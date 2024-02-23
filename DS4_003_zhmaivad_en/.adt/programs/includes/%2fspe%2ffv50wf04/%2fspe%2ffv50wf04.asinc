@@ -1,0 +1,143 @@
+*&---------------------------------------------------------------------*
+*&  Include           /SPE/FV50WF04
+*&---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+*       FORM /spe/set_ebumg_packing                                   *
+*---------------------------------------------------------------------*
+*       Set the quantity to be posted (EBUMG) for packing items       *
+*---------------------------------------------------------------------*
+*  <->  ct_xlips     Delivery item
+*  -->  it_ylips     Old item table
+*  -->  it_xvbup     Delivery item status
+*----------------------------------------------------------------------*
+FORM /spe/set_ebumg_packing  TABLES   ct_xlips   STRUCTURE lipsvb
+                                      it_ylips   STRUCTURE lipsvb.
+*                                     it_xvbup   STRUCTURE vbupvb.
+
+  FIELD-SYMBOLS: <fs_vbup>  TYPE vbupvb,
+                 <fs_ylips> TYPE lipsvb.
+
+  CHECK: ct_xlips-updkz NE updkz_delete,
+         ct_xlips-posar EQ charc,
+         NOT v50agl-confirm_central IS INITIAL,
+         ( likp-spe_le_scenario EQ gc_le_scenario-sto OR
+           likp-spe_le_scenario EQ gc_le_scenario-crossd ).
+
+
+  IF ct_xlips-updkz EQ updkz_new.
+    ct_xlips-ebumg     = ct_xlips-lfimg.
+    ct_xlips-ebumg_flo = ct_xlips-ebumg.
+    ct_xlips-ebumg_bme = ct_xlips-lgmng.
+    ct_xlips-ebumg_flt = ct_xlips-ebumg_bme.
+* Subtract already posted overdelivery quantity
+    CALL FUNCTION '/SPE/POD_PACK_APPLY_REDUCTION'
+      changing
+        cs_lips               = ct_xlips.
+
+  ELSE.
+    READ TABLE xvbup ASSIGNING <fs_vbup>
+                     WITH KEY vbeln = ct_xlips-vbeln
+                              posnr = ct_xlips-posnr
+                     BINARY SEARCH.
+    CASE <fs_vbup>-wbsta.
+      WHEN chara.   "Not processed yet
+        ct_xlips-ebumg     = ct_xlips-lfimg.
+        ct_xlips-ebumg_flo = ct_xlips-ebumg.
+        ct_xlips-ebumg_bme = ct_xlips-lgmng.
+        ct_xlips-ebumg_flt = ct_xlips-ebumg_bme.
+      WHEN charb OR
+           charc.   "Partially/Fully processed
+        READ TABLE it_ylips ASSIGNING <fs_ylips>
+                            WITH KEY vbeln = ct_xlips-vbeln
+                                     posnr = ct_xlips-posnr.
+*                           BINARY SEARCH.   ?
+        CHECK sy-subrc EQ 0.
+* Post the difference
+        ct_xlips-ebumg     = ct_xlips-lfimg - <fs_ylips>-lfimg.
+        ct_xlips-ebumg_flo = ct_xlips-ebumg.
+        ct_xlips-ebumg_bme = ct_xlips-lgmng - <fs_ylips>-lgmng.
+        ct_xlips-ebumg_flt = ct_xlips-ebumg_bme.
+    ENDCASE.
+  ENDIF.
+  MODIFY ct_xlips.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*       FORM /spe/set_discrepancy_ind                                 *
+*---------------------------------------------------------------------*
+*       Set indicator for discrepancy posting relevancy               *
+*---------------------------------------------------------------------*
+*  -->  is_xlips     Delivery item
+*  <--  ef_discr_ind 'Discrepancy ONLY' indicator
+*----------------------------------------------------------------------*
+FORM /spe/set_discrepancy_ind  TABLES ct_xlips      STRUCTURE lipsvb
+                             CHANGING ef_discr_ind  TYPE      xfeld.
+
+* Local Constants ---------------------------------------------------
+  CONSTANTS: lc_x       TYPE xfeld       VALUE 'X'
+            .
+* Local Data Declarations -------------------------------------------
+  DATA: lf_lfimg        TYPE lips-lfimg
+       ,ls_exc_reas     TYPE /spe/excp_reas
+       .
+  FIELD-SYMBOLS: <fs_ylips> TYPE lipsvb.
+
+  CLEAR ef_discr_ind.
+
+  CHECK: NOT xlips-spe_except_code    IS INITIAL AND  "Exception Code
+         likp-vbtyp  EQ IF_SD_DOC_CATEGORY=>DELIVERY_SHIPPING_NOTIF             AND  "Inbound Delivery ONLY !
+       ( likp-spe_le_scenario EQ gc_le_scenario-sto OR  "STO scenario only
+         likp-spe_le_scenario EQ gc_le_scenario-crossd ).
+
+* Note: /spe/excp_reas is a 100% buffered table !
+*       Therefore a SELECT is never a performance issue
+  CLEAR sy-subrc.
+  IF ls_exc_reas-exception_code NE xlips-spe_except_code.
+    SELECT SINGLE * FROM /spe/excp_reas INTO ls_exc_reas
+                    WHERE exception_code = xlips-spe_except_code.
+  ENDIF.
+
+* Leave if there is not assigned internal difference reason code
+  CHECK: sy-subrc EQ 0,
+         NOT ls_exc_reas-reason_code IS INITIAL.
+
+  READ TABLE ylips WITH KEY vbeln = xlips-vbeln
+                            posnr = xlips-posnr
+                   ASSIGNING <fs_ylips>.
+  CHECK sy-subrc EQ 0.
+  CHECK <fs_ylips>-spe_gen_elikz IS INITIAL.
+
+  IF xlips-posar EQ charc.        "Packing item
+    CALL FUNCTION '/SPE/POD_ACCUMULATE_PACK_QTY'
+      EXPORTING
+        IS_LIPS                    = ct_xlips
+      IMPORTING
+        EF_ACCUMULATED_LFIMG       = lf_lfimg.
+  ELSE.                           "Normal item
+    lf_lfimg = xlips-lfimg.
+  ENDIF.
+
+  IF ls_exc_reas-reason_code = 'CARR'.                         "n_3142235
+    CHECK: lf_lfimg GT xlips-ormng OR        "Overdelivery or
+           ( lf_lfimg LT xlips-ormng AND     "Undedelivery with ...
+             NOT xlips-spe_gen_elikz IS INITIAL ). "... Closing indicator
+  ENDIF.                                                       "n_3142235
+
+* Now it is sure that there IS a discrepancy !
+
+* But is the also a main posting - or only the discrepancy to be posted.
+* Discrepancies are only supported in Inbound
+  if  likpd-kzebu is initial.
+    IF xlips-lfimg  IS INITIAL.        "No quantity to be posted
+      ef_discr_ind = lc_x.
+    ENDIF.
+  ELSE.
+    IF xlips-ebumg  IS INITIAL.       "No quantity to be posted
+      ef_discr_ind = lc_x.
+      IF lf_lfimg LT xlips-ormng.
+        xlikp-mdiff_buch = 'X'.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                           "/spe/set_discrepancy_ind

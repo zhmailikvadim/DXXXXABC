@@ -1,0 +1,712 @@
+class CL_ATP_BUFFER definition
+  public
+  create public .
+
+public section.
+
+  interfaces IF_ATP_BUFFER_READ_ONLY .
+  interfaces IF_ATP_BUFFER .
+
+  methods CONSTRUCTOR
+    importing
+      !IO_TABLE_STRUCTURE type ref to CL_ABAP_TABLEDESCR .
+  PROTECTED SECTION.
+private section.
+
+  types:
+    BEGIN OF ts_table_key.
+        INCLUDE TYPE abap_table_keydescr AS table_key.
+    TYPES:
+        key_structure_descriptor TYPE REF TO cl_abap_structdescr,
+        key_table_descriptor     TYPE REF TO cl_abap_tabledescr,
+        where_clause             TYPE string,
+      END OF ts_table_key .
+  types:
+    tt_table_key TYPE SORTED TABLE OF ts_table_key WITH NON-UNIQUE KEY name .
+
+  data MR_DATA type ref to DATA .
+  data MO_DATA_TABLE_DESC type ref to CL_ABAP_TABLEDESCR .
+  data MO_DATA_DESC type ref to CL_ABAP_STRUCTDESCR .
+  data MT_TABLE_KEY type TT_TABLE_KEY .
+  data MR_NEGATIVE_BUFFER_FULL type ref to DATA .
+  data MO_FULL_NEGATIVE_BUF_TAB_DESC type ref to CL_ABAP_TABLEDESCR .
+
+  methods GET_KEY_FIELDS
+    exporting
+      !ET_KEY_FIELD type ABAP_COMPONENT_TAB .
+  methods CREATE_KEY_STRUCTURE .
+  methods GET_ALL_COMPONENTS
+    importing
+      !IO_DATA_DESC type ref to CL_ABAP_STRUCTDESCR
+    returning
+      value(RT_COMPONENT) type ABAP_COMPONENT_TAB .
+ENDCLASS.
+
+
+
+CLASS CL_ATP_BUFFER IMPLEMENTATION.
+
+
+  METHOD constructor.
+
+    mo_data_table_desc  = io_table_structure.
+    mo_data_desc       ?= mo_data_table_desc->get_table_line_type( ).
+
+    create_key_structure( ).
+
+    CREATE DATA mr_data TYPE HANDLE mo_data_table_desc.
+    CREATE DATA mr_negative_buffer_full TYPE HANDLE mo_full_negative_buf_tab_desc.
+
+  ENDMETHOD.
+
+
+  METHOD create_key_structure.
+
+    DATA: lt_key_field_all    TYPE STANDARD TABLE OF abap_componentdescr WITH DEFAULT KEY,
+          lt_key_field_sorted TYPE SORTED TABLE OF abap_componentdescr WITH UNIQUE KEY name,
+          lt_key_field        TYPE abap_component_tab,
+          ls_table_key        LIKE LINE OF mt_table_key.
+
+    DATA(lt_keys) = mo_data_table_desc->get_keys( ).
+
+    DATA(lt_all_components) = me->get_all_components( io_data_desc = mo_data_desc ).
+
+    LOOP AT lt_keys INTO ls_table_key-table_key.
+
+      IF ls_table_key-is_primary = abap_true.
+        DELETE ls_table_key-components WHERE table_line = 'MANDT'.
+        IF ls_table_key-key_kind <> cl_abap_tabledescr=>keydefkind_user.
+          ls_table_key-key_kind = cl_abap_tabledescr=>keydefkind_user.
+        ENDIF.
+        ls_table_key-access_kind = cl_abap_tabledescr=>tablekind_hashed.
+        ls_table_key-is_unique   = abap_true.
+      ENDIF.
+
+      CLEAR: lt_key_field,
+             ls_table_key-where_clause.
+
+      LOOP AT ls_table_key-components INTO DATA(ls_component).
+
+        IF ls_table_key-where_clause IS NOT INITIAL.
+          ls_table_key-where_clause = |{ ls_table_key-where_clause } and | ##NO_TEXT.
+        ENDIF.
+        ls_table_key-where_clause = |{ ls_table_key-where_clause }{ ls_component-name } = <ls_buffer_key>-{ ls_component-name }| ##NO_TEXT.
+
+        READ TABLE lt_all_components ASSIGNING FIELD-SYMBOL(<ls_component>)
+                                     WITH KEY name = ls_component-name.
+        CHECK sy-subrc = 0.
+        INSERT <ls_component> INTO TABLE lt_key_field.
+
+      ENDLOOP.
+
+      ls_table_key-key_structure_descriptor = cl_abap_structdescr=>get( p_components = lt_key_field ).
+
+      DATA(ls_table_key_4_output_keys) = ls_table_key.
+      IF ls_table_key_4_output_keys-is_primary <> abap_true.
+        ls_table_key_4_output_keys-is_primary  = abap_true.
+        ls_table_key_4_output_keys-key_kind    = cl_abap_tabledescr=>keydefkind_user.
+        ls_table_key_4_output_keys-access_kind = cl_abap_tabledescr=>tablekind_hashed.
+        ls_table_key_4_output_keys-is_unique   = abap_true.
+        CLEAR: ls_table_key_4_output_keys-name.
+      ENDIF.
+      ls_table_key-key_table_descriptor = cl_abap_tabledescr=>get_with_keys(
+                                            EXPORTING
+                                              p_line_type = ls_table_key-key_structure_descriptor
+                                              p_keys      = VALUE #( ( CORRESPONDING #( ls_table_key_4_output_keys ) ) )
+                                          ).
+
+      INSERT ls_table_key INTO TABLE mt_table_key.
+
+      LOOP AT lt_key_field ASSIGNING FIELD-SYMBOL(<ls_key_field>).
+        INSERT <ls_key_field> INTO TABLE lt_key_field_sorted.
+        CHECK sy-subrc = 0.
+        INSERT <ls_key_field> INTO TABLE lt_key_field_all.
+      ENDLOOP.
+
+    ENDLOOP.
+
+
+    IF mt_table_key IS INITIAL.
+      me->get_key_fields(
+        IMPORTING
+          et_key_field = lt_key_field
+      ).
+      ls_table_key-key_structure_descriptor = cl_abap_structdescr=>get( p_components = lt_key_field ).
+      ls_table_key-components  = CORRESPONDING #( ls_table_key-key_structure_descriptor->get_components( ) ).
+      ls_table_key-is_primary  = abap_true.
+      ls_table_key-key_kind    = cl_abap_tabledescr=>keydefkind_user.
+      ls_table_key-access_kind = cl_abap_tabledescr=>tablekind_hashed.
+      ls_table_key-is_unique   = abap_true.
+      ls_table_key-key_table_descriptor = cl_abap_tabledescr=>get_with_keys(
+                                            p_line_type = ls_table_key-key_structure_descriptor
+                                            p_keys      = VALUE #( ( CORRESPONDING #( ls_table_key ) ) )
+                                          ).
+    ELSE.
+      lt_key_field = CORRESPONDING #( lt_key_field_all ).
+    ENDIF.
+
+
+    DATA(lt_table_key) = mt_table_key.
+
+    " for the negative buffer, make table keys non-unique
+    LOOP AT lt_table_key ASSIGNING FIELD-SYMBOL(<ls_table_key>).
+      <ls_table_key>-is_unique = abap_false.
+      IF <ls_table_key>-access_kind = cl_abap_tabledescr=>tablekind_hashed.
+        <ls_table_key>-access_kind = cl_abap_tabledescr=>tablekind_sorted.
+      ENDIF.
+    ENDLOOP.
+    mo_full_negative_buf_tab_desc = cl_abap_tabledescr=>get_with_keys(
+                                      p_line_type    = mo_data_desc
+                                      p_keys         = CORRESPONDING #( lt_table_key )
+                                    ).
+  ENDMETHOD.
+
+
+  METHOD get_all_components.
+    DATA lt_component TYPE abap_component_tab.
+    DATA lo_component TYPE REF TO cl_abap_structdescr.
+    lt_component = io_data_desc->get_components( ).
+    LOOP AT lt_component ASSIGNING FIELD-SYMBOL(<ls_component>).
+      IF <ls_component>-type IS INSTANCE OF cl_abap_structdescr.
+        lo_component ?= <ls_component>-type.
+        INSERT LINES OF get_all_components( io_data_desc = lo_component ) INTO TABLE rt_component.
+      ELSE.
+        INSERT <ls_component> INTO TABLE rt_component.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD get_key_fields.
+* Returns the key fields of the buffer data structure.
+* Method supports DDIC types as well as locally defined types, prerequisite is that primary key is available.
+    DATA lo_field_type TYPE REF TO cl_abap_datadescr.
+    DATA lt_key TYPE abap_table_keydescr_tab.
+    DATA ls_key TYPE abap_table_keydescr.
+    DATA lt_all_component TYPE abap_component_tab.
+
+    CLEAR et_key_field.
+
+    IF mo_data_desc->is_ddic_type( ) = abap_true.
+      LOOP AT mo_data_desc->get_ddic_field_list( ) INTO DATA(ls_field) WHERE keyflag = 'X'.
+        lo_field_type ?= cl_abap_typedescr=>describe_by_name( p_name = ls_field-rollname ).
+        APPEND VALUE #( name = ls_field-fieldname
+                        type = lo_field_type ) TO et_key_field.
+      ENDLOOP.
+    ELSE.
+      lt_all_component = me->get_all_components( io_data_desc = mo_data_desc ).
+      lt_key = mo_data_table_desc->get_keys( ).
+
+      READ TABLE lt_key INTO ls_key WITH KEY is_primary = abap_true.
+      LOOP AT ls_key-components ASSIGNING FIELD-SYMBOL(<ls_component>).
+        READ TABLE lt_all_component INTO DATA(ls_component) WITH KEY name = <ls_component>-name.
+        IF sy-subrc = 0.
+          INSERT ls_component INTO TABLE et_key_field.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  method IF_ATP_BUFFER_READ_ONLY~GET_NEGATIVE_TABLE_STRUCT.
+    CREATE DATA er_negative_table_structure TYPE HANDLE mo_full_negative_buf_tab_desc.
+  endmethod.
+
+
+  METHOD if_atp_buffer~delete.
+    DATA lr_buffer TYPE REF TO data.
+    DATA lr_negative_buffer_key TYPE REF TO data.
+    FIELD-SYMBOLS <lt_buffer> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_negative_buffer> TYPE ANY TABLE.
+    FIELD-SYMBOLS <ls_buffer_key> TYPE any.
+    FIELD-SYMBOLS <lt_key> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_key_not_found> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_key_not_exist> TYPE ANY TABLE.
+
+    ASSIGN mr_data->* TO <lt_buffer>.
+
+    ASSIGN it_key->* TO <lt_key>.
+    CREATE DATA et_key_not_found TYPE HANDLE mo_data_table_desc. "optimize! just pass out key should be enough
+    ASSIGN et_key_not_found->* TO <lt_key_not_found>.
+
+    CREATE DATA et_key_not_exist TYPE HANDLE mo_data_table_desc. "optimize! just pass out key should be enough
+    ASSIGN et_key_not_exist->* TO <lt_key_not_exist>.
+
+    CREATE DATA lr_buffer TYPE HANDLE mo_data_desc.
+    ASSIGN lr_buffer->* TO <ls_buffer_key>.
+
+    ASSIGN mr_negative_buffer_full->* TO <lt_negative_buffer>.
+
+* Read buffer with provided key information
+    LOOP AT <lt_key> ASSIGNING FIELD-SYMBOL(<ls_key>).
+      <ls_buffer_key> = CORRESPONDING #( <ls_key> ).
+      DELETE TABLE <lt_buffer> FROM <ls_buffer_key>.
+      IF sy-subrc <> 0.
+        READ TABLE <lt_negative_buffer> FROM <ls_buffer_key> ASSIGNING FIELD-SYMBOL(<ls_negative_buffer>).
+        IF sy-subrc = 0.
+          INSERT <ls_buffer_key> INTO TABLE <lt_key_not_exist>.
+        ELSE.
+          INSERT <ls_buffer_key> INTO TABLE <lt_key_not_found>.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~find.
+* Find entries in buffer for given input.
+    DATA: lt_component TYPE abap_component_tab.
+    DATA: lv_next      TYPE boole.
+
+    FIELD-SYMBOLS <lt_buffer> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_find_data> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lv_find_field> TYPE any.
+    FIELD-SYMBOLS <lv_buffer_field> TYPE any.
+    FIELD-SYMBOLS <lt_result> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_not_found> TYPE ANY TABLE.
+
+    CLEAR:
+      et_data,
+      et_data_not_found,
+      et_data_not_exist.
+
+    CREATE DATA et_data TYPE HANDLE mo_data_table_desc.
+    ASSIGN et_data->* TO <lt_result>.
+
+    CREATE DATA et_data_not_found TYPE HANDLE mo_data_table_desc.
+    ASSIGN et_data_not_found->* TO <lt_not_found>.
+
+    ASSIGN mr_data->* TO <lt_buffer>.
+    ASSIGN it_data->* TO <lt_find_data>.
+
+    lt_component = me->get_all_components( io_data_desc = mo_data_desc ).
+
+    <lt_not_found> = CORRESPONDING #( <lt_find_data> ).
+
+    LOOP AT <lt_buffer> ASSIGNING FIELD-SYMBOL(<ls_buffer>).
+      LOOP AT <lt_find_data> ASSIGNING FIELD-SYMBOL(<ls_find_data>).
+        lv_next = abap_false.
+        LOOP AT lt_component ASSIGNING FIELD-SYMBOL(<ls_component>).
+          ASSIGN COMPONENT <ls_component>-name OF STRUCTURE <ls_find_data> TO <lv_find_field>.
+          ASSIGN COMPONENT <ls_component>-name OF STRUCTURE <ls_buffer> TO <lv_buffer_field>.
+
+          " In case the find qry input for the field is empty, the field is ignored as considered as 'not part of qry'.
+          IF <lv_find_field> IS INITIAL.
+            CONTINUE.
+          ENDIF.
+
+          IF <lv_buffer_field> <> <lv_find_field>.
+            lv_next = abap_true.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+
+        IF lv_next = abap_false.
+          "found!!
+          INSERT <ls_buffer> INTO TABLE <lt_result>.
+
+          DELETE TABLE <lt_not_found> FROM <ls_find_data>.
+        ENDIF.
+      ENDLOOP.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~find_with_secondary_key.
+* Return entries from buffer for given keys
+
+    DATA: lr_buffer_key          TYPE REF TO data.
+
+    FIELD-SYMBOLS: <lt_buffer>          TYPE ANY TABLE,
+                   <lt_negative_buffer> TYPE ANY TABLE,
+                   <ls_buffer_key>      TYPE any,
+                   <lt_key>             TYPE ANY TABLE,
+                   <lt_result>          TYPE ANY TABLE,
+                   <lt_key_not_found>   TYPE ANY TABLE,
+                   <lt_key_not_exist>   TYPE ANY TABLE.
+
+    CLEAR:
+      et_data,
+      et_key_not_found,
+      et_key_not_exist.
+
+    READ TABLE mt_table_key ASSIGNING FIELD-SYMBOL(<ls_table_key>) WITH KEY name = iv_key_name.
+    IF sy-subrc <> 0.
+      et_key_not_found = it_key.
+      RETURN.
+    ENDIF.
+
+    TRY.
+        <ls_table_key>-where_clause = cl_abap_dyn_prg=>check_whitelist_str(
+                                        EXPORTING
+                                          val       = <ls_table_key>-where_clause
+                                          whitelist = cl_abap_dyn_prg=>escape_quotes( val = <ls_table_key>-where_clause ) ).
+      CATCH cx_abap_not_in_whitelist INTO DATA(lx_not_in_whitelist) ##NEEDED.
+        RETURN.
+    ENDTRY.
+
+    ASSIGN mr_data->* TO <lt_buffer>.
+    CREATE DATA et_data TYPE HANDLE mo_data_table_desc.
+    ASSIGN et_data->* TO <lt_result>.
+
+    ASSIGN it_key->* TO <lt_key>.
+
+    CREATE DATA et_key_not_found TYPE HANDLE <ls_table_key>-key_table_descriptor.
+    ASSIGN et_key_not_found->* TO <lt_key_not_found>.
+
+    CREATE DATA et_key_not_exist TYPE HANDLE <ls_table_key>-key_table_descriptor.
+    ASSIGN et_key_not_exist->* TO <lt_key_not_exist>.
+
+    CREATE DATA lr_buffer_key TYPE HANDLE <ls_table_key>-key_structure_descriptor.
+    ASSIGN lr_buffer_key->* TO <ls_buffer_key>.
+
+    ASSIGN mr_negative_buffer_full->* TO <lt_negative_buffer>.
+
+    DATA lv_entry_found TYPE boole_d.
+
+* Read buffer with provided key information
+    LOOP AT <lt_key> ASSIGNING FIELD-SYMBOL(<ls_key>).
+
+      <ls_buffer_key> = CORRESPONDING #( <ls_key> ).
+
+      lv_entry_found = abap_false.
+
+      LOOP AT <lt_buffer> ASSIGNING FIELD-SYMBOL(<ls_buffer>)
+                          USING KEY (iv_key_name)
+                          WHERE (<ls_table_key>-where_clause).
+
+        INSERT <ls_buffer> INTO TABLE <lt_result>.
+        lv_entry_found = abap_true.
+
+      ENDLOOP.
+
+      CHECK lv_entry_found = abap_false.
+
+      LOOP AT <lt_negative_buffer> ASSIGNING FIELD-SYMBOL(<ls_negative_buffer>)
+                                   USING KEY (iv_key_name)
+                                   WHERE (<ls_table_key>-where_clause).
+
+        INSERT <ls_buffer_key> INTO TABLE <lt_key_not_exist>.
+        lv_entry_found = abap_true.
+
+      ENDLOOP.
+
+      CHECK lv_entry_found = abap_false.
+
+      INSERT <ls_buffer_key> INTO TABLE <lt_key_not_found>.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get.
+* Return entries from buffer for given keys
+    DATA lr_buffer TYPE REF TO data.
+    DATA lr_negative_buffer_key TYPE REF TO data.
+    FIELD-SYMBOLS <lt_buffer> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_negative_buffer> TYPE ANY TABLE.
+    FIELD-SYMBOLS <ls_buffer_key> TYPE any.
+    FIELD-SYMBOLS <lt_key> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_result> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_key_not_found> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_key_not_exist> TYPE ANY TABLE.
+
+    ASSIGN mr_data->* TO <lt_buffer>.
+    CREATE DATA et_data TYPE HANDLE mo_data_table_desc.
+    ASSIGN et_data->* TO <lt_result>.
+
+    ASSIGN it_key->* TO <lt_key>.
+    CREATE DATA et_key_not_found TYPE HANDLE mo_data_table_desc. "optimize! just pass out key should be enough
+    ASSIGN et_key_not_found->* TO <lt_key_not_found>.
+
+    CREATE DATA et_key_not_exist TYPE HANDLE mo_data_table_desc. "optimize! just pass out key should be enough
+    ASSIGN et_key_not_exist->* TO <lt_key_not_exist>.
+
+    CREATE DATA lr_buffer TYPE HANDLE mo_data_desc.
+    ASSIGN lr_buffer->* TO <ls_buffer_key>.
+
+    ASSIGN mr_negative_buffer_full->* TO <lt_negative_buffer>.
+
+* Read buffer with provided key information
+    LOOP AT <lt_key> ASSIGNING FIELD-SYMBOL(<ls_key>).
+      <ls_buffer_key> = CORRESPONDING #( <ls_key> ).
+      READ TABLE <lt_buffer> FROM <ls_buffer_key> ASSIGNING FIELD-SYMBOL(<ls_buffer>).
+      IF sy-subrc = 0.
+        INSERT <ls_buffer> INTO TABLE <lt_result>.
+      ELSE.
+        READ TABLE <lt_negative_buffer> FROM <ls_buffer_key> ASSIGNING FIELD-SYMBOL(<ls_negative_buffer>).
+        IF sy-subrc = 0.
+          INSERT <ls_buffer_key> INTO TABLE <lt_key_not_exist>.
+        ELSE.
+          INSERT <ls_buffer_key> INTO TABLE <lt_key_not_found>.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get_all.
+* Returns all entries in buffer.
+    FIELD-SYMBOLS <lt_buffer> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_result> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_negative_buffer> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_negative_buffer_result> TYPE ANY TABLE.
+
+    IF et_data IS REQUESTED.
+      ASSIGN mr_data->* TO <lt_buffer>.
+      CREATE DATA et_data TYPE HANDLE mo_data_table_desc.
+      ASSIGN et_data->* TO <lt_result>.
+
+      <lt_result> = <lt_buffer>.
+    ENDIF.
+
+    IF et_negative_data IS REQUESTED.
+      CREATE DATA et_negative_data TYPE HANDLE mo_full_negative_buf_tab_desc.
+      ASSIGN mr_negative_buffer_full->* TO <lt_negative_buffer>.
+      ASSIGN et_negative_data->* TO <lt_negative_buffer_result>.
+      <lt_negative_buffer_result> = <lt_negative_buffer>.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get_data_structure.
+* Returns data structure of buffer entries
+    CREATE DATA er_structure TYPE HANDLE mo_data_desc.
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get_data_table_structure.
+* Returns table data structure for buffer entries.
+    CREATE DATA er_table_structure TYPE HANDLE mo_data_table_desc.
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get_key_structure.
+* Returns key structure for buffer entries.
+
+    READ TABLE mt_table_key ASSIGNING FIELD-SYMBOL(<ls_table_key>) WITH KEY is_primary = abap_true.
+    CHECK sy-subrc = 0.
+
+    CREATE DATA er_key_structure TYPE HANDLE <ls_table_key>-key_structure_descriptor.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get_key_table_structure.
+* Returns key table structure for buffer entries.
+    DATA lo_key_table TYPE REF TO cl_abap_tabledescr.
+
+    READ TABLE mt_table_key ASSIGNING FIELD-SYMBOL(<ls_table_key>) WITH KEY is_primary = abap_true.
+    CHECK sy-subrc = 0.
+
+    lo_key_table = cl_abap_tabledescr=>get( p_line_type = <ls_table_key>-key_structure_descriptor
+                                            p_table_kind = cl_abap_tabledescr=>tablekind_sorted ).
+    CREATE DATA er_key_table_structure TYPE HANDLE lo_key_table.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get_secondary_key_structure.
+
+    CLEAR er_key_structure.
+
+    READ TABLE mt_table_key ASSIGNING FIELD-SYMBOL(<ls_table_key>)
+                            WITH KEY name = iv_key_name.
+    CHECK sy-subrc = 0.
+
+    CREATE DATA er_key_structure TYPE HANDLE <ls_table_key>-key_structure_descriptor.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~get_secondary_key_table_struct.
+
+    CLEAR er_key_table_structure.
+
+    READ TABLE mt_table_key ASSIGNING FIELD-SYMBOL(<ls_table_key>)
+                            WITH KEY name = iv_key_name.
+    CHECK sy-subrc = 0.
+
+    CREATE DATA er_key_table_structure TYPE HANDLE <ls_table_key>-key_table_descriptor.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~has.
+* Returns true/false if given entry is in buffer of not.
+    DATA lr_query_data TYPE REF TO data.
+    DATA lr_found TYPE REF TO data.
+    DATA lr_not_found TYPE REF TO data.
+
+    FIELD-SYMBOLS <ls_find_data> TYPE any.
+    FIELD-SYMBOLS <lt_find_data> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_found> TYPE ANY TABLE.
+    FIELD-SYMBOLS <lt_not_found> TYPE ANY TABLE.
+
+    CREATE DATA lr_query_data TYPE HANDLE mo_data_table_desc.
+    ASSIGN lr_query_data->* TO <lt_find_data>.
+
+    ASSIGN is_data->* TO <ls_find_data>.
+    INSERT <ls_find_data> INTO TABLE <lt_find_data>.
+
+    me->if_atp_buffer~find(
+      EXPORTING
+        it_data           = lr_query_data
+      IMPORTING
+        et_data           = lr_found
+        et_data_not_found = lr_not_found
+    ).
+
+    ASSIGN lr_found->* TO <lt_found>.
+    ASSIGN lr_not_found->* TO <lt_not_found>.
+
+    rv_has_entry = abap_false.
+
+    IF <lt_found> IS NOT INITIAL.
+      rv_has_entry = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~reset.
+* Resets the buffer by deleting all entries from buffer.
+    FIELD-SYMBOLS <lt_buffer> TYPE ANY TABLE.
+    CREATE DATA mr_data TYPE HANDLE mo_data_table_desc.
+    ASSIGN mr_data->* TO <lt_buffer>.
+
+    CLEAR <lt_buffer>.
+
+    FIELD-SYMBOLS <lt_negative_buffer> TYPE ANY TABLE.
+    ASSIGN mr_negative_buffer_full->* TO <lt_negative_buffer>.
+    CLEAR <lt_negative_buffer>.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~set.
+* Set given entries in buffer.
+    DATA lr_data_line TYPE REF TO data.
+    DATA lr_neg_buffer TYPE REF TO data.
+
+    FIELD-SYMBOLS:
+      <ls_input>               TYPE any,
+      <lt_buffer>              TYPE ANY TABLE,
+      <lt_negative_buffer>     TYPE ANY TABLE,
+      <ls_negative_buffer> TYPE any.
+
+    CHECK it_data IS NOT INITIAL.
+
+* Define reference types
+    ASSIGN mr_data->* TO <lt_buffer>.
+    ASSIGN mr_negative_buffer_full->* TO <lt_negative_buffer>.
+
+    CREATE DATA lr_data_line TYPE HANDLE mo_data_desc.
+    ASSIGN lr_data_line->* TO <ls_input>.
+
+    CREATE DATA lr_neg_buffer TYPE HANDLE mo_data_desc.
+    ASSIGN lr_neg_buffer->* TO <ls_negative_buffer>.
+
+* Insert data to buffer
+    LOOP AT it_data ASSIGNING FIELD-SYMBOL(<ls_data>).
+      <ls_input> = CORRESPONDING #( <ls_data> ).
+      INSERT <ls_input> INTO TABLE <lt_buffer>.
+      IF sy-subrc = 4.
+        MODIFY TABLE <lt_buffer> FROM <ls_input>.
+        CONTINUE.
+      ENDIF.
+
+      "first time insert into buffer => remove possible negative buffer entry.
+      IF <lt_negative_buffer> IS NOT INITIAL.
+        <ls_negative_buffer> = <ls_input>.
+        DELETE TABLE <lt_negative_buffer> FROM <ls_negative_buffer>.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~set_negative.
+
+    DATA lr_buffer_key TYPE REF TO data.
+    DATA lr_data_line TYPE REF TO data.
+
+    FIELD-SYMBOLS:
+      <ls_input>           TYPE any,
+      <ls_buffer>          TYPE any,
+      <ls_buffer_key>      TYPE any,
+      <lt_buffer>          TYPE ANY TABLE,
+      <lt_negative_buffer> TYPE ANY TABLE.
+
+    CHECK it_data IS NOT INITIAL.
+
+    " for performance reasons, inserting into the negative buffer can only be done with a specified key
+    " if no key name is given, the primary key is taken
+    READ TABLE mt_table_key ASSIGNING FIELD-SYMBOL(<ls_table_key>) WITH KEY name = iv_key_name.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    TRY.
+        <ls_table_key>-where_clause = cl_abap_dyn_prg=>check_whitelist_str(
+                                        EXPORTING
+                                          val       = <ls_table_key>-where_clause
+                                          whitelist = cl_abap_dyn_prg=>escape_quotes( val = <ls_table_key>-where_clause ) ).
+      CATCH cx_abap_not_in_whitelist INTO DATA(lx_not_in_whitelist) ##NEEDED.
+        RETURN.
+    ENDTRY.
+
+    " Define reference types
+    ASSIGN mr_data->* TO <lt_buffer>.
+    CREATE DATA lr_data_line TYPE HANDLE mo_data_desc.
+    ASSIGN lr_data_line->* TO <ls_buffer>.
+
+    ASSIGN mr_negative_buffer_full->* TO <lt_negative_buffer>.
+    ASSIGN lr_data_line TO <ls_input>.
+
+    CREATE DATA lr_buffer_key TYPE HANDLE <ls_table_key>-key_structure_descriptor.
+    ASSIGN lr_buffer_key->* TO <ls_buffer_key>.
+
+    DATA(lv_entry_found) = abap_false.
+
+    " Insert data into the negative buffer
+    LOOP AT it_data ASSIGNING <ls_input>.
+      <ls_buffer_key> = CORRESPONDING #( <ls_input> ).
+      lv_entry_found = abap_false.
+      LOOP AT <lt_negative_buffer> ASSIGNING FIELD-SYMBOL(<ls_negative_buffer>)
+                          USING KEY (iv_key_name)
+                          WHERE (<ls_table_key>-where_clause).
+        lv_entry_found = abap_true.
+        EXIT.
+      ENDLOOP.
+
+      IF lv_entry_found = abap_false.
+        INSERT <ls_input> INTO TABLE <lt_negative_buffer>.
+        IF <lt_buffer> IS NOT INITIAL.
+          "first time insert into negative buffer => remove possible buffer entry.
+          <ls_buffer> = CORRESPONDING #( <ls_input> ).
+          DELETE TABLE <lt_buffer> FROM <ls_buffer>.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_buffer~convert_to_buffer_key.
+
+    if_atp_buffer~get_key_table_structure(
+      IMPORTING
+        er_key_table_structure = rr_buffer_key ).
+
+    ASSIGN ir_key->* TO FIELD-SYMBOL(<lt_key>).
+    ASSIGN rr_buffer_key->* TO FIELD-SYMBOL(<lt_buffer_key>).
+
+    <lt_buffer_key> = CORRESPONDING #( <lt_key> ).
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,159 @@
+CLASS lcl_strict_mode_handler DEFINITION FINAL.
+  PUBLIC SECTION.
+    METHODS collect_instances IMPORTING it_create TYPE if_sadl_changeset=>tt_create
+                                        it_action TYPE if_sadl_changeset=>tt_action
+                                        it_update TYPE if_sadl_changeset=>tt_update
+                                        it_delete TYPE if_sadl_changeset=>tt_delete.
+    METHODS evaluate_state_messages IMPORTING io_reporter TYPE REF TO if_rap_reporter.
+  PRIVATE SECTION.
+    DATA mt_entity_instances TYPE if_rap_bhv_rt_types=>tt_entity_instances.
+
+    METHODS _collect_instance IMPORTING iv_entity_id TYPE sadl_entity_id
+                                        is_instance  TYPE data.
+ENDCLASS.
+
+CLASS lcl_strict_mode_handler IMPLEMENTATION.
+  METHOD collect_instances.
+    FIELD-SYMBOLS <t_keys> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <t_action_result> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <t_action_result_instances> TYPE ANY TABLE.
+
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create>).
+      ASSIGN <s_create>-rs_entity_data->* TO FIELD-SYMBOL(<s_instance>).
+      ASSERT sy-subrc = 0.
+      _collect_instance( iv_entity_id = <s_create>-entity_id
+                         is_instance  = <s_instance> ).
+    ENDLOOP.
+
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update>).
+      CHECK <s_update>-content_id_ref IS INITIAL.
+      ASSIGN <s_update>-rs_entity_data->* TO <s_instance>.
+      ASSERT sy-subrc = 0.
+      _collect_instance( iv_entity_id = <s_update>-entity_id
+                         is_instance  = <s_instance> ).
+    ENDLOOP.
+
+    LOOP AT it_delete ASSIGNING FIELD-SYMBOL(<s_delete>).
+      CHECK <s_delete>-content_id_ref IS INITIAL.
+      ASSIGN <s_delete>-rs_key_values->* TO <s_instance>.
+      ASSERT sy-subrc = 0.
+      _collect_instance( iv_entity_id = <s_delete>-entity_id
+                         is_instance  = <s_instance> ).
+    ENDLOOP.
+
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      ASSIGN <s_action>-rt_key_values->* TO <t_keys>.
+      IF sy-subrc = 0.
+        LOOP AT <t_keys> ASSIGNING <s_instance>.
+          DATA(lv_content_id_ref) = VALUE #( <s_action>-content_id_refs[ sy-tabix ] OPTIONAL ).
+          CHECK lv_content_id_ref IS INITIAL.
+          _collect_instance( iv_entity_id = <s_action>-entity_id
+                             is_instance  = <s_instance> ).
+        ENDLOOP.
+      ENDIF.
+      CHECK <s_action>-r_returning_parameters IS BOUND.
+      DATA(ls_action_md) = cl_rap_bhv_rt_entity_metadata=>get( EXACT #( <s_action>-entity_id ) )->get_action( EXACT #( <s_action>-name ) ).
+      CHECK NOT ls_action_md-result-entity IS INITIAL.
+      ASSIGN <s_action>-r_returning_parameters->* TO <t_action_result>.
+      ASSERT sy-subrc = 0.
+      LOOP AT <t_action_result> ASSIGNING FIELD-SYMBOL(<action_result>).
+        IF ls_action_md-result-sadl_cardinality = if_sadl_entity=>co_action_return_cardinality-zero_to_many
+        OR ls_action_md-result-sadl_cardinality = if_sadl_entity=>co_action_return_cardinality-one_to_many
+        OR ls_action_md-result-sadl_cardinality = if_sadl_entity=>co_action_return_cardinality-zero_to_one.
+          ASSIGN <action_result> TO <t_action_result_instances>.
+          LOOP AT <t_action_result_instances> ASSIGNING <s_instance>.
+            _collect_instance( iv_entity_id = EXACT #( ls_action_md-result-entity )
+                               is_instance  = <s_instance> ).
+          ENDLOOP.
+        ELSE.
+          ASSIGN <action_result> TO <s_instance>.
+          _collect_instance( iv_entity_id = EXACT #( ls_action_md-result-entity )
+                             is_instance  = <s_instance> ).
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD evaluate_state_messages.
+    FIELD-SYMBOLS <t_tky> TYPE STANDARD TABLE.
+*    FIELD-SYMBOLS <t_reported> TYPE STANDARD TABLE.
+*    FIELD-SYMBOLS <o_bhv_msg> TYPE REF TO if_abap_behv_message.
+
+    CHECK io_reporter->is_failed( ) = abap_false.
+    CHECK io_reporter->mv_strict_mode = abap_true.
+
+    DATA(lo_state_message_handler) = cl_rap_bhv_state_msg_handler=>get_instance( ).
+
+    LOOP AT mt_entity_instances ASSIGNING FIELD-SYMBOL(<s_entity_instances>).
+      ASSIGN <s_entity_instances>-instances->* TO <t_tky>.
+      ASSERT sy-subrc = 0.
+      CHECK NOT <t_tky> IS INITIAL.
+      IF cl_rap_bhv_rt_entity_metadata=>get( <s_entity_instances>-entity )->is_draft( ).
+        DATA(lv_key_name) = cl_abap_behv=>co_key_name-draft.
+      ELSEIF cl_rap_bhv_rt_entity_metadata=>get( <s_entity_instances>-entity )->is_late_numbering( ) = abap_false.
+        lv_key_name = cl_abap_behv=>co_key_name-entity.
+      ELSE.
+        lv_key_name = cl_abap_behv=>co_key_name-pid.
+      ENDIF.
+      DELETE ADJACENT DUPLICATES FROM <t_tky> USING KEY (lv_key_name).
+*      IF sy-uname = 'BOECKENHAUER'.
+      IF lo_state_message_handler->check_existence_for_strict( iv_entity = <s_entity_instances>-entity
+                                                               it_tky    = <t_tky> ).
+        io_reporter->add_failed( iv_reason   = io_reporter->co_failure_reason-message_in_strict_mode
+                                 iv_entity   = EXACT #( <s_entity_instances>-entity )
+                                 is_instance = <t_tky>[ 1 ] ).
+        RETURN. "performance - one failure suffices
+      ENDIF.
+*      CONTINUE.
+*      ENDIF.
+*      DATA(lt_entity_reported) = lo_state_message_handler->read( iv_entity = <s_entity_instances>-entity
+*                                                                 it_tky    = <t_tky> ).
+*      LOOP AT lt_entity_reported ASSIGNING FIELD-SYMBOL(<s_entity_reported>).
+*        ASSIGN <s_entity_reported>-instances->* TO <t_reported>.
+*        ASSERT sy-subrc = 0.
+*        LOOP AT <t_reported> ASSIGNING FIELD-SYMBOL(<s_reported>).
+*          ASSIGN COMPONENT cl_rap_bhv_processor=>co_techfield_name-msg OF STRUCTURE <s_reported> TO <o_bhv_msg>.
+*          ASSERT sy-subrc = 0.
+*          ASSERT <o_bhv_msg> IS BOUND.
+*          CHECK <o_bhv_msg>->m_severity = <o_bhv_msg>->severity-error OR <o_bhv_msg>->m_severity = <o_bhv_msg>->severity-warning.
+*          ASSIGN COMPONENT cl_rap_bhv_processor=>co_techfield_name-tky OF STRUCTURE <s_reported> TO FIELD-SYMBOL(<s_tky>).
+*          ASSERT sy-subrc = 0.
+*          io_reporter->add_failed( iv_reason   = io_reporter->co_failure_reason-message_in_strict_mode
+*                                   iv_entity   = EXACT #( <s_entity_instances>-entity )
+*                                   is_instance = <s_tky> ).
+*          RETURN. "performance - one failure suffices
+*        ENDLOOP.
+*      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD _collect_instance.
+    DATA lv_entity TYPE abp_entity_name.
+    DATA lr_tky TYPE REF TO data.
+    FIELD-SYMBOLS <t_tky> TYPE STANDARD TABLE.
+
+    lv_entity = EXACT #( iv_entity_id ).
+
+    IF cl_rap_bhv_rt_entity_metadata=>get( lv_entity )->is_draft( ).
+      IF cl_rap_bhv_rt_utility=>is_draft_instance( is_instance ).
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    ASSIGN mt_entity_instances[ entity = lv_entity  ] TO FIELD-SYMBOL(<s_entity_instances>).
+    IF sy-subrc <> 0.
+      INSERT VALUE #( entity    = lv_entity
+                      instances = cl_abap_behvdescr=>create_data( p_name = lv_entity  p_op = cl_abap_behvdescr=>op_virtual_tkey )  )
+      INTO TABLE mt_entity_instances ASSIGNING <s_entity_instances>.
+    ENDIF.
+    ASSIGN <s_entity_instances>-instances->* TO <t_tky>.
+    ASSERT sy-subrc = 0.
+    CREATE DATA lr_tky LIKE LINE OF <t_tky>.
+    ASSIGN lr_tky->* TO FIELD-SYMBOL(<s_tky>).
+    ASSERT sy-subrc = 0.
+    <s_tky> = CORRESPONDING #( is_instance ).
+    cl_rap_bhv_rt_utility=>set_draft_key_to_bhv( EXPORTING is_sadl_instance = is_instance
+                                                 CHANGING  cs_bhv_instance  = <s_tky> ).
+    INSERT <s_tky> INTO TABLE <t_tky>.
+  ENDMETHOD.
+ENDCLASS.

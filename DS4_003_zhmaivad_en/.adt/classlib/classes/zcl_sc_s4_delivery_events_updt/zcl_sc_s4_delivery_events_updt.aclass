@@ -1,0 +1,1887 @@
+CLASS zcl_sc_s4_delivery_events_updt DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PRIVATE .
+
+  PUBLIC SECTION.
+
+    TYPES:
+      BEGIN OF gtyp_sto_attr,
+        shippingpoint          TYPE i_purchasingdocumentshipping-shippingpoint,
+        distributionchannel    TYPE i_purchasingdocumentshipping-distributionchannel,
+        purchasingdocumenttype TYPE i_purchasingdocument-purchasingdocumenttype,
+        zz1_zorderreason_pdh   TYPE e_purchasingdocument-zz1_zorderreason_pdh,
+      END OF gtyp_sto_attr .
+    TYPES:
+      BEGIN OF gtyp_dates,
+        mbdat             TYPE schedule_timetags-mbdat,
+        lddat             TYPE schedule_timetags-lddat,
+        wadat             TYPE schedule_timetags-wadat,
+        lfdat             TYPE schedule_timetags-lfdat,
+        longest_lead_time TYPE tfmatage,
+      END OF gtyp_dates .
+    TYPES:
+      BEGIN OF gtyp_custom_fields,
+        deliv_numb             TYPE vbeln_vl,
+        zz1_vaslt_dlh          TYPE zz1_vaslt,
+        zz1_dnloadinglt_dlh    TYPE zz1_dnloadinglt,
+        zz1_dcprocessinglt_dlh TYPE zz1_dcprocessinglt,
+      END OF  gtyp_custom_fields .
+
+    DATA:
+      mt_dates TYPE STANDARD TABLE OF gtyp_dates .
+    CONSTANTS gc_identifier TYPE string VALUE 'LT' ##NO_TEXT.
+
+    METHODS update_events
+      IMPORTING
+        !iv_del_doc              TYPE vbeln OPTIONAL
+        !iv_nosave_events        TYPE flag OPTIONAL
+      EXPORTING
+        !ev_err_mbdat            TYPE mbdat
+      CHANGING
+        !ct_return               TYPE bapiret2_t OPTIONAL
+      RETURNING
+        VALUE(rv_return_success) TYPE boolean .
+    CLASS-METHODS get_instance
+      RETURNING
+        VALUE(ro_inst) TYPE REF TO zcl_sc_s4_delivery_events_updt .
+    METHODS update_events_so
+      IMPORTING
+        !iv_so_doc               TYPE vbeln OPTIONAL
+        !iv_nosave_events        TYPE flag OPTIONAL
+        !it_xlikp                TYPE shp_likp_t OPTIONAL
+        !it_xlips                TYPE shp_lips_t OPTIONAL
+      EXPORTING
+        !ev_err_mbdat            TYPE mbdat
+      CHANGING
+        !ct_return               TYPE bapiret2_t OPTIONAL
+      RETURNING
+        VALUE(rv_return_success) TYPE boolean .
+    CLASS-METHODS get_lt_vas_attributes
+      IMPORTING
+        !iv_order           TYPE vgbel
+        !iv_item_no         TYPE vgpos
+        !iv_aufer           TYPE aufer
+        !iv_fsh_vas_rel     TYPE fsh_vas_rel
+        !iv_fsh_transaction TYPE fsh_transaction
+        !iv_fsh_item_group  TYPE fsh_item_group
+      EXPORTING
+        !et_vas             TYPE zif_sd_lead_times_calculator=>gtyp_t_vas .
+    CLASS-METHODS get_lt_values
+      IMPORTING
+        !iv_aufer         TYPE aufer
+        !iv_vstel         TYPE vstel
+        !iv_vtweg         TYPE vtweg
+        !iv_auart         TYPE auart
+        !iv_vsbed         TYPE vsbed
+        !it_vas           TYPE zif_sd_lead_times_calculator=>gtyp_t_vas
+      EXPORTING
+        !ev_loading       TYPE zsd_lead_time
+        !ev_processing_lt TYPE zsd_lead_time
+        !ev_vas_lt        TYPE zsd_lead_time
+        !ev_creation_lt   TYPE zsd_lead_time .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    TYPES:
+      BEGIN OF gtyp_data,
+        delivery_note     TYPE likp-vbeln,
+        event_type        TYPE tsegevttyp,
+        begin_plan_date   TYPE d,
+        begin_plan_time   TYPE t,
+        end_plan_date     TYPE d,
+        end_plan_time     TYPE t,
+        begin_actual_date TYPE d,
+        begin_actual_time TYPE t,
+        end_actual_date   TYPE d,
+        end_actual_time   TYPE t,
+        actual_time_zone  TYPE systzonlo,
+        plan_time_zone    TYPE systzonlo,
+      END OF gtyp_data .
+    TYPES:
+      BEGIN OF gtyp_scenario1,
+        vstel TYPE vstel,
+        wadat TYPE  wadat,
+        lddat TYPE lddat,
+        lfdat TYPE lfdat,
+        kodat TYPE kodat,
+        route TYPE route,
+        vtweg TYPE vtweg,
+        aufer TYPE tvlk-aufer,
+        vgbel TYPE lips-vgbel,
+        vgpos TYPE lips-vgpos,
+      END OF gtyp_scenario1 .
+    TYPES:
+      BEGIN OF gtyp_events1,
+        zz1_delscen_sdi      TYPE zz1_delscen,
+        zz1_otcdldate_sdi    TYPE zz1_otcdldate,
+        zz1_zotcbookdate_sdh TYPE zz1_zotcbookdate,
+        zz1_zotcbook_sdh     TYPE zz1_zotcbook,
+      END OF gtyp_events1 .
+
+    DATA:
+      mt_data      TYPE TABLE OF  gtyp_data WITH EMPTY KEY .
+    DATA ms_scenario1 TYPE gtyp_scenario1 .
+    DATA ms_data TYPE gtyp_data .
+    DATA ms_events1 TYPE gtyp_events1 .
+    DATA:
+      mt_return_tab   TYPE STANDARD TABLE OF  bapiret2 .
+    DATA mv_mat_avail_dt TYPE vbep-mbdat .
+    DATA mv_loading_date TYPE vbep-lddat .
+    DATA mv_issue_date TYPE vbep-wadat .
+    DATA mv_delivery_date TYPE vbep-edatu .
+    DATA mv_conf_shelve_date TYPE vbep-edatu .
+    DATA mv_del_doc TYPE likp-vbeln .
+    DATA mv_sysubrc TYPE sy-subrc  ##NEEDED.
+    DATA mv_cut_off_time TYPE uzeit .
+    DATA mv_direction TYPE scal-indicator .
+    DATA:
+      mt_r_booking TYPE RANGE OF zz1_zotcbook .
+    CONSTANTS gc_pick TYPE tsegevttyp VALUE 'ZS4PLNPICK' ##NO_TEXT.
+    CONSTANTS gc_load TYPE tsegevttyp VALUE 'ZS4PLNLOAD' ##NO_TEXT.
+    CONSTANTS gc_gdis TYPE tsegevttyp VALUE 'ZS4PLNGDIS' ##NO_TEXT.
+    CONSTANTS gc_landel TYPE tsegevttyp VALUE 'ZS4PLNDELI' ##NO_TEXT.
+    CONSTANTS gc_lncons TYPE tsegevttyp VALUE 'ZS4PLNCONS' ##NO_TEXT.
+    CONSTANTS gc_lnrout TYPE tsegevttyp VALUE 'ZS4PLNROUT' ##NO_TEXT.
+    CONSTANTS gc_positive TYPE scal-indicator VALUE '+' ##NO_TEXT.
+    CONSTANTS gc_negative TYPE scal-indicator VALUE '-' ##NO_TEXT.
+    CLASS-DATA go_inst TYPE REF TO zcl_sc_s4_delivery_events_updt .
+    DATA mv_vstel TYPE vstel .
+    DATA mv_time_zone TYPE ad_tzone .
+    DATA mv_sysdate TYPE datum .
+    DATA mv_systime TYPE tims .
+
+    METHODS save_lt_vals_to_db
+      IMPORTING
+        !iv_loading       TYPE zsd_lead_time
+        !iv_processing_lt TYPE zsd_lead_time
+        !iv_vas_lt        TYPE zsd_lead_time .
+    METHODS update_delivery_lt_vals
+      IMPORTING
+        !iv_order           TYPE vgbel
+        !iv_item_no         TYPE vgpos
+        !iv_aufer           TYPE aufer
+        !iv_vstel           TYPE vstel
+        !iv_vtweg           TYPE vtweg
+        !iv_auart           TYPE auart
+        !iv_vsbed           TYPE vsbed
+        !iv_fsh_vas_rel     TYPE fsh_vas_rel
+        !iv_fsh_transaction TYPE fsh_transaction
+        !iv_fsh_item_group  TYPE fsh_item_group .
+    METHODS get_cut_off_data_sto
+      IMPORTING
+        !is_sto_attr     TYPE gtyp_sto_attr
+      RETURNING
+        VALUE(rv_status) TYPE abap_bool .
+    METHODS update_events_to_db
+      CHANGING
+        !ct_return TYPE bapiret2_t OPTIONAL .
+    METHODS get_data_from_db
+      RETURNING
+        VALUE(rv_return_success) TYPE boolean .
+    METHODS get_cut_off_data .
+    METHODS get_sd_schedulingm
+      IMPORTING
+        VALUE(iv_vstel)           TYPE tvst-vstel
+        VALUE(iv_route)           TYPE tvro-route
+        VALUE(iv_mbdat)           TYPE vbep-mbdat OPTIONAL
+        VALUE(iv_direction)       TYPE scal-indicator
+        VALUE(iv_delivery_date)   TYPE vbep-edatu OPTIONAL
+        VALUE(iv_no_cutoff_check) TYPE flag OPTIONAL
+      EXPORTING
+        !ev_sysubrc               TYPE sy-subrc
+        !et_sched_result          LIKE mt_dates .
+    METHODS calculate_datesm
+      EXPORTING
+        !ev_return_err TYPE flag
+        !ev_new_mbdat  TYPE mbdat .
+    METHODS get_data_from_db_so
+      IMPORTING
+        !it_xlikp                TYPE shp_likp_t OPTIONAL
+        !it_xlips                TYPE shp_lips_t OPTIONAL
+      RETURNING
+        VALUE(rv_return_success) TYPE boolean .
+    METHODS get_cut_off_data_so
+      IMPORTING
+        !is_sto_attr     TYPE gtyp_sto_attr OPTIONAL
+        !it_xlips        TYPE shp_lips_t OPTIONAL   ##NEEDED
+        !it_xlikp        TYPE shp_likp_t OPTIONAL   ##NEEDED
+      RETURNING
+        VALUE(rv_status) TYPE abap_bool .
+    METHODS calculate_datesm_so
+      IMPORTING
+        !it_xlikp      TYPE shp_likp_t OPTIONAL
+        !it_xlips      TYPE shp_lips_t OPTIONAL
+      EXPORTING
+        !ev_return_err TYPE flag
+        !ev_new_mbdat  TYPE mbdat .
+    METHODS get_sd_schedulingm_so
+      IMPORTING
+        VALUE(iv_vstel)           TYPE tvst-vstel
+        VALUE(iv_route)           TYPE tvro-route
+        VALUE(iv_mbdat)           TYPE vbep-mbdat OPTIONAL
+        VALUE(iv_direction)       TYPE scal-indicator
+        VALUE(iv_delivery_date)   TYPE vbep-edatu OPTIONAL
+        VALUE(iv_no_cutoff_check) TYPE flag OPTIONAL
+        !it_xlikp                 TYPE shp_likp_t OPTIONAL   ##NEEDED
+        !it_xlips                 TYPE shp_lips_t
+      EXPORTING
+        !ev_sysubrc               TYPE sy-subrc
+        !et_sched_result          LIKE mt_dates .
+    METHODS compare_with_old_lt
+      CHANGING
+        !cv_loading       TYPE zsd_lead_time
+        !cv_processing_lt TYPE zsd_lead_time
+        !cv_vas_lt        TYPE zsd_lead_time .
+ENDCLASS.
+
+
+
+CLASS zcl_sc_s4_delivery_events_updt IMPLEMENTATION.
+
+
+  METHOD get_data_from_db.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KAUSHRIS     | 20.06.2022 | 16980     : FB_12191_SD_[Platform-API    *
+*              |            |           extension] - DN Events Update  *
+*              |            | DS4K924254                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 14.10.2022 | 13118     : [Platform] - S4 to WMS - Outbound Delive *
+*              |            | DS4K927689                               *
+*----------------------------------------------------------------------*
+* KALSHZHA     | 12.04.2023 | 19973     : [Feature] [CR-6162] S4 to WMS - Delivery *
+*              |            | DS4K949665                              *
+*----------------------------------------------------------------------*
+* KALSHZHA     | 12.06.2023 | 19973     : Cut of table new field adjustment*
+*              |            | DS4K949665                              *
+*----------------------------------------------------------------------*
+* NAGARSOW     | 03.08.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+
+*)-Get all the data required to be used in Dates calculation and fetching
+**********************************************************************
+*)-selections for Events Update
+**********************************************************************
+    rv_return_success = abap_false.
+
+    TRY.
+        DATA(lr_lfart) = zcl_pe_hm_basic=>get_range( iv_id = '598' ).
+        DATA(lt_r_booking) = zcl_pe_hm_basic=>get_range( iv_id = '1466' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+    mt_r_booking = CORRESPONDING #( lt_r_booking ).
+    IF lr_lfart IS NOT INITIAL.
+      SELECT      cmgst UP TO 1 ROWS
+                  FROM likp
+                  INTO @DATA(lv_cmgst)
+                  WHERE vbeln = @mv_del_doc AND lfart IN @lr_lfart.
+      ENDSELECT.
+
+      IF sy-subrc = 0 AND ( lv_cmgst NE 'B' OR lv_cmgst NE 'C').
+
+        rv_return_success = abap_true.
+        SELECT
+          sdi~zz1_delscen_sdi,
+          sdi~zz1_otcdldate_sdi,
+          sd~zz1_zotcbookdate_sdh,
+          sd~zz1_zotcbook_sdh
+          FROM i_deliverydocumentitem AS dl
+          LEFT OUTER JOIN e_salesdocumentbasic WITH PRIVILEGED ACCESS AS sd
+          ON sd~salesdocument EQ dl~referencesddocument
+          LEFT OUTER JOIN e_salesdocumentitembasic WITH PRIVILEGED ACCESS AS sdi
+          ON sdi~salesdocument EQ dl~referencesddocument
+          AND sdi~salesdocumentitem EQ dl~referencesddocumentitem
+          WHERE dl~deliverydocument EQ @mv_del_doc
+          INTO @ms_events1 UP TO 1 ROWS.
+        ENDSELECT.                                        "#EC CI_SUBRC
+        IF sy-subrc IS NOT INITIAL.
+          CLEAR ms_events1.
+          SELECT
+            pdi~zz1_delscen_sdi_pdi,
+            pdi~zz1_otcdldate_sdi_pdi
+            FROM i_deliverydocumentitem AS dl
+            LEFT OUTER JOIN e_purchasingdocumentitem WITH PRIVILEGED ACCESS AS pdi
+            ON pdi~purchasingdocument EQ dl~referencesddocument
+            AND pdi~purchasingdocumentitem EQ dl~referencesddocumentitem
+            WHERE dl~deliverydocument EQ @mv_del_doc
+            INTO @ms_events1 UP TO 1 ROWS.
+          ENDSELECT.                                      "#EC CI_SUBRC
+        ENDIF.
+
+        get_cut_off_data( ).
+
+*)-Get Time Zone
+        SELECT SINGLE adrnr FROM tvst INTO @DATA(lv_adrnr)
+                     WHERE vstel = @mv_vstel.
+
+        IF sy-subrc = 0.
+          SELECT time_zone FROM adrc INTO @mv_time_zone UP TO 1 ROWS "#EC CI_NOORDER
+                            WHERE addrnumber = @lv_adrnr.
+          ENDSELECT.
+          IF sy-subrc NE 0 OR mv_time_zone IS INITIAL.
+            mv_time_zone =  sy-zonlo.
+
+          ENDIF.
+        ENDIF.
+        IF mv_time_zone IS INITIAL.
+          CALL FUNCTION 'GET_SYSTEM_TIMEZONE'
+            IMPORTING
+              timezone            = mv_time_zone
+            EXCEPTIONS
+              customizing_missing = 1
+              OTHERS              = 2.
+          IF sy-subrc = 0.
+* Implement suitable error handling here
+          ELSE.
+            CLEAR mv_time_zone.
+          ENDIF.
+        ENDIF.
+        GET TIME STAMP FIELD DATA(lv_sys_ts).
+        CONVERT TIME STAMP lv_sys_ts TIME ZONE mv_time_zone INTO DATE mv_sysdate TIME mv_systime.
+
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_instance.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KAUSHRIS     | 20.06.2022 | 12191     : FB_11743_SD_[Platform-API    *
+*              |            |           extension] - Custom Field Logic*
+*              |            | DS4K924254                               *
+*----------------------------------------------------------------------*
+* NAGARSOW     | 03.08.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+
+    IF go_inst IS NOT BOUND.
+      ro_inst = NEW zcl_sc_s4_delivery_events_updt( ).
+      go_inst = ro_inst.
+    ELSE.
+      ro_inst = go_inst.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD update_events.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KAUSHRIS     | 20.06.2022 | 16980     : FB_12191_SD_[Platform-API    *
+*              |            |           extension] - DN Events Update  *
+*              |            | DS4K924254                               *
+************************************************************************
+* ZHMAIVAD     | 01.11.2022 | 13118 : FB_13118_SD_[Platform] - S4 to WMS - Outbound Delive*
+*              |            | DS4K927689                               *
+*----------------------------------------------------------------------*
+* PEREDSER     | 20.03.2023 | FB_17044_SD_[build] DN Event from WMS    *
+*              |            | auto fill in window to TMS               *
+*              |            | DS4K940960                               *
+*----------------------------------------------------------------------*
+* NAGARSOW     | 03.08.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+    DATA: lo_tms_event_updater TYPE REF TO zcl_sd_deliv_event_tms_updt,
+          lv_err_mbdat         TYPE mbdat,
+          lv_err_flag          TYPE flag.
+*)-Passing Delivery document numner to Global Variable
+    mv_del_doc = iv_del_doc.
+
+*)-Fetching all the data from Database to be used for dates calulations
+*)- and data population
+    rv_return_success = abap_true.
+
+    IF get_data_from_db( ) IS NOT INITIAL.
+      rv_return_success = abap_true.
+
+*)-calulate the dates based on the following scenarios:
+*    --for No fulfilment Scenarios, Hard launch & Pre launch, Delivery note dates Calculation
+*    --For Pull Forward and Pack & Hold, delivery Note Dates calculation
+*      calculate_dates( ).
+      calculate_datesm( IMPORTING ev_return_err = lv_err_flag
+                                  ev_new_mbdat = lv_err_mbdat ).
+
+      IF lv_err_flag IS NOT INITIAL.
+        MESSAGE e016 INTO DATA(lv_msg) ##NEEDED.
+        cl_bapi_msg=>add_message( CHANGING ct_message = ct_return ).
+        rv_return_success = abap_false.
+        ev_err_mbdat = lv_err_mbdat.
+        RETURN.
+      ENDIF.
+
+      IF iv_nosave_events = 'X'.
+        RETURN.
+      ENDIF.
+
+*)-Update Events to TSEGE table
+      update_events_to_db( CHANGING ct_return = ct_return ).
+
+*) - Update events for TMS
+      lo_tms_event_updater = NEW #(  ).
+      lo_tms_event_updater->update_events( EXPORTING iv_del_doc = iv_del_doc
+                                           CHANGING  ct_return  = ct_return ).
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD update_events_to_db.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KAUSHRIS     | 20.06.2022 | 16980     : FB_12191_SD_[Platform-API    *
+*              |            |           extension] - DN Events Update  *
+*              |            | DS4K924254                               *
+**********************************************************************
+*)-If TESEGE table is empty and does not have the Events mentioned below
+*)-Also the dates data is fetched properly then we will proceed with the
+************************************************************************
+* ZHMAIVAD     | 13.10.2022 | 13118 : FB_13118_SD_[Platform] - S4 to WMS - Outbound Delive*
+*              |            | DS4K927689                               *
+*----------------------------------------------------------------------*
+* KALSHZHA     | 12.04.2023 | 19973     : [Feature] [CR-6162] S4 to WMS - Delivery *
+*              |            | DS4K949665                              *
+*----------------------------------------------------------------------*
+* NAGARSOW     | 19.09.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+* HURTSALE     | 18.01.2024 | 28219     : Milestone intf. imp. for REFU*
+*              |            | DS4K976629                               *
+*----------------------------------------------------------------------*
+
+*)-Updates to the Table
+*)-Pass the dates to the events
+    ms_data-delivery_note = mv_del_doc.
+    ms_data-event_type = gc_pick.
+    ms_data-begin_plan_date = mv_mat_avail_dt.
+    ms_data-begin_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-end_plan_date = mv_mat_avail_dt.
+    ms_data-end_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-actual_time_zone = mv_time_zone.
+    APPEND ms_data TO mt_data.
+
+    ms_data-delivery_note = mv_del_doc.
+    ms_data-event_type = gc_load.
+    ms_data-begin_plan_date = mv_loading_date.
+    ms_data-begin_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-end_plan_date = mv_loading_date.
+    ms_data-end_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-actual_time_zone = mv_time_zone.
+    APPEND ms_data TO mt_data.
+
+    ms_data-delivery_note = mv_del_doc.
+    ms_data-event_type = gc_gdis.
+    ms_data-begin_plan_date = mv_issue_date.
+    ms_data-begin_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-end_plan_date = mv_issue_date.
+    ms_data-end_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-actual_time_zone = mv_time_zone.
+    APPEND ms_data TO mt_data.
+
+    ms_data-delivery_note = mv_del_doc.
+    ms_data-event_type = gc_landel.
+    ms_data-begin_plan_date = mv_delivery_date.
+    ms_data-begin_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-end_plan_date = mv_delivery_date.
+    ms_data-end_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-actual_time_zone = mv_time_zone.
+    APPEND ms_data TO mt_data.
+
+    ms_data-delivery_note = mv_del_doc.
+    ms_data-event_type = gc_lncons.
+    ms_data-begin_plan_date = mv_conf_shelve_date.
+    ms_data-begin_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-end_plan_date = mv_conf_shelve_date.
+    ms_data-end_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-actual_time_zone = mv_time_zone.
+    APPEND ms_data TO mt_data.
+
+    ms_data-delivery_note = mv_del_doc.
+    ms_data-event_type = gc_lnrout.
+    ms_data-begin_plan_date = ms_events1-zz1_zotcbookdate_sdh.
+    ms_data-begin_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-end_plan_date = ms_events1-zz1_zotcbookdate_sdh.
+    ms_data-end_plan_time = |{ sy-uzeit(4) }| & |00|.
+    ms_data-actual_time_zone = mv_time_zone.
+    APPEND ms_data TO mt_data.
+
+
+    DELETE mt_data WHERE begin_plan_date IS INITIAL AND end_plan_date IS INITIAL. "#EC CI_STDSEQ
+
+    zcl_sd_delivery_events_update=>process(
+      EXPORTING
+        iv_test   = ''
+        iv_commit = abap_false
+        it_data   = CORRESPONDING #( mt_data MAPPING plan_time_zone = actual_time_zone )
+      CHANGING
+        ct_return = mt_return_tab[] ).
+
+    ct_return = mt_return_tab[].
+  ENDMETHOD.
+
+
+  METHOD get_cut_off_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 12.06.2023 | 19973     : Cut of table new field adjustment*
+*              |            | DS4K949665                              *
+*----------------------------------------------------------------------*
+* NAGARSOW     | 19.09.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+    TRY.
+        DATA(lt_rn_so) = zcl_pe_hm_basic=>get_range( iv_id = '1810' ).
+        DATA(lt_rn_sto) = zcl_pe_hm_basic=>get_range( iv_id = '1812' ).
+      ##NO_HANDLER  CATCH zcx_pe_hm.
+    ENDTRY.
+
+    SELECT
+      a~shippingpoint,                                  "#EC CI_NOORDER
+      a~plannedgoodsissuedate,
+      a~loadingdate,
+      a~deliverydate,
+      a~pickingdate,
+      a~proposeddeliveryroute,
+      b~distributionchannel,
+      c~precedingdocumentrequirement,
+      b~referencesddocument,
+      b~referencesddocumentitem
+      FROM i_deliverydocument WITH PRIVILEGED ACCESS AS a
+      LEFT OUTER JOIN i_deliverydocumentitem WITH PRIVILEGED ACCESS AS b
+      ON a~deliverydocument EQ b~deliverydocument
+      LEFT OUTER JOIN i_deliverydocumenttype WITH PRIVILEGED ACCESS AS c
+      ON a~deliverydocumenttype EQ c~deliverydocumenttype
+      WHERE a~deliverydocument = @mv_del_doc
+      INTO @ms_scenario1 UP TO 1 ROWS.
+    ENDSELECT.
+    IF sy-subrc IS INITIAL AND  ms_scenario1-aufer IS NOT INITIAL AND ms_scenario1-aufer IN lt_rn_so.
+      SELECT SINGLE
+          cutofftime,
+          shippingpoint
+          FROM zsd_i_os_dn INTO  (@mv_cut_off_time,@mv_vstel)
+          WHERE shippingpoint = @ms_scenario1-vstel AND distributionchannel = @ms_scenario1-vtweg.
+      IF sy-subrc IS NOT INITIAL.
+        CLEAR ms_scenario1.
+      ENDIF.
+    ELSEIF sy-subrc IS INITIAL AND ms_scenario1-aufer IS NOT INITIAL AND ms_scenario1-aufer IN lt_rn_sto.
+      SELECT
+         b~shippingpoint,
+         b~distributionchannel,
+         a~purchasingdocumenttype,
+         c~zz1_zorderreason_pdh
+        FROM i_purchasingdocument WITH PRIVILEGED ACCESS AS a
+        LEFT OUTER JOIN i_purchasingdocumentshipping WITH PRIVILEGED ACCESS AS b
+        ON b~purchasingdocument EQ a~purchasingdocument
+        INNER JOIN e_purchasingdocument WITH PRIVILEGED ACCESS AS c
+        ON c~purchasingdocument EQ a~purchasingdocument
+        WHERE b~purchasingdocument EQ @ms_scenario1-vgbel
+          AND b~purchasingdocumentitem EQ @ms_scenario1-vgpos
+        INTO @DATA(ls_so_attr)
+        UP TO 1 ROWS.
+      ENDSELECT.
+      IF sy-subrc IS INITIAL.
+        DATA(lv_status) = get_cut_off_data_sto(
+         VALUE #(
+          shippingpoint = ls_so_attr-shippingpoint
+          distributionchannel = ls_so_attr-distributionchannel
+          purchasingdocumenttype = ls_so_attr-purchasingdocumenttype
+          zz1_zorderreason_pdh = ls_so_attr-zz1_zorderreason_pdh
+         )
+        ).
+
+        CHECK lv_status EQ abap_false.
+
+        lv_status = get_cut_off_data_sto(
+         VALUE #(
+          shippingpoint = ls_so_attr-shippingpoint
+          distributionchannel = ls_so_attr-distributionchannel
+          purchasingdocumenttype = space
+          zz1_zorderreason_pdh = ls_so_attr-zz1_zorderreason_pdh
+         )
+        ).
+
+        CHECK lv_status EQ abap_false.
+
+        lv_status = get_cut_off_data_sto(
+         VALUE #(
+          shippingpoint = ls_so_attr-shippingpoint
+          distributionchannel = ls_so_attr-distributionchannel
+          purchasingdocumenttype = ls_so_attr-purchasingdocumenttype
+          zz1_zorderreason_pdh = space
+         )
+        ).
+
+        CHECK lv_status EQ abap_false.
+
+        lv_status = get_cut_off_data_sto(
+        VALUE #(
+         shippingpoint = ls_so_attr-shippingpoint
+         distributionchannel = ls_so_attr-distributionchannel
+         purchasingdocumenttype = space
+         zz1_zorderreason_pdh = space
+        )
+       ).
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_cut_off_data_sto.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 12.06.2023 | 19973     : Cut of table new field adjustment*
+*              |            | DS4K949665                              *
+*----------------------------------------------------------------------*
+* NAGARSOW     | 19.09.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+    SELECT SINGLE
+    cutofftime,
+    shippingpoint
+    FROM zsd_i_os_dn INTO  (@mv_cut_off_time,@mv_vstel)
+    WHERE shippingpoint EQ @is_sto_attr-shippingpoint
+    AND distributionchannel EQ @is_sto_attr-distributionchannel
+    AND purchasingdocumenttype EQ @is_sto_attr-purchasingdocumenttype
+    AND orderreason EQ @is_sto_attr-zz1_zorderreason_pdh.
+    IF sy-subrc IS INITIAL.
+      rv_status = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD calculate_datesm.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NAGARSOW     | 03.08.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+* CHISLRIM     | 12.02.2024 | FB_27479_SD_[FEATURE] - Delivery API     *
+*              |            | DS4K973219                               *
+*----------------------------------------------------------------------*
+*)- Customer Booking in Date logic
+    IF ms_events1-zz1_zotcbook_sdh IN mt_r_booking.
+      DATA(lv_fdate_zotcbook) =     ms_events1-zz1_zotcbookdate_sdh.
+      mv_direction = gc_negative.
+      CALL METHOD me->get_sd_schedulingm
+        EXPORTING
+          iv_vstel         = ms_scenario1-vstel
+          iv_route         = ms_scenario1-route
+          iv_direction     = mv_direction
+          iv_delivery_date = lv_fdate_zotcbook
+        IMPORTING
+          ev_sysubrc       = mv_sysubrc
+          et_sched_result  = mt_dates.
+      SORT mt_dates BY mbdat ASCENDING.
+      DATA(ls_dates) = VALUE #( mt_dates[ 1 ] OPTIONAL ).
+      IF ls_dates IS NOT INITIAL.
+        IF ls_dates-mbdat < mv_sysdate OR ls_dates-lfdat <> lv_fdate_zotcbook.
+          ev_return_err = 'X'.
+          ev_new_mbdat = ls_dates-mbdat.
+        ELSE.
+          mv_mat_avail_dt = ls_dates-mbdat.
+          mv_loading_date = ls_dates-lddat.
+          mv_issue_date = ls_dates-wadat.
+          mv_delivery_date = ls_dates-lfdat.
+        ENDIF.
+      ENDIF.
+    ELSE.
+      TRY.
+          DATA(lr_sdi_values) = zcl_pe_hm_basic=>get_range( iv_id = '2534' ).
+        CATCH zcx_pe_hm.
+          RETURN.
+      ENDTRY.
+      READ TABLE lr_sdi_values ASSIGNING FIELD-SYMBOL(<ls_sdi_value>) WITH KEY low = ms_events1-zz1_delscen_sdi.
+      IF sy-subrc = 0.
+        IF <ls_sdi_value>-high = 'X'.
+*)--For Pull Forward and Pack & Hold, delivery Note Dates calculation
+          DATA(lv_date) =  ms_events1-zz1_otcdldate_sdi.
+        ELSE.
+*)--for No fulfilment Scenarios, Hard launch & Pre launch, Delivery note dates Calculation
+          lv_date = ms_scenario1-lfdat.
+        ENDIF.
+      ELSEIF ms_events1-zz1_delscen_sdi EQ space.
+        lv_date = ms_scenario1-lfdat.
+      ENDIF.
+      mv_direction = gc_negative.
+      CALL METHOD me->get_sd_schedulingm
+        EXPORTING
+          iv_vstel         = ms_scenario1-vstel
+          iv_route         = ms_scenario1-route
+          iv_direction     = mv_direction
+          iv_delivery_date = lv_date
+        IMPORTING
+          ev_sysubrc       = mv_sysubrc
+          et_sched_result  = mt_dates.
+      SORT mt_dates BY longest_lead_time DESCENDING.
+      ls_dates = VALUE #( mt_dates[ 1 ] OPTIONAL ).
+      IF ls_dates IS NOT INITIAL.
+        IF ls_dates-mbdat < mv_sysdate OR ls_dates-lfdat <> lv_date.
+          CLEAR mt_dates.
+          IF mv_systime > mv_cut_off_time.
+            ls_dates-mbdat = mv_sysdate + 1.
+          ELSE.
+            ls_dates-mbdat = mv_sysdate.
+          ENDIF.
+*Get factory calender
+          mv_direction = gc_positive.
+          CALL METHOD me->get_sd_schedulingm
+            EXPORTING
+              iv_vstel           = ms_scenario1-vstel
+              iv_route           = ms_scenario1-route
+              iv_direction       = mv_direction
+              iv_mbdat           = ls_dates-mbdat
+              iv_no_cutoff_check = abap_true
+            IMPORTING
+              ev_sysubrc         = mv_sysubrc
+              et_sched_result    = mt_dates.
+
+          SORT mt_dates BY mbdat DESCENDING.
+          DATA(ls_dates_final) = VALUE #( mt_dates[ 1 ] OPTIONAL ).
+          IF ls_dates_final IS NOT INITIAL.
+            mv_mat_avail_dt = ls_dates_final-mbdat.
+            mv_loading_date = ls_dates_final-lddat.
+            mv_issue_date = ls_dates_final-wadat.
+            mv_delivery_date = ls_dates_final-lfdat.
+          ENDIF.
+        ELSE.
+          mv_mat_avail_dt = ls_dates-mbdat.
+          mv_loading_date = ls_dates-lddat.
+          mv_issue_date = ls_dates-wadat.
+          mv_delivery_date = ls_dates-lfdat.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_sd_schedulingm.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NAGARSOW     | 03.08.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+* CHISLRIM     | 12.01.2024 |  27479    : FB_27479_SD_[FEATURE] -       *
+*              |            |             -Delivery API ( Routing statu*
+*              |            | DS4K973219                               *
+*----------------------------------------------------------------------*
+    TYPES:
+      BEGIN OF ltyp_s_order_longest_data,
+        final_lt        TYPE tfmatage,
+        longest_order   TYPE vgbel,
+        longest_item_no TYPE vgpos,
+        aufer           TYPE aufer,
+        vstel           TYPE vstel,
+        vtweg           TYPE vtweg,
+        auart           TYPE auart,
+        vsbed           TYPE vsbed,
+        fsh_vas_rel     TYPE fsh_vas_rel,
+        fsh_transaction TYPE fsh_transaction,
+        fsh_item_group  TYPE fsh_item_group,
+      END OF ltyp_s_order_longest_data.
+
+    DATA: ls_vbak       TYPE vbak,
+          ls_vbap       TYPE vbap,
+          lv_fdate      TYPE scdatum,
+          lt_vbkd       TYPE vbkd_t,
+          lt_vbpa       TYPE vbpa_tt,
+          ls_ekko       TYPE ekko,
+          ls_ekpo       TYPE ekpo,
+          ls_ekpv       TYPE ekpv,
+          ls_sched      TYPE gtyp_dates,
+          lt_sched      TYPE STANDARD TABLE OF gtyp_dates
+          ,ls_longest_lt  TYPE ltyp_s_order_longest_data.
+*)-Common Method to avoid multiple Function calls
+    CLEAR: et_sched_result, ev_sysubrc.
+
+* Init scheduling API buffers
+    SELECT deliveryitem~referencesddocument AS doc_no,    "#EC CI_SUBRC
+           deliveryitem~referencesddocumentitem AS item_no,
+           deliveryitem~plant AS plant,
+           plant~factorycalendar AS factorycalendar,
+           deliverytype~precedingdocumentrequirement AS aufer
+           INTO TABLE @DATA(lt_attributes)
+    FROM i_deliverydocumentitem AS deliveryitem
+    INNER JOIN i_deliverydocument AS delivery
+      ON delivery~deliverydocument = deliveryitem~deliverydocument
+    INNER JOIN i_deliverydocumenttype AS deliverytype
+      ON deliverytype~deliverydocumenttype = delivery~deliverydocumenttype
+    INNER JOIN i_plant AS plant
+      ON plant~plant = deliveryitem~plant
+      WHERE delivery~deliverydocument = @mv_del_doc.
+
+    LOOP AT lt_attributes ASSIGNING FIELD-SYMBOL(<ls_attributes>).
+      IF <ls_attributes>-aufer = if_arberp_likp_aufer_c=>gc_sales_order_req.
+
+        DATA(lif_schema_detn_sd) = cl_bps_schema_detn_factory=>create_schema_detn_sd( ).
+        IF lif_schema_detn_sd->is_activated( ).
+
+          CALL FUNCTION 'SD_VBAK_SINGLE_READ'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+            IMPORTING
+              e_vbak           = ls_vbak
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'SD_VBAP_SINGLE_READ'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+              i_posnr          = <ls_attributes>-item_no
+            IMPORTING
+              e_vbap           = ls_vbap
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'SD_VBKD_READ_WITH_VBELN'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+            TABLES
+              et_vbkd          = lt_vbkd
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'SD_VBPA_READ_WITH_VBELN'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+            TABLES
+              et_vbpa          = lt_vbpa
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          DATA(lif_sd_buffer) = cl_bps_sd_atp_buffer=>get_instance( ).
+          lif_sd_buffer->set_sales_document( header              = ls_vbak
+                                             item                = ls_vbap
+                                             business_attributes = CORRESPONDING #( lt_vbkd ) ).
+
+          lif_sd_buffer->set_sd_partners( CORRESPONDING #( lt_vbpa ) ).
+
+          DATA(lv_schema_id) = lif_schema_detn_sd->get_schema(  VALUE #( doc_cat = ls_vbak-vbtyp
+                                                                         doc_no = ls_vbak-vbeln
+                                                                         item_no = ls_vbap-posnr
+                                                                         shipping_point = ls_vbap-vstel ) ).
+        ENDIF.
+      ELSEIF  <ls_attributes>-aufer = if_arberp_likp_aufer_c=>gc_purchase_order_req.
+
+        DATA(lif_schema_detn_mm) = cl_bps_schema_detn_factory=>create_schema_detn_mm( ).
+        IF lif_schema_detn_mm->is_activated( ).
+
+          CALL FUNCTION 'ME_EKKO_SINGLE_READ'
+            EXPORTING
+              pi_ebeln         = <ls_attributes>-doc_no
+            IMPORTING
+              po_ekko          = ls_ekko
+            EXCEPTIONS
+              no_records_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'ME_EKPO_SINGLE_READ'
+            EXPORTING
+              pi_ebeln         = <ls_attributes>-doc_no
+              pi_ebelp         = CONV ebelp( <ls_attributes>-item_no )
+            IMPORTING
+              po_ekpo          = ls_ekpo
+            EXCEPTIONS
+              no_records_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'ME_EKPV_SINGLE_READ'
+            EXPORTING
+              pi_ebeln         = <ls_attributes>-doc_no
+              pi_ebelp         = CONV ebelp( <ls_attributes>-item_no )
+            IMPORTING
+              po_ekpv          = ls_ekpv
+            EXCEPTIONS
+              no_records_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          DATA(lif_mm_buffer) = cl_bps_mm_atp_buffer=>get_instance( ).
+
+          lif_mm_buffer->set_stock_transport(
+            header             = ls_ekko
+            item               = ls_ekpo
+            shipping_attribute = ls_ekpv ).
+
+          lv_schema_id = lif_schema_detn_mm->get_schema(  VALUE #( doc_cat = ls_ekko-bstyp
+                                                                   doc_no = ls_ekko-ebeln
+                                                                   item_no = ls_ekpo-ebelp
+                                                                   shipping_point = ls_ekpv-vstel ) ).
+        ENDIF.
+      ENDIF.
+
+      CHECK lv_schema_id IS NOT INITIAL.
+
+* Call the API
+      GET TIME STAMP FIELD FINAL(lv_timestamp).
+      TRY.
+          DATA(ls_sched_result) = cl_bps_adapter_factory=>create_adapter(
+                                    )->schedule_single( VALUE #( schema_id = lv_schema_id
+                                                                 doc_no = <ls_attributes>-doc_no
+                                                                 item_no = <ls_attributes>-item_no
+                                                                 deliv_ind = abap_true
+                                                                 transp_enabled = abap_true
+                                                                 direction = iv_direction
+                                                                 option = VALUE #( transittime = abap_true )
+                                                                 start_date = VALUE #( mbdat = iv_mbdat lfdat = iv_delivery_date )
+                                                                 attribute = VALUE #( vstel = iv_vstel route = iv_route webaz = ls_ekpo-webaz )
+                                                                 timestamp_now = lv_timestamp
+                                                                 skip_buffer = abap_true  ) ).
+        CATCH cx_bps_exception.
+          CLEAR ls_sched_result.
+          CONTINUE.
+      ENDTRY.
+      ls_sched-mbdat = ls_sched_result-mbdat.
+      ls_sched-lddat = ls_sched_result-lddat.
+      ls_sched-wadat = ls_sched_result-wadat.
+      ls_sched-lfdat = ls_sched_result-lfdat.
+      IF mv_systime > mv_cut_off_time AND iv_no_cutoff_check = abap_false.
+        ls_sched-mbdat = ls_sched-mbdat - 1.
+        CALL FUNCTION 'DATE_CONVERT_TO_FACTORYDATE'
+          EXPORTING
+            factory_calendar_id          = <ls_attributes>-factorycalendar
+            correct_option               = '-'
+            date                         = ls_sched-mbdat
+          IMPORTING
+            date                         = lv_fdate
+          EXCEPTIONS
+            calendar_buffer_not_loadable = 1
+            correct_option_invalid       = 2
+            date_after_range             = 3
+            date_before_range            = 4
+            date_invalid                 = 5
+            factory_calendar_not_found   = 6
+            OTHERS                       = 7.
+        IF sy-subrc = 0.
+          ls_sched-mbdat = lv_fdate.
+        ENDIF.
+      ENDIF.
+      DATA(lv_date_diff) = ls_sched-lfdat - ls_sched-mbdat.
+      ls_sched-longest_lead_time = lv_date_diff.
+
+*     find SO/STO and Item number with longest Final LT for Outbound processing:
+      IF ls_longest_lt-final_lt < lv_date_diff.
+
+        ls_longest_lt-final_lt = lv_date_diff.
+        ls_longest_lt-longest_order = <ls_attributes>-doc_no.
+        ls_longest_lt-longest_item_no = <ls_attributes>-item_no.
+        ls_longest_lt-aufer = <ls_attributes>-aufer.
+
+**        SO/STO
+        IF <ls_attributes>-aufer = if_arberp_likp_aufer_c=>gc_sales_order_req. "SO
+          ls_longest_lt-vstel            = ls_vbap-vstel.
+          ls_longest_lt-vtweg            = ls_vbak-zz1_zsup_vtweg_sdh.
+          ls_longest_lt-auart            = ls_vbak-auart.
+          ls_longest_lt-vsbed            = ls_vbak-vsbed.
+          ls_longest_lt-fsh_vas_rel      = ls_vbap-fsh_vas_rel.
+          ls_longest_lt-fsh_transaction  = ls_vbap-fsh_transaction.
+          ls_longest_lt-fsh_item_group   = ls_vbap-fsh_item_group.
+        ELSEIF <ls_attributes>-aufer = if_arberp_likp_aufer_c=>gc_purchase_order_req. "STO
+          ls_longest_lt-vstel            = ls_ekpv-vstel.
+          ls_longest_lt-vtweg            = ls_ekko-zz1_zsales_channel_pdh.
+          ls_longest_lt-auart            = ls_ekko-bsart.
+          ls_longest_lt-vsbed            = ls_ekpv-vsbed.
+          ls_longest_lt-fsh_vas_rel      = ls_ekpo-fsh_vas_rel.
+          ls_longest_lt-fsh_transaction  = ls_ekpo-fsh_transaction.
+          ls_longest_lt-fsh_item_group   = ls_ekpo-fsh_item_group.
+        ENDIF.
+
+      ENDIF.
+
+      APPEND ls_sched TO lt_sched.
+      CLEAR ls_sched.
+
+    ENDLOOP.
+    et_sched_result[] = lt_sched[].
+
+
+*   store SO/STO and Item number with longest Final LT for Outbound processing:
+    IF ls_longest_lt IS NOT INITIAL.
+      update_delivery_lt_vals(
+        EXPORTING
+          iv_order           = ls_longest_lt-longest_order
+          iv_item_no         = ls_longest_lt-longest_item_no
+          iv_aufer           = ls_longest_lt-aufer
+          iv_vstel           = ls_longest_lt-vstel
+          iv_vtweg           = ls_longest_lt-vtweg
+          iv_auart           = ls_longest_lt-auart
+          iv_vsbed           = ls_longest_lt-vsbed
+          iv_fsh_vas_rel     = ls_longest_lt-fsh_vas_rel
+          iv_fsh_transaction = ls_longest_lt-fsh_transaction
+          iv_fsh_item_group  = ls_longest_lt-fsh_item_group ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_data_from_db_so.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ANIPEVIN     | 19.10.2023 | 24010 : Delivery Outbound Interfac       *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+*)-Get all the data required to be used in Dates calculation and fetching
+**********************************************************************
+*)-selections for Events Update
+**********************************************************************
+
+    rv_return_success = abap_false.
+
+    TRY.
+        DATA(lr_lfart) = zcl_pe_hm_basic=>get_range( iv_id = '598' ).
+        DATA(lt_r_booking) = zcl_pe_hm_basic=>get_range( iv_id = '1466' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+    mt_r_booking = CORRESPONDING #( lt_r_booking ).
+    IF lr_lfart IS NOT INITIAL.
+      SELECT      cmgst UP TO 1 ROWS
+                  FROM vbak
+                  INTO @DATA(lv_cmgst)
+                  WHERE vbeln = @mv_del_doc." AND lfart IN @lr_lfart.
+      ENDSELECT.
+
+      IF sy-subrc = 0 AND ( lv_cmgst NE 'B' OR lv_cmgst NE 'C').
+
+        rv_return_success = abap_true.
+        SELECT
+          sdi~zz1_delscen_sdi,
+          sdi~zz1_otcdldate_sdi,
+          sd~zz1_zotcbookdate_sdh,
+          sd~zz1_zotcbook_sdh
+          FROM e_salesdocumentbasic WITH PRIVILEGED ACCESS AS sd
+          INNER JOIN e_salesdocumentitembasic WITH PRIVILEGED ACCESS AS sdi
+          ON  sd~salesdocument EQ sdi~salesdocument
+          WHERE sd~salesdocument EQ @mv_del_doc
+          INTO @ms_events1 UP TO 1 ROWS.
+        ENDSELECT.                                        "#EC CI_SUBRC
+        IF sy-subrc IS NOT INITIAL.
+        ENDIF.
+
+        get_cut_off_data_so( EXPORTING it_xlikp = it_xlikp
+                                       it_xlips = it_xlips ).
+
+*)-Get Time Zone
+        SELECT SINGLE adrnr FROM tvst INTO @DATA(lv_adrnr)
+                     WHERE vstel = @mv_vstel.
+
+        IF sy-subrc = 0.
+          SELECT time_zone FROM adrc INTO @mv_time_zone UP TO 1 ROWS "#EC CI_NOORDER
+                            WHERE addrnumber = @lv_adrnr.
+          ENDSELECT.
+          IF sy-subrc NE 0 OR mv_time_zone IS INITIAL.
+            mv_time_zone =  sy-zonlo.
+
+          ENDIF.
+        ENDIF.
+        IF mv_time_zone IS INITIAL.
+          CALL FUNCTION 'GET_SYSTEM_TIMEZONE'
+            IMPORTING
+              timezone            = mv_time_zone
+            EXCEPTIONS
+              customizing_missing = 1
+              OTHERS              = 2.
+          IF sy-subrc = 0.
+* Implement suitable error handling here
+          ELSE.
+            CLEAR mv_time_zone.
+          ENDIF.
+        ENDIF.
+        GET TIME STAMP FIELD DATA(lv_sys_ts).
+        CONVERT TIME STAMP lv_sys_ts TIME ZONE mv_time_zone INTO DATE mv_sysdate TIME mv_systime.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD update_events_so.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ANIPEVIN     | 19.10.2023 | 24010 : Delivery Outbound Interfac       *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+
+    DATA: lo_tms_event_updater TYPE REF TO zcl_sd_deliv_event_tms_updt,
+          lv_err_mbdat         TYPE mbdat,
+          lv_err_flag          TYPE flag.
+*)-Passing Delivery document numner to Global Variable
+    mv_del_doc = iv_so_doc.
+
+*)-Fetching all the data from Database to be used for dates calulations
+*)- and data population
+    rv_return_success = abap_true.
+
+    IF get_data_from_db_so( EXPORTING it_xlikp = it_xlikp
+                                      it_xlips = it_xlips ) IS NOT INITIAL.
+      rv_return_success = abap_true.
+
+*)-calulate the dates based on the following scenarios:
+*    --for No fulfilment Scenarios, Hard launch & Pre launch, Delivery note dates Calculation
+*    --For Pull Forward and Pack & Hold, delivery Note Dates calculation
+*      calculate_dates( ).
+      calculate_datesm_so(  EXPORTING it_xlikp = it_xlikp
+                                      it_xlips = it_xlips
+                            IMPORTING ev_return_err = lv_err_flag
+                                      ev_new_mbdat = lv_err_mbdat ).
+
+      IF lv_err_flag IS NOT INITIAL.
+        MESSAGE e016 INTO DATA(lv_msg) ##NEEDED.
+        cl_bapi_msg=>add_message( CHANGING ct_message = ct_return ).
+        rv_return_success = abap_false.
+        ev_err_mbdat = lv_err_mbdat.
+        RETURN.
+      ENDIF.
+
+      IF iv_nosave_events = 'X'.
+        RETURN.
+      ENDIF.
+
+*)-Update Events to TSEGE table
+      update_events_to_db( CHANGING ct_return = ct_return ).
+
+*) - Update events for TMS
+      lo_tms_event_updater = NEW #(  ).
+      lo_tms_event_updater->update_events( EXPORTING iv_del_doc = mv_del_doc
+                                           CHANGING  ct_return  = ct_return ).
+
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD calculate_datesm_so.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ANIPEVIN     | 19.10.2023 | 24010 : Delivery Outbound Interfac       *
+*              |            | DS4K959947                               *
+* CHISLRIM     | 12.02.2024 | FB_27479_SD_[FEATURE] - Delivery API     *
+*              |            | DS4K973219                               *
+*----------------------------------------------------------------------*
+*)- Customer Booking in Date logic
+    IF ms_events1-zz1_zotcbook_sdh IN mt_r_booking.
+      DATA(lv_fdate_zotcbook) =     ms_events1-zz1_zotcbookdate_sdh.
+      mv_direction = gc_negative.
+      CALL METHOD me->get_sd_schedulingm_so
+        EXPORTING
+          iv_vstel         = ms_scenario1-vstel
+          iv_route         = ms_scenario1-route
+          iv_direction     = mv_direction
+          iv_delivery_date = lv_fdate_zotcbook
+          it_xlikp         = it_xlikp
+          it_xlips         = it_xlips
+        IMPORTING
+          ev_sysubrc       = mv_sysubrc
+          et_sched_result  = mt_dates.
+      SORT mt_dates BY mbdat ASCENDING.
+      DATA(ls_dates) = VALUE #( mt_dates[ 1 ] OPTIONAL ).
+      IF ls_dates IS NOT INITIAL.
+        IF ls_dates-mbdat < mv_sysdate OR ls_dates-lfdat <> lv_fdate_zotcbook.
+          ev_return_err = 'X'.
+          ev_new_mbdat = ls_dates-mbdat.
+        ELSE.
+          mv_mat_avail_dt = ls_dates-mbdat.
+          mv_loading_date = ls_dates-lddat.
+          mv_issue_date = ls_dates-wadat.
+          mv_delivery_date = ls_dates-lfdat.
+        ENDIF.
+      ENDIF.
+    ELSE.
+
+      TRY.
+          DATA(lr_sdi_values) = zcl_pe_hm_basic=>get_range( iv_id = '2534' ).
+        CATCH zcx_pe_hm.
+          RETURN.
+      ENDTRY.
+      READ TABLE lr_sdi_values ASSIGNING FIELD-SYMBOL(<ls_sdi_value>) WITH KEY low = ms_events1-zz1_delscen_sdi.
+      IF sy-subrc = 0.
+        IF <ls_sdi_value>-high = 'X'.
+*)--For Pull Forward and Pack & Hold, delivery Note Dates calculation
+          DATA(lv_date) =  ms_events1-zz1_otcdldate_sdi.
+        ELSE.
+*)--for No fulfilment Scenarios, Hard launch & Pre launch, Delivery note dates Calculation
+          lv_date = ms_scenario1-lfdat.
+        ENDIF.
+      ELSEIF ms_events1-zz1_delscen_sdi EQ space.
+        lv_date = ms_scenario1-lfdat.
+      ENDIF.
+
+      mv_direction = gc_negative.
+      CALL METHOD me->get_sd_schedulingm
+        EXPORTING
+          iv_vstel         = ms_scenario1-vstel
+          iv_route         = ms_scenario1-route
+          iv_direction     = mv_direction
+          iv_delivery_date = lv_date
+        IMPORTING
+          ev_sysubrc       = mv_sysubrc
+          et_sched_result  = mt_dates.
+      SORT mt_dates BY longest_lead_time DESCENDING.
+      ls_dates = VALUE #( mt_dates[ 1 ] OPTIONAL ).
+      IF ls_dates IS NOT INITIAL.
+        IF ls_dates-mbdat < mv_sysdate OR ls_dates-lfdat <> lv_date.
+          CLEAR mt_dates.
+          IF mv_systime > mv_cut_off_time.
+            ls_dates-mbdat = mv_sysdate + 1.
+          ELSE.
+            ls_dates-mbdat = mv_sysdate.
+          ENDIF.
+*Get factory calender
+          mv_direction = gc_positive.
+          CALL METHOD me->get_sd_schedulingm
+            EXPORTING
+              iv_vstel           = ms_scenario1-vstel
+              iv_route           = ms_scenario1-route
+              iv_direction       = mv_direction
+              iv_mbdat           = ls_dates-mbdat
+              iv_no_cutoff_check = abap_true
+            IMPORTING
+              ev_sysubrc         = mv_sysubrc
+              et_sched_result    = mt_dates.
+
+          SORT mt_dates BY mbdat DESCENDING.
+          DATA(ls_dates_final) = VALUE #( mt_dates[ 1 ] OPTIONAL ).
+          IF ls_dates_final IS NOT INITIAL.
+            mv_mat_avail_dt = ls_dates_final-mbdat.
+            mv_loading_date = ls_dates_final-lddat.
+            mv_issue_date = ls_dates_final-wadat.
+            mv_delivery_date = ls_dates_final-lfdat.
+          ENDIF.
+        ELSE.
+          mv_mat_avail_dt = ls_dates-mbdat.
+          mv_loading_date = ls_dates-lddat.
+          mv_issue_date = ls_dates-wadat.
+          mv_delivery_date = ls_dates-lfdat.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_cut_off_data_so.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 12.06.2023 | 19973     : Cut of table new field adjustment*
+*              |            | DS4K949665                              *
+*----------------------------------------------------------------------*
+* NAGARSOW     | 19.09.2023 | 24010     : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+* ANIPEVIN     | 19.10.2023 | Def-68063 : Delivery Outbound Interfac   *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+
+
+    DATA(ls_likp) = VALUE #( it_xlikp[ 1 ] OPTIONAL ).
+    IF ls_likp IS NOT INITIAL.
+      ms_scenario1-vstel = ls_likp-vstel.
+      ms_scenario1-vtweg = ls_likp-vtwiv.
+    ENDIF.
+
+    SELECT SINGLE
+        cutofftime,
+        shippingpoint
+        FROM zsd_i_os_dn INTO  (@mv_cut_off_time,@mv_vstel)
+        WHERE shippingpoint = @ms_scenario1-vstel AND distributionchannel = @ms_scenario1-vtweg.
+    IF sy-subrc IS NOT INITIAL.
+      CLEAR ms_scenario1.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD get_sd_schedulingm_so.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ANIPEVIN     | 19.10.2023 | 24010 : Delivery Outbound Interfac       *
+*              |            | DS4K959947                               *
+*----------------------------------------------------------------------*
+    TYPES:BEGIN OF ltyp_attributes,
+            doc_no          TYPE lips-vgbel,
+            item_no         TYPE lips-vgpos,
+            plant           TYPE lips-werks,
+            factorycalendar TYPE fabkl,
+            aufer           TYPE char1,
+          END OF ltyp_attributes.
+    DATA: ls_vbak       TYPE vbak,
+          ls_vbap       TYPE vbap,
+          lv_fdate      TYPE scdatum,
+          lt_vbkd       TYPE vbkd_t,
+          lt_vbpa       TYPE vbpa_tt,
+          ls_ekko       TYPE ekko,
+          ls_ekpo       TYPE ekpo,
+          ls_ekpv       TYPE ekpv,
+          ls_sched      TYPE gtyp_dates,
+          lt_sched      TYPE STANDARD TABLE OF gtyp_dates,
+          ls_attributes TYPE ltyp_attributes,
+          lt_attributes TYPE TABLE OF ltyp_attributes.
+*)-Common Method to avoid multiple Function calls
+    CLEAR: et_sched_result, ev_sysubrc.
+
+    LOOP AT it_xlips ASSIGNING FIELD-SYMBOL(<ls_xlips>).
+      ls_attributes-doc_no  = <ls_xlips>-vgbel.
+      ls_attributes-item_no = <ls_xlips>-vgpos.
+      ls_attributes-plant   = <ls_xlips>-werks.
+      ls_attributes-aufer   = abap_true.
+      DATA(lv_plant)        = <ls_xlips>-werks.
+      APPEND ls_attributes TO lt_attributes.
+      CLEAR:ls_attributes.
+    ENDLOOP.
+* Init scheduling API buffers
+*    SELECT deliveryitem~referencesddocument AS doc_no,    "#EC CI_SUBRC
+*           deliveryitem~referencesddocumentitem AS item_no,
+*           deliveryitem~plant AS plant,
+*           plant~factorycalendar AS factorycalendar,
+*           deliverytype~precedingdocumentrequirement AS aufer
+*           INTO TABLE @DATA(lt_attributes)
+*    FROM i_deliverydocumentitem AS deliveryitem
+*    INNER JOIN i_deliverydocument AS delivery
+*      ON delivery~deliverydocument = deliveryitem~deliverydocument
+*    INNER JOIN i_deliverydocumenttype AS deliverytype
+*      ON deliverytype~deliverydocumenttype = delivery~deliverydocumenttype
+*    INNER JOIN i_plant AS plant
+*      ON plant~plant = deliveryitem~plant
+*      WHERE delivery~deliverydocument = @mv_del_doc.
+
+    SELECT factorycalendar
+           INTO @DATA(lv_calender) UP TO 1 ROWS
+    FROM i_plant
+    WHERE plant = @lv_plant.
+    ENDSELECT.
+    IF sy-subrc NE 0.
+      CLEAR:lv_calender.
+    ENDIF.
+
+    LOOP AT lt_attributes ASSIGNING FIELD-SYMBOL(<ls_attributes>).
+      <ls_attributes>-factorycalendar = lv_calender.
+      IF <ls_attributes>-aufer = if_arberp_likp_aufer_c=>gc_sales_order_req.
+
+        DATA(lif_schema_detn_sd) = cl_bps_schema_detn_factory=>create_schema_detn_sd( ).
+        IF lif_schema_detn_sd->is_activated( ).
+
+          CALL FUNCTION 'SD_VBAK_SINGLE_READ'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+            IMPORTING
+              e_vbak           = ls_vbak
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'SD_VBAP_SINGLE_READ'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+              i_posnr          = <ls_attributes>-item_no
+            IMPORTING
+              e_vbap           = ls_vbap
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'SD_VBKD_READ_WITH_VBELN'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+            TABLES
+              et_vbkd          = lt_vbkd
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'SD_VBPA_READ_WITH_VBELN'
+            EXPORTING
+              i_vbeln          = <ls_attributes>-doc_no
+            TABLES
+              et_vbpa          = lt_vbpa
+            EXCEPTIONS
+              record_not_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          DATA(lif_sd_buffer) = cl_bps_sd_atp_buffer=>get_instance( ).
+          lif_sd_buffer->set_sales_document( header              = ls_vbak
+                                             item                = ls_vbap
+                                             business_attributes = CORRESPONDING #( lt_vbkd ) ).
+
+          lif_sd_buffer->set_sd_partners( CORRESPONDING #( lt_vbpa ) ).
+
+          DATA(lv_schema_id) = lif_schema_detn_sd->get_schema(  VALUE #( doc_cat = ls_vbak-vbtyp
+                                                                         doc_no = ls_vbak-vbeln
+                                                                         item_no = ls_vbap-posnr
+                                                                         shipping_point = ls_vbap-vstel ) ).
+        ENDIF.
+      ELSEIF  <ls_attributes>-aufer = if_arberp_likp_aufer_c=>gc_purchase_order_req.
+
+        DATA(lif_schema_detn_mm) = cl_bps_schema_detn_factory=>create_schema_detn_mm( ).
+        IF lif_schema_detn_mm->is_activated( ).
+
+          CALL FUNCTION 'ME_EKKO_SINGLE_READ'
+            EXPORTING
+              pi_ebeln         = <ls_attributes>-doc_no
+            IMPORTING
+              po_ekko          = ls_ekko
+            EXCEPTIONS
+              no_records_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'ME_EKPO_SINGLE_READ'
+            EXPORTING
+              pi_ebeln         = <ls_attributes>-doc_no
+              pi_ebelp         = CONV ebelp( <ls_attributes>-item_no )
+            IMPORTING
+              po_ekpo          = ls_ekpo
+            EXCEPTIONS
+              no_records_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'ME_EKPV_SINGLE_READ'
+            EXPORTING
+              pi_ebeln         = <ls_attributes>-doc_no
+              pi_ebelp         = CONV ebelp( <ls_attributes>-item_no )
+            IMPORTING
+              po_ekpv          = ls_ekpv
+            EXCEPTIONS
+              no_records_found = 1
+              OTHERS           = 2.
+          IF sy-subrc <> 0.
+            RETURN.
+          ENDIF.
+
+          DATA(lif_mm_buffer) = cl_bps_mm_atp_buffer=>get_instance( ).
+
+          lif_mm_buffer->set_stock_transport(
+            header             = ls_ekko
+            item               = ls_ekpo
+            shipping_attribute = ls_ekpv ).
+
+          lv_schema_id = lif_schema_detn_mm->get_schema(  VALUE #( doc_cat = ls_ekko-bstyp
+                                                                   doc_no = ls_ekko-ebeln
+                                                                   item_no = ls_ekpo-ebelp
+                                                                   shipping_point = ls_ekpv-vstel ) ).
+        ENDIF.
+      ENDIF.
+
+      CHECK lv_schema_id IS NOT INITIAL.
+
+* Call the API
+      GET TIME STAMP FIELD FINAL(lv_timestamp).
+      TRY.
+          DATA(ls_sched_result) = cl_bps_adapter_factory=>create_adapter(
+                                    )->schedule_single( VALUE #( schema_id = lv_schema_id
+                                                                 doc_no = <ls_attributes>-doc_no
+                                                                 item_no = <ls_attributes>-item_no
+                                                                 deliv_ind = abap_true
+                                                                 transp_enabled = abap_true
+                                                                 direction = iv_direction
+                                                                 option = VALUE #( transittime = abap_true )
+                                                                 start_date = VALUE #( mbdat = iv_mbdat lfdat = iv_delivery_date )
+                                                                 attribute = VALUE #( vstel = iv_vstel route = iv_route webaz = ls_ekpo-webaz )
+                                                                 timestamp_now = lv_timestamp
+                                                                 skip_buffer = abap_true  ) ).
+        CATCH cx_bps_exception.
+          CLEAR ls_sched_result.
+          CONTINUE.
+      ENDTRY.
+      ls_sched-mbdat = ls_sched_result-mbdat.
+      ls_sched-lddat = ls_sched_result-lddat.
+      ls_sched-wadat = ls_sched_result-wadat.
+      ls_sched-lfdat = ls_sched_result-lfdat.
+      IF mv_systime > mv_cut_off_time AND iv_no_cutoff_check = abap_false.
+        ls_sched-mbdat = ls_sched-mbdat - 1.
+        CALL FUNCTION 'DATE_CONVERT_TO_FACTORYDATE'
+          EXPORTING
+            factory_calendar_id          = <ls_attributes>-factorycalendar
+            correct_option               = '-'
+            date                         = ls_sched-mbdat
+          IMPORTING
+            date                         = lv_fdate
+          EXCEPTIONS
+            calendar_buffer_not_loadable = 1
+            correct_option_invalid       = 2
+            date_after_range             = 3
+            date_before_range            = 4
+            date_invalid                 = 5
+            factory_calendar_not_found   = 6
+            OTHERS                       = 7.
+        IF sy-subrc = 0.
+          ls_sched-mbdat = lv_fdate.
+        ENDIF.
+      ENDIF.
+      DATA(lv_date_diff) = ls_sched-lfdat - ls_sched-mbdat.
+      ls_sched-longest_lead_time = lv_date_diff.
+      APPEND ls_sched TO lt_sched.
+      CLEAR ls_sched.
+    ENDLOOP.
+    et_sched_result[] = lt_sched[].
+  ENDMETHOD.
+
+
+  METHOD compare_with_old_lt.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHISLRIM     | 24.01.2024 |  27479    : FB_27479_SD_[FEATURE] -      *
+*              |            |             -Delivery API ( Routing statu*
+*              |            | DS4K973219                               *
+*----------------------------------------------------------------------*
+    DATA : lv_vaslt   TYPE zz1_vaslt,
+           lv_load_lt TYPE zz1_dnloadinglt,
+           lv_proc_lt TYPE zz1_dcprocessinglt
+           .
+    SELECT SINGLE zz1_vaslt_dlh, zz1_dnloadinglt_dlh, zz1_dcprocessinglt_dlh
+      INTO (@lv_vaslt, @lv_load_lt, @lv_proc_lt)
+      FROM i_deliverydocument
+      WHERE deliverydocument = @mv_del_doc.
+
+    IF sy-subrc EQ 0.
+
+      IF cv_vas_lt = lv_vaslt.
+        CLEAR cv_vas_lt.
+      ENDIF.
+
+      IF cv_loading = lv_load_lt.
+        CLEAR cv_loading.
+      ENDIF.
+
+      IF cv_processing_lt = lv_proc_lt.
+        CLEAR cv_processing_lt.
+      ENDIF.
+
+    ELSE.
+      CLEAR : cv_loading,
+      cv_processing_lt,
+      cv_vas_lt.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_lt_values.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHISLRIM     | 23.01.2024 | 27479    : FB_27479_SD_[FEATURE] -       *
+*              |            |             -Delivery API ( Routing statu*
+*              |            | DS4K973219                               *
+************************************************************************
+    CHECK iv_aufer IS NOT INITIAL
+      AND iv_vstel  IS NOT INITIAL
+      AND iv_vtweg  IS NOT INITIAL
+      AND iv_auart  IS NOT INITIAL
+      AND iv_vsbed  IS NOT INITIAL
+      .
+    DATA : lv_mode TYPE zsd_lead_time_calc_mode
+          .
+    IF iv_aufer = if_arberp_likp_aufer_c=>gc_sales_order_req.
+      lv_mode = zif_sd_lead_times_const=>gc_mode-sales_order.
+    ELSEIF iv_aufer = if_arberp_likp_aufer_c=>gc_purchase_order_req.
+      lv_mode =  zif_sd_lead_times_const=>gc_mode-stock_transport_order.
+    ENDIF.
+
+    CHECK lv_mode IS NOT INITIAL.
+
+    zcl_sd_lead_time_calculator=>get_instance( lv_mode )->process(
+      EXPORTING
+        iv_vstel          = iv_vstel
+        iv_vtweg          = iv_vtweg
+        iv_auart          = iv_auart
+        iv_vsbed          = iv_vsbed
+        it_vas            = it_vas
+      IMPORTING
+        ev_loading        = ev_loading
+        ev_processing_lt  = ev_processing_lt
+        ev_vas_lt         = ev_vas_lt
+        ev_creation_lt    = ev_creation_lt ).
+
+    IF ev_loading IS NOT INITIAL.
+      ev_loading =
+       cl_bps_duration=>conv_hour_to_day( ev_loading ).
+    ENDIF.
+    IF ev_processing_lt IS NOT INITIAL.
+      ev_processing_lt =
+       cl_bps_duration=>conv_hour_to_day( ev_processing_lt ).
+    ENDIF.
+    IF ev_vas_lt IS NOT INITIAL.
+      ev_vas_lt =
+       cl_bps_duration=>conv_hour_to_day( ev_vas_lt ).
+    ENDIF.
+    IF ev_creation_lt IS NOT INITIAL.
+      ev_creation_lt =
+       cl_bps_duration=>conv_hour_to_day( ev_creation_lt ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_lt_vas_attributes.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHISLRIM     | 12.01.2024 |  27479    : FB_27479_SD_[FEATURE] -      *
+*              |            |             -Delivery API ( Routing statu*
+*              |            | DS4K973219                               *
+*----------------------------------------------------------------------*
+    DATA : lt_vass_buffer       TYPE fsh_vass_buffer_t
+           ,lt_vasm_buffer      TYPE fsh_vasm_buffer_t
+           .
+    IF ( iv_fsh_vas_rel = abap_true ) AND ( iv_aufer = if_arberp_likp_aufer_c=>gc_sales_order_req ).
+
+
+      CALL FUNCTION 'FSH_SD_VAS_GET'
+        EXPORTING
+          iv_fsh_transaction = iv_fsh_transaction
+          iv_fsh_item_group  = iv_fsh_item_group
+        IMPORTING
+          et_fsh_vass_buffer = lt_vass_buffer.
+
+      et_vas = VALUE zif_sd_lead_times_calculator=>gtyp_t_vas(
+                       FOR <ls_vass> IN lt_vass_buffer WHERE ( fsh_vgbel = iv_order AND fsh_vgpos = iv_item_no )
+                       ( <ls_vass>-fsh_vas_sub_ser ) ).
+
+    ELSEIF  ( iv_fsh_vas_rel = abap_true ) AND  ( iv_aufer = if_arberp_likp_aufer_c=>gc_purchase_order_req ).
+
+      CALL FUNCTION 'FSH_VAS_GET'
+        EXPORTING
+          iv_fsh_transaction = iv_fsh_transaction
+          iv_fsh_item_group  = iv_fsh_item_group
+        IMPORTING
+          et_fsh_vasm_buffer = lt_vasm_buffer.
+      IF lt_vasm_buffer IS INITIAL.
+        CALL FUNCTION 'FSH_VAS_GET_DB'
+          EXPORTING
+            iv_ebeln        = iv_order
+            iv_ebelp        = CONV ebelp( iv_item_no )
+          IMPORTING
+            et_vasm_db_buff = lt_vasm_buffer.
+      ENDIF.
+
+      et_vas = VALUE zif_sd_lead_times_calculator=>gtyp_t_vas(
+                 FOR <ls_vasm> IN lt_vasm_buffer WHERE ( fsh_refbs = iv_order AND fsh_refps = iv_item_no )
+                ( <ls_vasm>-fsh_vas_sub_ser ) ).
+
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD save_lt_vals_to_db.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHISLRIM     | 12.01.2024 |  27479    : FB_27479_SD_[FEATURE] -      *
+*              |            |             -Delivery API ( Routing statu*
+*              |            | DS4K973219                               *
+*----------------------------------------------------------------------*
+    CHECK iv_loading IS NOT INITIAL
+       OR iv_processing_lt IS NOT INITIAL
+       OR iv_vas_lt IS NOT INITIAL
+       .
+    DATA ls_header_data    TYPE bapiobdlvhdrchg.
+    DATA ls_header_control TYPE bapiobdlvhdrctrlchg.
+    DATA ls_techn_control  TYPE bapidlvcontrol.
+    DATA ls_extension1    TYPE bapiextc.
+    DATA lt_extension1    TYPE TABLE OF bapiextc.
+    DATA ls_extension2     TYPE bapiext.
+    DATA lt_extension2     TYPE TABLE OF bapiext.
+    DATA ls_cust_fields    TYPE gtyp_custom_fields.
+    DATA lt_returntab      TYPE bapiret2_tab.
+
+    ls_header_data-deliv_numb = mv_del_doc.
+    ls_header_control-deliv_numb = mv_del_doc.
+    ls_techn_control-upd_ind = abap_true.
+
+    ls_cust_fields-deliv_numb = mv_del_doc.
+    IF iv_loading IS NOT INITIAL.
+      ls_cust_fields-zz1_dnloadinglt_dlh = iv_loading.
+    ENDIF.
+    IF iv_processing_lt IS NOT INITIAL.
+      ls_cust_fields-zz1_dcprocessinglt_dlh = iv_processing_lt.
+    ENDIF.
+    IF iv_vas_lt IS NOT INITIAL.
+      ls_cust_fields-zz1_vaslt_dlh = iv_vas_lt.
+    ENDIF.
+
+    ls_extension1 = ls_cust_fields.
+    INSERT ls_extension1 INTO TABLE lt_extension1.
+
+    ls_extension2-value =  gc_identifier.
+    INSERT ls_extension2 INTO TABLE lt_extension2.
+
+    CALL FUNCTION 'BAPI_OUTB_DELIVERY_CHANGE'
+      EXPORTING
+        header_data    = ls_header_data
+        header_control = ls_header_control
+        delivery       = mv_del_doc
+        techn_control  = ls_techn_control
+      TABLES
+        extension1     = lt_extension1
+        extension2     = lt_extension2
+        return         = lt_returntab.
+
+    BREAK zhmaivad.
+
+    IF cl_bapi_msg=>contains_error( lt_returntab ) = abap_true.
+      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+    ELSE.
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+        EXPORTING
+          wait = abap_true.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD update_delivery_lt_vals.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHISLRIM     | 12.01.2024 |  27479    : FB_27479_SD_[FEATURE] -      *
+*              |            |             -Delivery API ( Routing statu*
+*              |            | DS4K973219                               *
+*----------------------------------------------------------------------*
+    DATA : lt_vas            TYPE zif_sd_lead_times_calculator=>gtyp_t_vas
+          ,lv_loading        TYPE zsd_lead_time
+          ,lv_processing_lt  TYPE zsd_lead_time
+          ,lv_vas_lt         TYPE zsd_lead_time
+          .
+
+
+    get_lt_vas_attributes( EXPORTING iv_order        = iv_order
+                                 iv_item_no          = iv_item_no
+                                 iv_aufer            = iv_aufer
+                                 iv_fsh_vas_rel      = iv_fsh_vas_rel
+                                 iv_fsh_transaction  = iv_fsh_transaction
+                                 iv_fsh_item_group   = iv_fsh_item_group
+                       IMPORTING et_vas              = lt_vas
+                                     ).
+    get_lt_values( EXPORTING iv_aufer           = iv_aufer
+                             iv_vstel           = iv_vstel
+                             iv_vtweg           = iv_vtweg
+                             iv_auart           = iv_auart
+                             iv_vsbed           = iv_vsbed
+                             it_vas             = lt_vas
+                   IMPORTING ev_loading         = lv_loading
+                             ev_processing_lt   = lv_processing_lt
+                             ev_vas_lt          = lv_vas_lt
+                             ).
+    compare_with_old_lt( CHANGING cv_loading         = lv_loading
+                                  cv_processing_lt   = lv_processing_lt
+                                  cv_vas_lt          = lv_vas_lt ).
+
+    save_lt_vals_to_db( EXPORTING iv_loading    = lv_loading
+                             iv_processing_lt   = lv_processing_lt
+                             iv_vas_lt          = lv_vas_lt ).
+
+  ENDMETHOD.
+ENDCLASS.

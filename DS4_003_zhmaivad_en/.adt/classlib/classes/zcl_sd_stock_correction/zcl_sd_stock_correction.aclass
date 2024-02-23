@@ -1,0 +1,198 @@
+CLASS zcl_sd_stock_correction DEFINITION
+  PUBLIC FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    TYPES gtyp_t_stck_correction_history TYPE STANDARD TABLE OF zsd_i_stock_correction_history.
+    TYPES gtyp_t_stck_correction         TYPE STANDARD TABLE OF zsd_i_stock_corr_rprt.
+    TYPES gtyp_t_stock_errors            TYPE STANDARD TABLE OF zsd_i_stock_correction_errors.
+    TYPES gtyp_tt_goods_movement_items   TYPE STANDARD TABLE OF bapi2017_gm_item_create.
+
+    CONSTANTS gc_repeat TYPE i VALUE 30 ##NO_TEXT.
+    CONSTANTS gc_wait   TYPE i VALUE 3 ##NO_TEXT.
+
+    CLASS-METHODS update_after_goods_movement
+      IMPORTING it_stock_correction TYPE gtyp_t_stck_correction_history
+                it_stock_errors     TYPE gtyp_t_stock_errors.
+
+    CLASS-METHODS create_material_doc_via_eml
+      IMPORTING is_document_header      TYPE i_materialdocumenttp
+                it_goods_movement_items TYPE gtyp_tt_goods_movement_items.
+ENDCLASS.
+
+
+CLASS zcl_sd_stock_correction IMPLEMENTATION.
+  METHOD update_after_goods_movement.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 26.09.2022 | 13444     : [Build] - Stock reconciliation with WMS -
+    "              |            | DS4K929106                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 19.02.2023 | 16311     : [Feature] [Build] - Stock re -
+    "              |            | DS4K938447                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 27.07.2023 | 22859     : [Feature] [Build] - Stock re -
+    "              |            | DS4K957133                               -
+    " -----------------------------------------------------------------------
+
+    DATA lt_update         TYPE TABLE FOR UPDATE zsd_i_stock_corr_rprt.
+    DATA lt_errors         TYPE TABLE FOR CREATE zsd_i_stock_corr_rprt\_stockcorrectionerrors.
+    DATA lt_create_history TYPE TABLE FOR CREATE zsd_i_stock_corr_rprt\_stockcorrectionhistory.
+
+    lt_update = CORRESPONDING #( it_stock_correction MAPPING uuid = stockcorrectionuuid ).
+
+    IF it_stock_errors IS NOT INITIAL.
+      LOOP AT it_stock_errors ASSIGNING FIELD-SYMBOL(<ls_stock_errors>).
+        APPEND INITIAL LINE TO lt_errors ASSIGNING FIELD-SYMBOL(<ls_errors>).
+        <ls_errors>-%tky-uuid = <ls_stock_errors>-stockcorrectionuuid.
+
+        APPEND INITIAL LINE TO <ls_errors>-%target ASSIGNING FIELD-SYMBOL(<ls_errors_target>).
+        <ls_errors_target> = CORRESPONDING #( <ls_stock_errors> ).
+      ENDLOOP.
+
+      DO gc_repeat TIMES.
+        SET LOCKS OF zsd_i_stock_corr_rprt
+            ENTITY stockcorrection
+            FROM VALUE #( ( uuid = <ls_stock_errors>-stockcorrectionuuid ) )
+            FAILED FINAL(ls_failed).
+        IF ls_failed IS INITIAL.
+          EXIT.
+        ENDIF.
+        WAIT UP TO gc_wait SECONDS.
+      ENDDO.
+
+      MODIFY ENTITIES OF zsd_i_stock_corr_rprt
+             ENTITY stockcorrection
+             CREATE BY \_stockcorrectionerrors
+             AUTO FILL CID FIELDS ( semanticcountnumber
+                                    messagetype
+                                    messageid
+                                    messagenumber
+                                    message
+                                    parameterbapi
+                                    systemclient )
+             WITH lt_errors.
+
+      COMMIT ENTITIES
+             RESPONSE OF zsd_i_stock_corr_rprt
+             FAILED FINAL(ls_failed_er_commit) ##NEEDED.
+    ENDIF.
+
+    LOOP AT it_stock_correction ASSIGNING FIELD-SYMBOL(<ls_stock_correction>).
+      APPEND INITIAL LINE TO lt_create_history ASSIGNING FIELD-SYMBOL(<ls_create_history>).
+      <ls_create_history>-%tky-uuid = <ls_stock_correction>-stockcorrectionuuid.
+
+      APPEND INITIAL LINE TO <ls_create_history>-%target ASSIGNING FIELD-SYMBOL(<ls_create_history_target>).
+      <ls_create_history_target> = CORRESPONDING #( <ls_stock_correction> ).
+    ENDLOOP.
+
+    DO gc_repeat TIMES.
+      SET LOCKS OF zsd_i_stock_corr_rprt
+          ENTITY stockcorrection
+          FROM VALUE #( ( uuid = <ls_stock_correction>-stockcorrectionuuid ) )
+          FAILED FINAL(ls_failed_history).
+      IF ls_failed_history IS INITIAL.
+        EXIT.
+      ENDIF.
+      WAIT UP TO gc_wait SECONDS.
+    ENDDO.
+
+    MODIFY ENTITIES OF zsd_i_stock_corr_rprt
+           ENTITY stockcorrection
+           CREATE BY \_stockcorrectionhistory
+           AUTO FILL CID FIELDS ( status
+                                  semanticcountnumber
+                                  wmssnapshotdate
+                                  sapsnapshotdate
+                                  materialdocument
+                                  materialdocumentyear
+                                  movetype
+                                  transferto
+                                  adjustmentqty
+                                  meins
+                                  plant
+                                  storagelocation
+                                  article
+                                  salesordernumber
+                                  salesorderitem )
+           WITH lt_create_history
+           MAPPED FINAL(ls_mapped).
+
+    COMMIT ENTITIES
+           RESPONSE OF zsd_i_stock_corr_rprt
+           FAILED FINAL(ls_failed_commit) ##NEEDED.
+
+    zcl_sd_stock_recon_base=>set_posting_finished(
+        it_stock_corr_history = CORRESPONDING #( ls_mapped-stockcorrectionhistory ) ).
+  ENDMETHOD.
+
+  METHOD create_material_doc_via_eml.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 26.09.2022 | 13444     : [Build] - Stock reconciliation with WMS -
+    "              |            | DS4K929106                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 19.02.2023 | 16311     : [Feature] [Build] - Stock re -
+    "              |            | DS4K938447                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 19.04.2023 | 19611     : Stock reconciliation         -
+    "              |            | DS4K950069                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 28.12.2023 | 22859     : Stock reconciliation         -
+    "              |            | DS4K957133                               -
+    " -----------------------------------------------------------------------
+    TRY.
+        MODIFY ENTITIES OF i_materialdocumenttp
+               ENTITY materialdocument
+               CREATE FROM VALUE #( ( %cid                       = 'CID_001'
+                                      goodsmovementcode          = is_document_header-goodsmovementcode
+                                      %control-goodsmovementcode = cl_abap_behv=>flag_changed ) )
+               ENTITY materialdocument
+               CREATE BY \_materialdocumentitem
+               FROM VALUE #(
+                   ( %cid_ref = 'CID_001'
+                     %target  = VALUE #( FOR ls_gmi IN it_goods_movement_items
+                                         ( %cid                         = cl_system_uuid=>create_uuid_x16_static( )
+                                           plant                        = ls_gmi-plant
+                                           material                     = ls_gmi-material
+                                           goodsmovementtype            = ls_gmi-move_type
+                                           storagelocation              = ls_gmi-stge_loc
+                                           quantityinentryunit          = ls_gmi-entry_qnt
+                                           entryunit                    = ls_gmi-entry_uom
+                                           %control-plant               = cl_abap_behv=>flag_changed
+                                           %control-material            = cl_abap_behv=>flag_changed
+                                           %control-goodsmovementtype   = cl_abap_behv=>flag_changed
+                                           %control-storagelocation     = cl_abap_behv=>flag_changed
+                                           %control-quantityinentryunit = cl_abap_behv=>flag_changed
+                                           %control-entryunit           = cl_abap_behv=>flag_changed ) ) ) )
+               MAPPED   FINAL(ls_create_mapped).
+      CATCH cx_static_check ##NO_HANDLER.
+    ENDTRY.
+
+    COMMIT ENTITIES BEGIN
+           RESPONSE OF i_materialdocumenttp
+           REPORTED FINAL(ls_commit_reported) ##NEEDED.
+
+    LOOP AT ls_create_mapped-materialdocument ASSIGNING FIELD-SYMBOL(<ls_keys_header>).
+      CONVERT KEY OF i_materialdocumenttp
+              FROM <ls_keys_header>-%pid
+              TO <ls_keys_header>-%key.
+    ENDLOOP.
+
+    LOOP AT ls_create_mapped-materialdocumentitem ASSIGNING FIELD-SYMBOL(<ls_keys_item>).
+      CONVERT KEY OF i_materialdocumentitemtp
+              FROM <ls_keys_item>-%pid
+              TO <ls_keys_item>-%key.
+    ENDLOOP.
+
+    COMMIT ENTITIES END.
+  ENDMETHOD.
+ENDCLASS.

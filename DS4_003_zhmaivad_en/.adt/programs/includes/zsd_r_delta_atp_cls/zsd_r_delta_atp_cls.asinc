@@ -1,0 +1,476 @@
+" -----------------------------------------------------------------------
+"  R E V I S I O N   H I S T O R Y                                     -
+" -----------------------------------------------------------------------
+" AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+"              |            | TRANSPORT REQUESTS                       -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 29.04.2023 | 20690     : Feature - ATP push from S/4  -
+"              |            | DS4K950897                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 29.04.2023 | 22968     : Feature - ATP push from S/4  -
+"              |            | DS4K957400                               -
+" -----------------------------------------------------------------------
+" NAGARSOW     | 24.08.2023 | 22968     : Feature - ATP push from S/4  -
+"              |            | DS4K957400                               -
+"-----------------------------------------------------------------------
+" ZHMAIVAD     | 05.01.2024 | 27294     : Feature - GAH - Performance  -
+"              |            | DS4K972552                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 20.02.2024 | 28986     : Feature - ATP push from S/4  -
+"              |            | DS4K979378                                -
+" -----------------------------------------------------------------------
+CLASS lcx_error DEFINITION INHERITING FROM cx_static_check FINAL.
+  PUBLIC SECTION.
+    INTERFACES if_t100_message.
+    INTERFACES if_t100_dyn_msg.
+ENDCLASS.
+
+
+CLASS lcl_report DEFINITION FINAL.
+  PUBLIC SECTION.
+    METHODS run
+      RAISING cx_root.
+
+    METHODS after_rfc
+      IMPORTING p_task TYPE clike.
+
+    TYPES gtyp_data_show TYPE SORTED TABLE OF zsd_s_atp_display WITH NON-UNIQUE KEY material
+                                                                                    plant
+                                                                                    distributionchannel
+                                                                                    checkingrule
+                                                                                    supflag.
+
+    DATA gt_store_last_timestamp TYPE TABLE OF zsd_s_atp_store_last_timestamp.
+    DATA gv_lines                TYPE i.
+    DATA gv_start_timestamp      TYPE timestampl.
+
+  PRIVATE SECTION.
+    CONSTANTS gc_log_object     TYPE balobj_d  VALUE 'ZATP'.
+    CONSTANTS gc_log_sub_object TYPE balsubobj VALUE 'Z_KAFKA'.
+
+    TYPES gtyp_tt_kafka_keys TYPE zsd_tt_aif_atp_kafka_keys.
+    TYPES: BEGIN OF mtyp_s_dc,
+             vlfkz TYPE vlfkz,
+             vtweg TYPE vtweg,
+             prreg TYPE prreg,
+           END OF mtyp_s_dc.
+
+    METHODS publish_atp
+      RAISING cx_root.
+
+    METHODS show_published
+      IMPORTING its_data TYPE gtyp_data_show
+      RAISING   cx_root.
+
+    METHODS get_timestamp_range
+      RETURNING VALUE(rt_result) TYPE /smb/tr_timestampl
+      RAISING   zcx_pe_runtime_info.
+
+    METHODS call_send_to_aif_in_new_task
+      IMPORTING it_aif_atp_keys_messages TYPE zsd_tt_aif_atp_kafka_keys_t
+                iv_dest_server_group     TYPE spta_rfcgr
+                iv_pers_rtcfgr_ns        TYPE /aif/pers_rtcfgr_ns
+                iv_pers_rtcfgr_name      TYPE /aif/pers_rtcfgr_name
+                iv_last                  TYPE abap_bool
+      CHANGING  cts_data_show            TYPE gtyp_data_show.
+
+    METHODS split_by_message_size
+      IMPORTING it_aif_atp_keys      TYPE zsd_tt_aif_atp_kafka_keys
+                iv_dest_server_group TYPE spta_rfcgr
+                iv_pers_rtcfgr_ns    TYPE /aif/pers_rtcfgr_ns
+                iv_pers_rtcfgr_name  TYPE /aif/pers_rtcfgr_name
+                iv_last              TYPE abap_bool
+                iv_message_size      TYPE i
+      CHANGING  cts_data_show        TYPE gtyp_data_show.
+
+    METHODS send_to_aif
+      IMPORTING it_aif_keys            TYPE zsd_tt_aif_atp_kafka_keys
+                iv_pers_rtcfgr_ns      TYPE /aif/pers_rtcfgr_ns
+                iv_pers_rtcfgr_name    TYPE /aif/pers_rtcfgr_name
+                iv_dest_server_group   TYPE spta_rfcgr
+                iv_max_msg_per_session TYPE i
+                iv_message_size        TYPE i
+      CHANGING  cts_data_show          TYPE gtyp_data_show.
+ENDCLASS.
+
+
+CLASS lcl_report IMPLEMENTATION.
+  METHOD run.
+    GET TIME STAMP FIELD gv_start_timestamp.
+    IF p_parall <> 'X'.
+      p_maxmsg = 1.
+    ENDIF.
+    publish_atp( ).
+  ENDMETHOD.
+
+  METHOD show_published.
+    DATA lt_data TYPE TABLE OF zsd_s_atp_display.
+
+    CHECK its_data IS NOT INITIAL.
+    lt_data = its_data.
+    cl_salv_table=>factory( IMPORTING r_salv_table = FINAL(lo_salv)
+                            CHANGING  t_table      = lt_data ).
+    FINAL(lo_columns) = lo_salv->get_columns( ).
+    lo_columns->set_optimize( if_salv_c_bool_sap=>true ).
+    FINAL(lo_display) = lo_salv->get_display_settings( ).
+    lo_display->set_striped_pattern( if_salv_c_bool_sap=>true ).
+
+    DATA(lv_coun_send) = 0.
+    LOOP AT lt_data TRANSPORTING NO FIELDS WHERE status = TEXT-010.
+      lv_coun_send += 1.
+    ENDLOOP.
+    SORT lt_data BY pushed_into_aif_tmstmp.
+    FINAL(lv_maxtimestamp) = lt_data[ lines( lt_data ) ]-pushed_into_aif_tmstmp.
+    IF lv_maxtimestamp > 0.
+      FINAL(lv_sec) = cl_abap_tstmp=>subtract( tstmp1 = lv_maxtimestamp
+                                               tstmp2 = gv_start_timestamp ).
+    ENDIF.
+    lo_display->set_list_header(
+        | {  TEXT-009  } ({ lines( lt_data ) }/{ lv_coun_send } ) {  TEXT-012  } { lv_sec DECIMALS = 1  } {  TEXT-013  }: | ).
+    lo_salv->get_functions( )->set_all( if_salv_c_bool_sap=>true ).
+    lo_salv->display( ).
+  ENDMETHOD.
+
+  METHOD get_timestamp_range.
+    CHECK NOT ( p_begd IS INITIAL AND p_endd IS INITIAL ).
+    " In case of selection screen timestamp mode - just prepare the timestamps using dates
+    CONVERT DATE p_begd TIME p_begt INTO TIME STAMP FINAL(lv_begts) TIME ZONE sy-zonlo.
+    CONVERT DATE p_endd TIME p_endt INTO TIME STAMP FINAL(lv_endts) TIME ZONE sy-zonlo.
+
+    rt_result = VALUE #( ( sign = 'I' option = 'BT' low = lv_begts high = lv_endts ) ).
+  ENDMETHOD.
+
+  METHOD publish_atp.
+    DATA lts_data_show            TYPE gtyp_data_show.
+    DATA lts_checking_rules       TYPE SORTED TABLE OF mtyp_s_dc WITH NON-UNIQUE KEY vtweg vlfkz.
+    DATA lt_atp_data_multiplicate TYPE TABLE OF zsd_i_atp_relevantnetchange.
+    DATA ls_data_show             LIKE LINE OF lts_data_show.
+    DATA lt_data_show             TYPE STANDARD TABLE OF zsd_s_atp_display.
+    DATA lv_type                  TYPE datatype_d.
+    DATA lt_aif_messages          TYPE gtyp_tt_kafka_keys.
+
+    FINAL(lt_timestamp_range) = get_timestamp_range( ).
+
+    SELECT DISTINCT plantcategory, distributionchannel, checkingrule, material, plant, atpcalltimestamp, supflag
+      FROM zsd_i_atp_relevantnetchange
+      INTO TABLE @DATA(lt_atpdata)
+      WHERE plant             IN @s_werks[]
+        AND material          IN @s_matnr[]
+        AND mrparea           IN @s_berid[]
+        AND netchangecategory IN @s_netch[]
+        AND plantcategory     IN @s_vlfkz[]
+        AND atpcalltimestamp  IN @lt_timestamp_range
+      ORDER BY plantcategory,
+               distributionchannel,
+               checkingrule,
+               material,
+               plant,
+               atpcalltimestamp,
+               supflag.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE lcx_error MESSAGE e095(/aif/mes).
+    ELSE.
+      DATA(lt_atpdata_inter) = lt_atpdata.
+      DELETE lt_atpdata_inter WHERE supflag = 'F'.
+
+      IF lt_atpdata_inter IS NOT INITIAL.
+        SELECT plantcategory, distributionchannel, checkingrule, material, plant, atpcalltimestamp, supflag
+          FROM zsd_i_atp_relevantnetchange
+          APPENDING TABLE @lt_atpdata
+          FOR ALL ENTRIES IN @lt_atpdata_inter
+          WHERE plant     = @lt_atpdata_inter-plant
+            AND material  = @lt_atpdata_inter-material
+            AND supflag  <> 'X'.
+        IF sy-subrc = 0.
+          SORT lt_atpdata BY plantcategory
+                             distributionchannel
+                             checkingrule
+                             material
+                             plant
+                             atpcalltimestamp
+                             supflag.
+          DELETE ADJACENT DUPLICATES FROM lt_atpdata COMPARING plantcategory distributionchannel checkingrule material plant atpcalltimestamp supflag.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDDB9D3EE6353849F59'
+                                                iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-names
+                                      IMPORTING et_table        = lts_checking_rules ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    LOOP AT lt_atpdata ASSIGNING FIELD-SYMBOL(<ls_atpdata>).
+      IF <ls_atpdata>-supflag = abap_true.
+        APPEND INITIAL LINE TO lt_atp_data_multiplicate ASSIGNING FIELD-SYMBOL(<ls_atp_data_multiplicate>).
+        <ls_atp_data_multiplicate> = CORRESPONDING #( <ls_atpdata> ).
+      ELSE.
+        LOOP AT lts_checking_rules ASSIGNING FIELD-SYMBOL(<ls_checking_rules>)
+             WHERE    ( vlfkz = <ls_atpdata>-plantcategory AND vtweg = <ls_atpdata>-distributionchannel ) "#EC CI_SORTSEQ "#EC CI_NESTED
+                   OR ( vlfkz = <ls_atpdata>-plantcategory AND vtweg = '' ).
+          APPEND INITIAL LINE TO lt_atp_data_multiplicate ASSIGNING <ls_atp_data_multiplicate>.
+          <ls_atp_data_multiplicate> = CORRESPONDING #( <ls_atpdata> ).
+
+          IF <ls_checking_rules>-vtweg IS INITIAL.
+            CLEAR <ls_atp_data_multiplicate>-distributionchannel.
+          ENDIF.
+          <ls_atp_data_multiplicate>-checkingrule = <ls_checking_rules>-prreg.
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+
+    SORT lt_atp_data_multiplicate BY material
+                                     plant
+                                     distributionchannel
+                                     checkingrule
+                                     atpcalltimestamp DESCENDING.
+    DELETE ADJACENT DUPLICATES FROM lt_atp_data_multiplicate COMPARING material plant distributionchannel checkingrule.
+
+    LOOP AT lt_atp_data_multiplicate ASSIGNING <ls_atp_data_multiplicate>.
+      FINAL(lv_last_timestamp_all) = zcl_pe_abap_runtime=>get_last_execution(
+                                         iv_program_name = sy-cprog
+                                         iv_add_info1    = CONV #( <ls_atp_data_multiplicate>-plant )
+                                         iv_add_info2    = <ls_atp_data_multiplicate>-material )-timestamp.
+      IF p_begd IS INITIAL AND p_endd IS INITIAL AND p_lastr IS NOT INITIAL.
+        FINAL(lv_last_timestamp) = lv_last_timestamp_all.
+      ENDIF.
+
+      IF <ls_atp_data_multiplicate>-atpcalltimestamp >= lv_last_timestamp.
+        IF p_show = abap_true.
+          ls_data_show = CORRESPONDING #( <ls_atp_data_multiplicate> ).
+          ls_data_show-lastchangetimestamp = lv_last_timestamp_all.
+          APPEND ls_data_show TO lt_data_show.
+        ENDIF.
+      ELSE.
+        CONTINUE.
+      ENDIF.
+
+      DATA(ls_kafka_data) = CORRESPONDING zsd_s_aif_atp_kafka_keys( <ls_atp_data_multiplicate> ).
+
+      CALL FUNCTION 'NUMERIC_CHECK'
+        EXPORTING string_in = ls_kafka_data-material
+        IMPORTING htype     = lv_type.
+
+      IF lv_type = 'CHAR'.
+        ls_kafka_data-material = shift_left( val = <ls_atp_data_multiplicate>-material
+                                             sub = '0' ).
+      ENDIF.
+
+      INSERT ls_kafka_data INTO TABLE lt_aif_messages.
+    ENDLOOP.
+
+    lts_data_show = lt_data_show.
+
+    IF p_pub2 = abap_true.
+      gv_lines = lines( lt_aif_messages ).
+      IF p_parall = ''.
+        CLEAR p_rfcgrp.
+      ENDIF.
+      send_to_aif( EXPORTING it_aif_keys            = lt_aif_messages
+                             iv_pers_rtcfgr_ns      = p_cf_ns
+                             iv_pers_rtcfgr_name    = p_cf_nm
+                             iv_dest_server_group   = p_rfcgrp
+                             iv_max_msg_per_session = p_maxmsg
+                             iv_message_size        = p_msgsiz
+                   CHANGING  cts_data_show          = lts_data_show ).
+    ENDIF.
+
+    show_published( lts_data_show ).
+  ENDMETHOD.
+
+  METHOD call_send_to_aif_in_new_task.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 04.01.2024 | 27294     : Feature - GAH - Performance  -
+    "              |            | DS4K972552                               -
+    " -----------------------------------------------------------------------
+
+    DATA lv_current_timestamp TYPE timestampl.
+
+    FINAL(lv_task_name) = it_aif_atp_keys_messages[ 1 ]-messages[ 1 ]-plant && it_aif_atp_keys_messages[ 1 ]-messages[ 1 ]-distributionchannel.
+
+    DO 10 TIMES.
+      CALL FUNCTION 'ZSD_FM_AIF_MAP_ATP_TO_KAFKA_PA'
+        STARTING NEW TASK lv_task_name
+        DESTINATION IN GROUP iv_dest_server_group
+        CALLING after_rfc ON END OF TASK
+        EXPORTING  it_aif_atp_keys       = it_aif_atp_keys_messages
+                   iv_pers_rtcfgr_ns     = iv_pers_rtcfgr_ns
+                   iv_pers_rtcfgr_name   = iv_pers_rtcfgr_name
+                   iv_log_object         = gc_log_object
+                   iv_log_sub_object     = gc_log_sub_object
+                   iv_program_name       = sy-cprog
+        EXCEPTIONS system_failure        = 1
+                   communication_failure = 2
+                   resource_failure      = 3
+                   OTHERS                = 4.
+      IF sy-subrc = 0.
+        EXIT.
+      ENDIF.
+      WAIT UP TO 1 SECONDS.
+    ENDDO.
+
+    FINAL(lv_status) = COND char6( WHEN sy-subrc = 0 THEN TEXT-010 ELSE TEXT-011 ).
+    GET TIME STAMP FIELD lv_current_timestamp.
+
+    LOOP AT it_aif_atp_keys_messages ASSIGNING FIELD-SYMBOL(<ls_aif_atp_keys>).
+      LOOP AT <ls_aif_atp_keys>-messages ASSIGNING FIELD-SYMBOL(<ls_messages>).
+        READ TABLE cts_data_show ASSIGNING FIELD-SYMBOL(<ls_data_show>) WITH  KEY material            = <ls_messages>-material
+                                                                                  plant               = <ls_messages>-plant
+                                                                                  distributionchannel = <ls_messages>-distributionchannel
+                                                                                  checkingrule        = <ls_messages>-checkingrule
+                                                                                  supflag             = <ls_messages>-supflag.
+        IF sy-subrc = 0.
+          <ls_data_show>-status                 = lv_status.
+          <ls_data_show>-pushed_into_aif_tmstmp = lv_current_timestamp.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+
+    IF iv_last = abap_true.
+      WAIT FOR ASYNCHRONOUS TASKS UNTIL lines( gt_store_last_timestamp ) >= gv_lines.
+      SORT gt_store_last_timestamp BY material
+                                      plant
+                                      zcurrent_timestamp DESCENDING.
+      DELETE ADJACENT DUPLICATES FROM gt_store_last_timestamp.
+      LOOP AT gt_store_last_timestamp ASSIGNING FIELD-SYMBOL(<ls_store_last_timestamp>).
+        TRY.
+            zcl_pe_abap_runtime=>save( VALUE #( timestamp        = <ls_store_last_timestamp>-zcurrent_timestamp
+                                                program_name     = sy-cprog
+                                                additional_info1 = <ls_store_last_timestamp>-plant
+                                                additional_info2 = <ls_store_last_timestamp>-material ) ).
+          CATCH zcx_pe_runtime_info.
+            CONTINUE.
+        ENDTRY.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD after_rfc.
+    " TODO: parameter P_TASK is never used (ABAP cleaner)
+
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 04.01.2024 | 27294     : Feature - GAH - Performance  -
+    "              |            | DS4K972552                               -
+    " -----------------------------------------------------------------------
+
+    DATA lt_aif_atp_keys TYPE zsd_tt_aif_atp_kafka_keys.
+    DATA lv_delta        TYPE f.
+
+    RECEIVE RESULTS FROM FUNCTION 'ZSD_FM_AIF_MAP_ATP_TO_KAFKA_PA'
+      IMPORTING  et_aif_atp_keys       = lt_aif_atp_keys
+      EXCEPTIONS system_failure        = 1
+                 communication_failure = 2
+                 resource_failure      = 3
+                 OTHERS                = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    SORT lt_aif_atp_keys BY material
+                            plant.
+    LOOP AT lt_aif_atp_keys ASSIGNING FIELD-SYMBOL(<ls_aif_atp_keys>).
+      GET TIME STAMP FIELD FINAL(lv_current_timestamp).
+      lv_delta = sy-tabix / 1000000.
+      FINAL(lv_current_timestampl) = cl_abap_tstmp=>add( tstmp = lv_current_timestamp
+                                                         secs  = lv_delta ).
+      TRY.
+          APPEND VALUE #( zcurrent_timestamp = lv_current_timestampl
+                          plant              = <ls_aif_atp_keys>-plant
+                          material           = <ls_aif_atp_keys>-material ) TO gt_store_last_timestamp.
+        CATCH zcx_pe_runtime_info.
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD send_to_aif.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 04.01.2024 | 27294     : Feature - GAH - Performance  -
+    "              |            | DS4K972552                               -
+    " -----------------------------------------------------------------------
+
+    DATA lts_processing_messages TYPE SORTED TABLE OF zsd_s_aif_atp_kafka_keys WITH NON-UNIQUE KEY primary_key COMPONENTS plant distributionchannel checkingrule supflag.
+    DATA lt_processing_messages  LIKE it_aif_keys.
+    DATA lt_session_data         LIKE it_aif_keys.
+
+    DATA(lt_split_keys) = it_aif_keys.
+    SORT lt_split_keys BY plant
+                          distributionchannel
+                          checkingrule
+                          supflag.
+    DELETE ADJACENT DUPLICATES FROM lt_split_keys COMPARING plant distributionchannel checkingrule supflag.
+
+    lts_processing_messages = it_aif_keys.
+
+    LOOP AT lt_split_keys ASSIGNING FIELD-SYMBOL(<ls_split_keys>).
+      AT LAST.
+        FINAL(lv_last_first) = abap_true.
+      ENDAT.
+      lt_processing_messages = FILTER #( lts_processing_messages USING KEY primary_key
+            WHERE     plant        = <ls_split_keys>-plant        AND distributionchannel = <ls_split_keys>-distributionchannel
+                  AND checkingrule = <ls_split_keys>-checkingrule AND supflag             = <ls_split_keys>-supflag ).
+
+      LOOP AT lt_processing_messages ASSIGNING FIELD-SYMBOL(<ls_processing_messages>). "#EC CI_NESTED
+        FINAL(lv_processing_message_sy_tabix) = sy-tabix.
+        AT LAST.
+          IF lv_last_first = abap_true.
+            FINAL(lv_last_second) = abap_true.
+          ENDIF.
+        ENDAT.
+        APPEND <ls_processing_messages> TO lt_session_data.
+        IF sy-tabix MOD iv_max_msg_per_session <> 0 AND lv_processing_message_sy_tabix < lines( lt_processing_messages ).
+          CONTINUE.
+        ENDIF.
+        split_by_message_size( EXPORTING it_aif_atp_keys      = lt_session_data
+                                         iv_dest_server_group = iv_dest_server_group
+                                         iv_pers_rtcfgr_ns    = iv_pers_rtcfgr_ns
+                                         iv_pers_rtcfgr_name  = iv_pers_rtcfgr_name
+                                         iv_last              = lv_last_second
+                                         iv_message_size      = iv_message_size
+                               CHANGING  cts_data_show        = cts_data_show ).
+        CLEAR lt_session_data.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD split_by_message_size.
+    DATA ls_messages     TYPE zsd_s_aif_atp_kafka_keys_t.
+    DATA lt_aif_messages TYPE zsd_tt_aif_atp_kafka_keys_t.
+
+    LOOP AT it_aif_atp_keys ASSIGNING FIELD-SYMBOL(<ls_aif_atp_keys>). "#EC CI_NESTED
+      FINAL(lv_processing_sy_tabix) = sy-tabix.
+      APPEND <ls_aif_atp_keys> TO ls_messages-messages.
+
+      IF sy-tabix MOD iv_message_size <> 0 AND lv_processing_sy_tabix < lines( it_aif_atp_keys ).
+        CONTINUE.
+      ENDIF.
+
+      APPEND ls_messages TO lt_aif_messages.
+      CLEAR ls_messages.
+    ENDLOOP.
+
+    call_send_to_aif_in_new_task( EXPORTING it_aif_atp_keys_messages = lt_aif_messages
+                                            iv_dest_server_group     = iv_dest_server_group
+                                            iv_pers_rtcfgr_ns        = iv_pers_rtcfgr_ns
+                                            iv_pers_rtcfgr_name      = iv_pers_rtcfgr_name
+                                            iv_last                  = iv_last
+                                  CHANGING  cts_data_show            = cts_data_show ).
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,839 @@
+class /AIF/CL_PERSIST_ENGINE_STRU definition
+  public
+  inheriting from /AIF/CL_PERSIST_ENGINE_BASE
+  create public .
+
+public section.
+
+  methods CONSTRUCTOR
+    importing
+      !IO_TRANSFORMATION_LOGIC type ref to /AIF/IF_TRANSFORMATION_LOGIC optional
+      !IO_MAPPING_STORE type ref to /AIF/IF_MAPPING_STORE optional
+      !IO_MAPPING_INTERPRETER type ref to /AIF/IF_MAPPING_INTERPRETER optional .
+
+  methods /AIF/IF_PERSISTENCY_ENGINE~ARCHIVE
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~BUFFER_LAST_MSG_VERSIONS
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~CHECK_SINGLE_MSG_EXISTENCE
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~DELETE
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~DETERMINE_STATUS_ICON
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~GET_DELETED_MESSAGE_IDS
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~LOCK
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~READ_MESSAGES_BY_MSG_KEY
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~RETRIEVE
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~SAVE_BUFFER
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~UNLOCK
+    redefinition .
+  methods /AIF/IF_PERSISTENCY_ENGINE~UPDATE
+    redefinition .
+  methods /AIF/IF_DELETION_PERSISTENCY~GET_ADD_TABLES_TO_DELETE
+    redefinition .
+protected section.
+  PRIVATE SECTION.
+
+    DATA mo_transformation_logic TYPE REF TO /aif/if_transformation_logic .
+    DATA mo_mapping_store TYPE REF TO /aif/if_mapping_store .
+    DATA mo_mapping_interpreter TYPE REF TO /aif/if_mapping_interpreter .
+    "! defines the id of the most recent version of a message
+    "! (structured persistence only uses one version - there is no dedicated versioning in place)
+    CONSTANTS mc_most_recent_version_id TYPE /aif/pers_xml_version VALUE 1 ##NO_TEXT.
+
+    METHODS determine_raw_structure
+      IMPORTING
+        !iv_ns                       TYPE /aif/ns
+        !iv_ifname                   TYPE /aif/ifname
+        !iv_ifversion                TYPE /aif/ifversion
+      RETURNING
+        VALUE(rv_target_struct_type) TYPE char30
+      RAISING
+        /aif/cx_error_handling_general .
+ENDCLASS.
+
+
+
+CLASS /AIF/CL_PERSIST_ENGINE_STRU IMPLEMENTATION.
+
+
+  METHOD /aif/if_persistency_engine~archive.
+    me->/aif/if_persistency_engine~delete(
+      EXPORTING
+        iv_msgguid    = iv_msgguid
+        iv_pipelineid = iv_pipelineid
+        iv_ns         = iv_ns
+        iv_ifname     = iv_ifname
+        iv_ifver      = iv_ifver
+      IMPORTING
+        et_return     = et_return
+    ).
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~buffer_last_msg_versions.
+    "****************************************************************"
+    "*                                                              *"
+    "*       No action required for Structured persistence!         *"
+    "*                                                              *"
+    "* For XML persistency, the entry in the AIF single index table *"
+    "* is the leading denominator for the message status. For that  *"
+    "* reason we do not need to buffer any message status - we will *"
+    "* simply have it in the index entry.                           *"
+    "*                                                              *"
+    "****************************************************************"
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~check_single_msg_existence.
+**********************************************************************
+* Depricated!
+**********************************************************************
+* This method is depricated and shouldn't be used anymore. Please use
+* the following method instead:
+* /AIF/IF_PERSISTENCY_ENGINE ~ RETRIEVE
+**********************************************************************
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~delete.
+
+    DATA: lv_msgguid     TYPE guid_32,
+          lt_mapping     TYPE /aif/mapping_instruction_tt,
+          lt_dbtab_names TYPE /aif/tabname16_tt,
+          lv_dbtab_name  TYPE tabname16,
+          lo_exception   TYPE REF TO /aif/cx_struct_pers_base.
+
+* Determine msgguid
+    lv_msgguid = iv_msgguid.
+
+* Load mapping
+    TRY.
+        lt_mapping = mo_mapping_store->load_mapping_by_interface( iv_ns        = iv_ns
+                                                                  iv_ifname    = iv_ifname
+                                                                  iv_ifversion = iv_ifver ).
+      CATCH /aif/cx_struct_pers_base INTO lo_exception.
+        RAISE EXCEPTION TYPE /aif/cx_error_handling_general EXPORTING previous = lo_exception.
+    ENDTRY.
+
+    IF lt_mapping IS INITIAL.
+      RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers
+        EXPORTING
+          textid = /aif/cx_engine_structured_pers=>no_db_mapping_found.
+    ENDIF.
+
+* Get all relevant dbtab names
+    lt_dbtab_names = mo_mapping_interpreter->extract_used_dbtabs( lt_mapping ).
+
+* Delete message (all versions) from these dbtabs
+    LOOP AT lt_dbtab_names INTO lv_dbtab_name.
+
+      TRY.
+          cl_abap_dyn_prg=>check_table_name_str(
+            EXPORTING
+              val                    = lv_dbtab_name
+              packages               = '' ).
+        CATCH cx_abap_not_a_table.
+          CONTINUE.
+        CATCH cx_abap_not_in_package.
+      ENDTRY.
+
+      DELETE FROM (lv_dbtab_name) WHERE ns = iv_ns
+                                    AND ifname = iv_ifname
+                                    AND ifver = iv_ifver
+                                    AND msgguid = lv_msgguid.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~determine_status_icon.
+
+    DATA: lt_mapping     TYPE /aif/mapping_instruction_tt,
+          lv_edit_status TYPE /aif/pers_xml_status_e,
+          lv_sub_status  TYPE /aif/proc_sub_status,
+          lv_guid32      TYPE guid_32.
+
+    FIELD-SYMBOLS: <lv_status>     TYPE /aif/proc_status,
+                   <lv_sub_status> TYPE /aif/proc_sub_status,
+                   <lv_ns>         TYPE any,
+                   <lv_ifname>     TYPE any,
+                   <lv_ifver>      TYPE any.
+
+    ASSIGN COMPONENT 'NS' OF STRUCTURE  is_idx_data  TO <lv_ns>.
+    ASSIGN COMPONENT 'IFNAME' OF STRUCTURE  is_idx_data  TO <lv_ifname>.
+    ASSIGN COMPONENT 'IFVER' OF STRUCTURE  is_idx_data  TO <lv_ifver>.
+    lv_guid32 = iv_msgguid.
+    ASSIGN COMPONENT 'STATUS'  OF STRUCTURE is_idx_data TO <lv_status>.
+    CHECK sy-subrc = 0.
+    DATA: ls_key_mapping TYPE /aif/ifkeys_map_idx_tbl_st,
+          lv_status      TYPE /aif/proc_status,
+          lv_tabname     TYPE string.
+    lv_status =     <lv_status>.
+    "Sub-status of In-Process status for XML&STRU Engine begin
+    IF  /aif/cl_aif_global_tools=>sub_status_is_active( iv_ns = <lv_ns>
+                                                        iv_ifname = <lv_ifname>
+                                                        iv_ifver = <lv_ifver> ) = abap_true.
+
+      ASSIGN COMPONENT 'SUB_STATUS'  OF STRUCTURE is_idx_data TO <lv_sub_status>.
+      IF sy-subrc = 0 AND <lv_sub_status> IS ASSIGNED.
+        lv_sub_status = <lv_sub_status>.
+      ENDIF.
+    ENDIF.
+    "Sub-status of In-Process status for XML&STRU Engine end
+    IF iv_reload_from_db IS NOT INITIAL.
+      READ TABLE it_keys_tbl_mapping INTO ls_key_mapping WITH TABLE KEY ns = <lv_ns>   ifname = <lv_ifname>   ifver = <lv_ifver>.
+      CHECK sy-subrc IS INITIAL.
+      TRY.
+          lv_tabname = cl_abap_dyn_prg=>check_table_name_str(
+                              val      = ls_key_mapping-idx_table
+                              packages = '' ).
+          SELECT SINGLE status INTO lv_status FROM (lv_tabname) WHERE msgguid = iv_msgguid.
+        CATCH cx_abap_not_a_table.                       "#EC NO_HANDLE
+        CATCH cx_abap_not_in_package.                    "#EC NO_HANDLE
+          lv_tabname = ls_key_mapping-idx_table.
+          SELECT SINGLE status INTO lv_status FROM (lv_tabname) WHERE msgguid = iv_msgguid.
+      ENDTRY.
+    ENDIF.
+    TRY.
+        IF lv_status = /aif/if_globals=>gc_eh_file_status-successful
+        OR lv_status = /aif/if_globals=>gc_eh_file_status-successful_w_warning
+        OR lv_status = /aif/if_globals=>gc_eh_file_status-canceled
+        OR lv_status = /aif/if_globals=>gc_eh_file_status-in_process.
+          RAISE EXCEPTION TYPE /aif/cx_aif_engine_base.
+        ENDIF.
+        DATA: lr_msg_payload_status TYPE REF TO /aif/cl_msg_payload_status .
+        CREATE OBJECT lr_msg_payload_status.
+        lv_edit_status = lr_msg_payload_status->/aif/if_msg_payload_status~get_edited_status(
+                                                              iv_msgguid         = lv_guid32
+                                                              iv_ns              = <lv_ns>
+                                                              iv_ifname          = <lv_ifname>
+                                                              iv_ifversion       = <lv_ifver>
+                                                                         ).
+        IF lv_edit_status IS NOT INITIAL.
+          IF lv_edit_status = 50.
+            ev_icon_expanded = '@0Z\Q'  && TEXT-001 && '@'.
+            CONDENSE ev_icon_expanded.
+            ev_icon_collapsed = ev_icon_expanded.
+            RETURN.
+          ENDIF.
+        ELSE.
+          RAISE EXCEPTION TYPE /aif/cx_aif_engine_base.
+        ENDIF.
+
+      CATCH /aif/cx_aif_engine_base .
+        ev_icon_collapsed = ev_icon_expanded = /aif/cl_aif_global_tools=>determine_aif_file_stat_icon( iv_status = lv_status iv_sub_status = lv_sub_status )."Sub-status of In-Process status for XML&STRU Engine
+    ENDTRY.
+    DATA:
+      lr_det_sts_badi TYPE REF TO /aif/per_engine_proxy,
+      lr_root         TYPE REF TO cx_root,
+      lv_pid          TYPE sxmspid.
+    TRY.
+        GET BADI lr_det_sts_badi.
+        IF lr_det_sts_badi IS BOUND.
+*   the badi enables customer to implement his own logic of determine the status icon
+          CALL BADI lr_det_sts_badi->determine_status_icon
+            EXPORTING
+              iv_msgguid          = iv_msgguid
+              iv_pid              = lv_pid
+              is_idx_data         = is_idx_data
+              iv_reload_from_db   = iv_reload_from_db
+              it_keys_tbl_mapping = it_keys_tbl_mapping
+            CHANGING
+              cv_icon_collapsed   = ev_icon_collapsed
+              cv_icon_expanded    = ev_icon_expanded.
+        ENDIF.
+      CATCH cx_root INTO lr_root.
+        RAISE EXCEPTION TYPE /aif/cx_error_handling_general EXPORTING previous = lr_root.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~get_deleted_message_ids.
+
+
+    DATA:
+      ls_idx_data              TYPE /aif/if_globals=>ty_msg_key_info,
+      lt_existing_msgs         TYPE STANDARD TABLE OF guid_32,
+      lt_mapping               TYPE /aif/mapping_instruction_tt,
+      lv_root_table_name       TYPE tabname16,
+      lo_not_a_table_exception TYPE REF TO cx_abap_not_a_table,
+      lo_exception             TYPE REF TO /aif/cx_struct_pers_base.
+
+    IF it_idx_data IS INITIAL.
+      RETURN.
+    ENDIF.
+
+* Load mapping
+    TRY.
+        lt_mapping = mo_mapping_store->load_mapping_by_interface( iv_ns         = is_finf-ns
+                                                                  iv_ifname    = is_finf-ifname
+                                                                  iv_ifversion = is_finf-ifversion ).
+      CATCH /aif/cx_struct_pers_base INTO lo_exception.
+        RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_exception textid = /aif/cx_engine_structured_pers=>no_db_mapping_found.
+    ENDTRY.
+
+    IF lt_mapping IS INITIAL.
+      RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers
+        EXPORTING
+          textid = /aif/cx_engine_structured_pers=>no_db_mapping_found.
+    ENDIF.
+
+* Retrieve root table name
+    lv_root_table_name =  mo_mapping_interpreter->extract_root_dbtab( it_mapping = lt_mapping ).
+
+* Select all existing entries
+    TRY.
+        cl_abap_dyn_prg=>check_table_name_str(
+          EXPORTING
+            val                    = lv_root_table_name
+            packages               = '' ).
+      CATCH cx_abap_not_a_table INTO lo_not_a_table_exception.
+        RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_not_a_table_exception textid = /aif/cx_engine_structured_pers=>dbtab_does_not_exist.
+      CATCH cx_abap_not_in_package.
+    ENDTRY.
+
+    SELECT msgguid FROM (lv_root_table_name)
+      INTO TABLE lt_existing_msgs
+      FOR ALL ENTRIES IN it_idx_data
+      WHERE msgguid = it_idx_data-msgguid
+       AND ns = is_finf-ns
+       AND ifname = is_finf-ifname
+       AND ifver = is_finf-ifversion.
+
+* one message may have multiple versions
+    SORT lt_existing_msgs.
+    DELETE ADJACENT DUPLICATES FROM lt_existing_msgs.
+
+* check which messages were deleted
+    LOOP AT it_idx_data INTO ls_idx_data.
+      READ TABLE lt_existing_msgs TRANSPORTING NO FIELDS
+        WITH KEY table_line = ls_idx_data-msgguid BINARY SEARCH.
+      IF sy-subrc <> 0.
+        " the message does not exist in the dbtabs
+        INSERT ls_idx_data INTO TABLE rt_idx_data_del.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~lock.
+
+    DATA: lv_msgguid               TYPE guid_32,
+          ls_pers_xml              TYPE /aif/pers_xml,
+          ls_textid                TYPE scx_t100key,
+          lr_exception             TYPE REF TO /aif/cx_engine_xml,
+          lt_mapping               TYPE /aif/mapping_instruction_tt,
+          lv_root_table_name       TYPE tabname16,
+          lv_create_date           TYPE /aif/create_date,
+          lv_create_time           TYPE /aif/create_time,
+          lv_timestamp             TYPE string,
+          lo_not_a_table_exception TYPE REF TO cx_abap_not_a_table,
+          lo_exception             TYPE REF TO /aif/cx_struct_pers_base.
+    FIELD-SYMBOLS: <ls_xmlparse> TYPE /aif/xmlparse_data.
+
+    TRY.
+        " Retrieve msgguid
+        ASSIGN cr_xmlparse->* TO <ls_xmlparse>.
+        IF NOT sy-subrc IS INITIAL.
+          RAISE EXCEPTION TYPE /aif/cx_engine_xml
+            EXPORTING
+              textid = /aif/cx_engine_xml=>invalid_structure.
+        ENDIF.
+        lv_msgguid = <ls_xmlparse>-msgguid.
+
+        " Lock message
+        CALL FUNCTION 'ENQUEUE_E_SXMSMAST'
+          EXPORTING
+            mode_sxmspmast = 'E'
+            mandt          = sy-mandt
+            msgguid        = <ls_xmlparse>-msgguid
+          EXCEPTIONS
+            foreign_lock   = 1
+            system_failure = 2
+            OTHERS         = 3.
+        IF sy-subrc <> 0.
+          ls_textid-msgid = sy-msgid.
+          ls_textid-msgno = sy-msgno.
+          ls_textid-attr1 = sy-msgv1.
+          ls_textid-attr2 = sy-msgv2.
+          ls_textid-attr3 = sy-msgv3.
+          ls_textid-attr4 = sy-msgv4.
+          RAISE EXCEPTION TYPE /aif/cx_error_handling_general EXPORTING textid = ls_textid.
+        ELSE.
+
+          " load mapping and identify root table
+          TRY.
+              lt_mapping = mo_mapping_store->load_mapping_by_interface( iv_ns         = <ls_xmlparse>-ns
+                                                                        iv_ifname    = <ls_xmlparse>-ifname
+                                                                        iv_ifversion = <ls_xmlparse>-ifver ).
+            CATCH /aif/cx_struct_pers_base INTO lo_exception.
+              RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_exception textid = /aif/cx_engine_structured_pers=>no_db_mapping_found.
+          ENDTRY.
+          lv_root_table_name =  mo_mapping_interpreter->extract_root_dbtab( it_mapping = lt_mapping ).
+
+          " fetch create date & time from root table
+          TRY.
+              cl_abap_dyn_prg=>check_table_name_str(
+                EXPORTING
+                  val                    = lv_root_table_name
+                  packages               = '' ).
+            CATCH cx_abap_not_a_table INTO lo_not_a_table_exception.
+              RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_not_a_table_exception textid = /aif/cx_engine_structured_pers=>dbtab_does_not_exist.
+            CATCH cx_abap_not_in_package.
+          ENDTRY.
+          SELECT SINGLE create_date create_time FROM (lv_root_table_name) INTO ( lv_create_date, lv_create_time ) WHERE msgguid = <ls_xmlparse>-msgguid
+                                                                                                              AND ns = <ls_xmlparse>-ns
+                                                                                                              AND ifname = <ls_xmlparse>-ifname
+                                                                                                              AND ifver = <ls_xmlparse>-ifver
+                                                                                                              AND version = mc_most_recent_version_id.
+
+*     check if the date and time is still the same, to ensure that latest version is displayed
+          CONCATENATE lv_create_date lv_create_time INTO lv_timestamp.
+          IF <ls_xmlparse>-xi_timestamp <> lv_timestamp.
+            CALL FUNCTION 'DEQUEUE_E_SXMSMAST'
+              EXPORTING
+                mode_sxmspmast = 'E'
+                mandt          = sy-mandt
+                msgguid        = <ls_xmlparse>-msgguid.
+            <ls_xmlparse>-data_changed = abap_true.
+            <ls_xmlparse>-is_locked    = abap_false.
+            ev_can_be_updated          = abap_false.
+            DATA: lv_msgv TYPE symsgv.
+            WRITE ls_pers_xml-last_time TO lv_msgv.
+            ls_textid-msgid = '/AIF/ERROR_HANDLING'.
+            ls_textid-msgno = '070'.
+            ls_textid-attr1 = ls_pers_xml-last_user.
+            ls_textid-attr2 = lv_msgv.
+            RAISE EXCEPTION TYPE /aif/cx_error_handling_general EXPORTING textid = ls_textid.
+          ELSE.
+            <ls_xmlparse>-is_locked    = abap_true.
+            ev_can_be_updated          = abap_true.
+          ENDIF.
+        ENDIF.
+      CATCH /aif/cx_engine_xml INTO lr_exception.
+        RAISE EXCEPTION TYPE /aif/cx_error_handling_general EXPORTING previous = lr_exception.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~read_messages_by_msg_key.
+
+    DATA: lo_xml_persist_engine TYPE REF TO /aif/cl_persist_engine_xml.
+    CREATE OBJECT lo_xml_persist_engine.
+
+    " delegate call to xml persistence engine
+    lo_xml_persist_engine->/aif/if_persistency_engine~read_messages_by_msg_key(
+      EXPORTING
+        is_finf                        = is_finf
+        it_msg_key                     = it_msg_key
+      it_date_rng                    = it_date_rng
+    IMPORTING
+      et_msg                         = et_msg
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~retrieve.
+
+    DATA: lv_msgguid_cast          TYPE guid_32,
+          lt_mapping               TYPE /aif/mapping_instruction_tt,
+          lv_dbtab_name            TYPE tabname16,
+          lv_raw_structure_type    TYPE char30,
+          lt_records               TYPE REF TO data,
+          lt_dbtab_names           TYPE /aif/tabname16_tt,
+          lo_table_record_buffer   TYPE REF TO /aif/if_table_record_buffer,
+          lv_timestamp             TYPE string,
+          lv_root_table_name       TYPE tabname16,
+          lo_exception             TYPE REF TO /aif/cx_struct_pers_base,
+          lo_not_a_table_exception TYPE REF TO cx_abap_not_a_table,
+          lt_nonunique_keys        TYPE /aif/cl_table_record_buffer=>lty_key_tt.
+
+    FIELD-SYMBOLS: <lt_records>     TYPE ANY TABLE,
+                   <ls_structure>   TYPE any,
+                   <ls_record>      TYPE any,
+                   <lv_create_date> TYPE /aif/create_date,
+                   <lv_create_time> TYPE /aif/create_time.
+
+    lv_msgguid_cast = iv_msgguid.
+
+    " Determine raw structure
+    lv_raw_structure_type = determine_raw_structure( iv_ns     = iv_ns
+                                                     iv_ifname = iv_ifname
+                                                     iv_ifversion  = iv_ifver ).
+
+* Create raw structure
+    CREATE DATA cref_data TYPE (lv_raw_structure_type).
+    ASSIGN cref_data->* TO <ls_structure>.
+
+* Load mapping
+    TRY.
+        lt_mapping = mo_mapping_store->load_mapping( lv_raw_structure_type ).
+      CATCH /aif/cx_struct_pers_base INTO lo_exception.
+        RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_exception textid = /aif/cx_engine_structured_pers=>no_db_mapping_found.
+    ENDTRY.
+
+* Get all relevant dbtab names
+    lt_dbtab_names = mo_mapping_interpreter->extract_used_dbtabs( lt_mapping ).
+
+* Determine root table name
+    lv_root_table_name =  mo_mapping_interpreter->extract_root_dbtab( it_mapping = lt_mapping ).
+
+* Read all data from db tables and buffer it
+    APPEND 'COUNTER' TO lt_nonunique_keys.
+    CREATE OBJECT lo_table_record_buffer TYPE /aif/cl_table_record_buffer EXPORTING it_nonunique_keys = lt_nonunique_keys.
+    LOOP AT lt_dbtab_names INTO lv_dbtab_name.
+      CREATE DATA lt_records TYPE STANDARD TABLE OF (lv_dbtab_name).
+      ASSIGN lt_records->* TO <lt_records>.
+      TRY.
+          cl_abap_dyn_prg=>check_table_name_str(
+            EXPORTING
+              val                    = lv_dbtab_name
+              packages               = '' ).
+        CATCH cx_abap_not_a_table INTO lo_not_a_table_exception.
+          RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_not_a_table_exception textid = /aif/cx_engine_structured_pers=>dbtab_does_not_exist.
+        CATCH cx_abap_not_in_package.
+      ENDTRY.
+      SELECT * FROM (lv_dbtab_name) INTO TABLE <lt_records> WHERE msgguid = lv_msgguid_cast
+                                                              AND ifname = iv_ifname
+                                                              AND ifver = iv_ifver
+                                                              AND ns = iv_ns
+                                                              AND version = mc_most_recent_version_id.
+      lo_table_record_buffer->set_records_in_table( EXPORTING iv_tablename = lv_dbtab_name
+                                                              it_records = <lt_records> ).
+
+      IF lv_dbtab_name = lv_root_table_name.
+        IF lines( <lt_records> ) <> 1.
+          RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers
+            EXPORTING
+              textid  = /aif/cx_engine_structured_pers=>missing_message
+              msgguid = lv_msgguid_cast.
+        ENDIF.
+        LOOP AT <lt_records> ASSIGNING <ls_record>.
+          EXIT. " root table only has one row per message version
+        ENDLOOP.
+        ASSIGN COMPONENT 'CREATE_DATE' OF STRUCTURE <ls_record> TO <lv_create_date>.
+        ASSIGN COMPONENT 'CREATE_TIME' OF STRUCTURE <ls_record> TO <lv_create_time>.
+        CONCATENATE <lv_create_date> <lv_create_time> INTO lv_timestamp.
+      ENDIF.
+    ENDLOOP.
+
+* Map data to structure
+    TRY.
+        mo_transformation_logic->transform_records_to_structure( EXPORTING it_mapping = lt_mapping
+                                                                           io_table_record_buffer = lo_table_record_buffer
+                                                                 CHANGING cs_structure = <ls_structure> ).
+      CATCH /aif/cx_struct_pers_base INTO lo_exception.
+        RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_exception.
+    ENDTRY.
+
+* Finish returned structure
+    cs_xmlparse-ns      = iv_ns.
+    cs_xmlparse-ifname  = iv_ifname.
+    cs_xmlparse-ifver   = iv_ifver.
+    cs_xmlparse-msgguid = iv_msgguid.
+    cs_xmlparse-xi_pipelineid = iv_pipelineid.
+    cs_xmlparse-xi_timestamp = lv_timestamp.
+    cs_xmlparse-xi_data = cref_data.
+
+**********************************************************************
+** SRAL integration
+**********************************************************************
+    IF iv_read_access_logging = abap_true.
+
+      /aif/cl_sral_aif_handler=>get_instance( )->set_values(
+        EXPORTING
+          iv_msgguid            = iv_msgguid
+          iv_ns                 = iv_ns
+          iv_ifname             = iv_ifname
+          iv_ifversion          = iv_ifver
+          iv_aif_structure_type = /aif/if_sral_aif_constants=>gc_aif_structure_raw
+          ir_data               = cref_data
+      ).
+
+    ENDIF.
+
+
+
+
+
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~save_buffer.
+    " buffer currently not implemented
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~unlock.
+    FIELD-SYMBOLS: <ls_xmlparse> TYPE /aif/xmlparse_data.
+
+    ASSIGN cr_xmlparse->* TO <ls_xmlparse>.
+    CHECK sy-subrc IS INITIAL.
+
+    CALL FUNCTION 'DEQUEUE_E_SXMSMAST'
+      EXPORTING
+        mode_sxmspmast = 'E'
+        mandt          = sy-mandt
+        msgguid        = <ls_xmlparse>-msgguid.
+
+    CLEAR <ls_xmlparse>-is_locked.
+  ENDMETHOD.
+
+
+  METHOD /aif/if_persistency_engine~update.
+    DATA: lv_msgguid               TYPE guid_32,
+          lt_mapping               TYPE /aif/mapping_instruction_tt,
+          lt_buffer                TYPE /aif/buffered_table_records_tt,
+          ls_buffer                TYPE /aif/buffered_table_records,
+          lv_root_table_name       TYPE tabname16,
+          lo_table_record_buffer   TYPE REF TO /aif/if_table_record_buffer,
+          lv_count                 TYPE i,
+          lv_raw_structure_type    TYPE char30,
+          lr_raw_structure         TYPE REF TO data,
+*          lv_status                TYPE /aif/pers_xml_status_e,
+          lo_exception             TYPE REF TO /aif/cx_struct_pers_base,
+          lo_not_a_table_exception TYPE REF TO cx_abap_not_a_table,
+          lv_tmp                   TYPE guid_32,
+          lv_message_does_exist    TYPE /aif/boolean,
+          lr_record                TYPE REF TO data.
+
+    FIELD-SYMBOLS: <ls_xmlparse>       TYPE /aif/xmlparse_data,
+                   <ls_data>           TYPE any,
+                   <lt_table_records>  TYPE ANY TABLE,
+                   <ls_raw_structure>  TYPE any,
+                   <ls_record>         TYPE any,
+                   <ls_general_fields> TYPE /aif/struc_pers_general,
+*                   <lv_status>         TYPE /aif/pers_xml_status_e,
+                   <lv_create_user>    TYPE /aif/create_user,
+                   <lv_create_date>    TYPE /aif/create_date,
+                   <lv_create_time>    TYPE /aif/create_time.
+
+* Access xmlparse structure
+    ASSIGN cr_xmlparse->* TO <ls_xmlparse>.
+    IF NOT sy-subrc IS INITIAL.
+      RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers
+        EXPORTING
+          textid = /aif/cx_engine_structured_pers=>invalid_structure.
+    ENDIF.
+
+* Determine raw structure type
+    lv_raw_structure_type = determine_raw_structure( iv_ns         = <ls_xmlparse>-ns
+                                                     iv_ifname    = <ls_xmlparse>-ifname
+                                                     iv_ifversion = <ls_xmlparse>-ifver ).
+
+* Retrieve and copy raw structure
+    ASSIGN <ls_xmlparse>-xi_data->* TO <ls_data>.
+    CREATE DATA lr_raw_structure TYPE (lv_raw_structure_type).
+    ASSIGN lr_raw_structure->* TO <ls_raw_structure>.
+    <ls_raw_structure> = <ls_data>.
+
+    IF NOT sy-subrc IS INITIAL.
+      RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers
+        EXPORTING
+          textid = /aif/cx_engine_structured_pers=>invalid_structure.
+    ENDIF.
+
+* Determine msgguid
+    lv_msgguid = <ls_xmlparse>-msgguid.
+
+* Determine status
+*    IF <ls_xmlparse>-data_changed = abap_true.
+*      lv_status = 50.
+*    ENDIF.
+
+* Load mapping
+    TRY.
+        lt_mapping = mo_mapping_store->load_mapping( lv_raw_structure_type ).
+      CATCH /aif/cx_struct_pers_base INTO lo_exception.
+        RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_exception textid = /aif/cx_engine_structured_pers=>no_db_mapping_found.
+    ENDTRY.
+
+    IF lt_mapping IS INITIAL.
+      RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers
+        EXPORTING
+          textid = /aif/cx_engine_structured_pers=>no_db_mapping_found.
+    ENDIF.
+
+* Determine root table
+    lv_root_table_name =  mo_mapping_interpreter->extract_root_dbtab( it_mapping = lt_mapping ).
+
+* Transform structure into db records
+    TRY.
+        mo_transformation_logic->transform_structure_to_records( EXPORTING it_mapping = lt_mapping
+                                                                 IMPORTING eo_table_content = lo_table_record_buffer
+                                                                 CHANGING cs_structure = <ls_raw_structure> ).
+      CATCH /aif/cx_struct_pers_base INTO lo_exception.
+        RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_exception.
+    ENDTRY.
+
+* Check if there are any existing entries
+* (Check the existence only once in the root table [and not in the other tables] for performance reasons!)
+    TRY.
+        cl_abap_dyn_prg=>check_table_name_str(
+          EXPORTING
+            val                    = lv_root_table_name
+            packages               = '' ).
+      CATCH cx_abap_not_a_table INTO lo_not_a_table_exception.
+        RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_not_a_table_exception textid = /aif/cx_engine_structured_pers=>dbtab_does_not_exist.
+      CATCH cx_abap_not_in_package.
+    ENDTRY.
+    SELECT SINGLE msgguid FROM (lv_root_table_name) INTO lv_tmp WHERE msgguid = lv_msgguid
+                                                                  AND version = mc_most_recent_version_id
+                                                                  AND ns = <ls_xmlparse>-ns
+                                                                  AND ifname = <ls_xmlparse>-ifname
+                                                                  AND ifver = <ls_xmlparse>-ifver.
+    IF lv_tmp IS INITIAL.
+      lv_message_does_exist = abap_false.
+    ELSE.
+      lv_message_does_exist = abap_true.
+    ENDIF.
+
+* Insert into dbtabs
+    lt_buffer = lo_table_record_buffer->get_all_records( ).
+    LOOP AT lt_buffer INTO ls_buffer.
+
+      ASSIGN ls_buffer-records->* TO <lt_table_records>.
+      LOOP AT <lt_table_records> ASSIGNING <ls_record>.
+
+        " fill general fields
+        ASSIGN COMPONENT '/AIF/STRUC_PERS_GENERAL' OF STRUCTURE <ls_record> TO <ls_general_fields>.
+        <ls_general_fields>-msgguid = lv_msgguid.
+        <ls_general_fields>-version = mc_most_recent_version_id.
+        <ls_general_fields>-ns      = <ls_xmlparse>-ns.
+        <ls_general_fields>-ifname  = <ls_xmlparse>-ifname.
+        <ls_general_fields>-ifver   = <ls_xmlparse>-ifver.
+
+        IF ls_buffer-tablename = lv_root_table_name.
+          " fill admin fields
+*          ASSIGN COMPONENT 'STATUS' OF STRUCTURE <ls_record> TO <lv_status>.
+*          <lv_status> = lv_status.
+          ASSIGN COMPONENT 'CREATE_USER' OF STRUCTURE <ls_record> TO <lv_create_user>.
+          <lv_create_user> = sy-uname.
+          ASSIGN COMPONENT 'CREATE_DATE' OF STRUCTURE <ls_record> TO <lv_create_date>.
+          <lv_create_date> = sy-datum.
+          ASSIGN COMPONENT 'CREATE_TIME' OF STRUCTURE <ls_record> TO <lv_create_time>.
+          <lv_create_time> = sy-uzeit.
+        ENDIF.
+      ENDLOOP.
+
+      " check if table exists
+      TRY.
+          DATA(lv_table) = cl_abap_dyn_prg=>check_table_name_str(
+              val                    = ls_buffer-tablename
+              packages               = '' ).
+        CATCH cx_abap_not_a_table INTO lo_not_a_table_exception.
+          RAISE EXCEPTION TYPE /aif/cx_engine_structured_pers EXPORTING previous = lo_not_a_table_exception textid = /aif/cx_engine_structured_pers=>dbtab_does_not_exist.
+        CATCH cx_abap_not_in_package.
+          lv_table = ls_buffer-tablename.
+      ENDTRY.
+
+      " delete existing entries
+      IF lv_message_does_exist = abap_true.
+        DELETE FROM (lv_table) WHERE msgguid = lv_msgguid
+                                            AND version = mc_most_recent_version_id
+                                            AND ns = <ls_xmlparse>-ns
+                                            AND ifname = <ls_xmlparse>-ifname
+                                            AND ifver = <ls_xmlparse>-ifver.
+      ENDIF.
+
+      " insert entries
+      INSERT (lv_table) FROM TABLE <lt_table_records>.
+
+    ENDLOOP.
+    IF <ls_xmlparse>-data_changed = abap_true.
+      "for payload changed message, the payload edited status will be updated to table.
+      DATA: lr_msg_payload_status TYPE REF TO /aif/cl_msg_payload_status .
+*      lv_msgguid = <ls_xmlparse_data>-msgguid.
+      CREATE OBJECT lr_msg_payload_status.
+      lr_msg_payload_status->/aif/if_msg_payload_status~payload_edited(
+                                                  iv_msgguid         = lv_msgguid
+                                                  iv_ns              = <ls_xmlparse>-ns
+                                                  iv_ifname          = <ls_xmlparse>-ifname
+                                                  iv_ifversion       = <ls_xmlparse>-ifver ) .
+    ENDIF.
+    IF <lv_create_time> IS ASSIGNED AND <lv_create_time> IS NOT INITIAL.
+      DATA lv_timestamp TYPE string.
+      CONCATENATE <lv_create_date> <lv_create_time> INTO lv_timestamp.
+      <ls_xmlparse>-xi_timestamp = lv_timestamp.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    super->constructor( ).
+
+    mo_transformation_logic = io_transformation_logic.
+    IF mo_transformation_logic IS INITIAL.
+      CREATE OBJECT mo_transformation_logic TYPE /aif/cl_transformation_logic.
+    ENDIF.
+
+    mo_mapping_store = io_mapping_store.
+    IF mo_mapping_store IS INITIAL.
+      CREATE OBJECT mo_mapping_store TYPE /aif/cl_mapping_store.
+    ENDIF.
+
+    mo_mapping_interpreter = io_mapping_interpreter.
+    IF mo_mapping_interpreter IS INITIAL.
+      CREATE OBJECT mo_mapping_interpreter TYPE /aif/cl_mapping_interpreter.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD determine_raw_structure.
+
+    DATA lr_db_finf TYPE REF TO /aif/cl_db_access_finf.
+    DATA ls_finf TYPE /aif/t_finf.
+
+    lr_db_finf = /aif/cl_db_access_finf=>get_instance( ).
+    ls_finf = lr_db_finf->read_single( iv_ns     = iv_ns
+                                       iv_ifname = iv_ifname
+                                       iv_ifver  = iv_ifversion ). " raises exception if not found
+
+    IF NOT ls_finf-proxyclassnamecl IS INITIAL.
+      " This is an outbound interface -> source data is SAP structure
+      rv_target_struct_type = ls_finf-ddicstructure.
+    ELSE.
+      " Assume inbound message -> raw structure is source
+      rv_target_struct_type = ls_finf-ddicstructureraw.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /aif/if_deletion_persistency~get_add_tables_to_delete.
+
+    CLEAR rt_tables.
+
+    TRY.
+        DATA(lr_mapping_store) = NEW /aif/cl_mapping_store( ).
+        DATA(lt_mapping) = VALUE /aif/mapping_instruction_tt( ).
+        lt_mapping = lr_mapping_store->/aif/if_mapping_store~load_mapping_by_interface( iv_ns = ir_deletion_params->ms_ifkey-ns
+                                                                                        iv_ifname = ir_deletion_params->ms_ifkey-ifname
+                                                                                        iv_ifversion = ir_deletion_params->ms_ifkey-ifver ).
+
+        DATA(lr_mapping_interpreter) = NEW /aif/cl_mapping_interpreter( ).
+        DATA(lt_tables) = VALUE /aif/tabname16_tt( ).
+        lt_tables = lr_mapping_interpreter->/aif/if_mapping_interpreter~extract_used_dbtabs( it_mapping = lt_mapping ).
+
+        DATA lv_table TYPE tabname16.
+        LOOP AT lt_tables INTO lv_table.
+          APPEND CONV tabname( lv_table ) TO rt_tables.
+        ENDLOOP.
+      CATCH cx_root INTO DATA(lr_root).
+        CLEAR rt_tables.
+    ENDTRY.
+  ENDMETHOD.
+ENDCLASS.

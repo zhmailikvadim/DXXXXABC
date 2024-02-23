@@ -1,0 +1,375 @@
+ CLASS zcl_i_a_deleteconditionrecord DEFINITION
+  PUBLIC
+  INHERITING FROM /bobf/cl_lib_a_supercl_simple
+  FINAL
+  CREATE PUBLIC .
+
+   PUBLIC SECTION.
+
+     METHODS constructor .
+
+     METHODS /bobf/if_frw_action~execute
+         REDEFINITION .
+   PROTECTED SECTION.
+   PRIVATE SECTION.
+
+     DATA mo_sls_api TYPE REF TO if_slsprcg_cndnrecd_api .
+     DATA mo_dep TYPE REF TO if_cnd_maint_ltd_dep .
+     DATA mo_cond_checks TYPE REF TO if_cnd_maint_ltd_check .
+
+     METHODS check_authority
+       EXPORTING
+         !es_msg      TYPE symsg
+       CHANGING
+         !cs_recordtp TYPE zsislspricingconditionrecordt .
+ ENDCLASS.
+
+
+
+ CLASS zcl_i_a_deleteconditionrecord IMPLEMENTATION.
+
+
+   METHOD /bobf/if_frw_action~execute.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+     TYPES: BEGIN OF ty_keys,
+              conditionrecord           TYPE zsislspricingconditionrecordt-conditionrecord,
+              conditionsequentialnumber TYPE zsislspricingconditionrecordt-conditionsequentialnumber,
+              conditionvalidityenddate  TYPE zsislspricingconditionrecordt-conditionvalidityenddate,
+            END OF ty_keys,
+            BEGIN OF ty_conditiontype,
+              conditionapplication TYPE zsislspricingconditionrecordt-conditionapplication,
+              conditiontype        TYPE zsislspricingconditionrecordt-conditiontype,
+            END OF ty_conditiontype.
+     DATA: ls_keys                       TYPE ty_keys,
+           lt_keys                       TYPE TABLE OF ty_keys,
+           ls_conditiontype              TYPE ty_conditiontype,
+           lt_conditiontype              TYPE TABLE OF ty_conditiontype,
+           lt_t685a                      TYPE TABLE OF t685a,
+           ls_cndn_cds                   TYPE zsislspricingconditionrecordt,
+           lo_message                    TYPE REF TO /bobf/if_frw_message,
+           lo_message_exception          TYPE REF TO /bobf/if_frw_message,
+           lt_failed_key                 TYPE /bobf/t_frw_key,
+           lv_knumh                      TYPE knumh,
+           ls_message                    TYPE symsg,
+           ls_condition_record           TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_record_s,
+           ls_cndnrecord_criteria_header TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_header_s,
+           lt_cndnrecord_criteria_item   TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_item_t,
+           ls_cndnrecord_criteria_item   TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_item_s,
+           ls_cndnrecord_query_option    TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_query_option_s,
+           lt_condition_validity         TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_validity_enh_t,
+           lt_condition_record           TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_record_t,
+           ls_cndn_query_option_response TYPE if_slsprcg_cndnrecd_api_types=>ty_query_option_response_s,
+           lt_condition_record_d         TYPE if_slsprcg_cndnrecd_api_types=>ty_cndn_record_deletion_t,
+           lt_data                       TYPE zsislspricingconditionrecordt,
+           ls_set                        TYPE zc_slspricingconditionrecordtp,
+           lt_uuid                       TYPE TABLE OF /bobf/uuid.
+
+     CONSTANTS:cv_comma TYPE c VALUE ','.
+
+     FIELD-SYMBOLS:
+       <ls_parameters> TYPE sdprcg_conditionuuid.
+
+     ASSIGN is_parameters->* TO <ls_parameters>.
+     ev_static_action_failed = abap_true.
+     IF NOT <ls_parameters> IS ASSIGNED OR <ls_parameters> IS INITIAL OR <ls_parameters>-isactiveentity = abap_false.
+       RETURN.
+     ENDIF.
+
+     IF NOT eo_message IS BOUND.
+       eo_message = /bobf/cl_frw_factory=>get_message( ).
+     ENDIF.
+
+**Get the non-neccessary sign, e.g. '-'
+     DATA(lv_uuid_str) = <ls_parameters>-conditionrecorduuid.
+     CONDENSE lv_uuid_str NO-GAPS.
+     DATA(lv_offset) = 0.
+     DATA(lv_len) = 1.
+     DATA(lv_strlen) = strlen( lv_uuid_str ).
+     DO.
+       IF lv_strlen = lv_offset.
+         EXIT.
+       ENDIF.
+       DATA(lv_link_sign) = lv_uuid_str+lv_offset(lv_len).
+       IF lv_link_sign NA '0123456789'.
+         EXIT.
+       ELSE.
+         lv_offset = lv_offset + lv_len.
+         CLEAR:lv_link_sign.
+       ENDIF.
+     ENDDO.
+     IF lv_link_sign <> cv_comma AND lv_link_sign <> space.
+       REPLACE ALL OCCURRENCES OF lv_link_sign IN lv_uuid_str WITH space.
+     ENDIF.
+     SPLIT lv_uuid_str AT cv_comma INTO TABLE DATA(lt_uuid_char).
+     lt_uuid = lt_uuid_char.
+     lt_keys = CONV #( lt_uuid ).
+
+     LOOP AT lt_keys INTO ls_keys.
+       APPEND VALUE #( sign = 'I' option = 'EQ' low = ls_keys-conditionrecord ) TO ls_cndnrecord_criteria_item-conditionrecord.
+     ENDLOOP.
+     APPEND ls_cndnrecord_criteria_item TO lt_cndnrecord_criteria_item.
+
+     TRY.
+         TEST-SEAM get_condition_record.
+           CALL METHOD mo_sls_api->get_condition_record
+             EXPORTING
+               is_cndnrecord_criteria_header = ls_cndnrecord_criteria_header
+               it_cndnrecord_criteria_item   = lt_cndnrecord_criteria_item
+             IMPORTING
+               et_condition_validity_enh     = lt_condition_validity
+               et_condition_record           = lt_condition_record
+               es_cndn_query_option_response = ls_cndn_query_option_response.
+         END-TEST-SEAM.
+       CATCH cx_prcg_cndnrecord_exception INTO DATA(le_cndn).
+*     add header message to BOPF
+         CLEAR ls_message.
+         ls_message-msgid = le_cndn->if_t100_message~t100key-msgid.
+         ls_message-msgno = le_cndn->if_t100_message~t100key-msgno.
+         ls_message-msgty = le_cndn->if_t100_dyn_msg~msgty.
+         ls_message-msgv1 = le_cndn->if_t100_dyn_msg~msgv1.
+         ls_message-msgv2 = le_cndn->if_t100_dyn_msg~msgv2.
+         ls_message-msgv3 = le_cndn->if_t100_dyn_msg~msgv3.
+         ls_message-msgv4 = le_cndn->if_t100_dyn_msg~msgv4.
+
+         eo_message->add_message(
+           EXPORTING
+             is_msg       = ls_message
+             iv_node      = zif_i_slspricingconditionrec_c=>sc_node-zi_slspricingconditionrecordtp
+             iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition ).
+         RETURN.
+     ENDTRY.
+
+**Delete record that ConditionValidityEndDate is not equal to the input one
+     LOOP AT lt_condition_validity INTO DATA(ls_condition_validity).
+       DATA(lv_tabix) = sy-tabix.
+       READ TABLE lt_keys WITH KEY conditionrecord = ls_condition_validity-conditionrecord
+                                   conditionvalidityenddate = ls_condition_validity-conditionvalidityenddate
+                                   TRANSPORTING NO FIELDS.
+       IF sy-subrc = 0.
+         CLEAR ls_conditiontype.
+         READ TABLE lt_conditiontype WITH KEY conditionapplication = ls_condition_validity-conditionapplication
+                                              conditiontype = ls_condition_validity-conditiontype
+                                              TRANSPORTING NO FIELDS.
+         IF sy-subrc <> 0.
+           ls_conditiontype-conditionapplication = ls_condition_validity-conditionapplication.
+           ls_conditiontype-conditiontype = ls_condition_validity-conditiontype.
+           APPEND ls_conditiontype TO lt_conditiontype.
+         ENDIF.
+       ELSE.
+         DELETE lt_condition_validity INDEX lv_tabix.
+       ENDIF.
+     ENDLOOP.
+
+     "Check condition type configuration
+     LOOP AT lt_condition_record INTO ls_condition_record.
+       lv_tabix = sy-tabix.
+       READ TABLE lt_condition_validity INTO ls_condition_validity WITH KEY conditionrecord = ls_condition_record-conditionrecord.
+       MOVE-CORRESPONDING ls_condition_record TO ls_cndn_cds.
+       MOVE-CORRESPONDING ls_condition_validity TO ls_cndn_cds.
+       check_authority(
+         IMPORTING
+           es_msg             = DATA(ls_mess)
+         CHANGING
+           cs_recordtp        = ls_cndn_cds
+       ).
+
+       " Add check for contract condition type
+       IF ls_condition_record-conditiontable IS NOT INITIAL.
+         TEST-SEAM contract_check.
+           CALL METHOD cl_wlf_kotabnr_check=>check
+             EXPORTING
+               i_kotabnr = ls_condition_record-conditiontable " Condition Table
+               i_kappl   = if_ct_constants=>c_application_sales   " Application
+               i_kvewe   = if_ct_constants=>c_usage_pricing   " Usage of the Condition Table
+               i_aktyp   = ' '   " Activity Category in the Transaction
+             EXCEPTIONS
+               error     = 4.
+         END-TEST-SEAM.
+         IF sy-subrc <> 0.
+           MESSAGE i682(ws) WITH ls_condition_record-conditiontable INTO DATA(lv_message).
+           CLEAR: ls_message.
+           ls_message-msgty = 'I'. " 'I'
+           ls_message-msgid = 'WS'. " 'WS'
+           ls_message-msgno = 682. " 682
+           ls_message-msgv1 = ls_condition_record-conditiontable.
+
+           eo_message->add_message(
+             EXPORTING
+               is_msg       = ls_message
+               iv_node      = zif_i_slspricingconditionrec_c=>sc_node-zi_slspricingconditionrecordtp
+               iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition ).
+           APPEND VALUE #( key = ls_cndn_cds-key ) TO et_failed_key.
+           CONTINUE.
+         ENDIF.
+       ENDIF.
+
+       IF ls_cndn_cds-conditionrecordiseditable = abap_false.   "no delete authorization
+         " add message to BOPF
+         MESSAGE e001(00) WITH 'No Authorization,' ls_cndn_cds-conditionrecord
+                          INTO DATA(lv_mess).
+         CLEAR: ls_mess.
+         MOVE-CORRESPONDING sy TO ls_mess.
+         eo_message->add_message(
+           EXPORTING
+             is_msg       = ls_mess
+             iv_node      = zif_i_slspricingconditionrec_c=>sc_node-zi_slspricingconditionrecordtp
+*            iv_key       = lv_root_key
+             iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition ).
+         "remove data without authorization
+         DELETE lt_condition_record INDEX lv_tabix.
+         DELETE lt_condition_validity WHERE conditionrecord = ls_condition_record-conditionrecord.
+       ELSE.
+         TEST-SEAM get_t685a.
+           mo_dep->get_t685a(
+             EXPORTING
+               iv_kappl = ls_condition_record-conditionapplication
+               iv_kschl = ls_condition_record-conditiontype
+             RECEIVING
+               rs_t685a = DATA(ls_t685a)
+           ).
+         END-TEST-SEAM.
+         IF ls_t685a-kdele = space. "Do not delete (set the deletion flag only)
+           DATA(lv_not_delete) = abap_true.
+           ls_condition_record-conditionisdeleted = abap_true.
+           MODIFY lt_condition_record FROM ls_condition_record INDEX lv_tabix.
+         ELSE.
+           DELETE lt_condition_record INDEX lv_tabix.
+           DELETE lt_condition_validity WHERE conditionrecord = ls_condition_record-conditionrecord.
+           APPEND VALUE #( conditionrecord = ls_condition_record-conditionrecord ) TO lt_condition_record_d.
+         ENDIF.
+         CLEAR ls_t685a.
+       ENDIF.
+
+     ENDLOOP.
+
+     TRY.
+         ev_static_action_failed = abap_false.
+         IF lv_not_delete = abap_true. "Do not delete (set the deletion flag only)
+           TEST-SEAM update_condition_record.
+             CALL METHOD mo_sls_api->update_condition_record
+               IMPORTING
+                 et_message                = DATA(lt_message_api)
+               CHANGING
+                 ct_condition_validity_enh = lt_condition_validity
+                 ct_condition_record       = lt_condition_record.
+           END-TEST-SEAM.
+         ENDIF.
+         IF NOT lt_condition_record_d IS INITIAL.
+           TEST-SEAM delete_condition_record.
+             CALL METHOD mo_sls_api->delete_condition_record
+               IMPORTING
+                 et_message          = lt_message_api
+               CHANGING
+                 ct_condition_record = lt_condition_record_d.
+           END-TEST-SEAM.
+         ENDIF.
+       CATCH cx_prcg_cndnrecord_exception INTO le_cndn.
+         ev_static_action_failed = abap_true.
+*     add header message to BOPF
+         CLEAR ls_message.
+         ls_message-msgid = le_cndn->if_t100_message~t100key-msgid.
+         ls_message-msgno = le_cndn->if_t100_message~t100key-msgno.
+         ls_message-msgty = le_cndn->if_t100_dyn_msg~msgty.
+         ls_message-msgv1 = le_cndn->if_t100_dyn_msg~msgv1.
+         ls_message-msgv2 = le_cndn->if_t100_dyn_msg~msgv2.
+         ls_message-msgv3 = le_cndn->if_t100_dyn_msg~msgv3.
+         ls_message-msgv4 = le_cndn->if_t100_dyn_msg~msgv4.
+
+         eo_message->add_message(
+           EXPORTING
+             is_msg       = ls_message
+             iv_node      = zif_i_slspricingconditionrec_c=>sc_node-zi_slspricingconditionrecordtp
+             iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition ).
+     ENDTRY.
+   ENDMETHOD.
+
+
+   METHOD check_authority.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+     DATA:ls_record_int TYPE if_cnd_maint_ltd_types=>ty_cond_record_usage_a_s,
+          ls_komg       TYPE komg.
+
+     CLEAR: es_msg.
+
+     cs_recordtp-conditionrecordiseditable = abap_true.
+
+     IF cs_recordtp-conditionrecord+0(2) <> '$$'.
+       mo_dep->get_wlf_mp_fields(
+        IMPORTING
+          et_wlf_mp_fields = DATA(lt_map) " Mapping external to internal fields
+      ).
+
+       LOOP AT lt_map INTO DATA(ls_map).
+         ASSIGN COMPONENT ls_map-ext_fieldname OF STRUCTURE cs_recordtp TO FIELD-SYMBOL(<fs_ext_value>).
+         IF <fs_ext_value> IS ASSIGNED AND NOT <fs_ext_value> IS INITIAL.
+           ASSIGN COMPONENT ls_map-int_fieldname OF STRUCTURE ls_record_int TO FIELD-SYMBOL(<fs_record_value>).
+           IF <fs_record_value> IS ASSIGNED.
+             <fs_record_value> = <fs_ext_value>.
+           ENDIF.
+           ASSIGN COMPONENT ls_map-int_fieldname OF STRUCTURE ls_komg TO FIELD-SYMBOL(<fs_komg_value>).
+           IF <fs_komg_value> IS ASSIGNED.
+             <fs_komg_value> = <fs_ext_value>.
+           ENDIF.
+         ENDIF.
+       ENDLOOP.
+
+       " 1. Authorization check on each record
+       ls_record_int-tabix = 1.
+       TRY.
+           mo_cond_checks->check_authority(
+             EXPORTING
+               is_cond_record = ls_record_int
+               iv_aktyp       = if_cnd_maint_ltd_check=>c_aktyp_change
+               iv_tabix       = ls_record_int-tabix
+               is_komg        = ls_komg
+               ).
+         CATCH cx_cnd_maint_ltd_exception INTO DATA(lr_exc).
+           " The user has no authority to change the condition record
+           es_msg-msgid = lr_exc->if_t100_message~t100key-msgid.
+           es_msg-msgty = lr_exc->if_t100_dyn_msg~msgty.
+           es_msg-msgno = lr_exc->if_t100_message~t100key-msgno.
+           es_msg-msgv1 = lr_exc->if_t100_dyn_msg~msgv1.
+           es_msg-msgv2 = lr_exc->if_t100_dyn_msg~msgv2.
+           es_msg-msgv3 = lr_exc->if_t100_dyn_msg~msgv3.
+           es_msg-msgv4 = lr_exc->if_t100_dyn_msg~msgv4.
+           cs_recordtp-conditionrecordiseditable = abap_false.
+       ENDTRY.
+     ENDIF.
+   ENDMETHOD.
+
+
+   METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+     super->constructor( ).
+     mo_sls_api = NEW zcl_slsprcg_cndnrecord_api( ).
+     mo_dep = cl_cnd_maint_ltd_dep_mgr=>get_instance( ).
+     mo_cond_checks = cl_cnd_maint_ltd_check_mgr=>get_instance( ).
+   ENDMETHOD.
+ ENDCLASS.

@@ -1,0 +1,209 @@
+class CL_SD_SLS_SOA_CRT_BULK_PROC definition
+  public
+  final
+  create private
+
+  global friends CL_SD_SLS_SOA_FACTORY .
+
+public section.
+
+  interfaces IF_SD_SLS_SOA_CRT_BULK_PROC .
+protected section.
+private section.
+
+  data MO_FACTORY type ref to IF_SD_SLS_SOA_FACTORY .
+
+  methods CONSTRUCTOR .
+  methods CHECK_DUPLICATE_CUST_RETURNS
+    importing
+      !IT_CUSTRETURNS type SDSLS_ESR_CUSTOMER_RETURN_TAB
+    exporting
+      !ET_RETURN_TAB type BAPIRET2_T .
+  methods CHECK_BUSINESS_SYSTEM_ID
+    importing
+      !IV_SENDER_BUSINESS_SYSTEM_ID type SD_EXT_BUS_SYST_ID
+    exporting
+      !EV_SENDER_BUSINESS_SYSTEM_ID type SD_EXT_BUS_SYST_ID
+      !ET_RETURN_TAB type BAPIRET2_T .
+  methods CHECK_LAST_CHANGE_DATE
+    importing
+      !IS_CUSTOMER_RETURN type SDSLS_ESR_CUSTOMER_RETURN
+    exporting
+      !EV_TIMESTAMP type TIMESTAMPL
+      !ET_RETURN_TAB type BAPIRET2_T .
+ENDCLASS.
+
+
+
+CLASS CL_SD_SLS_SOA_CRT_BULK_PROC IMPLEMENTATION.
+
+
+  METHOD check_business_system_id.
+    CLEAR: ev_sender_business_system_id,
+           et_return_tab.
+
+    IF iv_sender_business_system_id IS NOT INITIAL.
+      DATA(lv_is_cloud) = cl_cos_utilities=>is_s4h_cloud( ).
+      TEST-SEAM ls_s4h_cloud.
+      END-TEST-SEAM.
+      IF lv_is_cloud = abap_true.
+        TEST-SEAM bus_syst_maintained.
+*         CloudEdition
+          cl_sdsls_integ_common_factory=>get_asynchronous( )->cloud_get_logical_port(
+            EXPORTING
+              iv_comm_scenario_id   = if_sd_sls_soa_const=>co_comm_scenario-cr_bulk_integ-scenario_id
+              iv_comm_bus_syst_id   = iv_sender_business_system_id
+              iv_comm_service_id    = if_sd_sls_soa_const=>co_comm_scenario-cr_bulk_integ-outbound-conf-service_id
+            IMPORTING
+              ev_bus_syst_not_maint = DATA(lv_bus_syst_not_maint) ).
+        END-TEST-SEAM.
+        IF lv_bus_syst_not_maint EQ abap_true.
+          INSERT VALUE #( type   = if_sd_sls_message=>co_severity-error
+                          id     = if_sd_sls_message=>co_t100_msgid-soa_sd
+                          number = if_sd_sls_message=>co_t100_soa_sd-msgno_036 ) INTO TABLE et_return_tab.
+        ELSE.
+          ev_sender_business_system_id = iv_sender_business_system_id.
+        ENDIF.
+      ELSE.
+*       OnPremise
+        ev_sender_business_system_id = iv_sender_business_system_id.
+      ENDIF.
+    ELSE.
+      INSERT VALUE #( type   = if_sd_sls_message=>co_severity-error
+                      id     = if_sd_sls_message=>co_t100_msgid-soa_sd
+                      number = if_sd_sls_message=>co_t100_soa_sd-msgno_015 ) INTO TABLE et_return_tab.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD check_duplicate_cust_returns.
+    TYPES:
+      BEGIN OF tcs_ext_doc_id,
+        external_document_id TYPE sdesr_external_ref_key_id,
+      END OF tcs_ext_doc_id.
+
+    DATA:
+      lt_custreturns               TYPE SORTED TABLE OF tcs_ext_doc_id WITH NON-UNIQUE KEY table_line,
+      lv_last_external_document_id TYPE sdesr_external_ref_key_id.
+
+    CLEAR et_return_tab.
+    lt_custreturns = CORRESPONDING #( it_custreturns ). "sorting on EXTERNAL_DOCUMENT_ID
+
+*   Check if the same customer return is included more than once
+    LOOP AT lt_custreturns REFERENCE INTO DATA(lr_custreturns_validate).
+      IF lv_last_external_document_id EQ lr_custreturns_validate->external_document_id.
+        INSERT VALUE #( type       = if_sd_sls_message=>co_severity-error
+                        id         = if_sd_sls_message=>co_t100_msgid-soa_sd
+                        number     = 070
+                        message_v1 = lv_last_external_document_id ) INTO TABLE et_return_tab.
+        EXIT.
+      ENDIF.
+      lv_last_external_document_id = lr_custreturns_validate->external_document_id.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD check_last_change_date.
+    CLEAR:
+      et_return_tab,
+      ev_timestamp.
+
+*   if Last change date is initial
+    IF is_customer_return-external_doc_last_change_date IS INITIAL.
+      INSERT VALUE #( type   = if_sd_sls_message=>co_severity-error
+                      id     = if_sd_sls_message=>co_t100_msgid-soa_sd
+                      number = if_sd_sls_message=>co_t100_soa_sd-msgno_018 ) INTO TABLE et_return_tab.
+    ELSE.
+*     Convert XML Timestamp format into internal format
+      TRY .
+          cl_bs_soa_convert_xsddatetime=>map_xsddatetime_long_z_in(
+            EXPORTING
+              iv_xsd_datetime = is_customer_return-external_doc_last_change_date
+            IMPORTING
+              ev_timestamp    = ev_timestamp
+          ).
+        CATCH cx_bs_soa_exception.
+          INSERT VALUE #( type   = if_sd_sls_message=>co_severity-error
+                          id     = if_sd_sls_message=>co_t100_msgid-soa_sd
+                          number = if_sd_sls_message=>co_t100_soa_sd-msgno_011 ) INTO TABLE et_return_tab.
+      ENDTRY.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    mo_factory = cl_sd_sls_soa_factory=>so_instance.
+  ENDMETHOD.
+
+
+  METHOD if_sd_sls_soa_crt_bulk_proc~process_bulk.
+
+    DATA:
+      lo_single_processing  TYPE REF TO if_sd_sls_soa_crt_single_proc,
+      lv_ext_timestamp      TYPE timestampl,
+      lt_return_tab         TYPE bapiret2_t.
+
+    CLEAR: et_return_tab,
+           ev_aif_success_flag.
+
+    DO 1 TIMES.
+      DATA(lt_custreturns) = is_customer_return_bulk_msg-customer_return.
+
+*     Check if the same customer return is included more than once
+      check_duplicate_cust_returns(
+        EXPORTING
+          it_custreturns = lt_custreturns
+        IMPORTING
+          et_return_tab  = et_return_tab ).
+
+*     when error, stop the whole processing
+      CHECK NOT line_exists( et_return_tab[ type = if_sd_sls_message=>co_severity-error ] ).
+
+*     Check if busisness system id is valid
+      check_business_system_id(
+        EXPORTING
+          iv_sender_business_system_id = is_customer_return_bulk_msg-message_header-sender_business_system_id
+        IMPORTING
+          ev_sender_business_system_id = DATA(lv_ext_business_system_id)
+          et_return_tab                = et_return_tab ).
+
+*     when error, stop the whole processing
+      CHECK NOT line_exists( et_return_tab[ type = if_sd_sls_message=>co_severity-error ] ).
+
+      LOOP AT lt_custreturns REFERENCE INTO DATA(lr_custreturns).
+        CLEAR lt_return_tab.
+        check_last_change_date(
+          EXPORTING
+            is_customer_return = lr_custreturns->*
+          IMPORTING
+            et_return_tab  = lt_return_tab
+            ev_timestamp   = lv_ext_timestamp ).
+        INSERT LINES OF lt_return_tab INTO TABLE et_return_tab.
+
+*       if error, skip this customer return
+        CHECK NOT line_exists( lt_return_tab[ type = if_sd_sls_message=>co_severity-error ] ).
+
+        lo_single_processing = mo_factory->get_custreturn_processing_sing(
+         iv_ext_rev_tmstmp  = lv_ext_timestamp
+         iv_ext_bus_syst_id = lv_ext_business_system_id
+         iv_test_run_flag   = iv_test_run_flag ).
+
+        CLEAR lt_return_tab.
+
+*       Process every Customer Return individually
+        lt_return_tab = lo_single_processing->process_single( is_customerreturn = lr_custreturns->* ).
+
+        INSERT LINES OF lt_return_tab INTO TABLE et_return_tab.
+      ENDLOOP.
+    ENDDO.
+
+*   return success flag
+    IF NOT line_exists( et_return_tab[ type = if_sd_sls_message=>co_severity-error ] ).
+      ev_aif_success_flag = /aif/if_globals=>gc_success_flag-std_success.
+    ELSE.
+      ev_aif_success_flag = /aif/if_globals=>gc_success_flag-std_failure.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

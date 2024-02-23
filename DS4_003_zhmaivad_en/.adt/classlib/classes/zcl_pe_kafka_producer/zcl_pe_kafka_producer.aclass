@@ -1,0 +1,642 @@
+CLASS zcl_pe_kafka_producer DEFINITION
+  PUBLIC
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    TYPES: BEGIN OF mtyp_s_offset,
+             partition      TYPE i,
+             offset         TYPE int8,
+             error_code(19),
+             message        TYPE string,
+           END OF mtyp_s_offset,
+           mtyp_tt_offsets TYPE STANDARD TABLE OF mtyp_s_offset WITH DEFAULT KEY.
+    TYPES: BEGIN OF mtyp_s_api_response,
+             key_schema_id   TYPE zpe_kafka_schema_id,
+             value_schema_id TYPE zpe_kafka_schema_id,
+             offsets         TYPE mtyp_tt_offsets,
+           END OF mtyp_s_api_response .
+
+
+    METHODS: constructor IMPORTING iv_topic           TYPE zpe_kafka_topic,
+      add_record IMPORTING is_data_key   TYPE any OPTIONAL
+                           is_data_value TYPE any OPTIONAL,
+      send_kafka_message IMPORTING ith_mapping_tables TYPE /ui2/cl_json=>name_mappings OPTIONAL
+                         EXPORTING es_response        TYPE zpe_s_kafka_producer_response
+                         RAISING   zcx_pe_kafka_producer.
+  PROTECTED SECTION.
+    CONSTANTS:
+      BEGIN OF mc_s_configuration,
+        schema_key     TYPE zpe_kafka_config_key VALUE 'SCHEMA_KEY',
+        schema_value   TYPE zpe_kafka_config_key VALUE 'SCHEMA_VALUE',
+        optional_field TYPE zpe_kafka_config_key VALUE 'OPTIONAL_FIELD',
+        hidden_field   TYPE zpe_kafka_config_key VALUE 'HIDDEN_FIELD',
+      END OF mc_s_configuration .
+    CONSTANTS:
+      BEGIN OF mc_s_namespace_configuration,
+        rfc        TYPE zpe_kafka_config_key VALUE 'RFC',
+        apiVersion TYPE zpe_kafka_config_key VALUE 'API_VERSION',
+      END OF mc_s_namespace_configuration .
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF mtyp_s_topic,
+             topic           TYPE zpe_kafka_topic,
+             namespace       TYPE zpe_kafka_namespace,
+             key_schema_id   TYPE zpe_kafka_schema_id,
+             value_schema_id TYPE zpe_kafka_schema_id,
+           END OF mtyp_s_topic.
+
+    TYPES: BEGIN OF mtyp_s_json_body,
+             key_schema      TYPE string,
+             key_schema_id   TYPE zpe_kafka_schema_id,
+             value_schema    TYPE string,
+             value_schema_id TYPE zpe_kafka_schema_id,
+             records         TYPE zpe_tt_kafka_data_records,
+           END OF mtyp_s_json_body .
+
+
+    TYPES: BEGIN OF mtyp_s_optional_field,
+             path     TYPE string,
+             field    TYPE string,
+             jsontype TYPE string,
+           END OF mtyp_s_optional_field,
+           mtyp_tt_optional_field TYPE STANDARD TABLE OF mtyp_s_optional_field WITH DEFAULT KEY.
+
+    TYPES: BEGIN OF mtyp_s_hidden_field,
+             path  TYPE string,
+             field TYPE string,
+           END OF mtyp_s_hidden_field,
+           mtyp_tt_hidden_field TYPE STANDARD TABLE OF mtyp_s_hidden_field WITH DEFAULT KEY.
+
+
+    DATA: ms_topic          TYPE mtyp_s_topic,
+          mo_data_provider  TYPE REF TO lcl_data_provider,
+          mt_records        TYPE zpe_tt_kafka_data_records,
+          mt_json_header    TYPE httphead,
+          ms_json_body      TYPE mtyp_s_json_body,
+          mv_rfcdest        TYPE rfcdest,
+          ms_response       TYPE zpe_s_kafka_producer_response,
+          mt_optionalfields TYPE mtyp_tt_optional_field,
+          mt_hiddenfields   TYPE mtyp_tt_hidden_field.
+
+    METHODS set_record
+      IMPORTING
+        is_data_key            TYPE any
+        is_data_value          TYPE any
+      RETURNING
+        VALUE(rs_kafka_record) TYPE zpe_s_kafka_data_record.
+    METHODS set_response
+      IMPORTING
+        is_response TYPE mtyp_s_api_response
+        iv_status   TYPE i.
+    METHODS get_data_provider
+      IMPORTING
+        io_data_provider TYPE REF TO lcl_data_provider OPTIONAL.
+    METHODS build_json.
+    METHODS build_json_header.
+    METHODS build_json_body.
+    METHODS call_api  IMPORTING ith_mapping_tables TYPE /ui2/cl_json=>name_mappings OPTIONAL
+                      RAISING   zcx_pe_kafka_producer.
+    METHODS set_api_head CHANGING co_rest_client TYPE REF TO cl_rest_http_client.
+    METHODS set_api_body IMPORTING ith_mapping_tables TYPE /ui2/cl_json=>name_mappings
+                         CHANGING  cif_request        TYPE REF TO if_rest_entity
+                         RAISING   zcx_pe_kafka_producer.
+    METHODS get_topic_config
+      IMPORTING
+                iv_topic TYPE zpe_kafka_topic
+      RAISING   zcx_pe_kafka_producer.
+
+    METHODS change_optional_fields
+      CHANGING
+               cv_json TYPE string
+      RAISING  zcx_pe_kafka_producer.
+    METHODS get_optional_fields RAISING   zcx_pe_kafka_producer.
+    METHODS change_json
+      CHANGING
+        cv_json TYPE string.
+    METHODS build_config RAISING   zcx_pe_kafka_producer.
+    METHODS remove_hidden_fiedls
+      CHANGING
+               cv_json TYPE string
+      RAISING  zcx_pe_kafka_producer.
+    METHODS get_hidden_fields RAISING   zcx_pe_kafka_producer.
+ENDCLASS.
+
+
+
+CLASS zcl_pe_kafka_producer IMPLEMENTATION.
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528,DS4K916184                    *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    ms_topic-topic = iv_topic.
+
+  ENDMETHOD.
+
+
+  METHOD get_data_provider.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528,DS4K916184                    *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    IF io_data_provider IS BOUND.
+      mo_data_provider = io_data_provider.
+    ELSEIF mo_data_provider IS NOT BOUND.
+      mo_data_provider = NEW lcl_data_provider( ).
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD add_record.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528                               *
+*----------------------------------------------------------------------*
+    DATA(ls_kafka_record) = set_record( is_data_key   = is_data_key
+                                        is_data_value = is_data_value ).
+    APPEND ls_kafka_record TO mt_records.
+  ENDMETHOD.
+
+
+  METHOD set_record.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528                               *
+*----------------------------------------------------------------------*
+    FIELD-SYMBOLS: <ls_data_key>   TYPE any,
+                   <lt_data_key>   TYPE ANY TABLE,
+                   <lt_data_value> TYPE ANY TABLE,
+                   <ls_data_value> TYPE any.
+    "key
+    CREATE DATA rs_kafka_record-key LIKE is_data_key.
+    CASE cl_abap_typedescr=>describe_by_data( is_data_key )->type_kind.
+      WHEN cl_abap_typedescr=>typekind_table.
+        ASSIGN rs_kafka_record-key->* TO <lt_data_key>.
+        <lt_data_key> = is_data_key.
+      WHEN cl_abap_typedescr=>typekind_struct1 OR cl_abap_typedescr=>typekind_struct2.
+        ASSIGN rs_kafka_record-key->* TO <ls_data_key>.
+        <ls_data_key> = is_data_key.
+    ENDCASE.
+
+
+    "value
+    CREATE DATA rs_kafka_record-value LIKE is_data_value.
+    CASE cl_abap_typedescr=>describe_by_data( is_data_value )->type_kind.
+      WHEN cl_abap_typedescr=>typekind_table.
+        ASSIGN rs_kafka_record-value->* TO <lt_data_value>.
+        <lt_data_value> = is_data_value.
+      WHEN cl_abap_typedescr=>typekind_struct1 OR cl_abap_typedescr=>typekind_struct2.
+        ASSIGN rs_kafka_record-value->* TO <ls_data_value>.
+        <ls_data_value> = is_data_value.
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD send_kafka_message.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528,DS4K916184                    *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    get_data_provider(  ).
+    build_config(  ).
+    build_json(  ).
+    call_api( ith_mapping_tables = ith_mapping_tables ).
+    es_response = ms_response.
+  ENDMETHOD.
+
+
+  METHOD build_json.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528                               *
+*----------------------------------------------------------------------*
+    build_json_header( ).
+    build_json_body(  ).
+
+  ENDMETHOD.
+
+
+  METHOD build_json_header.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528                               *
+*----------------------------------------------------------------------*
+    IF ms_topic-key_schema_id IS INITIAL AND ms_topic-value_schema_id IS INITIAL.
+      mt_json_header = VALUE #( ( name = 'Content-Type'
+                                  value = 'application/vnd.kafka.json.v2+json' ) ).
+    ELSE.
+      mt_json_header = VALUE #( ( name = 'Content-Type'
+                                  value = 'application/vnd.kafka.avro.v2+json' ) ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD build_json_body.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528                               *
+*----------------------------------------------------------------------*
+    ms_json_body = CORRESPONDING #( ms_topic ).
+    ms_json_body-records = mt_records[].
+
+  ENDMETHOD.
+
+
+  METHOD call_api.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528,DS4K916184                    *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    mo_data_provider->create_http_client( EXPORTING iv_rfcdest = mv_rfcdest
+                                          IMPORTING eif_http_client = DATA(lif_http_client) ).
+    TRY.
+        cl_http_utility=>set_request_uri( request = lif_http_client->request
+                                          uri     = |/topics/{ ms_topic-topic }| ).
+        ms_response-json_message-pathprefix = |/topics/{ ms_topic-topic }|.
+        DATA(lo_rest_client) = NEW cl_rest_http_client( lif_http_client ).
+        DATA(lif_request) = lo_rest_client->if_rest_client~create_request_entity( ).
+      CATCH cx_rest_client_exception.
+        RAISE EXCEPTION TYPE zcx_pe_kafka_producer MESSAGE e002(zpe_kafka_producer).
+    ENDTRY.
+    IF lif_request IS BOUND.
+      set_api_head( CHANGING co_rest_client = lo_rest_client ).
+      set_api_body( EXPORTING ith_mapping_tables = ith_mapping_tables
+                    CHANGING cif_request = lif_request ).
+      TRY.
+          mo_data_provider->post( EXPORTING iif_request = lif_request
+                                  IMPORTING es_response = DATA(ls_response)
+                                            ev_status = DATA(lv_status)
+                                  CHANGING co_rest_client = lo_rest_client ).
+
+          lo_rest_client->if_rest_client~close( ).
+          set_response( is_response = ls_response
+                        iv_status = lv_status ).
+        CATCH cx_rest_client_exception.
+          RAISE EXCEPTION TYPE zcx_pe_kafka_producer MESSAGE e002(zpe_kafka_producer).
+      ENDTRY.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD set_api_head.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528,DS4K916184                    *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    LOOP AT mt_json_header ASSIGNING FIELD-SYMBOL(<ls_header>).
+      co_rest_client->if_rest_client~set_request_header( iv_name  = <ls_header>-name
+                                                         iv_value = CONV #( <ls_header>-value ) ).
+    ENDLOOP.
+    ms_response-json_message-header = mt_json_header.
+  ENDMETHOD.
+
+  METHOD set_api_body.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528,DS4K916184                    *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    IF ms_json_body IS NOT INITIAL.
+      DATA(lv_json) = /ui2/cl_json=>serialize( data = ms_json_body "OBJECT!!!
+                                           pretty_name = /ui2/cl_json=>pretty_mode-low_case
+                                           numc_as_string = abap_true
+                                           name_mappings = ith_mapping_tables
+                                           conversion_exits = abap_true ).
+      remove_hidden_fiedls( CHANGING cv_json = lv_json ).
+      change_optional_fields( CHANGING cv_json = lv_json ).
+      cif_request->set_string_data( lv_json ).
+      ms_response-json_message-body = lv_json.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_topic_config.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528                               *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    ms_topic-namespace  = substring_before( val = iv_topic sub = '.' ).
+    DATA(lt_config) = mo_data_provider->get_kafka_configuration_value( iv_topic = iv_topic
+                                                                        iv_key = mc_s_configuration-schema_key ).
+    READ TABLE lt_config INTO ms_topic-key_schema_id INDEX 1. "#EC CI_SUBRC
+
+    lt_config = mo_data_provider->get_kafka_configuration_value( iv_topic = iv_topic
+                                                                 iv_key = mc_s_configuration-schema_value ).
+    READ TABLE lt_config INTO  ms_topic-value_schema_id INDEX 1. "#EC CI_SUBRC
+
+    IF ( ms_topic-key_schema_id IS INITIAL AND ms_topic-value_schema_id IS NOT INITIAL )
+    OR ( ms_topic-key_schema_id IS NOT INITIAL AND ms_topic-value_schema_id IS INITIAL ).
+      RAISE EXCEPTION TYPE zcx_pe_kafka_producer MESSAGE e004(zpe_kafka_producer).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+
+  METHOD set_response.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 10.03.2022 | 10163     : Kafka helper tool            *
+*              |            | DS4K914528,DS4K916184                    *
+*----------------------------------------------------------------------*
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    ms_response-status = iv_status.
+    IF cl_rest_status_code=>is_success( iv_code = iv_status ) = abap_false AND is_response-offsets[] IS NOT INITIAL.
+      ms_response-error_code = is_response-offsets[ 1 ]-error_code.
+      ms_response-error_message = is_response-offsets[ 1 ]-message.
+    ELSE.
+      ms_response-offsets = VALUE #( FOR ls_offset IN is_response-offsets
+                                     ( ls_offset-offset ) ).
+    ENDIF.
+  ENDMETHOD.
+
+
+
+  METHOD change_optional_fields.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+
+    get_optional_fields(  ).
+    change_json( CHANGING cv_json = cv_json ).
+
+  ENDMETHOD.
+
+
+
+  METHOD get_optional_fields.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    DATA(lt_fields) = mo_data_provider->get_kafka_configuration_value( iv_topic = ms_topic-topic
+                                                                       iv_key = mc_s_configuration-optional_field ).
+    LOOP AT lt_fields ASSIGNING FIELD-SYMBOL(<lv_field>).
+      APPEND INITIAL LINE TO mt_optionalfields ASSIGNING FIELD-SYMBOL(<ls_optionalfield>).
+
+      TRY.
+          IF find( val = <lv_field> sub = '-' )  = -1 . "no path
+            <ls_optionalfield> = VALUE #( path = substring_before( val = <lv_field> sub = '/')
+                                          field = substring_before( val = <lv_field> sub = '/')
+                                          jsontype = substring_after( val = <lv_field> sub = '/' )
+                                          ).
+          ELSE.
+            <ls_optionalfield> = VALUE #( path = substring_before( val = <lv_field> sub = '/')
+                                          field = substring_before( val =  substring_after( val = <lv_field> sub = '-' occ = '-1' )
+                                                                    sub = '/' )
+                                          jsontype = substring_after( val = <lv_field> sub = '/' )
+                                          ).
+
+          ENDIF.
+        CATCH cx_sy_strg_par_val cx_sy_range_out_of_bounds.
+          RAISE EXCEPTION TYPE zcx_pe_kafka_producer MESSAGE e003(zpe_kafka_producer).
+      ENDTRY.
+    ENDLOOP.
+
+
+  ENDMETHOD.
+
+
+
+  METHOD change_json.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    DATA: lv_offset TYPE i.
+    LOOP AT mt_optionalfields ASSIGNING FIELD-SYMBOL(<ls_optional>).
+      TRY.
+          lv_offset = 0.
+          WHILE <ls_optional>-path <> <ls_optional>-field.
+            DATA(lv_search) = substring_before( val = <ls_optional>-path sub = '-').
+            DATA(lv_search_json)   = |"{ lv_search }":|.
+            lv_offset = find( val = cv_json sub = lv_search off = lv_offset ).
+            <ls_optional>-path = substring_after( val = <ls_optional>-path sub = '-').
+          ENDWHILE.
+          IF lv_offset = -1.
+            CONTINUE.
+          ENDIF.
+          lv_search = <ls_optional>-field.
+          lv_search_json   = |"{ lv_search }":|.
+          lv_offset = find( val = cv_json sub = lv_search_json off = lv_offset ).
+
+          DATA(lv_replace)  = |"{ <ls_optional>-field }" : \{ "{ <ls_optional>-jsontype }": |.
+          cv_json = replace( val = cv_json off = lv_offset len = strlen( lv_search_json ) with = lv_replace ).
+
+
+          DATA(lv_offsetEndObject) = SWITCH i( <ls_optional>-jsontype(5)
+                                              WHEN 'array' THEN find( val = cv_json sub = '],' off = lv_offset )
+                                              WHEN 'com.a' THEN find( val = cv_json sub = '},' off = lv_offset )
+                                              ELSE find( val = cv_json sub = '"' off = lv_offset occ = 6 ) ).
+
+          IF lv_offsetEndObject = '-1'.
+            lv_offsetEndObject = find( val = cv_json sub = ']' occ = -1 ).
+            cv_json = replace( val = cv_json off = lv_offsetEndObject len = 1 with = '}]' ).
+          ELSE.
+            cv_json = SWITCH string( <ls_optional>-jsontype(5)
+                                     WHEN 'array' OR 'com.a' THEN replace( val = cv_json off = lv_offsetEndObject + 1 len = 1 with = '},' )
+                                     ELSE replace( val = cv_json off = lv_offsetEndObject  len = 1 with = '"}' ) ).
+          ENDIF.
+
+        CATCH cx_sy_range_out_of_bounds cx_sy_strg_par_val.
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+
+  METHOD build_config.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    get_topic_config( ms_topic-topic ).
+    DATA(lt_config) = mo_data_provider->get_namespace_value( iv_namespace = ms_topic-namespace
+                                                             iv_key = mc_s_namespace_configuration-rfc ).
+    mv_rfcdest = lt_config[ 1 ].
+  ENDMETHOD.
+
+
+
+  METHOD remove_hidden_fiedls.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    DATA: lv_offset TYPE i.
+    get_hidden_fields(  ).
+    LOOP AT mt_hiddenfields ASSIGNING FIELD-SYMBOL(<ls_hiddenfield>).
+      TRY.
+          lv_offset = 0.
+          WHILE <ls_hiddenfield>-path <> <ls_hiddenfield>-field.
+            DATA(lv_search) = substring_before( val = <ls_hiddenfield>-path sub = '-').
+            DATA(lv_search_json)   = |"{ lv_search }":|.
+            lv_offset = find( val = cv_json sub = lv_search off = lv_offset ).
+            <ls_hiddenfield>-path = substring_after( val = <ls_hiddenfield>-path sub = '-').
+          ENDWHILE.
+          lv_search = <ls_hiddenfield>-field.
+          lv_search_json   = |"{ lv_search }":|.
+          lv_offset = find( val = cv_json sub = lv_search_json off = lv_offset ).
+          DATA(lv_offsetEndObject) = find( val = cv_json sub = ',' off = lv_offset ).
+          IF lv_offsetEndObject = '-1'.
+            lv_offsetEndObject = find( val = cv_json sub = '}' occ = -1 ).
+          ENDIF.
+          cv_json = replace( val = cv_json off = lv_offset len = ( lv_offsetEndObject - lv_offset - 1 ) with = '' ).
+
+        CATCH cx_sy_range_out_of_bounds cx_sy_strg_par_val.
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+
+  METHOD get_hidden_fields.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 11.04.2022 | 10561     : Kafka helper tool v2         *
+*              |            | DS4K916184                               *
+*----------------------------------------------------------------------*
+    DATA(lt_fields) = mo_data_provider->get_kafka_configuration_value( iv_topic = ms_topic-topic
+                                                                         iv_key = mc_s_configuration-hidden_field ).
+    LOOP AT lt_fields ASSIGNING FIELD-SYMBOL(<lv_field>).
+      APPEND INITIAL LINE TO mt_hiddenfields ASSIGNING FIELD-SYMBOL(<ls_hiddenfield>).
+
+      TRY.
+          IF find( val = <lv_field> sub = '-' )  = -1 . "no path
+            <ls_hiddenfield> = VALUE #( path = <lv_field>
+                                          field = <lv_field>
+                                          ).
+          ELSE.
+            <ls_hiddenfield> = VALUE #( path = <lv_field>
+                                          field = substring_after( val = <lv_field> sub = '-' occ = '-1' )
+                                          ).
+
+          ENDIF.
+        CATCH cx_sy_strg_par_val cx_sy_range_out_of_bounds.
+          RAISE EXCEPTION TYPE zcx_pe_kafka_producer MESSAGE e003(zpe_kafka_producer).
+      ENDTRY.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+ENDCLASS.

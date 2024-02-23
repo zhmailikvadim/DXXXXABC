@@ -1,0 +1,734 @@
+*----------------------------------------------------------------------*
+*  INCLUDE FV50WF0B                                                    *
+*----------------------------------------------------------------------*
+*  Unterroutinen SD/WS-Warenausgang alphabetisch sortiert:             *
+*  -------------------------------------------------------             *
+*  Buchstabe B:                                                        *
+*                                                                      *
+*       PERFORM BESTANDSFINDUNG_DURCHFUEHREN.                          *
+*       PERFORM BESTANDSFINDUNG_CHECK.                                 *
+*       PERFORM BESTELLHISTORY_READ.                                   *
+*       PERFORM BADI_LE_SHP_GOODSMOVEMENT.                             *
+*----------------------------------------------------------------------*
+
+
+*&---------------------------------------------------------------------*
+*&      Form  BESTANDSFINDUNG_DURCHFUEHREN
+*&---------------------------------------------------------------------*
+*       BF_STOCK_DETERMINATION zur Bestandsfindung aufrufen
+*----------------------------------------------------------------------*
+FORM bestandsfindung_durchfuehren.
+
+  DATA:   lf_bukrs TYPE bukrs,
+          lf_monat TYPE monat,
+          lf_gjahr TYPE gjahr,
+          ls_marv  TYPE marv.
+  CLEAR:  xbfcom,
+          e_bfstock.
+  REFRESH e_bfstock.
+
+  MOVE-CORRESPONDING ximseg TO xbfcom.
+
+*<<<<<<<<< begin of insertion HP_169127 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+*... Unterscheidung Bewertungsart, Charge
+  IF xlips-bwtex =  charx AND
+     xlips-xchpf <> charx AND
+     xlips-xchar =  charx.
+    CLEAR xbfcom-charg.
+    xbfcom-bwtar = xlips-bwtar.
+  ENDIF.
+*<<<<<<<<<<<< end of insertion HP_169127 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+  xbfcom-kappl = 'ME'.
+  CLEAR xbfcom-lbbsa.
+
+*... Keinen Dialog mit der Bestandsfindung beim WA !
+  xbfcom-nodia = charx.
+
+*... KZ Dynamische Verfügbarkeitsprüfung (Lokale Sperre)
+  xbfcom-kzvbp = charl.
+
+*... Transaktionstyp vorgeben (HW 115254)
+  xbfcom-atp_trtyp = t180-trtyp.
+
+*... Allow postings into earlier periods with stock determination
+  IF likp-wadat_ist < sy-datlo.                             "v_n_1038531
+
+*   Get company code for plant
+    CALL FUNCTION 'RM_COMPANYCODE_FIND'
+      EXPORTING
+        werks    = xlips-werks
+      IMPORTING
+        compcode = lf_bukrs.
+
+    IF sy-subrc IS INITIAL.
+*     Find related posting period for actual GM date
+      CALL FUNCTION 'FI_PERIOD_DETERMINE'
+        EXPORTING
+          i_bukrs = lf_bukrs
+          i_budat = likp-wadat_ist
+        IMPORTING
+          e_monat = lf_monat
+          e_gjahr = lf_gjahr
+        EXCEPTIONS
+          OTHERS  = 1.
+
+      IF sy-subrc IS INITIAL.
+*       Get actual MARV entry to compare
+        CALL FUNCTION 'MARV_SINGLE_READ'
+          EXPORTING
+            bukrs  = lf_bukrs
+          IMPORTING
+            wmarv  = ls_marv
+          EXCEPTIONS
+            OTHERS = 1.
+*       Set XRUEM or XRUEJ in case of posting into earlier periods
+        IF sy-subrc IS INITIAL AND
+           lf_monat EQ ls_marv-vmmon AND
+           lf_monat NE ls_marv-lfmon.
+*         Posting to previous periodas only 2 are open
+          xbfcom-xruem = charx.
+          IF lf_gjahr LT ls_marv-lfgja.
+*           Previous period is also the last year period
+            xbfcom-xruej = charx.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+*   Do not set XRUEM or XRUEJ in case of any problems
+  ENDIF.                                                    "^_n_1038531
+
+*... Stock determination split allowed, except serial numbers "n_853506
+
+*... Bestandsfindung ausführen
+  CALL FUNCTION 'BF_STOCK_DETERMINATION'
+    TABLES
+      e_bfstock               = e_bfstock
+    CHANGING
+      x_bfcom                 = xbfcom
+    EXCEPTIONS
+      no_material             = 1
+      no_plant                = 2
+      no_application          = 3
+      function_not_possible   = 4
+      condition_not_found     = 5
+      classtype_not_found     = 6
+      classtype_not_active    = 7
+      no_base_unit            = 8
+      no_unit                 = 9
+      conversion_not_found    = 10
+      conversion_overflow     = 11
+      missing_entry_t156c     = 12
+      conversion_type_invalid = 13
+      division_by_zero        = 14
+      data_mismatch           = 15
+      material_not_found      = 16
+      no_quantity             = 17
+      OTHERS                  = 18.
+
+  IF NOT sy-subrc EQ 0.
+    MESSAGE a640 WITH sy-subrc.
+  ELSE.
+    LOOP AT e_bfstock.
+      ximseg-matnr = e_bfstock-matnr.
+      ximseg-werks = e_bfstock-werks.
+      ximseg-lgort = e_bfstock-lgort.
+      ximseg-charg = e_bfstock-charg.
+      ximseg-menge = e_bfstock-menge.
+      ximseg-meins = e_bfstock-meins.
+      ximseg-erfmg = e_bfstock-erfmg.
+      ximseg-erfme = e_bfstock-erfme.
+      ximseg-sobkz = e_bfstock-sobkz.
+      ximseg-lifnr = e_bfstock-lifnr.
+      ximseg-bwtar = e_bfstock-bwtar.
+
+*... Bewertungsart vorhanden?
+      IF NOT xlips-bwtex IS INITIAL
+         AND xlips-xchpf IS INITIAL.
+        IF xlips-bwtar IS INITIAL AND
+           xlips-lfimg > 0        AND
+           NOT xlips-bwart IS INITIAL.
+          IF NOT ximseg-bwtar IS INITIAL.
+          ELSE.
+* MESSAGE E606 WITH XLIPS-POSNR.
+* In Lieferposition & ist die Bewertungsart nicht bekannt
+            MOVE-CORRESPONDING xlips TO wat.
+            wat-msgno = '606'.
+            wat-msgty = e.
+            wat-msgid = 'VL'.
+            wat-msgv1 = xlips-posnr.
+            wat-msgv2 = space.
+            wat-msgv3 = space.
+            wat-msgv4 = space.
+            APPEND wat.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+*... Gewicht u. Volumen zuweisen, auf 1 Mengeneinheit bezogen
+      IF NOT xlips-lgmng IS INITIAL.
+        ximseg-brgew = xlips-brgew / xlips-lgmng.
+        ximseg-volum = xlips-volum / xlips-lgmng.
+      ENDIF.
+      ximseg-l_tabix = xlips_tabix.
+      APPEND ximseg.
+      xbfcom-erfmg = xbfcom-erfmg - e_bfstock-erfmg.
+    ENDLOOP.
+
+*... Konnte die angeforderte Menge befiedigt werden?
+    IF xbfcom-erfmg > 0.
+* MESSAGE E643.
+* Nach Bestandsfindung bleibt eine Menge von & & offen
+      DATA: loc_text(20) TYPE c.
+      WRITE xbfcom-erfmg TO loc_text NO-ZERO LEFT-JUSTIFIED. "#EC *
+      MOVE-CORRESPONDING xlips TO wat.
+      wat-msgno = '643'.
+      wat-msgty = e.
+      wat-msgid = 'VL'.
+      wat-msgv1 = loc_text.
+      wat-msgv2 = xbfcom-erfme.
+      wat-msgv3 = space.
+      wat-msgv4 = space.
+      APPEND wat.
+    ELSE.
+*... Mengen sperren bei gleichem Material in verschiedenen Positionen
+      CALL FUNCTION 'BF_SET_LOC_ENQ_TAB'
+        EXPORTING
+          delete_stock = ' '
+        TABLES
+          l_bfstock    = e_bfstock
+        EXCEPTIONS
+          OTHERS       = 1.
+
+      xlips-lbefu_ind = xlips_tabix.
+      xlips-lips_up   = charx.
+      MODIFY xlips.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                               " BESTANDSFINDUNG_DURCHFUEHREN
+
+
+*&---------------------------------------------------------------------*
+*&      Form  BESTANDSFINDUNG_CHECK                                    *
+*&---------------------------------------------------------------------*
+*  Diese Formroutine prüft die Alternativen bezügl. durchzuführender   *
+*  Bestandsfindung pro Lieferposition.                                 *
+*                                                                      *
+*  Alternativen:    1. Kein WM aktiv                                   *
+*                   2. WM aktiv, aber kein LEAN-WM                     *
+*                   3. LEAN-WM aktiv                                   *
+*                   4. Belegschiefstand                                *
+*                   5. Dec. WMS                                        *
+*                   6. Handling Units                                  *
+*                                                                      *
+*  BC_WB_RESULT liefert einen Returncode gemäß der unten aufgeführten  *
+*  Unterpunkte                                                         *
+*----------------------------------------------------------------------*
+*  1. Kein WM aktiv:                                                   *
+*  =================                                                   *
+*     LIPS-KOMKZ <> D , VBUP-LVSTA = space, LIPS-KZBEF = SPACE         *
+*                                                                      *
+*  1.1  LIPS-EPRIO = space, LIPS-RULES = space                         *
+*       normaler GI in SHP                                             *
+*                                                                      *
+*       LIPS-EPRIO = space, LIPS-RULES <> space                        *
+*       normaler GI in SHP                                             *
+*                                                                      *
+*       LIPS-EPRIO <> space, LIPS-RULES = space                        *
+*       normaler GI in SHP                                             *
+*                                                                      *
+*  1.2  LIPS-EPRIO <> space, LIPS-RULES <> space                       *
+*       Bestandsfindung im SHP/GI                                      *
+*                                                                      *
+*  1.3  LIPS-KOMKZ <> D, VBUP-LVSTA = space, LIPSKZBEF <> space        *
+*       Fehler!                                                        *
+*                                                                      *
+************************************************************************
+*                                                                      *
+*  2. WM aktiv, kein LEAN-WM: Hier niemals eigene BF durch SHP/GI      *
+*  ==============================================================      *
+*     LIPS-KOMKZ <> D, VBUP-LVSTA <> space                             *
+*                                                                      *
+*  2.1   LIPS-KZBEF <> space   (durch WM gesetzt)                      *
+*        LIPS-EPRIO <> space, LIPS-RULES = space or LIPS-RULES <> space*
+*        VBFA-KZBEF, VBFA-SOBKZ, VBFA-SONUM in VBFA durch WM gesetzt   *
+*                 Analyse VBFA-SOBKZ, VBFA-SONUM, VBFA-KZBEF           *
+*                 Weiterverabeitung in IMSEG                           *
+*                                      VBFA-SOBKZ in IMSEG-SOBKZ       *
+*                                      VBFA-SONUM in IMSEG-LIFNR       *
+*                                                                      *
+*  2.2  LIPS-KZBEF = space                                             *
+*       LIPS-EPRIO = space, LIPS-RULES = space or LIPS-RULES <> space  *
+*       LIPS-EPRIO <> space, LIPS-RULES = space or LIPS-RULES <> space *
+*       VBFA-KZBEF, VBFA-SOBKZ, VBFA-SONUM in VBFA initial             *
+*                 keine Bestandsfindung durch SHP/GI                   *
+*                                                                      *
+************************************************************************
+*                                                                      *
+*  3. LEAN-WM aktiv (KOMKZ = D):                                       *
+*  =============================                                       *
+*       LIPS-KOMKZ = D, VBUP-LVSTA <> space                            *
+*  3.1  LIPS-KZBEF <> space    (durch WM-LEAN gesetzt)                 *
+*       LIPS-EPRIO <> space, LIPS-RULES = space or LIPS-RULES <> space *
+*                                                                      *
+*       VBFA-KZBEF, VBFA-SOBKZ, VBFA-SONUM in VBFA durch WM gesetzt    *
+*                 Analyse VBFA-SOBKZ, VBFA-SONUM, VBFA-KZBEF           *
+*                 Weiterverabeitung in IMSEG                           *
+*                                      VBFA-SOBKZ in IMSEG-SOBKZ       *
+*                                      VBFA-SONUM in IMSEG-LIFNR       *
+*                                                                      *
+*                 Der Sonderbestand wird beim quittieren TA manuell    *
+*                 gesetzt.                                             *
+*                 Keine Bestandsfindung durch SHP/GI                   *
+*                                                                      *
+*                                                                      *
+*       LIPS-KZBEF = space                                             *
+*  3.2  LIPS-EPRIO = space, LIPS-RULES = space                         *
+*       normaler GI in SHP                                             *
+*                                                                      *
+*       LIPS-EPRIO = space, LIPS-RULES <> space                        *
+*       normaler GI in SHP                                             *
+*                                                                      *
+*       LIPS-EPRIO <> space, LIPS-RULES = space                        *
+*       normaler GI in SHP                                             *
+*                                                                      *
+*  3.3  LIPS-EPRIO <> space, LIPS-RULES <> space                       *
+*       Bestandsfindung im SHP/GI                                      *
+*                                                                      *
+************************************************************************
+*                                                                      *
+*  4.   Belegschiefstand                                               *
+*  =====================                                               *
+*  4.1  LIPS-KOMKZ = D, VBUP-LVSTA = space, LIPS-KZBEF = space         *
+*       Fehler                                                         *
+*                                                                      *
+*  4.2  LIPS-KOMKZ = D, VBUP-LVSTA = space, LIPS-KZBEF <> space        *
+*                                                                      *
+************************************************************************
+*                                                                      *
+*  5.   Bestandsfindung ist im dezentralen WMS gelaufen                *
+*  ====================================================                *
+*  5.1  Interne Tabelle VBSUPCON_TAB gefüllt, LIKP-VLSTK = C           *
+*                                                                      *
+************************************************************************
+*                                                                      *
+*  6.   HUM or LEAN STATUS UPDATE active (TVSHP-EXIDV_UNIQE or         *
+*       TVSHP-SPE_LEAN_HUSTAT is set                                   *
+*  ====================================================                *
+*  6.1  No Stock Determination when item is packed  (note 1385829)     *
+*                                                                      *
+*----------------------------------------------------------------------*
+FORM bestandsfindung_check USING bc_wb_result.
+  DATA: vbsupcon_anzpo LIKE sy-tabix.
+  DATA: lf_unique          TYPE xfeld,                      "n_1385829
+        lf_spe_lean_hustat TYPE xfeld,
+        lf_pksta           TYPE vbup-pksta,                 "n_1626768
+        cf_hu_sd           TYPE xfeld,                      "n_2095809
+        lf_counter         TYPE sytabix.                    "n_1626768
+  STATICS: sf_tabix        TYPE sytabix,                    "n_2501902
+           sf_vbeln        TYPE lips-vbeln.                 "n_2675881
+
+* Begin of note 1385829
+  CHECK xlips-hupos EQ ' '.
+* VLPOD step for SIT => no stock determination!              "n_1966276
+  CHECK GV_XSIT IS INITIAL OR GV_XSIT EQ CHARN.              "n_2495946
+
+  CALL FUNCTION 'HU_TVSHP_SELECT'
+    IMPORTING
+      ef_exidv_unique    = lf_unique                      "v_XAN-SPM
+      ef_spe_lean_hustat = lf_spe_lean_hustat.
+*...XAN HU_lean_status_update for non-unique HU numbering setting
+  IF NOT lf_spe_lean_hustat IS INITIAL OR
+     NOT lf_unique IS INITIAL.
+    READ TABLE xvbup WITH KEY vbeln = xlips-vbeln
+                              posnr = xlips-posnr
+                              BINARY SEARCH.
+    IF sy-subrc IS INITIAL.
+      IF sf_vbeln IS INITIAL.                               "v_n_2675881
+        sf_vbeln = xlips-vbeln.
+      ELSEIF sf_vbeln <> xlips-vbeln.
+*...initialize sf_tabix with new delivery
+        CLEAR sf_tabix.
+        sf_vbeln = xlips-vbeln.
+      ENDIF.                                                "^_n_2675881
+      sf_tabix = sf_tabix + 1.                                "n_2501902
+      PERFORM userexit_activate_hu_sd(sapmv50a) IF FOUND    "v_n_2095809
+              CHANGING cf_hu_sd.
+      IF sy-subrc IS INITIAL AND NOT
+         cf_hu_sd IS INITIAL  AND
+         xlips-eprio NE space AND
+         ( xlips-rules NE space OR xlips-kzbef NE space ).
+*       Make the HU think only one stock is found
+        PERFORM hu_fill_hu_imseg USING sf_tabix.              "n_2501902
+      IF likp-vlstk <> charc                         OR
+         cl_ops_switch_check=>le_sfws_sc3( ) = space OR
+         /spe/cl_ctrl=>is_ewm( i_lgnum = likp-lgnum ) = gc_false.
+*         Allowed by user exit
+        ELSE.
+          lf_pksta = xvbup-pksta.
+        ENDIF.
+      ELSE.
+* Allow in EWM packed consignment stock                     "v_n_1626768
+        IF likp-vlstk <> charc                         OR
+           cl_ops_switch_check=>le_sfws_sc3( ) = space OR
+           /spe/cl_ctrl=>is_ewm( i_lgnum = likp-lgnum ) = gc_false.
+          CHECK xvbup-pksta EQ ' '.
+      ELSE.
+         lf_pksta = xvbup-pksta.                             "n_2036185
+      ENDIF.                                              "^_n_1626768
+      ENDIF.                                                "^_n_2095809
+    ENDIF.
+  ENDIF.
+* End   of note 1385829
+
+*... Bestandsfindung im dezentralen WMS gelaufen ?
+  IF likp-vlstk EQ charc.
+    IF VBSUPCON_TAB[] IS INITIAL AND                        "v_n_2571384
+      /SPE/CL_CTRL=>IS_EWM( I_LGNUM = LIKP-LGNUM ) = GC_TRUE.
+*     No stock determination in ERP for deliveries processed in EWM
+      CLEAR BC_WB_RESULT.
+      RETURN.
+    ENDIF.                                                  "^_n_2571384
+    IF lf_pksta NA 'BC'                            OR      "v_n_1626768
+       cl_ops_switch_check=>le_sfws_sc3( ) = space OR
+       /spe/cl_ctrl=>is_ewm( i_lgnum = likp-lgnum ) = gc_false.
+* Item not packed, LOG_LE_INTEGRATION not active or no EWM: Use
+*old logic
+      READ TABLE vbsupcon_tab WITH KEY vbeln_vl = xlips-vbeln " 811932
+                                       posnr_vl = xlips-posnr " 811932
+                                       BINARY SEARCH.       "n_967038
+      IF sy-subrc IS INITIAL.                               " 811932
+        bc_wb_result = '51'.
+        CHECK 1 = 2.
+      ENDIF.
+    ELSE.
+* Delivery has been processed in EWM and item is packed: Allow exactly
+* one consignment stock
+      CLEAR lf_counter.
+      LOOP AT vbsupcon_tab TRANSPORTING NO FIELDS
+                           WHERE vbeln_vl = xlips-vbeln
+                           AND   posnr_vl = xlips-posnr.
+        lf_counter = lf_counter + 1.
+        IF lf_counter > 1.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF lf_counter = 1.
+        bc_wb_result = '51'.
+      ENDIF.
+      RETURN.
+    ENDIF.                                                 "^_n_1626768
+  ENDIF.
+
+*... Bestandsfindung in bestimmten Fällen unterbinden...
+*--> Keine BEFI im WMS Fall
+  CHECK tvlk-aufer NE charo.           "nicht aus MB11 entstanden
+  CHECK tvlk-aufer NE charh.           "keine MB11 Umbuchung       "HUM
+  CHECK tvlk-vbtyp NE if_sd_doc_category=>returns_delivery_for_order.           "nicht für Retouren    "n_699350
+  IF cl_ops_switch_check=>ops_sfws_sc_advret1( ) IS NOT INITIAL AND   "v_n_1798747
+        likp-msr_active = charx and                            "no stock determination for ARM deliveries
+        xlips-vgtyp NE if_sd_doc_category=>order_wo_charge.    "except outbound SDF delivery   "n_2314630
+    RETURN.
+  ENDIF.                                                              "^_n_1798747
+  CHECK ( ( likp-vlstk CA ' C') OR     "nicht relevant für Verteilung
+                              "bzw. ERP Quittierung nach dez. Abwicklung
+          ( likp-vlstk EQ 'A' AND      "WA-Buchung im dezentralen WMS
+            v50agl-warenausgang EQ 'X' ) ) .                "n_967038
+
+*--> Es darf niemals ein SOBKZ sitzen
+  CHECK xlips-sobkz EQ space.
+
+
+*... Kein WM aktiv ?
+  IF xlips-komkz NE chard AND xvbup-lvsta EQ space AND
+                              xlips-kzbef EQ space.
+    IF ( xlips-eprio EQ space AND xlips-rules EQ space ) OR
+       ( xlips-eprio EQ space AND xlips-rules NE space ) OR
+       ( xlips-eprio NE space AND xlips-rules EQ space ).
+      bc_wb_result = '11'.             "keine Bestandsfindung
+      CHECK 1 = 2.
+    ENDIF.
+    IF ( xlips-eprio NE space AND xlips-rules NE space ).
+      bc_wb_result = '12'.             "Bestandsfindung SHP/GI
+      CHECK 1 = 2.
+    ENDIF.
+  ENDIF.
+*... Obwohl kein LVS und kein Lean-WM im Einsatz ist, sitzt KZBEF
+*    Dieser Zustand ist zwar nicht o.k., wird aber ignoriert
+  IF xlips-komkz NE chard AND xvbup-lvsta EQ space AND
+                              xlips-kzbef NE space.
+    bc_wb_result = '13'.               "keine Bestandsfindung
+    CHECK 1 = 2.
+  ENDIF.
+
+
+*... WM aktiv, aber kein LEAN-WM ?
+  IF xlips-komkz NE chard AND xvbup-lvsta NE space.
+    IF xlips-kzbef NE space.
+      bc_wb_result = '21'.             "Bestandsfindung WM
+      CHECK 1 = 2.
+    ENDIF.
+    IF xlips-kzbef EQ space.
+      bc_wb_result = '22'.             "keine Bestandsfindung
+      CHECK 1 = 2.
+    ENDIF.
+  ENDIF.
+
+*... LEAN-WM ist aktiv ?
+  IF xlips-komkz EQ chard AND xvbup-lvsta NE space.
+    IF xlips-kzbef NE space.
+      bc_wb_result = '31'.             "Bestandsfindung WM
+      CHECK 1 = 2.
+    ENDIF.
+    IF xlips-kzbef EQ space.
+      IF ( xlips-eprio EQ space AND xlips-rules EQ space ) OR
+         ( xlips-eprio EQ space AND xlips-rules NE space ) OR
+         ( xlips-eprio NE space AND xlips-rules EQ space ).
+        bc_wb_result = '32'.           "keine Bestandsfindung
+        CHECK 1 = 2.
+      ENDIF.
+
+      IF ( xlips-eprio NE space AND xlips-rules NE space ).
+        bc_wb_result = '33'.           "Bestandsfindung SHP/GI
+        CHECK 1 = 2.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+*... Dieser Fall dürfte nicht vorkommen
+  IF xlips-komkz EQ chard AND xvbup-lvsta EQ space.
+    IF xlips-kzbef EQ space.
+      bc_wb_result = '41'.             "Belegschiefstand
+      CHECK 1 = 2.
+    ENDIF.
+    IF xlips-kzbef NE space.
+      bc_wb_result = '42'.             "Belegschiefstand
+      CHECK 1 = 2.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                               " BESTANDSFINDUNG_CHECK
+
+*&---------------------------------------------------------------------*
+*&      Form  BESTELLHISTORY_READ
+*&---------------------------------------------------------------------*
+*       Bestellhistorie nachlesen
+*----------------------------------------------------------------------*
+FORM bestellhistory_read.
+  DATA: liefpos LIKE ekbe-buzei.                 "Liefpos. bei RÜLI
+  DATA: L_GJAHR LIKE EKBE-GJAHR.                              "n_2679055
+
+  CLEAR liefpos.
+  WRITE xlips-posnr TO liefpos RIGHT-JUSTIFIED.  "BUZEI vierstellig
+  IF XLIPS-UECHA IS INITIAL.                                "v_n_2679055
+    L_GJAHR = '0000'.
+  ELSE.
+    L_GJAHR = XLIPS-POSNR(2).
+  ENDIF.                                                    "^_n_2679055
+
+  SELECT SINGLE * FROM ekbe WHERE ebeln = xlips-vgbel AND
+                                  ebelp = xlips-vgpos AND
+                                  zekkn = '00'        AND
+                                  vgabe = charr       AND
+*                                 GJAHR = 0000        AND
+                                  GJAHR = L_GJAHR     AND     "n_2679055
+                                  belnr = xlips-vbeln AND
+                                  buzei = liefpos.
+  IF sy-subrc EQ 0.
+    ximseg-lfbja = ekbe-lfgja.
+    ximseg-lfbnr = ekbe-lfbnr.
+    ximseg-lfpos = ekbe-lfpos.
+    ximseg-grund = ekbe-grund.
+    ximseg-etens = ekbe-etens.                    "<<< note 353043
+  ENDIF.
+
+ENDFORM.                               " BESTELLHISTORY_READ
+
+*&---------------------------------------------------------------------*
+*&      Form  BADI_LE_SHP_GOODSMOVEMENT
+*&---------------------------------------------------------------------*
+*      Change IMKPF and XIMSEG before calling MB_CREATE_GOODS_MOVEMENT *
+*----------------------------------------------------------------------*
+FORM badi_le_shp_goodsmovement.
+  DATA: lt_badi_log TYPE shp_badi_error_log_t,
+        ls_badi_log TYPE shp_badi_error_log,
+        lb_gm       TYPE REF TO shp_badi_goods_movement. "EhP4
+
+  FIELD-SYMBOLS: <ls_xlips> LIKE LINE OF xlips.             "n_637289
+
+  GET BADI lb_gm. "v_EhP4
+  CALL BADI lb_gm->preprocess
+    EXPORTING
+      is_likp        = likp
+      is_likpd       = likpd
+      is_v50agl      = v50agl
+      if_trtyp       = t180-trtyp
+      if_tcode       = t180-tcode
+      if_fcode       = fcode
+      it_xlips       = xlips[]
+      it_xvbfa       = xvbfa[]
+      it_xvbuk       = xvbuk[]
+      it_xvbup       = xvbup[]
+      it_xvbpa       = xvbpa[]
+    CHANGING
+      cs_imkpf       = imkpf
+      cs_v50agl_cust = v50agl_cust
+      ct_ximseg      = ximseg[]
+      ct_log         = lt_badi_log.
+  .
+
+  IF NOT gi_badi_goodsmovement IS INITIAL.               "EhP4
+
+    CALL METHOD gi_badi_goodsmovement->change_input_header_and_items
+      EXPORTING
+        is_likp        = likp
+        is_likpd       = likpd
+        is_v50agl      = v50agl
+        if_trtyp       = t180-trtyp
+        if_tcode       = t180-tcode
+        if_fcode       = fcode
+        it_xlips       = xlips[]
+        it_xvbfa       = xvbfa[]
+        it_xvbuk       = xvbuk[]
+        it_xvbup       = xvbup[]
+        it_xvbpa       = xvbpa[]
+      CHANGING
+        cs_imkpf       = imkpf
+        cs_v50agl_cust = v50agl_cust
+        ct_ximseg      = ximseg[]
+        ct_log         = lt_badi_log.
+
+  ENDIF.                                                  "EhP4
+* Cloud BAdI.
+  PERFORM badi_le_shp_modify_post_gm(SAPMV50A) USING likp
+                                                     xlips[]
+                                                     t180-trtyp
+                                            CHANGING imkpf
+                                                     ximseg[]
+                                                     lt_badi_log.
+
+*... Errors will be put into the goods movement protocol
+  IF NOT lt_badi_log[] IS INITIAL.
+    LOOP AT lt_badi_log INTO ls_badi_log.
+      CLEAR wat.
+      LOOP AT xlips ASSIGNING <ls_xlips>                    "v_n_637289
+                    WHERE vbeln EQ likp-vbeln
+                      AND posnr EQ ls_badi_log-posnr
+                      AND updkz NE updkz_delete.
+        MOVE-CORRESPONDING <ls_xlips> TO wat.
+        EXIT.
+      ENDLOOP.                                              "^_n_637289
+      wat-posnr = ls_badi_log-posnr.
+      wat-msgno = ls_badi_log-msgno.
+      wat-msgty = chare.
+      wat-msgid = ls_badi_log-msgid.
+      wat-msgv1 = ls_badi_log-msgv1.
+      wat-msgv2 = ls_badi_log-msgv2.
+      wat-msgv3 = ls_badi_log-msgv3.
+      wat-msgv4 = ls_badi_log-msgv4.
+      APPEND wat.
+    ENDLOOP.
+  ENDIF.
+
+ENDFORM.                    " BADI_LE_SHP_GOODSMOVEMENT
+
+*&---------------------------------------------------------------------*
+*&      Form  BADI_POSTPROCESS_GOODSMOVEMENT (EhP4)
+*&---------------------------------------------------------------------*
+*      Check/ change result of MB_CREATE_GOODS_MOVEMENT
+*----------------------------------------------------------------------*
+FORM badi_postprocess_goodsmovement.
+  DATA:
+    lt_badi_log TYPE shp_badi_error_log_t,
+    lb_gm       TYPE REF TO shp_badi_goods_movement.
+
+  FIELD-SYMBOLS:
+    <ls_badi_log> TYPE shp_badi_error_log,
+    <ls_xlips>    TYPE lipsvb.
+
+  GET BADI lb_gm.
+  CALL BADI lb_gm->postprocess
+    EXPORTING
+      is_likp   = likp
+      is_likpd  = likpd
+      is_v50agl = v50agl
+      if_trtyp  = t180-trtyp
+      if_tcode  = t180-tcode
+      if_fcode  = fcode
+      it_xlips  = xlips[]
+      it_xvbfa  = xvbfa[]
+      it_xvbuk  = xvbuk[]
+      it_xvbup  = xvbup[]
+      it_xvbpa  = xvbpa[]
+      it_imseg  = imseg[]
+    CHANGING
+      cs_emkpf  = emkpf
+      ct_emseg  = emseg[]
+      ct_ximseg = ximseg[]
+      ct_yimseg = yimseg[]
+      ct_log    = lt_badi_log.
+
+  LOOP AT lt_badi_log ASSIGNING <ls_badi_log>.
+    READ TABLE xlips ASSIGNING <ls_xlips>
+      WITH KEY vbeln = likp-vbeln
+               posnr = <ls_badi_log>-posnr.
+    CHECK sy-subrc EQ 0 AND <ls_xlips>-updkz NE updkz_delete.
+    MOVE-CORRESPONDING <ls_xlips> TO wat.
+
+    wat-posnr = <ls_badi_log>-posnr.
+    wat-msgno = <ls_badi_log>-msgno.
+    wat-msgty = chare.
+    wat-msgid = <ls_badi_log>-msgid.
+    wat-msgv1 = <ls_badi_log>-msgv1.
+    wat-msgv2 = <ls_badi_log>-msgv2.
+    wat-msgv3 = <ls_badi_log>-msgv3.
+    wat-msgv4 = <ls_badi_log>-msgv4.
+    APPEND wat.
+  ENDLOOP.
+
+ENDFORM.                    " BADI_POSTPROCESS_GOODSMOVEMENT
+
+*&---------------------------------------------------------------------*
+*&  Form  BWTAR_FILL_GI
+*&---------------------------------------------------------------------*
+*&  For batch items in outbound deliveries check if valuation type is
+*&  filled and redermine it if missing in lips
+*&---------------------------------------------------------------------*
+FORM bwtar_fill_gi  USING    is_xlikp type likpvb           "v_n_2089783
+                    CHANGING cs_lips  type lips.
+
+data: ls_mtcom type mtcom,
+      ls_mchar type mchar,
+      ls_mtcor type mtcor.
+
+  check     is_xlikp-vbtyp eq if_sd_doc_category=>delivery_shipping_notif.
+  check not cs_lips-charg  is initial.
+  check not cs_lips-xchar  is initial.
+  check not cs_lips-bwtex  is initial.
+  check     cs_lips-bwtar  is initial.
+
+  ls_mtcom-kenng = 'MCHAR'.
+  ls_mtcom-matnr = cs_lips-matnr.
+  ls_mtcom-werks = cs_lips-werks.
+  ls_mtcom-lgort = cs_lips-lgort.
+  ls_mtcom-charg = cs_lips-charg.
+  ls_mtcom-maxtz = 100.
+
+  CALL FUNCTION 'MATERIAL_READ'
+    EXPORTING
+      schluessel         = ls_mtcom
+    IMPORTING
+      matdaten           = ls_mchar
+      return             = ls_mtcor
+    EXCEPTIONS
+      material_not_found = 1
+      batch_not_found    = 2
+      error_message      = 98
+      others             = 99.
+
+  if sy-subrc eq 0.
+    cs_lips-bwtar = ls_mchar-bwtar.
+  endif.
+
+ENDFORM.                    " BWTAR_FILL_GI                 "^_n_2089783

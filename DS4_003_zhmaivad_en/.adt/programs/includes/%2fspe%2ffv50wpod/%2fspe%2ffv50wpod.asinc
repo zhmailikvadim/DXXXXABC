@@ -1,0 +1,746 @@
+*&---------------------------------------------------------------------*
+*&  Include           /SPE/FV50WPOD
+*&---------------------------------------------------------------------*
+
+FORM /spe/ximseg_add_pod_items.
+
+* Local Constants ---------------------------------------------------
+  CONSTANTS: lc_x          TYPE xfeld            VALUE 'X'
+            ,lc_posar_c    TYPE lips-posar       VALUE 'C'
+            ,lc_delete     TYPE lipsvb-updkz     VALUE 'D'
+            ,lc_corr       TYPE c                VALUE 'C'
+            ,lc_exceed     TYPE c                VALUE 'E'
+            ,lc_tabix_no   TYPE imsegvb-l_tabix  VALUE '-1'
+            ,lc_kzbew_l    TYPE imsegvb-kzbew    VALUE 'L'
+            .
+* Local Data Declarations -------------------------------------------
+  DATA: wa_ximseg       LIKE LINE OF ximseg
+       ,lv_recv_stloc   TYPE t001l-lgort
+       ,lv_send_stloc   TYPE t001l-lgort
+       ,lv_send_plant   TYPE t001w-werks
+       ,lv_bwart_next   TYPE t156-bwart
+       ,ls_outb_lips    TYPE lipsvb
+       ,lv_kunnr        TYPE kunnr
+       ,lv_delta_lfimg  TYPE /spe/pod_delta-lfimg_diff
+       ,lv_delta_lgmng  TYPE /spe/pod_delta-lgmng_diff
+       ,lv_save_lfimg   TYPE lips-lfimg
+       ,lv_save_lgmng   TYPE lips-lgmng
+       ,ls_ximseg       LIKE ximseg
+       ,ls_exc_reas     TYPE /spe/excp_reas
+       ,lf_mode         TYPE c    "SPACE, Correction, Exceed
+       ,lf_sum          TYPE lips-lgmng
+       ,lv_vbeln_outb   TYPE likp-vbeln
+       ,ls_outb_delv    TYPE shp_vl10_delivery
+       ,ls_buffering    TYPE shp_vl10_buffering
+       ,lf_lfimg        TYPE lips-lfimg
+       ,lf_lgmng        TYPE lips-lgmng
+       ,lf_vbumg        TYPE lipsvb-vbumg
+       ,lf_ebumg        TYPE lipsvb-ebumg
+       ,ls_pack_red     TYPE /spe/pod_packing_overdlvry
+       ,lf_tabix_ximseg TYPE sy-tabix
+       ,lf_tabix_humseg TYPE sy-tabix                        "n_2340649
+       ,lf_pstng_enrich TYPE REF TO /spe/discrepancy_mm_posting
+       ,ls_t156         TYPE t156
+       ,ls_likp         TYPE likpvb                          "n_1541417
+       .
+
+*... separation in own new fields
+  DATA: lv_ebumg_buom       TYPE ebumg,                        "v_n_1686065
+        lv_vbumg_buom       TYPE vbumg_bme,
+        lv_ormng_buom       TYPE ormng_vl,
+        lv_sum_buom         TYPE lgmng,
+        lv_lgmng_buom       TYPE lgmng,
+        lv_delta_lgmng_buom TYPE lgmng.                        "^_n_1686065
+
+  DATA: lv_trans_lfimg      TYPE lfimg,                      "n_3142235
+        lv_trans_lgmng      TYPE lgmng.                      "n_3142235
+
+  RANGES: lor_bwart FOR t156n-bwart,                         "n_3070249
+          lur_bwart FOR t156n-bwart.                         "n_3070249
+
+  STATICS: sf_checked TYPE xfeld
+        ,sf_lgnum   TYPE lgnum.                              "n_1541417
+
+*---------------------------------------------------------------------*
+* A) CALCULATE THE ABSOLUTE QUANTITIES:
+*     LF_EBUMG as the absolute value to qantity to be posted
+*     LF_VBUMG as the quantity already posted
+*     LF_SUM   as the posted quantity after completion of this posting
+*     LF_LFIMG as the delivery quantity
+*     All quantities are in Sales Unit of measure (VRKME)
+*---------------------------------------------------------------------*
+  CHECK likp-spe_le_scenario EQ gc_le_scenario-sto OR
+        likp-spe_le_scenario EQ gc_le_scenario-crossd.
+
+*... Provide original delivery quantity in BUOM
+  lv_ormng_buom = xlips-ormng * xlips-umvkz / xlips-umvkn.
+
+* Get accumulated quantity for packing items
+  IF xlips-posar EQ lc_posar_c.
+
+    CALL FUNCTION '/SPE/POD_ACCUMULATE_PACK_QTY'
+      EXPORTING
+        is_lips              = xlips
+      IMPORTING
+        ef_accumulated_lfimg = lf_lfimg
+        ef_accumulated_lgmng = lf_lgmng
+        ef_accumulated_vbumg = lf_vbumg
+        ef_accumulated_vbumg_bme = lv_vbumg_buom            "n_1686065
+      EXCEPTIONS
+        not_main_item        = 1
+        OTHERS               = 2.
+
+    IF sy-subrc EQ 0.
+      lf_sum   = lf_lfimg.
+      lf_ebumg = lf_lfimg - lf_vbumg.
+
+*...Provide functionality in BUOM                          "v_n_1686065
+      lv_sum_buom   = lf_lgmng.
+*...copy qty in BUOM in an own field
+      lv_lgmng_buom = lf_lgmng.
+      lv_ebumg_buom = lv_lgmng_buom - lv_vbumg_buom.       "^_n_1686065
+      IF xlips-updkz EQ lc_delete.
+* In this case LIPS_BEARBEITEN was not performed, so some values (like
+* BWART) need to be transferred from LIPS to XLIPS
+        MOVE-CORRESPONDING lips TO xlips.
+      ENDIF.
+    ENDIF.
+  ELSE.
+    lf_lfimg = xlips-lfimg.
+    lf_vbumg = xlips-vbumg.
+    lf_ebumg = xlips-ebumg.
+
+*...Provide functionality in BUOM
+    lv_lgmng_buom = xlips-lgmng.                                 "v_n_1686065
+    lv_vbumg_buom = xlips-vbumg_bme.
+    lv_ebumg_buom = xlips-ebumg_bme.                             "^_n_1686065
+
+    IF likpd-mdiff_buch = charx.
+      CLEAR ls_t156.
+      CALL FUNCTION '/SPE/GEN_T156_GET'
+        EXPORTING
+          if_bwart  = xlips-mdiff_bwart
+        IMPORTING
+          es_t156   = ls_t156
+        EXCEPTIONS
+          not_found = 1
+          OTHERS    = 2.
+      IF ls_t156-shkzg = 'H'.
+        lf_sum = xlips-vbumg - xlips-ebumg.
+        lf_mode  = lc_corr.
+*...Provide functionality in BUOM
+        lv_sum_buom = xlips-vbumg_bme - xlips-ebumg_bme.    "n_1686065
+      ELSE.
+        lf_sum = xlips-vbumg + xlips-ebumg.
+*...Provide functionality in BUOM
+        lv_sum_buom = xlips-vbumg_bme + xlips-ebumg_bme.    "n_1686065
+      ENDIF.
+    ELSE.
+      lf_sum = xlips-vbumg + xlips-ebumg.
+*...Provide functionality in BUOM
+      lv_sum_buom = xlips-vbumg_bme + xlips-ebumg_bme.      "n_1686065
+    ENDIF.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* B) CHECK PREREQUISITES FOR DISCREANCY LINE
+*---------------------------------------------------------------------*
+* CHECK completion indicator and existence of a delta
+  IF lf_sum  GT xlips-ormng AND
+     lf_mode NE lc_corr.
+    lf_mode  = lc_exceed.
+  ENDIF.
+
+* Is there a relevant discrepancy ?
+  CHECK:   NOT xlips-spe_gen_elikz  IS INITIAL  OR          "n_3142235
+*           lf_lfimg    <> xlips-ormng             ) OR     "n_3142235
+           lf_mode    EQ lc_exceed                   OR
+         ( lf_mode    EQ lc_corr  AND
+           lf_vbumg   GT xlips-ormng               ).
+
+* And a filled exception code ?
+  CHECK: NOT xlips-spe_except_code IS INITIAL.
+
+* Note: /spe/excp_reas is a 100% buffered table !
+*       Therefore a SELECT is never a performance issue
+  IF ls_exc_reas-exception_code NE xlips-spe_except_code.
+    SELECT SINGLE * FROM /spe/excp_reas INTO ls_exc_reas
+                    WHERE exception_code = xlips-spe_except_code.
+  ENDIF.
+
+* Leave if there is not assigned internal difference reason code
+  CHECK: sy-subrc EQ 0,
+         NOT ls_exc_reas-reason_code IS INITIAL.
+
+  IF ls_exc_reas-reason_code EQ 'CARR'.                            "n_3142235
+*---------------------------------------------------------------------*
+* C) CALCULATE DISCREPANCY QUANTITY
+*---------------------------------------------------------------------*
+  IF lf_mode EQ lc_exceed.
+* CASE 1: Original delivery quanitity is exceeded (potentially w/o
+*         completion)
+*                                      4
+*                           ---------EBUMG---------->
+* -----------------------VBUMG-------ORMNG--------LFIMG-----> Quantities
+*                          5           7            9
+* If we are exceeding the original delivery quantity (ORMNG), we are
+* posting the quantity exceeding ORMNG with the exception code.
+* This would be EBUMG - (ORMNG-VBUMG)
+* However if, VBUMG alread exceeded ORMNG, it's simply EBUMG.
+    IF lf_vbumg LT xlips-ormng.
+      lv_delta_lfimg = xlips-ormng - lf_vbumg.
+    ENDIF.
+    lv_delta_lfimg = lv_delta_lfimg - lf_ebumg.
+
+*...Provide functionality in BUOM
+    IF lv_vbumg_buom LT lv_ormng_buom.                            "v_n_1686065
+      lv_delta_lgmng_buom = lv_ormng_buom - lv_vbumg_buom.
+    ENDIF.
+    lv_delta_lgmng_buom = lv_delta_lgmng_buom - lv_ebumg_buom.    "^_n_1686065
+
+
+
+  ELSEIF lf_mode EQ lc_corr.
+* CASE 2: Quanitity difference posting (Sender Method GRC) to partially
+*         reduce an already posted quanitity
+*                                     -4
+*                           <--------EBUMG----------
+* -----------------------LFIMG-------ORMNG--------VBUMG-----> Quantities
+*                          5           7            9
+* For a correction, we first need to calculate the difference
+* of the posted quantity (VBUMG) exceeding the original qty (ORMNG)
+* This difference (if less then EBUMG) is to be posted with the
+* exception code.
+*                                              -1
+*                                           <-EBUMG-
+* -----------------------------------ORMNG-LFIMG--VBUMG-----> Quantities
+*                                      7     8      9
+* If this difference is greated then EBUMG, then just EBUMG is to be
+* posted with the exception code.
+    IF lf_vbumg GT xlips-ormng.
+      lv_delta_lfimg = lf_vbumg - xlips-ormng.
+      IF lv_delta_lfimg GT lf_ebumg.
+        lv_delta_lfimg = lf_ebumg.
+      ENDIF.
+    ENDIF.
+
+*...Provide functionality in BUOM
+    IF lv_vbumg_buom GT lv_ormng_buom.                                           "v_n_1686065
+      lv_delta_lgmng_buom = lv_vbumg_buom - lv_ormng_buom.
+      IF lv_delta_lgmng_buom GT lv_ebumg_buom.
+        lv_delta_lgmng_buom = lv_ebumg_buom.                                     "^_n_1686065
+      ENDIF.
+    ENDIF.
+
+
+* IF additionally the closing indicator is set, we need to add any
+* further discrepancy between ORMNG and LFIMG
+    IF NOT xlips-spe_gen_elikz  IS INITIAL AND
+       xlips-ormng GT lf_lfimg.
+      lv_delta_lfimg = lv_delta_lfimg + xlips-ormng - lf_lfimg.
+    ENDIF.
+
+*...Provide functionality in BUOM                                                 "v_n_1686065
+    IF NOT xlips-spe_gen_elikz  IS INITIAL AND
+        lv_ormng_buom GT lv_lgmng_buom.
+      lv_delta_lgmng_buom = lv_delta_lgmng_buom + lv_ormng_buom - lv_lgmng_buom.  "^_n_1686065
+
+* Note: Now lv_delta_lfimg should equal to lf_ebumg again ...
+    ENDIF.
+  ELSE.
+* CASE 3: 'Normal' final posting with completion indicator
+    lv_delta_lfimg = xlips-ormng - lf_lfimg.
+
+*...Provide functionality in BUOM                                               "v_n_1686065
+    lv_delta_lgmng_buom = lv_ormng_buom - lv_lgmng_buom.                        "^_n_1686065
+
+  ENDIF.
+
+  ELSE.                                                                        "v_n_3142235
+* eception code SHIP: Compute stock in transit quantity: ormng + all 641/642 postings
+  lv_trans_lfimg = xlips-ormng.
+  lv_trans_lgmng = lv_ormng_buom.                                              "^_n_3142235
+
+  SELECT * FROM t156n WHERE fcode = 'POD_SH_O'                                 "v_n_3070249
+                         OR fcode = 'POD_SH_O_CC'.
+    lor_bwart-sign = 'I'.
+    lor_bwart-option  = 'EQ'.
+    lor_bwart-low = t156n-bwart_next.
+    APPEND lor_bwart TO lor_bwart.
+  ENDSELECT.
+
+  SELECT * FROM t156n WHERE fcode = 'POD_SH_U'
+                         OR fcode = 'POD_SH_U_CC'.
+    lur_bwart-sign = 'I'.
+    lur_bwart-option  = 'EQ'.
+    lur_bwart-low = t156n-bwart_next.
+    APPEND lur_bwart TO lur_bwart.
+  ENDSELECT.
+
+  LOOP AT xvbfa WHERE vbelv = xlips-vbeln
+                  AND posnv = xlips-posnr
+                  AND vbtyp_n CA 'Rh'                                            "n_3109682
+                  AND plmin = '0'
+                  AND ( bwart IN lor_bwart
+                     OR bwart IN lur_bwart ).
+    IF xvbfa-bwart IN lor_bwart.
+      lv_trans_lfimg = lv_trans_lfimg + xvbfa-rfmng_flo.                       "v_n_3142235
+      lv_trans_lgmng = lv_trans_lgmng + xvbfa-rfmng_flt.                         "n_3086888
+    ELSE.
+      lv_trans_lfimg = lv_trans_lfimg - xvbfa-rfmng_flo.
+      lv_trans_lgmng = lv_trans_lgmng - xvbfa-rfmng_flt.                       "^_n_3142235
+    ENDIF.
+  ENDLOOP.                                                                     "^_n_3070249
+
+* CALCULATE DISCREPANCY QUANTITY                                               "v_n_3142235
+* sum of required GR's is in lf_sum / lv_sum_buom
+* sum of available transit stock is in lv_trans_lfimg / lv_trans_lgmng
+  IF NOT xlips-spe_gen_elikz IS INITIAL.
+* end of process:
+* take simply the difference between available and required quantity
+    lv_delta_lfimg      = lv_trans_lfimg - lf_sum.
+    lv_delta_lgmng_buom = lv_trans_lgmng - lv_sum_buom.
+  ELSE.
+    IF lf_sum > lv_trans_lfimg.
+* case 1: required GR quantity > stock in transit -> create negative delta requirement
+      lv_delta_lfimg      = lv_trans_lfimg - lf_sum.
+      lv_delta_lgmng_buom = lv_trans_lgmng - lv_sum_buom.
+    ELSEIF lf_sum < lv_trans_lfimg AND lv_trans_lfimg > xlips-ormng.
+* GR quantity is less than stock in transit, stock in transit is more than original quantity
+      IF lf_sum <= xlips-ormng.
+* case 2a: reduce stock in transit only up to original quantity (GR <= OR)
+        lv_delta_lfimg      = lv_trans_lfimg - xlips-ormng.
+        lv_delta_lgmng_buom = lv_trans_lgmng - lv_ormng_buom.
+      ELSE.
+* case 2b: reduce stock in transit only up to GR quantity (GR > OR)
+        lv_delta_lfimg      = lv_trans_lfimg - lf_sum.
+        lv_delta_lgmng_buom = lv_trans_lgmng - lv_sum_buom.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  IF lv_delta_lfimg < 0.
+    lf_mode = lc_exceed.
+  ELSEIF lv_delta_lfimg > 0.
+    lf_mode = lc_corr.
+  ENDIF.
+
+  ENDIF.                                                                       "^_n_3142235
+
+  IF lv_delta_lfimg = 0. RETURN. ENDIF.
+
+  lv_delta_lgmng = lv_delta_lfimg * xlips-umvkz / xlips-umvkn.
+
+*...Provide functionality in BUOM and overwrite                                "v_n_1686065
+***********************************************************************
+* change of mimic --> no conversion from SUOM to BUOM !!!!!!!!!!!!!!!!!
+***********************************************************************
+  IF xlips-akmng = 'B'.
+     lv_delta_lgmng = lv_delta_lgmng_buom .
+  ENDIF.
+
+
+*---------------------------------------------------------------------*
+* D) DETERMINE REQUIRED DATA FOR ADDITIONAL DISCREPANCY LINE
+*---------------------------------------------------------------------*
+* lines deleted n_1482789
+
+* Determine previous delivery
+  CALL FUNCTION '/SPE/POD_DET_PREV_OUTB_DLVRY'
+    EXPORTING
+      is_likp_inb   = likp
+    IMPORTING
+      ev_vbeln_outb = lv_vbeln_outb.
+
+  IF lv_vbeln_outb NE space.
+    ls_buffering-lips = 'X'.
+
+    CALL FUNCTION 'SHP_DELIVERY_READ_SINGLE'
+      EXPORTING
+        if_vbeln         = lv_vbeln_outb
+        is_buffering     = ls_buffering
+      CHANGING
+        cs_delivery      = ls_outb_delv
+      EXCEPTIONS
+        no_record_found  = 0
+        no_key_specified = 0
+        OTHERS           = 0.
+    gt_outb_lips = ls_outb_delv-lips[].
+  ENDIF.
+
+  IF NOT xlips-lifexpos IS INITIAL.
+    READ TABLE gt_outb_lips INTO ls_outb_lips
+                            WITH KEY posnr = xlips-lifexpos.
+  ELSEIF xlips-posar EQ lc_posar_c.
+* Read generated item in previous outbound delivery
+    READ TABLE gt_outb_lips INTO ls_outb_lips
+                   WITH KEY vbeln = lv_vbeln_outb
+                            posar = lc_posar_c
+                            matnr = xlips-matnr.
+  ENDIF.
+
+* Determine the sending plant                              "v_n_1482789
+  lv_send_plant = ls_outb_lips-werks.                      "^_n_1482789
+
+*Determine the next movement type for posting
+  CALL FUNCTION '/SPE/DETERMINE_DISCRPNCY_BWART'
+    EXPORTING
+      if_werk1       = xlips-werks
+      if_werk2       = lv_send_plant
+      if_reason_code = ls_exc_reas-reason_code
+      if_bwart       = ls_outb_lips-bwart
+      if_delta       = lv_delta_lfimg
+    IMPORTING
+      ef_bwart_next  = lv_bwart_next.
+
+*SHIP/CD location responsibility
+  CHECK: NOT lv_bwart_next IS INITIAL.
+
+* Initialize BADI
+  TRY.
+      GET BADI lf_pstng_enrich.
+    CATCH cx_badi_not_implemented.
+  ENDTRY.
+
+  CLEAR ls_ximseg.
+  READ TABLE ximseg INTO ls_ximseg
+                    WITH KEY l_tabix = xlips_tabix.
+  lf_tabix_ximseg = sy-tabix.
+
+* Fill fields which are common for ALL cases
+* Initialize from original posting line ...
+  MOVE-CORRESPONDING ls_ximseg TO wa_ximseg.
+* ... and adapt it
+  wa_ximseg-called_by = 'VL32N'.
+  wa_ximseg-xdeliv    = char1.
+  wa_ximseg-xnocon    = charx.
+  wa_ximseg-bwart     = lv_bwart_next.
+  wa_ximseg-bwtar     = xlips-bwtar.
+  wa_ximseg-matnr     = xlips-matnr.
+  IF NOT xlips-xchpf IS INITIAL.
+    wa_ximseg-charg     = xlips-charg.
+  ENDIF.
+  wa_ximseg-bwtar     = xlips-bwtar.
+  wa_ximseg-umrez     = xlips-umvkz.
+  wa_ximseg-umren     = xlips-umvkn.
+  wa_ximseg-vbeln     = likp-vbeln.
+  wa_ximseg-posnr     = xlips-posnr .
+* Check in FV50WF0W !
+  wa_ximseg-lgnum     = likp-lgnum.
+  wa_ximseg-ebeln     = xlips-vgbel.
+  wa_ximseg-ebelp     = xlips-vgpos.
+  wa_ximseg-meins     = xlips-meins.
+  wa_ximseg-erfme     = xlips-vrkme.
+  wa_ximseg-wempf     = xlips-werks.
+  wa_ximseg-ummat     = xlips-matnr.
+  wa_ximseg-umcha     = xlips-umcha.
+  wa_ximseg-kzbew     = lc_kzbew_l.       "Posting from Delivery processing (fixed)
+
+  PERFORM /spe/ximseg_fuellen_copied CHANGING wa_ximseg.
+* set INSMK according to the replenishment delivery           "n_2167574
+  wa_ximseg-insmk = ls_outb_lips-insmk.                       "n_2167574
+  IF ls_exc_reas-reason_code EQ 'SHIP'  OR
+     ls_exc_reas-reason_code EQ 'PREF'.
+
+    wa_ximseg-kzbew     = charl.
+    IF sy-subrc EQ 0.
+      DELETE ximseg INDEX lf_tabix_ximseg.
+    ENDIF.
+
+    CALL FUNCTION '/SPE/POD_DETERMINE_STLOC'
+      EXPORTING
+        iv_plant = lv_send_plant
+      IMPORTING
+        ev_stloc = lv_recv_stloc.
+    MOVE xlips-lgort TO lv_send_stloc.
+
+    CALL FUNCTION '/SPE/PARTNER_FROM_PLANT'
+      EXPORTING
+        if_plant             = xlips-werks
+      IMPORTING
+        ef_customer          = lv_kunnr
+      EXCEPTIONS
+        plant_not_existent   = 1
+        no_customer_assigned = 2
+        no_vendor_assigned   = 3
+        OTHERS               = 4.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    IF lv_delta_lfimg LT 0.
+      COMPUTE lv_delta_lfimg = abs( lv_delta_lfimg ).
+      COMPUTE lv_delta_lgmng = abs( lv_delta_lgmng ).
+      wa_ximseg-shkzg = 'H'.
+    ELSE.
+      wa_ximseg-shkzg = 'S'.
+    ENDIF.
+    wa_ximseg-werks = lv_send_plant .
+    wa_ximseg-lgort = lv_recv_stloc .
+    IF sf_checked IS INITIAL.                              "v_n_1541417
+      IF ls_exc_reas-reason_code EQ 'PREF'.
+*       No cross-docking process
+      ELSE.
+*       Check for transportation cross-docking initial delivery
+        CALL METHOD /spe/cl_cd_docflow=>read_source
+          EXPORTING
+            if_delivery   = lv_vbeln_outb
+          IMPORTING
+            ef_cd_process = ls_likp-vbeln
+          EXCEPTIONS
+            no_cd_process = 1
+            OTHERS        = 2.
+        IF sy-subrc IS INITIAL.
+*         Get warehose number for this delivery
+          CALL FUNCTION 'SHP_LIKP_GET_SINGLE'
+            EXPORTING
+              if_vbeln                 = ls_likp-vbeln
+            CHANGING
+              cs_likp                  = ls_likp
+           EXCEPTIONS
+             no_record_found          = 1
+             OTHERS                   = 2.
+          IF sy-subrc IS INITIAL.
+            sf_lgnum = ls_likp-lgnum.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+      sf_checked = 'X'.
+    ENDIF.
+    IF NOT sf_checked IS INITIAL.
+      IF NOT sf_lgnum IS INITIAL.
+        wa_ximseg-lgnum = sf_lgnum.
+      ELSE.
+*       Post with reference to sending warehouse number      "n_1526326
+        wa_ximseg-lgnum = ls_outb_lips-lgnum.                "n_1526326
+      ENDIF.
+    ENDIF.                                                 "^_n_1541417
+    wa_ximseg-kunnr = lv_kunnr.
+    wa_ximseg-erfmg = lv_delta_lfimg .
+    wa_ximseg-menge = lv_delta_lgmng .
+    IF xlips-vgtyp <> 'V'.                      "n_2040409 "n_2418999
+      wa_ximseg-umwrk = xlips-werks.
+* For Cross-Docking (BWART 313/314) we need the sending storage location
+* in UMLGO ! Isn't this not required for 101/102 postings ??
+    wa_ximseg-umlgo = ls_outb_lips-umlgo.
+    ENDIF.                                                 "n_2040409
+
+* Special logic for L_TABIX: -1 will mean that this is NOT relevant for
+* Quantity consumption in VBFA !
+    wa_ximseg-l_tabix = lc_tabix_no .
+
+    IF NOT lf_pstng_enrich IS INITIAL.
+      CALL BADI lf_pstng_enrich->enrich_posting
+        EXPORTING
+          is_delivery_header = xlikp
+          is_delivery_item   = xlips
+        CHANGING
+          cs_imseg           = wa_ximseg.
+    ENDIF.
+
+    IF lf_mode NE lc_corr.
+* Sequencing: 101 after 641
+      APPEND wa_ximseg TO ximseg.
+      READ TABLE gt_humseg_hu WITH KEY imseg_tabix = sy-tabix.    "n_2340649
+      lf_tabix_humseg = sy-tabix.                                 "n_2340649
+      IF NOT ls_ximseg IS INITIAL AND
+         ls_ximseg-erfmg GT 0.
+        APPEND ls_ximseg TO ximseg.
+        IF lf_tabix_humseg > 0.                                 "v_n_2340649
+          gt_humseg_hu-imseg_tabix = sy-tabix.
+          MODIFY gt_humseg_hu index lf_tabix_humseg.
+        ENDIF.                                                  "^_n_2340649
+      ENDIF.
+    ELSE.
+* Sequencing: 642 after 102
+      IF NOT ls_ximseg IS INITIAL AND
+         ls_ximseg-erfmg GT 0.
+        APPEND ls_ximseg TO ximseg.
+      ENDIF.
+      APPEND wa_ximseg TO ximseg.
+    ENDIF.
+
+  ELSEIF ls_exc_reas-reason_code EQ 'CARR'.
+*    Underdelivery (and completion indicator) :
+*      Determine primary posting line in XIMSEG.
+*      Add duplicate with discrepancy value (this will result in
+*      an additional
+*      101 posting to receive the discrepancy from stock in-transit).
+*      Determine Storage location from originating inbound delivery item
+*      Complete XIMSEG structure for additional scrapping posting
+*      (movement type determined above) and APPEND.
+
+    wa_ximseg-werks = xlips-werks.
+    wa_ximseg-lgort = xlips-lgort.
+* In this case the posting lines are NOT relevant to consume delivery
+* quantities !
+*   WA_XIMSEG-L_TABIX = LC_TABIX_NO. "501/502 ARE relevant "n_1793800
+    wa_ximseg-l_tabix = 0.                                 "n_1793800
+
+    IF lv_delta_lfimg GT 0.
+      IF lf_mode NE lc_corr.
+        IF NOT ls_ximseg IS INITIAL.
+
+*          ls_ximseg-line_id   = '000000'.
+          ls_ximseg-erfmg     = lv_delta_lfimg.
+          ls_ximseg-menge     = lv_delta_lgmng.
+*         LS_XIMSEG-L_TABIX   = LC_TABIX_NO.
+          ls_ximseg-l_tabix   = 0.                         "n_1793800
+
+          APPEND ls_ximseg TO ximseg.
+        ELSE.
+* Little trick: Temporarily we store the deltas into xlips and then call
+*               the standard form to fill the 'primary' XIMSEG line
+          lv_save_lfimg   = xlips-lfimg.
+          lv_save_lgmng   = xlips-lgmng.
+          xlips-lfimg     = lv_delta_lfimg.
+          xlips-ebumg     = lv_delta_lfimg.
+          xlips-ebumg_bme = lv_delta_lgmng.
+          xlips-lgmng     = lv_delta_lgmng.
+          xlips-mdiff_lgort = xlips-lgort.
+          PERFORM ximseg_fuellen.
+          DESCRIBE TABLE ximseg LINES sy-tfill.
+          IF sy-tfill GT 0.
+            READ TABLE ximseg INTO  ls_ximseg
+                              INDEX sy-tfill.
+*           LS_XIMSEG-L_TABIX   = LC_TABIX_NO.             "n_1793800
+            wa_ximseg-l_tabix = 0.                         "n_1793800
+
+            MODIFY ximseg FROM ls_ximseg INDEX sy-tfill.
+          ENDIF.
+          xlips-lfimg     = lv_save_lfimg.
+          xlips-lgmng     = lv_save_lgmng.
+          CLEAR: xlips-ebumg,
+                 xlips-ebumg_bme.
+* Within ximseg_fuellen there was a MODIFY on XLIPS.
+* This changed the quantity ... we need to to a second MODIFY to correct
+* the quantity again.
+          MODIFY xlips.
+        ENDIF.
+      ELSE.
+* Correction posting (MDIFF) reduce primary line by the quantity which
+* is 'redirected' to discrepancy posting
+        IF NOT ls_ximseg IS INITIAL.
+          ls_ximseg-erfmg = ximseg-erfmg - lv_delta_lfimg.
+          ls_ximseg-menge = ximseg-menge - lv_delta_lgmng.
+          IF ls_ximseg-erfmg GT 0.
+            MODIFY ximseg FROM ls_ximseg INDEX lf_tabix_ximseg.
+          ELSE.
+            DELETE ximseg INDEX lf_tabix_ximseg.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      wa_ximseg-erfmg = lv_delta_lfimg.
+      wa_ximseg-menge = lv_delta_lgmng.
+
+      IF NOT lf_pstng_enrich IS INITIAL.
+        CALL BADI lf_pstng_enrich->enrich_posting
+          EXPORTING
+            is_delivery_header = xlikp
+            is_delivery_item   = xlips
+          CHANGING
+            cs_imseg           = wa_ximseg.
+      ENDIF.
+      APPEND wa_ximseg TO ximseg.
+
+*Overdelivery (with or w/o completion indicator) :
+    ELSEIF lv_delta_lfimg LT 0.
+*    Reduce primary line to fit in original quantity (delete, if it gets
+*    0 in a partial GR, where the delivery quantity was already
+*    received)
+
+* In this case the posting line is relevant to consume delivery
+* quantities !
+*    wa_ximseg-l_tabix = lc_tabix_no.
+
+      IF NOT ls_ximseg IS INITIAL.
+        ls_ximseg-erfmg = ximseg-erfmg + lv_delta_lfimg.
+        ls_ximseg-menge = ximseg-menge + lv_delta_lgmng.
+        IF ls_ximseg-erfmg GT 0.
+          MODIFY ximseg FROM ls_ximseg INDEX lf_tabix_ximseg.
+        ELSE.
+          DELETE ximseg INDEX lf_tabix_ximseg.
+        ENDIF.
+      ELSE.
+* In case of packing items with overdelivery we need to remember the
+* already posted overdelivery quantity, so that it gets subtracted later
+        MOVE: xlips-vbeln TO ls_pack_red-vbeln
+             ,xlips-matnr TO ls_pack_red-matnr
+             ,xlips-werks TO ls_pack_red-werks
+             ,xlips-lgort TO ls_pack_red-lgort
+             ,xlips-lfimg TO ls_pack_red-lfimg
+             ,xlips-lgmng TO ls_pack_red-lgmng
+             ,xlips-vrkme TO ls_pack_red-vrkme
+             ,xlips-meins TO ls_pack_red-meins
+             .
+        CALL FUNCTION '/SPE/POD_PACK_STORE_REDUCTION'
+          EXPORTING
+            is_overdelivery = ls_pack_red.
+      ENDIF.
+
+*    Fill the delta for the new posting line with the new movement type
+*    (501)
+      wa_ximseg-erfmg = abs( lv_delta_lfimg ) .
+      wa_ximseg-menge = abs( lv_delta_lgmng ) .
+      IF NOT lf_pstng_enrich IS INITIAL.
+        CALL BADI lf_pstng_enrich->enrich_posting
+          EXPORTING
+            is_delivery_header = xlikp
+            is_delivery_item   = xlips
+          CHANGING
+            cs_imseg           = wa_ximseg.
+      ENDIF.
+      APPEND wa_ximseg TO ximseg.
+    ENDIF.
+  ENDIF.
+
+* If necessary (quantity 0), make delivery item GR-relevant !
+  IF xlips-lbefu_ind IS INITIAL.
+    xlips-lbefu_ind = xlips_tabix.
+    xlips-lips_up   = charx.
+    MODIFY xlips.
+  ENDIF.
+
+ENDFORM.                    "/spe/ximseg_add_pod_items
+*&---------------------------------------------------------------------*
+*&      Form  /spe/ximseg_fuellen_copied
+*&---------------------------------------------------------------------*
+*       Copied logic from ximseg_fuellen for POD
+*----------------------------------------------------------------------*
+*  <->  cs_imseg     MM posting line
+*----------------------------------------------------------------------*
+FORM /spe/ximseg_fuellen_copied CHANGING cs_imseg LIKE ximseg.
+
+*... Bestandsart ist nur sinnvoll, wenn Bewegungskz. auf B sitzt!
+  IF xlips-qplos IS INITIAL OR xlips-qplos EQ space            "n_2933810
+                            OR tvlk-aufer CN 'OH'.
+    IF xlips-kzbew CA 'BF'.
+      cs_imseg-insmk = xlips-insmk.                            "n_1929082
+* Assign stock type value in LIPS to IMSEG in case of STO process
+    ELSEIF xlips-vgtyp = if_sd_doc_category=>purchase_order  AND   " charv
+           NOT xlips-vgbel IS INITIAL AND
+           NOT xlips-vgpos IS INITIAL AND
+           NOT xlips-insmk IS INITIAL.
+      cs_imseg-insmk = xlips-insmk.                            "n_1929082
+* SPE MP 17.01.2005 Take over stock type for return to dealer deliveries
+    ELSEIF xlips-spe_auth_number NE space      AND
+       likp-vbtyp           EQ if_sd_doc_category=>delivery AND
+       xlips-insmk          NE space.
+      cs_imseg-insmk = xlips-insmk.                            "n_1929082
+    ELSE.
+      CLEAR cs_imseg-insmk.                                    "n_1929082
+    ENDIF.
+  ELSE.
+    cs_imseg-insmk = xlips-insmk.                              "n_1929082
+  ENDIF.
+
+*... Bestandsart ist nur sinnvoll, wenn Bewegungs-    "n_v_750836
+*    art <> 103 'Buchung in WE-Sperrbestand' ist!
+  IF xlips-bwart = gc_bwart_103.
+    CLEAR cs_imseg-insmk.                                      "n_1929082
+  ENDIF.                                                    "n_^_750836
+  xlseg_com-bestq  =  xlips-bestq.
+
+ENDFORM.                    " /spe/ximseg_fuellen_copied

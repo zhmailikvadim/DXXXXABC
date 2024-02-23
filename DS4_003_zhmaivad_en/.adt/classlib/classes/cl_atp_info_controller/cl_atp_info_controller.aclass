@@ -1,0 +1,217 @@
+CLASS cl_atp_info_controller DEFINITION
+  PUBLIC
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    TYPES:
+      " These types could be used later for an additional mass-enabled interface,
+      " where several requests with different dates/qts are bundled
+      " In order to keep it simple for the typical use cases, we'll probably have
+      " two separated classes for that, one mass enabled, one not.
+      BEGIN OF ts_raw_req_by_datetime,
+        raw_req            TYPE REF TO if_atp_info_raw_req,
+        requested_datetime TYPE timestamp,
+      END OF ts_raw_req_by_datetime .
+    TYPES:
+      tt_raw_req_by_datetime TYPE STANDARD TABLE OF ts_raw_req_by_datetime WITH DEFAULT KEY .
+    TYPES:
+      BEGIN OF TS_RAW_REQ_BY_quantity,
+        raw_req            TYPE REF TO if_atp_info_raw_req,
+        requested_quantity TYPE bs_atp_req_qty,
+      END OF ts_raw_req_by_quantity .
+    TYPES:
+      tt_raw_req_by_quantity TYPE STANDARD TABLE OF ts_raw_req_by_quantity WITH DEFAULT KEY .
+
+    METHODS:
+      determine_availability_at
+        IMPORTING
+          io_raw_request         TYPE REF TO if_atp_info_raw_req
+          iv_requested_date      TYPE timestamp
+        EXPORTING
+          es_availability_record TYPE atp_info_res_availy_record
+          et_message             TYPE if_atp_info_raw_req=>tt_message,
+
+      determine_availability_of
+        IMPORTING
+          io_raw_request         TYPE REF TO if_atp_info_raw_req
+          iv_requested_quantity  TYPE bs_atp_req_qty
+        EXPORTING
+          es_availability_record TYPE atp_info_res_availy_record
+          et_message             TYPE if_atp_info_raw_req=>tt_message,
+
+      calculate_availy_timeseries
+        IMPORTING
+          io_raw_request             TYPE REF TO if_atp_info_raw_req
+        EXPORTING
+          et_availability_timeseries TYPE tbl_atp_info_res_availy_record
+          et_message                 TYPE if_atp_info_raw_req=>tt_message.
+
+
+    METHODS constructor
+      IMPORTING
+        !io_pac TYPE REF TO cl_atp_pac OPTIONAL .
+  PROTECTED SECTION.
+
+    METHODS calculate_availability
+      IMPORTING
+        io_raw_request       TYPE REF TO if_atp_info_raw_req
+      EXPORTING
+        eo_processed_request TYPE REF TO if_atp_info_req
+        et_message           TYPE if_atp_info_raw_req=>tt_message.
+
+  PRIVATE SECTION.
+
+    DATA mo_pac TYPE REF TO cl_atp_pac .
+ENDCLASS.
+
+
+
+CLASS CL_ATP_INFO_CONTROLLER IMPLEMENTATION.
+
+
+  METHOD calculate_availability.
+    " NOTE: This method follows a concept to allow processing of batch requests with a single
+    "       data read. The price for that howeber is a 'generic' exporting parameter
+    "       which is not necessary in simple cases to interpret.
+    "       Therefore, we have a wrapper around that introduces better semantics. As soon as
+    "       we also support more complex queries, we could make this implementation public and
+    "       move it to a 'complex controller'.
+
+    DATA: lv_is_request_valid           TYPE abap_bool,
+          lo_interpreted_request        TYPE REF TO if_atp_info_req,
+          lt_scheduleline_for_data_read TYPE tbl_atpcs_s4.
+
+    CLEAR: et_message.
+
+    io_raw_request->validate( IMPORTING ev_valid   = lv_is_request_valid
+                                        et_message = et_message ).
+
+    IF lv_is_request_valid = abap_false.
+      RETURN.
+    ENDIF.
+
+    lo_interpreted_request = io_raw_request->interprete( ).
+    lo_interpreted_request->to_scheduleline_for_data_read( IMPORTING et_scheduleline = lt_scheduleline_for_data_read ).
+
+    mo_pac->read_data_for_display( EXPORTING  it_scheduleline = lt_scheduleline_for_data_read
+                                              iv_rdmod        = cl_atp_s4_c=>display_totals
+                                              iv_trtyp        = cl_atp_s4_c=>trtyp_create
+                                   IMPORTING  et_chkkey       = DATA(lt_checkkey)
+                                              et_single       = DATA(lt_single)
+                                   EXCEPTIONS no_customizing  = 1
+                                              OTHERS          = 2 ).
+
+    IF sy-subrc <> 0.
+      " Handle!
+      ASSERT 1 = 2.
+    ENDIF.
+
+    lo_interpreted_request->take_raw_result( it_chkkey = lt_checkkey
+                                             it_single = lt_single ).
+
+    eo_processed_request = lo_interpreted_request.
+  ENDMETHOD.
+
+
+  METHOD calculate_availy_timeseries.
+
+    DATA: lo_processed_request        TYPE REF TO if_atp_info_req,
+          lo_processed_single_request TYPE REF TO cl_atp_info_req.
+
+    me->calculate_availability(
+      EXPORTING
+        io_raw_request       = io_raw_request
+      IMPORTING
+        eo_processed_request = lo_processed_request
+        et_message           = et_message
+    ).
+
+    CHECK et_message IS INITIAL.
+
+
+    lo_processed_single_request ?= lo_processed_request.
+
+    lo_processed_single_request->get_result( )->to_availability_timeseries(
+      IMPORTING
+        et_availability_timeseries = et_availability_timeseries
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    mo_pac = io_pac.
+
+    IF mo_pac IS NOT BOUND.
+      CREATE OBJECT mo_pac.
+    ENDIF.
+
+    cl_atp_db_controller=>get_instance( )->fill_param(
+      EXPORTING
+        iv_enqueue_mode = cl_atp_s4_c=>enqueue_mode_read_only
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD determine_availability_at.
+
+    DATA: lt_availability_timeseries TYPE tbl_atp_info_res_availy_record,
+          lv_time_now                TYPE timestamp.
+
+    me->calculate_availy_timeseries(
+      EXPORTING
+        io_raw_request             = io_raw_request
+      IMPORTING
+        et_availability_timeseries = lt_availability_timeseries
+        et_message                 = et_message
+    ).
+
+    CHECK et_message IS INITIAL.
+
+
+    DELETE lt_availability_timeseries WHERE periodstartutcdatetime > iv_requested_date.
+    READ TABLE lt_availability_timeseries INDEX lines( lt_availability_timeseries ) INTO es_availability_record.
+
+    IF sy-subrc <> 0.
+      lv_time_now = cl_atp_db_controller=>get_param( )-time_now.
+
+      IF iv_requested_date < lv_time_now.
+        MESSAGE ID 'AG' TYPE 'E' NUMBER 153 INTO DATA(lv_dummy).
+      ELSE.
+        MESSAGE ID 'AG' TYPE 'E' NUMBER 152 INTO lv_dummy.
+      ENDIF.
+
+      INSERT CORRESPONDING #( sy ) INTO TABLE et_message.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD determine_availability_of.
+
+    DATA: lt_availability_timeseries TYPE tbl_atp_info_res_availy_record.
+
+    me->calculate_availy_timeseries(
+      EXPORTING
+        io_raw_request             = io_raw_request
+      IMPORTING
+        et_availability_timeseries = lt_availability_timeseries
+        et_message                 = et_message
+    ).
+
+    CHECK et_message IS INITIAL.
+
+
+    DELETE lt_availability_timeseries WHERE availablequantityinbaseunit < iv_requested_quantity.
+    READ TABLE lt_availability_timeseries INDEX 1 INTO es_availability_record.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID 'AG' TYPE 'E' NUMBER 150 INTO DATA(lv_dummy).
+      INSERT CORRESPONDING #( sy ) INTO TABLE et_message.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

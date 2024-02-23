@@ -1,0 +1,765 @@
+*----------------------------------------------------------------------*
+***INCLUDE LEEWA_MD_ROF50 .
+*----------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  check_service_type
+*&---------------------------------------------------------------------*
+*       überprüft ob die Leistungsart zulässig ist.
+*       Zulässigkeiten sind in der Route hinterlegt
+*----------------------------------------------------------------------*
+FORM check_service_type USING   route TYPE ewaroute-route.
+
+  DATA: lf_refresh TYPE kennzx.
+  TRY.
+      CALL METHOD cl_eewa_rfc_service_frequency=>check_service_type
+        EXPORTING
+          i_route        = route
+          i_product      = obj-wa_tab-product
+          i_service_type = ewaobjd-service_type
+        IMPORTING
+          e_refresh_tree = lf_refresh
+        CHANGING
+          c_obj          = obj
+          c_ewaobjd      = ewaobjd.
+    CATCH cx_eewa_md INTO lex.    " Ausnahmeklasse zum Servicerhythmus
+      __display_msg.
+  ENDTRY.
+
+
+  IF NOT lf_refresh IS INITIAL.
+    PERFORM refresh_tree   USING     g_node_key
+                           CHANGING  obj.
+  ENDIF.
+
+ENDFORM.                    " check_service_type
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_DAILY_SERVICE
+*&---------------------------------------------------------------------*
+FORM check_daily_service.
+
+  TRY.
+      CALL METHOD cl_eewa_rfc_service_frequency=>check_daily_service
+        EXPORTING
+          i_day_type = obj-wa_tsl-day_type
+          i_date     = ewaobjd-serv_date.
+    CATCH cx_eewa_md INTO lex.    " Ausnahmeklasse zum Servicerhythmus
+      __display_msg.
+  ENDTRY.
+
+ENDFORM.                               " CHECK_DAILY_SERVICE
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_SAISON
+*&---------------------------------------------------------------------*
+FORM check_saison USING    s_from   TYPE season_from
+                           s_to     TYPE season_to.
+
+  TRY.
+      CALL METHOD cl_eewa_rfc_service_frequency=>check_season
+        EXPORTING
+          i_season_from = s_from
+          i_season_to   = s_to.
+    CATCH cx_eewa_md INTO lex.    " Ausnahmeklasse zum Servicerhythmus
+      __display_msg.
+  ENDTRY.
+
+ENDFORM.                               " CHECK_SAISON
+*&---------------------------------------------------------------------*
+*&      Form  DATE_CHECK
+*&---------------------------------------------------------------------*
+FORM date_check  USING    sub_mode         TYPE isuwa_obj-contr-wmode
+                          x_bis            TYPE ewaobjd-bis
+                 CHANGING save_okcode      TYPE regen-okcode.
+
+  TRY.
+      CALL METHOD cl_eewa_rfc_service_frequency=>check_service_date
+        EXPORTING
+          i_tsl       = obj-wa_tsl
+          i_from      = ewaobjd-ab
+          i_to        = x_bis
+          i_startdate = ewaobjd-startdate
+        CHANGING
+          c_obj       = obj.
+    CATCH cx_eewa_md INTO lex.    " Ausnahmeklasse zum Servicerhythmus
+      CLEAR save_okcode.
+      __display_msg.
+  ENDTRY.
+
+*   den aktuellen Knoten ausfindig machen
+  PERFORM refresh_tree USING g_node_key
+                       CHANGING obj.
+
+
+
+ENDFORM.                    "date_check
+*&---------------------------------------------------------------------*
+*&      Form  TIME_CHECK
+*&---------------------------------------------------------------------*
+FORM time_check USING     sub_mode         TYPE isuwa_obj-contr-wmode
+                CHANGING  p_ewaobjd        TYPE ewaobjd
+                          y_save_okcode    TYPE regen-okcode.
+
+  DATA: lex          TYPE REF TO cx_eewa_base.
+
+  TRY.
+      cl_eewa_rci_eloc=>check_service_window(
+              EXPORTING i_submode  = sub_mode
+              CHANGING  c_ewaobjd  = p_ewaobjd
+                        c_okcode   = y_save_okcode ).
+
+    CATCH cx_eewa_base  INTO lex.
+      __display_msg.
+  ENDTRY.
+
+
+ENDFORM.                               " TIME_CHECK
+
+*&---------------------------------------------------------------------*
+*&      Form  check_service_date
+*&---------------------------------------------------------------------*
+FORM check_service_date.
+
+  IF NOT ewaobjd-serv_date IS INITIAL.
+    CALL FUNCTION 'ISU_DATE_PLAUSIBLE_CHECK'
+      EXPORTING
+        x_date       = ewaobjd-serv_date
+      EXCEPTIONS
+        date_invalid = 1
+        OTHERS       = 2.
+    IF sy-subrc NE 0.                " DATE_CHECK
+      CLEAR save_okcode.
+*   Bitte gültiges Datum angeben...
+      mac_msg_repeat co_msg_information space.
+      EXIT.
+    ENDIF.
+*   Servicedatum darf nicht kleiner als aktuelles Ab-Datum sein oder
+*   größer als das Bis-Datum
+    IF ewaobjd-serv_date < ewaobjd-ab OR
+       ewaobjd-serv_date > ewaobjd-bis.
+      CLEAR save_okcode.
+      mac_msg_putx co_msg_error '018' 'EWA'
+                   space space space space space.
+*         For cross reference purpose only
+      IF 1 = 2. MESSAGE e018(ewa). ENDIF.
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.                    " check_service_date
+*&---------------------------------------------------------------------*
+*&      Form  initialize_diffcult
+*&---------------------------------------------------------------------*
+*       stellt die Erschwernisse der aktuellen Zeitscheibe in eine
+*       interne Tabelle
+*----------------------------------------------------------------------*
+FORM initialize_diffcult.
+
+  DATA:
+     rt_obj_lines       TYPE REF TO isuwa_obj_lines,
+     rt_ewaobjh         TYPE REF TO isuwa_ewaobjh,
+     rt_ewaobjh_upos    TYPE REF TO ewaobjh_upos.
+
+  LOOP AT obj-ewatab REFERENCE INTO rt_obj_lines
+  WHERE ewaobj-objnr = obj-wa_tab-objnr.
+    LOOP AT rt_obj_lines->ewaobjh REFERENCE INTO rt_ewaobjh
+    WHERE ewaobjh-laufnr = obj-wa_tsl-laufnr
+    AND   ewaobjh-bis    = obj-wa_tsl-bis.
+      idiffc[] = rt_ewaobjh->ewaobjh_diffcult.
+    ENDLOOP.
+  ENDLOOP.
+  if SY-SUBRC is not initial.
+    clear IDIFFC.
+    refresh IDIFFC[].
+  endif.
+
+ENDFORM.                    " initialize_diffcult
+*&---------------------------------------------------------------------*
+*&      Form  initialize_upos
+*&---------------------------------------------------------------------*
+*       stellt die Unterpositionen der aktuellen Zeitscheibe in eine
+*       interne Tabelle
+*----------------------------------------------------------------------*
+FORM initialize_upos.
+
+  DATA:
+     rt_obj_lines       TYPE REF TO isuwa_obj_lines,
+     rt_ewaobjh         TYPE REF TO isuwa_ewaobjh,
+     rt_ewaobjh_upos    TYPE REF TO ewaobjh_upos.
+
+  LOOP AT obj-ewatab REFERENCE INTO rt_obj_lines
+  WHERE ewaobj-objnr = obj-wa_tab-objnr.
+    LOOP AT rt_obj_lines->ewaobjh REFERENCE INTO rt_ewaobjh
+    WHERE ewaobjh-laufnr = obj-wa_tsl-laufnr
+    AND   ewaobjh-bis    = obj-wa_tsl-bis.
+      iupos[] = rt_ewaobjh->ewaobjh_upos.
+    ENDLOOP.
+  ENDLOOP.
+  if SY-SUBRC is not initial.
+    clear IUPOS.
+    refresh IUPOS[].
+  endif.
+
+ENDFORM.                    " initialize_diffcult
+*&---------------------------------------------------------------------*
+*&      Form  initialize_share
+*&---------------------------------------------------------------------*
+*       stellt die Behälteranteile der aktuellen Zeitscheibe in eine
+*       interne Tabelle
+*----------------------------------------------------------------------*
+FORM initialize_share.
+
+  DATA:
+     rt_obj_lines       TYPE REF TO isuwa_obj_lines,
+     rt_ewaobjh         TYPE REF TO isuwa_ewaobjh,
+     rt_ewaobjh_share   TYPE REF TO ewaobjh_sdshare.
+
+  LOOP AT obj-ewatab REFERENCE INTO rt_obj_lines
+  WHERE ewaobj-objnr = obj-wa_tab-objnr.
+    LOOP AT rt_obj_lines->ewaobjh REFERENCE INTO rt_ewaobjh
+    WHERE ewaobjh-laufnr = obj-wa_tsl-laufnr
+    AND   ewaobjh-bis    = obj-wa_tsl-bis.
+      ishared[] = rt_ewaobjh->ewaobjh_share.
+    ENDLOOP.
+  ENDLOOP.
+  if SY-SUBRC is not initial.
+    clear ISHARED.
+    refresh ISHARED[].
+  endif.
+
+ENDFORM.                    " initialize_diffcult
+
+*&---------------------------------------------------------------------*
+*&      Form  check_diffc_input
+*&---------------------------------------------------------------------*
+FORM check_diffc_input.
+
+
+  TRY.
+      CALL METHOD cl_eewa_rfc_service_frequency=>check_diffc_input
+        EXPORTING
+          i_diffcult     = ewaobjd-diffcult
+          i_diffctxt     = ewaobjd-diffctxt
+          i_current_line = tab_diffc-current_line
+          i_tsl          = obj-wa_tsl
+          i_billdate     = obj-wa_tab-billdate
+          i_regpol       = obj-regpol_hrchy
+          i_country      = obj-wa_tab-country
+          i_regpolit     = obj-wa_tab-regpolit
+        CHANGING
+          c_diffc_tab    = idiffc[].
+    CATCH cx_eewa_md INTO lex.    " Ausnahmeklasse zum Servicerhythmus
+      __display_msg.
+  ENDTRY.
+
+  READ TABLE idiffc INDEX tab_diffc-current_line INTO idiffc.
+
+
+ENDFORM.                    " check_diffc_input
+
+*&--------------------------------------------------------------------*
+*&      Form  check_upos_input
+*&--------------------------------------------------------------------*
+*       text
+*---------------------------------------------------------------------*
+FORM check_upos_input.
+
+  DATA: current_line TYPE sy-tabix.
+
+  current_line = tab_upos-current_line.
+
+  iupos-upos = ewaobjd-upos.
+  iupos-mandt = sy-mandt.
+  iupos-bis = obj-wa_tsl-bis.
+  iupos-laufnr = obj-wa_tsl-laufnr.
+  iupos-objnr = obj-wa_tsl-objnr.
+
+  READ TABLE iupos INDEX current_line TRANSPORTING NO FIELDS.
+  IF sy-subrc = 0.
+    MODIFY iupos  INDEX current_line.
+  ELSEIF sy-subrc <> 0.
+    READ TABLE iupos WITH KEY upos = ewaobjd-upos
+                TRANSPORTING NO FIELDS.
+    IF sy-subrc <> 0.
+      APPEND iupos.
+    ELSE.
+      DELETE iupos INDEX current_line.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    "check_upos_input
+*&--------------------------------------------------------------------*
+*&      Form  check_upos_input
+*&--------------------------------------------------------------------*
+FORM check_share_input.
+
+  DATA: current_line TYPE sy-tabix,
+        wa_elocsd    TYPE ewaelocsd_all,
+        wa_propsd    TYPE ewapropsd.
+
+  current_line = tab_share-current_line.
+
+* Positionsnummer bestimmen
+  CASE obj-object.
+    WHEN co_obj_sdorder.
+*   das ist eindeutig...
+      LOOP AT obj-mdata-ielocsd INTO wa_elocsd
+      WHERE vbeln = ewaobjd-sdvertrag
+      AND   posnr = ewaobjd-posnr
+      AND   ab      LE obj-wa_tsl-bis
+      AND   bis     GE obj-wa_tsl-ab.
+        ewaobjd-posnr_share = wa_elocsd-posnr.
+        IF ewaobjd-contshare IS INITIAL.
+          ewaobjd-contshare = wa_elocsd-contshare.
+        ENDIF.
+      ENDLOOP.
+    WHEN co_obj_servloc.
+      IF NOT obj-wa_tab-devgrp IS INITIAL OR
+         NOT obj-wa_tab-ibase IS INITIAL .
+        LOOP AT obj-mdata-ielocsd INTO wa_elocsd
+        WHERE servloc = obj-wa_tab-servloc
+        AND   devgrp  = obj-wa_tab-devgrp
+        AND   ibase  = obj-wa_tab-ibase
+        AND   vbeln   = ewaobjd-vbeln_share
+        AND   ab      LE obj-wa_tsl-bis
+        AND   bis     GE obj-wa_tsl-ab.
+          ewaobjd-posnr_share = wa_elocsd-posnr.
+          IF ewaobjd-contshare IS INITIAL.
+            ewaobjd-contshare = wa_elocsd-contshare.
+          ENDIF.
+        ENDLOOP.
+      ELSE.
+        LOOP AT obj-mdata-ielocsd INTO wa_elocsd
+        WHERE servloc = obj-wa_tab-servloc
+        AND   equnr   = obj-wa_tab-equnr
+        AND   vbeln   = ewaobjd-vbeln_share
+        AND   ab      LE obj-wa_tsl-bis
+        AND   bis     GE obj-wa_tsl-ab.
+          ewaobjd-posnr_share = wa_elocsd-posnr.
+          IF ewaobjd-contshare IS INITIAL.
+            ewaobjd-contshare = wa_elocsd-contshare.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    WHEN co_obj_rob.
+**** Bei Reinigng gibt es keinen SHARE! daher hier keine Anpassung bei der Ermittlung der Fläche.
+      IF obj-wa_tab-clean_prop IS NOT INITIAL.
+        LOOP AT obj-mdata-ipropsd INTO wa_propsd
+        WHERE prop = obj-wa_tab-clean_prop
+        AND   vbeln   = ewaobjd-vbeln_share
+        AND   ab      LE obj-wa_tsl-bis
+        AND   bis     GE obj-wa_tsl-ab.
+*          ewaobjd-posnr_share = wa_elocsd-posnr.
+          ewaobjd-posnr_share = wa_propsd-posnr.
+          IF ewaobjd-contshare IS INITIAL.
+*            ewaobjd-contshare = wa_elocsd-contshare.
+            ewaobjd-contshare = wa_propsd-propshare.
+          ENDIF.
+        ENDLOOP.
+      ELSE.
+        LOOP AT obj-mdata-ieewaprop REFERENCE INTO DATA(lieewapropref)
+          WHERE rob = obj-wa_tab-rob
+            AND ab  LE obj-wa_tsl-bis
+            AND bis GE obj-wa_tsl-ab.
+
+          LOOP AT obj-mdata-ipropsd INTO wa_propsd
+            WHERE prop = lieewapropref->prop
+              AND   vbeln   = ewaobjd-vbeln_share
+              AND   ab      LE obj-wa_tsl-bis
+              AND   bis     GE obj-wa_tsl-ab.
+
+            ewaobjd-posnr_share = wa_propsd-posnr.
+            IF ewaobjd-contshare IS INITIAL.
+              ewaobjd-contshare = wa_propsd-propshare.
+            ENDIF.
+          ENDLOOP.
+
+        ENDLOOP.
+      ENDIF.
+  ENDCASE.
+
+  ishared-vbeln = ewaobjd-vbeln_share.
+  ishared-contshare = ewaobjd-contshare.
+  ishared-posnr = ewaobjd-posnr_share.
+  ishared-mandt = sy-mandt.
+  ishared-bis = obj-wa_tsl-bis.
+  ishared-laufnr = obj-wa_tsl-laufnr.
+  ishared-objnr = obj-wa_tsl-objnr.
+
+  READ TABLE ishared INDEX current_line TRANSPORTING NO FIELDS.
+  IF sy-subrc = 0.
+    MODIFY ishared  INDEX current_line.
+  ELSEIF sy-subrc <> 0.
+    READ TABLE ishared
+       WITH KEY vbeln = ewaobjd-vbeln_share
+                posnr = ewaobjd-posnr_share
+                TRANSPORTING NO FIELDS.
+    IF sy-subrc <> 0.
+      APPEND ishared.
+    ELSE.
+      DELETE ishared INDEX current_line  .
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    "check_upos_input
+
+*&---------------------------------------------------------------------*
+*&      Form  check_freqzus
+*&---------------------------------------------------------------------*
+* damit eine Servicezusammenfassung ziehen kann, müssen zumindest zwei
+* Services zum Behälter existieren mit der gleichen Leistungsart
+* Inwiefern die Nutzung einer Servicezusammenfassung zulässig ist, wird
+* im USER EXIT geprüft
+*&---------------------------------------------------------------------*
+FORM check_freqzus USING servzus TYPE e_freqzus
+                   CHANGING  xy_obj TYPE isuwa_obj.
+
+  TRY.
+      CALL METHOD cl_eewa_rfc_service_frequency=>check_servintgrouping
+        EXPORTING
+          i_sfgroup = servzus
+        CHANGING
+          c_obj     = xy_obj.
+    CATCH cx_eewa_md INTO lex.
+      __display_msg.
+  ENDTRY.
+
+
+ENDFORM.                    " check_freqzus
+*&---------------------------------------------------------------------*
+*&      Form  Transfer_diffc_input
+*&---------------------------------------------------------------------*
+FORM transfer_diffc_input.
+
+  DATA:
+     rt_obj_lines       TYPE REF TO isuwa_obj_lines,
+     rt_ewaobjh         TYPE REF TO isuwa_ewaobjh.
+
+  SORT idiffc[] BY diffcult.
+  DELETE idiffc[] WHERE diffcult IS INITIAL.
+
+  LOOP AT obj-ewatab REFERENCE INTO rt_obj_lines
+  WHERE ewaobj-objnr = obj-wa_tab-objnr.
+    LOOP AT rt_obj_lines->ewaobjh REFERENCE INTO rt_ewaobjh
+    WHERE ewaobjh-laufnr = obj-wa_tsl-laufnr
+    AND   ewaobjh-bis    = obj-wa_tsl-bis.
+
+      rt_ewaobjh->ewaobjh_diffcult = idiffc[].
+    ENDLOOP.
+  ENDLOOP.
+
+ENDFORM.                    " Transfer_diffc_input
+*&--------------------------------------------------------------------*
+*&      Form  transfer_upos_input
+*&--------------------------------------------------------------------*
+FORM transfer_upos_input.
+
+  DATA:
+     rt_obj_lines       TYPE REF TO isuwa_obj_lines,
+     rt_ewaobjh         TYPE REF TO isuwa_ewaobjh,
+     rt_ewaobjh_upos    TYPE REF TO ewaobjh_upos.
+
+  SORT iupos[] BY upos.
+  DELETE iupos[] WHERE upos IS INITIAL.
+
+  LOOP AT obj-ewatab REFERENCE INTO rt_obj_lines
+  WHERE ewaobj-objnr = obj-wa_tab-objnr.
+    LOOP AT rt_obj_lines->ewaobjh REFERENCE INTO rt_ewaobjh
+    WHERE ewaobjh-laufnr = obj-wa_tsl-laufnr
+    AND   ewaobjh-bis    = obj-wa_tsl-bis.
+
+      rt_ewaobjh->ewaobjh_upos = iupos[].
+    ENDLOOP.
+  ENDLOOP.
+
+
+ENDFORM.                    " Transfer_upos_input
+*&---------------------------------------------------------------------*
+*&      Form  transfer_share_input
+*&---------------------------------------------------------------------*
+FORM transfer_share_input.
+
+  DATA:
+     rt_obj_lines       TYPE REF TO isuwa_obj_lines,
+     rt_ewaobjh         TYPE REF TO isuwa_ewaobjh,
+     rt_ewaobjh_upos    TYPE REF TO ewaobjh_sdshare.
+
+  SORT ishared[] BY vbeln posnr.
+  DELETE ishared[] WHERE vbeln IS INITIAL.
+
+  LOOP AT obj-ewatab REFERENCE INTO rt_obj_lines
+  WHERE ewaobj-objnr = obj-wa_tab-objnr.
+    LOOP AT rt_obj_lines->ewaobjh REFERENCE INTO rt_ewaobjh
+    WHERE ewaobjh-laufnr = obj-wa_tsl-laufnr
+    AND   ewaobjh-bis    = obj-wa_tsl-bis.
+
+      rt_ewaobjh->ewaobjh_share = ishared[].
+    ENDLOOP.
+  ENDLOOP.
+
+
+ENDFORM.                    " Transfer_upos_input
+*&---------------------------------------------------------------------*
+*&      Form  check_ggvertrag
+*&---------------------------------------------------------------------*
+* folgende punkte müssen untersucht werden:
+* 1)  ist einer der AATs des Services mit dem AAT des
+*     Garantiegebervertrags übereinstimmend
+* 2)  ist der Behältertyp des Services mit dem Behältertyp des
+*     GG-Vertrags vereinbar
+* 3)  ist der Abfall im Servicerhythmus (falls vorhanden) mit der
+*     Abfallfraktion des GG-vertrags vereinbar
+*&---------------------------------------------------------------------*
+FORM check_ggvertrag  USING x_vertrag TYPE eewa_guarantor-ggvertrag
+                      CHANGING xy_obj TYPE isuwa_obj.
+
+  DATA: gg_data      TYPE isuwa_guarantor,
+        gg_hist      TYPE eewa_guarantorh,
+        found        TYPE kennzx,
+        iever        TYPE t_ever,
+        wever        TYPE ever,
+        ielocsd      TYPE isuwa_ewaelocsdall,
+        welocsd      TYPE ewaelocsd_all,
+        wa_fraction  TYPE tewawastefract,
+        lt_guaraat   TYPE STANDARD TABLE OF tewaguarantoraat,
+        ls_guaraat   TYPE tewaguarantoraat,
+        lt_aat       TYPE STANDARD TABLE OF teservicetypeaat,
+        ls_aat       TYPE teservicetypeaat,
+        error(1).
+
+  CHECK NOT x_vertrag IS INITIAL.
+
+* erst mal die Daten zum GG-Vertrag ermitteln
+  CALL FUNCTION 'ISU_DB_EEWA_GUARANTOR_SELECT'
+    EXPORTING
+      x_gcontract      = x_vertrag
+    IMPORTING
+      y_guarantor_data = gg_data
+    EXCEPTIONS
+      not_found        = 1
+      system_error     = 2
+      not_qualified    = 3
+      OTHERS           = 4.
+  IF sy-subrc = 1.
+    mac_msg_putx co_msg_error '544' 'EWA'
+                text-s72 x_vertrag 'EEWA_GUARANTOR' space space.
+    IF 1 = 2.
+      MESSAGE e544(ewa) WITH text-s72 x_vertrag 'EEWA_GUARANTOR'.
+    ENDIF.
+  ELSEIF sy-subrc > 1.
+    mac_msg_repeat co_msg_error space.
+  ENDIF.
+
+* Abrechungsdaten zum GG-vertrag selektieren
+  LOOP AT gg_data-guarantorh INTO gg_hist.
+    SELECT * FROM tewaguarantoraat APPENDING TABLE lt_guaraat
+    WHERE guarantortyp = gg_data-guarantor-ggtyp
+    AND fraction = gg_hist-fraktion.
+  ENDLOOP.
+
+* Prüfung auf Vertrag
+  IF NOT ewaobjd-vertrag IS INITIAL.
+    IF ewaobjd-vertrag <> gg_data-guarantor-kvertrag
+    AND NOT gg_data-guarantor-kvertrag IS INITIAL.
+      mac_msg_putx co_msg_error '615' 'EWA' x_vertrag
+                            space space space space.
+      SET EXTENDED CHECK OFF.
+      IF 1 = 2. MESSAGE e615(ewa). ENDIF. " for cross-reference only
+      SET EXTENDED CHECK ON.
+    ENDIF.
+  ELSE.
+    IF NOT ewaobjd-servloc IS INITIAL.
+* ->Falls der Behälter einem Standplatz zugeordnet ist, muss
+*   zuerst überprüft werden, ob es mehrere Kunden (Verträge) gibt,
+*   die sich den Behälter teilen
+      PERFORM get_servloc_contracts CHANGING iever
+                                             error
+                                             obj-iveger
+                                             ielocsd.
+      IF NOT error IS INITIAL.
+        mac_msg_putx co_msg_error '615' 'EWA' x_vertrag
+                              space space space space.
+      ELSE.
+        READ TABLE iever INDEX 1 INTO wever.
+        IF sy-subrc = 0
+        AND wever-vertrag <> gg_data-guarantor-kvertrag.
+          mac_msg_putx co_msg_error '615' 'EWA' x_vertrag
+                                space space space space.
+          SET EXTENDED CHECK OFF.
+          IF 1 = 2. MESSAGE e615(ewa). ENDIF. " for cross-reference only
+          SET EXTENDED CHECK ON.
+        ENDIF.
+        READ TABLE ielocsd INDEX 1 INTO welocsd.
+        IF sy-subrc = 0
+        AND welocsd-vbeln <> gg_data-guarantor-ksdvertrag.
+          mac_msg_putx co_msg_error '615' 'EWA' x_vertrag
+                                space space space space.
+          SET EXTENDED CHECK OFF.
+          IF 1 = 2. MESSAGE e615(ewa). ENDIF. " for cross-reference only
+          SET EXTENDED CHECK ON.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+* check auf Abfallfraktion
+  IF NOT xy_obj-wa_tab-waste_type IS INITIAL.
+    CLEAR found.
+    LOOP AT gg_data-guarantorh INTO gg_hist.
+      READ TABLE gt_wastefract
+      WITH KEY matkl = gg_hist-fraktion
+      TRANSPORTING NO FIELDS.
+      IF sy-subrc <> 0.
+        SELECT matnr matkl FROM mara
+        APPENDING CORRESPONDING FIELDS OF TABLE gt_wastefract
+        WHERE matkl = gg_hist-fraktion.
+      ENDIF.
+    ENDLOOP.
+    IF sy-subrc = 0.
+      READ TABLE gt_wastefract
+      WITH KEY matnr = xy_obj-wa_tab-waste_type
+      TRANSPORTING NO FIELDS.
+      IF sy-subrc <> 0.
+        mac_msg_putx co_msg_error '615' 'EWA' x_vertrag
+                              space space space space.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+* Behältertyp überprüfen
+  IF NOT xy_obj-wa_tab-beh_type IS INITIAL.
+    READ TABLE lt_guaraat
+    WITH KEY beh_type = xy_obj-wa_tab-beh_type
+    TRANSPORTING NO FIELDS.
+    IF sy-subrc <> 0.
+      mac_msg_putx co_msg_error '615' 'EWA' x_vertrag
+                            space space space space.
+    ENDIF.
+  ENDIF.
+
+* Abfallabrechnungstyp überprüfen
+  IF NOT xy_obj-wa_tsl-service_type IS INITIAL.
+    SELECT * FROM teservicetypeaat INTO TABLE lt_aat
+    WHERE service_type = xy_obj-wa_tsl-service_type.
+    IF sy-subrc = 0.
+      CLEAR found.
+      LOOP AT lt_aat INTO ls_aat.
+        READ TABLE lt_guaraat
+        WITH KEY billtype = ls_aat-billtype TRANSPORTING NO FIELDS.
+        IF sy-subrc = 0.
+          found = 'X'.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF found IS INITIAL.
+        mac_msg_putx co_msg_error '615' 'EWA' x_vertrag
+                              space space space space.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " check_ggvertrag
+*&---------------------------------------------------------------------*
+*&      Form  check_completeness
+*&---------------------------------------------------------------------*
+FORM check_completeness  CHANGING xy_obj TYPE isuwa_obj.
+  data:
+    LVPROT type isu_sprot_u.
+
+*  CLEAR vprot.
+
+
+  IF NOT cl_isu_wa_exithandler=>ref_exit_cmpl_check IS INITIAL.
+    CALL METHOD
+      cl_isu_wa_exithandler=>ref_exit_cmpl_check->check_compl_before_save
+      EXPORTING
+        flt_val        = xy_obj-object
+      CHANGING
+        cewaobjd       = ewaobjd
+        cobj           = xy_obj
+        cprot_tab      = lvprot
+      EXCEPTIONS
+        failed         = 1
+        internal_error = 2
+        OTHERS         = 3.
+    IF sy-subrc > 2.
+      mac_msg_putx co_msg_error '582' 'EWA'
+      space space space space internal_error.
+    ENDIF.
+  ENDIF.
+
+  perform display_prot
+    USING
+      lvprot
+    CHANGING
+      xy_obj.
+
+ENDFORM.                    " check_completeness
+
+*&---------------------------------------------------------------------*
+*&      Form  display_prot
+*&---------------------------------------------------------------------*
+FORM display_prot USING x_prot TYPE isu_sprot_u
+                  CHANGING xy_obj TYPE isuwa_obj.
+
+  DATA: wprot TYPE sprot_u.
+  DATA: msg   TYPE emsg_gen.
+
+  IF NOT x_prot IS INITIAL.
+    IF ( sy-batch IS INITIAL
+    AND sy-binpt IS INITIAL
+    AND xy_obj-contr-no_dialog IS INITIAL ).
+      IF application IS INITIAL.
+        CREATE OBJECT application.
+      ENDIF.
+
+      loop at X_PROT transporting no fields where SEVERITY ca 'EA'.
+        xy_obj-contr-inperr = 'X'.
+        exit.
+      endloop.
+
+      CALL METHOD application->display_prot
+        CHANGING
+          iprot = x_prot.
+
+    ELSE.
+      LOOP AT x_prot INTO wprot
+      WHERE ( severity = 'E' ) or ( severity = 'A' ).
+        CLEAR msg.
+        msg-msgno = wprot-msgnr.
+        msg-msgid = wprot-ag.
+        mac_msg_putx co_msg_error msg-msgno msg-msgid
+        wprot-var1 wprot-var2 wprot-var3 wprot-var4 internal_error.
+        xy_obj-contr-inperr = 'X'.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    "display_prot
+*&---------------------------------------------------------------------*
+*&      Form  check_services
+*&---------------------------------------------------------------------*
+FORM check_services  USING    head        TYPE kennzx
+                              service     TYPE kennzx
+                     CHANGING xy_obj      TYPE isuwa_obj
+                              xy_ewaobjd  TYPE ewaobjd.
+
+  TRY.
+      CALL METHOD cl_eewa_rfc_service_frequency=>check_service_data
+        EXPORTING
+          i_check_head = head
+          i_check_hist = service
+        CHANGING
+          c_obj        = xy_obj
+          c_ewaobjd    = xy_ewaobjd.
+    CATCH cx_eewa_md INTO lex.    " Ausnahmeklasse zum Servicerhythmus
+      __display_msg.
+  ENDTRY.
+
+ENDFORM.                    " check_services
+
+*&---------------------------------------------------------------------*
+*&      Form  check_capakind
+*&---------------------------------------------------------------------*
+FORM check_capakind  USING    x_capakind TYPE ewaobjd-capacitykind
+                     CHANGING xy_obj     TYPE isuwa_obj.
+
+ENDFORM.                    " check_capakind

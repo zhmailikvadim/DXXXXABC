@@ -1,0 +1,1135 @@
+*-------------------------------------------------------------------
+***INCLUDE LSEUTF00 .
+** Forms shared by any modules from level (1) or (2)
+*-------------------------------------------------------------------
+*---------------------------------------------------------------------*
+*       FORM ok_handle_search                                    *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  OK_CODE                                                       *
+*  -->  VALUE(FROM_ID)                                                *
+*---------------------------------------------------------------------*
+form ok_handle_search
+  using ok_code type stree_ucomm
+        value(from_id) like streenode-id.
+  statics:
+    begin of found occurs 0,
+      id like streenode-id,
+      action,                          "Scroll or eXpand
+      parent like streenode-id,
+    end of found,
+    current_match type stree_tabix value 0,
+    last_id type stree_node_id.
+  data:
+    entries type stree_tabix,
+    root_id like snodetext-id,
+    expand_id like snodetext-id,
+    parent_id like snodetext-id,
+    list like snodetext occurs 0
+      with header line,
+    subtree like snodetext occurs 0
+      with header line,
+    moreinfo like streeattr occurs 0
+      with header line,
+    node like streenode.
+  local tabix.
+* switch ok code
+  case ok_code.
+    when stree_cmd_cancel_immediately.
+      exit.
+    when stree_cmd_search.
+      refresh found.
+      clear:
+        current_match,
+        last_id,
+        found_id.
+* give user the chance to complete the tree if required
+      read table nodelist
+        index 1
+        transporting id.
+      root_id = nodelist-id.
+* expand subtree of current root to collect the FORCE_PLUS nodes
+      if check_thislist = space.
+        call function 'RS_TREE_LIST'
+             exporting
+                  node_id         = root_id
+                  all             = 'X'
+*                 WITH_ATTRIBUTES = ' '
+             tables
+                  list            = list
+             exceptions
+                  cycle_detected  = 1
+                  node_not_found  = 2
+                  others          = 3.
+        check sy-subrc = 0.
+* fill nodetab to call user command form
+        refresh nodetab.
+        loop at list
+          where force_plus = 'X'
+          and child = 0.
+          move-corresponding list to nodetab.
+          append nodetab.
+        endloop.
+        ucomm = stree_cmd_search.
+        perform uc_user_callback.
+      endif.
+* now get the propably completed subtree
+      call function 'RS_TREE_LIST'
+           exporting
+                node_id         = root_id
+                all             = ' '
+                with_attributes = 'X'
+           tables
+                list            = list
+           exceptions
+                cycle_detected  = 1
+                node_not_found  = 2
+                others          = 3.
+      loop at list.
+* look at current line
+*       IF list CS searchfor.                                 "DS170196
+        if_found_x list searchfor.                            "DS170196
+          clear found.
+          found-id = list-id.
+          found-action = 'S'.
+          append found.
+* check additional info if required
+        elseif check_moreinfo = 'X'
+          and list-moreinfo = 'X'
+          and ld-callback_program ne space
+          and ld-callback_moreinfo_display ne space.
+          move-corresponding list to node.
+          refresh moreinfo.
+          perform (ld-callback_moreinfo_display)
+            in program (ld-callback_program)
+            tables moreinfo
+            using node
+            if found.
+          loop at moreinfo.
+*           IF moreinfo CS searchfor.                         "DS170196
+            if_found moreinfo searchfor.                      "DS170196
+              clear found.
+              found-id = list-id.
+              found-action = 'S'.
+              append found.
+            endif.
+          endloop.
+        endif.
+* scan subtree if available
+        if check_thislist = space
+          and list-compress = 'X'
+          and list-child > 0.
+          refresh subtree.
+          call function 'RS_TREE_LIST'
+               exporting
+                    node_id         = list-id
+                    all             = 'X'
+                    with_attributes = 'X'
+               tables
+                    list            = subtree
+               exceptions
+                    cycle_detected  = 1
+                    node_not_found  = 2
+                    others          = 3.
+          loop at subtree
+            from 2.
+* look at current line
+*           IF subtree CS searchfor.                          "DS170196
+            if_found_x subtree searchfor.                     "DS170196
+              clear found.
+              found-id = subtree-id.
+              found-action = 'X'.
+              found-parent = subtree-parent.
+              append found.
+* check additional info if required
+            elseif check_moreinfo = 'X'
+              and subtree-moreinfo = 'X'
+              and ld-callback_program ne space
+              and ld-callback_moreinfo_display ne space.
+              move-corresponding subtree to node.
+              refresh moreinfo.
+              perform (ld-callback_moreinfo_display)
+                in program (ld-callback_program)
+                tables moreinfo
+                using node
+                if found.
+              loop at moreinfo.
+*               IF moreinfo CS searchfor.                     "DS170196
+                if_found moreinfo searchfor.                  "DS170196
+                  clear found.
+                  found-id = subtree-id.
+                  found-action = 'X'.
+                  found-parent = subtree-parent.
+                  append found.
+                endif.
+              endloop.
+            endif.
+          endloop.
+        endif.
+      endloop.
+* ok now, check if matches have been found
+      clear list.
+      describe table found
+        lines entries.
+      if entries = 0.
+        message e089
+          with searchfor.
+        current_match = 0.
+        exit.
+      endif.
+      current_match = 1.
+    when stree_cmd_search_next.
+      add 1 to current_match.
+    when others.
+      exit.
+  endcase.
+* scroll to current match
+  if from_id = last_id.
+    add 1 to from_id.
+  endif.
+* scroll from cursor position
+  if from_id > 0.
+    data compl_list like snodetext occurs 0 with header line.
+    call function 'RS_TREE_LIST'
+         exporting
+              node_id         = root_id
+              all             = 'X'
+*             WITH_ATTRIBUTES = ' '
+*             HIDDEN_NODES    = ' '
+         tables
+              list            = compl_list
+         exceptions
+              cycle_detected  = 1
+              node_not_found  = 2
+              others          = 3.
+    read table compl_list
+      with key from_id
+      transporting no fields.
+    tabix = sy-tabix.
+    loop at compl_list
+      from tabix.
+      read table found
+        with key compl_list-id
+        transporting no fields.
+      if sy-subrc = 0.
+        tabix = sy-tabix.
+        exit.
+      endif.
+    endloop.
+    if sy-subrc = 0.
+      read table found
+        index tabix.
+    endif.
+  else.
+    read table found
+      index current_match.
+  endif.
+  if sy-subrc = 0.
+    current_match = sy-tabix.
+    found_id = found-id.
+    last_id = found_id.
+    case found-action.
+      when 'S'.
+* ok, that's it, nothing more to do, wait for scrolling during write
+      when 'X'.
+* otherwise expand parent subtree
+        expand_id = found-id.
+        do.
+          if expand_id = '1'.
+            exit.
+          endif.
+          read table tree
+            with key expand_id
+            binary search.
+          parent_id = tree-parent.
+          if sy-subrc <> 0.
+            exit.
+          endif.
+          read table expand
+            with key parent_id
+            binary search.
+          if sy-subrc <> 0.
+            call function 'RS_TREE_EXPAND'
+               exporting
+                    node_id     = parent_id
+                    all         = ' '
+                    list_scroll = ' '
+               exceptions
+                    not_found   = 1
+                    others      = 2.
+          endif.
+          expand_id = parent_id.
+        enddo.
+        data parent like found-parent.
+        parent = found-parent.
+        loop at found
+          where parent = parent.
+          found-action = 'S'.
+          modify found.
+        endloop.
+    endcase.
+  else.
+    found_id = 0.
+    current_match = 0.
+    message i090
+      with searchfor.
+  endif.
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM USER_COMMAND                                             *
+*---------------------------------------------------------------------*
+form uc_user_callback.
+
+  data:
+    uc like rsnewleng-fcode,
+    list_refresh.
+
+  if ld-callback_program ne space
+    and ld-callback_user_command ne space.
+    list_refresh = 'X'.
+    uc = ucomm.
+    perform (ld-callback_user_command) in program (ld-callback_program)
+      tables nodetab
+      using uc
+      changing exit list_refresh
+      if found.
+    if exit ne space.
+      if ucomm = stree_cmd_exit.
+        ld_f15 = 'X'.
+      endif.
+      exit_from_screen.
+    endif.
+    if list_refresh ne space.
+      tree_display = true.
+      tv_nopbo = stree_false.
+    else.
+      tree_display = false.
+      tv_nopbo = stree_true.
+    endif.
+  endif.
+  if list_refresh = 'X'.
+    loop at marklist.
+      read table nodetab with key marklist-id."binary search.
+      if sy-subrc = 0 and nodetab-ok = 'X'.
+        call function 'RS_TREE_RESET_LOCK'
+             exporting
+                  node_id        = marklist-id
+                  with_subtree   = 'X'
+             exceptions
+                  node_not_found = 01.
+      endif.
+    endloop.
+  endif.
+
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM PREPARE_NODETAB                                          *
+*---------------------------------------------------------------------*
+form uc_prepare_nodetab.
+  move-corresponding nodelist to nodetab.
+  nodetab-ok      = 'X'.
+  if nodelist-moreinfo <> 'I'.
+    read table textbuffer
+      with key nodelist-id
+      binary search.
+    if sy-subrc = 0.
+      move-corresponding textbuffer to nodetab.
+    endif.
+  endif.
+  append nodetab.
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM l_tree                                          *
+*---------------------------------------------------------------------*
+form l_tree.
+  data:
+    treeroot like snode-id value '1',
+    old_level like nodelist-tlevel,
+    last_line type stree_tabix,
+    root_level like snode-tlevel,
+    maxlen type i,
+    nodeid like snode-id,
+    moreinfo like streeattr occurs 1
+      with header line,
+    endro like sy-srows,
+    node like streenode,
+    wa like nodelist,
+* fields to control real number of childs
+    last type stree_bool value stree_false,
+    count type i value 0,
+* level control
+    xlevel type stree_index,
+    v(100).
+  field-symbols <v>.
+
+  data: cycle_detected type stree_bool,
+        node_not_found type stree_bool.
+
+  refresh:
+    lastlist,                                                 "DS170197
+    inputlines.                                               "DS200197
+  check tree_display = true.
+*  if sy-lsind > 0.
+**    sy-lsind = sy-lsind - 1.
+    sy-lsind = 0.
+* endif.
+  format reset.
+* gui status
+  if ld-callback_program ne space
+    and ld-callback_gui_status ne space.
+* call user for gui status
+    perform (ld-callback_gui_status) in program (ld-callback_program)
+      if found.
+  elseif ( ld-status = 'IMPLICIT'
+      and ld-callback_user_command = space )
+    or ld-status = 'STANDARD'.
+* set status
+    set titlebar 'TRE'.
+    set pf-status 'LD_TREE'.
+  endif.
+* expand root
+  call function 'RS_TREE_EXPAND'
+       exporting
+            node_id   = current_root_id
+       exceptions
+            not_found = 01.
+  if sy-subrc = 0.
+    nodeid = current_root_id.
+  else.
+    nodeid = treeroot.
+  endif.
+  perform tr_list tables   nodelist
+                       using    nodeid
+                                space               "all
+                                'X'                 "with_attributes
+                                space               "hidden_nodes
+                                'X'                 " fill_lastlist
+                      changing cycle_detected
+                               node_not_found.
+* ask user for node attributes
+  if ld-callback_program ne space
+    and ld-callback_text_display ne space.
+    perform (ld-callback_text_display) in program (ld-callback_program)
+      tables nodelist
+      if found.
+  endif.
+  old_level = root_level = 0.
+  column = 1.
+  describe table nodelist
+    lines last_line.
+  if last_line = 0.
+    skip.
+    exit.
+  endif.
+* new page
+  if ld-use_control = stree_use_list_print.
+    new-page
+      line-size 255
+      print on.
+  else.
+    new-page
+      line-size 255.
+  endif.
+* top of tree
+  if ld-callback_program ne space
+    and ld-callback_top_of_tree ne space.
+    perform (ld-callback_top_of_tree) in program (ld-callback_program)
+      if found.
+  endif.
+  format reset.
+  clear v.
+* write nodes
+  loop at nodelist.
+* set default colors
+    if nodelist-link = 'X'.
+      nodelist-color = ld-color_of_link.
+      nodelist-intensiv = '0'.
+    elseif nodelist-link = 'C'.
+      nodelist-color = ld-color_of_link.
+      nodelist-intensiv = '1'.
+    endif.
+* update node attributes
+    if ld-callback_text_display ne space.
+*wk230298      and current_application ne appl_wb.
+      perform tr_update_textbuffer
+        using nodelist.
+    endif.
+    if root_level = 0.
+      move nodelist-tlevel to root_level.
+    endif.
+    cur_level = nodelist-tlevel - root_level + 1.
+* write node
+    new-line.
+
+*   check if node is last child
+    last = stree_false.
+    if ld_nodisplay = stree_false.
+      if nodelist-next is initial.
+        last = stree_true.
+      endif.
+    else.
+      read table lastlist
+        transporting no fields
+        with key nodelist-id.
+*        binary search.
+      if sy-subrc = 0.
+        last = stree_true.
+      endif.
+    endif.
+* draw line as node
+    level_indicator true last.
+    perform _display_node_w_symbol
+      using nodelist true.
+* set scroll position
+    if nodelist-id = found_id.
+      endro = sy-staro + sy-srows.
+* found node is above current start row
+      if sy-linno < sy-staro.
+        lirow = sy-linno - 5.                          "2.
+* found node is below current end row
+      elseif sy-linno >= endro.
+        lirow = sy-linno - 5.                          "sy-srows + 2.
+* found node is at current screen
+      else.
+*       lirow = sy-linno - 5.                          "
+      endif.
+      if lirow < 1.
+        lirow = 1.
+      endif.
+      call function 'LIST_SCROLL_LINE_TOPMOST'
+        exporting list_line = lirow
+        importing scroll_line = lirow
+        exceptions others = 1.
+      curow = sy-linno - sy-staro + 1.
+      found_id = 0.
+      top_id = 0.
+    elseif nodelist-id = top_id.
+      call function 'LIST_SCROLL_LINE_TOPMOST'
+        exporting list_line = sy-linno
+        importing scroll_line = lirow
+        exceptions others = 1.
+      if sy-subrc <> 0.
+        lirow = sy-linno.
+      endif.
+      top_id = 0.
+    endif.
+    hide nodelist.
+* ask user for multi line information
+    if nodelist-moreinfo ne space
+      and ld-callback_program ne space
+      and ld-callback_moreinfo_display ne space.
+      move-corresponding nodelist to node.
+      refresh moreinfo.
+      perform (ld-callback_moreinfo_display)
+        in program (ld-callback_program)
+        tables moreinfo
+        using node
+        if found.
+* write info
+      loop at moreinfo.
+        move-corresponding moreinfo to nodelist.
+        new-line.
+* draw line as line, not as node
+        level_indicator false last.
+        perform _display_node_w_symbol
+          using nodelist false.
+        nodelist-moreinfo = 'I'.
+        hide nodelist.
+      endloop.
+    endif.
+    if sy-colno > maxlen.
+      maxlen = sy-colno.
+    endif.
+  endloop.
+  move space to hide_type.
+  clear nodelist.
+  data line_size type i.
+  if maxlen > 255.
+    line_size = 255.
+  else.
+    line_size = maxlen.
+  endif.
+  perform set_linsz using line_size.
+*  current_lsind = sy-lsind + 1.
+  scroll list
+    index 0  "current_lsind
+    to page sy-cpage line lirow.                              "hk090304
+**  to first page line lirow.                                 "hk090304
+  scroll list
+    index 0 "current_lsind
+    to column licol.
+  scroll list
+    index 1  "current_lsind
+    to page sy-cpage line lirow.                              "hk090304
+**  to first page line lirow.                                 "hk090304
+  scroll list
+    index 1 "current_lsind
+    to column licol.
+  set cursor cucol curow.
+
+endform.
+
+form set_linsz using value(line_size) type i.
+
+  call 'SET_LOG_LINESIZE'  ID 'LINE-SIZE' FIELD line_size. "#EC CI_CCALL
+
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM UPDATE_TEXBUFFER                                         *
+*---------------------------------------------------------------------*
+form tr_update_textbuffer using info structure snodetext.
+
+  data: attr like streeattr.
+
+* check current_application ne appl_wb.
+
+  move-corresponding info to attr.
+  if not ( attr is initial )
+    and attr ne space.
+    read table textbuffer with key id = info-id binary search.
+    case sy-subrc.
+      when 0.
+        move-corresponding info to textbuffer.
+        modify textbuffer index sy-tabix.
+      when 4.
+        move-corresponding info to textbuffer.
+        insert textbuffer index sy-tabix.
+      when 8.
+        move-corresponding info to textbuffer.
+        append textbuffer.
+    endcase.
+    if info-nodisplay ne space.
+      ld_nodisplay = stree_true.
+    endif.
+
+  endif.
+endform.
+
+*-------------------------------------------------------------------
+***INCLUDE LSEUTF00 .
+** Local forms
+*-------------------------------------------------------------------
+form _count_children
+  using parent like snodetext
+  changing count type i.
+  local tabix.
+  tabix = count = 0.
+  data:
+    childattr like line of textbuffer,
+    last like line of textbuffer,
+    treetabix like sy-tabix.
+
+  read table tree
+    with key id = parent-child
+    binary search
+    transporting id next.
+  check sy-subrc = 0.
+  treetabix = sy-tabix.
+  do.
+    clear childattr.
+    read table textbuffer index treetabix
+      into childattr
+      transporting id nodisplay.
+    if not ( sy-subrc = 0 and tree-id = textbuffer-id ).
+      read table textbuffer
+        into childattr
+        with key id = tree-id
+        binary search
+        transporting id nodisplay.
+    endif.
+    if not ( sy-subrc = 0
+        and childattr-nodisplay = stree_true ).
+      add 1 to count.
+      last-id = childattr-id.
+    endif.
+    if tree-next = 0.
+      exit.
+    else.
+      read table tree
+        with key id = tree-next
+        binary search
+        transporting id next.
+      if sy-subrc <> 0.
+        exit.
+      endif.
+    endif.
+  enddo.
+  if last-id <> 0.
+    append last-id
+      to lastlist.
+    sort lastlist.
+  endif.
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM _display_node_w_symbol                                 *
+*---------------------------------------------------------------------*
+form _display_node_w_symbol
+  using node like snodetext
+        with_symbol type stree_bool.                          "DS030796
+
+  constants:
+    on  value '1',
+    off value '0'.
+
+  local column.
+  statics text_column like sy-colno.
+
+  data:
+    new_inverse like snodetext-tintensiv,
+    new_intensiv like snodetext-tintensiv.
+  data:
+    force_color type stree_bool value false,
+    forced_color type n,
+    g1 like g.
+  data:
+    length like snodetext-tlength,
+    len2   like snodetext-tlength.
+
+  if found_id > 0
+    and node-id = found_id.
+    force_color = true.
+    forced_color = 5.
+  elseif node-tlock ne space.
+    force_color = true.
+    forced_color = ld-color_of_mark.
+  endif.
+
+  if force_color = true.
+    node-color    = forced_color.
+    node-intensiv = off.
+    if node-text ne space.
+      node-tcolor    = forced_color.
+      node-tintensiv = off.
+    endif.
+    if node-text1 ne space.
+      node-tcolor1    = forced_color.
+      node-tintensiv1 = off.
+    endif.
+    if node-text2 ne space.
+      node-tcolor2    = forced_color.
+      node-tintensiv2 = off.
+    endif.
+    if node-text3 ne space.
+      node-tcolor3    = forced_color.
+      node-tintensiv3 = off.
+    endif.
+    if node-text4 ne space.
+      node-tcolor4    = forced_color.
+      node-tintensiv4 = off.
+    endif.
+    if node-text5 ne space.
+      node-tcolor5    = forced_color.
+      node-tintensiv5 = off.
+    endif.
+    if node-text6 ne space.
+      node-tcolor6    = forced_color.
+      node-tintensiv6 = off.
+    endif.
+    if node-text7 ne space.
+      node-tcolor7    = forced_color.
+      node-tintensiv7 = off.
+    endif.
+    if node-text8 ne space.
+      node-tcolor8    = forced_color.
+      node-tintensiv8 = off.
+    endif.
+    if node-text9 ne space.
+      node-tcolor9    = forced_color.
+      node-tintensiv9 = off.
+    endif.
+  endif.
+  clear:
+    new_inverse,
+    new_intensiv.
+
+  if cur_level = 1.
+    new_intensiv = node-intensiv.
+    perform _color_intensity
+      using node-intensiv
+      changing new_inverse new_intensiv.
+
+*   ADD 1 TO COLUMN.                                          "DS251096
+    add f to column.                                          "DS251096
+    position column.
+    if with_symbol = false
+      and node-compress = space
+      and node-leaf = space.
+*     ADD 1 TO COLUMN.                                        "DS251096
+      add f to column.                                        "DS251096
+      position column.
+      write line_vertical_line as line.
+    endif.
+* Positionierung für Knoten und Malen der Symbole
+  elseif with_symbol = true.                                  "DS030796
+    add 1 to column.
+    position column.
+    if ld-suppress_node_output ne space.
+      node-color    = node-tcolor.
+      node-intensiv = node-tintensiv.
+    endif.
+    perform _color_intensity
+      using node-intensiv
+      changing new_inverse new_intensiv.
+    if node-compress = space and node-leaf = space.
+*     WRITE minusline no-gap.
+      do g times.                                             "DS251096
+        write line_horizontal_line as line no-gap.
+      enddo.                                                  "DS251096
+      if ld-layout_mode = stree_layout_compressed.            "DS251096
+        write sym_minus_box as symbol                         "DS251096
+          color = node-color                                  "DS251096
+          intensified = new_intensiv                         "DS251096
+          inverse = new_inverse
+          hotspot.                                            "DS251096
+      else.                                                   "DS251096
+        write sym_minus_folder as symbol
+          color = node-color
+          intensified = new_intensiv
+          inverse = new_inverse
+          hotspot.
+      endif.                                                  "DS251096
+    elseif node-compress ne space
+      or ( node-force_plus ne space and
+           node-child = space ).
+*     WRITE PLUSLINE NO-GAP.
+      do g times.                                             "DS251096
+        write line_horizontal_line as line no-gap.
+      enddo.                                                  "DS251096
+      if ld-layout_mode = stree_layout_compressed.            "DS251096
+        write sym_plus_box as symbol                          "DS251096
+          color = node-color                                  "DS251096
+          intensified = new_intensiv                     "DS251096
+          inverse = new_inverse
+          hotspot.                                            "DS251096
+      else.                                                   "DS251096
+        write sym_plus_folder as symbol
+          color = node-color
+          intensified = new_intensiv
+          inverse = new_inverse
+          hotspot.
+      endif.                                                  "DS251096
+    elseif node-leaf ne space.
+*     WRITE SY-ULINE(3) NO-GAP.
+      g1 = g + 1.                                             "DS251096
+      do g1 times.                                            "DS251096
+        write line_horizontal_line as line no-gap.
+      enddo.                                                  "DS251096
+*     WRITE SY-ULINE(2) NO-GAP.
+      do g times.                                             "DS251096
+        write line_horizontal_line as line no-gap.
+      enddo.                                                  "DS251096
+    endif.
+* Positionierung der Zusatzinfo...                             DS030796
+  else.
+* ...für expandierte Knoten
+    if node-compress = space
+      and node-leaf = space.
+*     ADD 4 TO COLUMN.                                        "DS251096
+      column = column + ( 2 * g ).                            "DS251096
+      position column.
+      write line_vertical_line as line.
+* sonst
+    else.
+      add 6 to column.
+      position column.
+    endif.
+  endif.
+
+  if node-tlock ne space.
+    CL_ABAP_LIST_UTIL_INTERNAL=>SEUT_NODE_MARKED( ).
+  endif.
+
+  if with_symbol eq true.
+    column = sy-colno.
+    position column.
+    if node-nlength > 0.
+*     for multibyte we have to provide not the number of chars
+*                                   but the real output length
+      len2 = length = node-nlength.
+      if len2 > max_node_length. len2 = max_node_length. endif.
+      length =
+       CL_ABAP_LIST_UTILITIES=>DYNAMIC_OUTPUT_LENGTH( node-name(len2) ).
+      if length < len2. length = len2. endif.
+    endif.
+    write at (length) node-name
+      color = node-color
+      intensified = new_intensiv
+      inverse = new_inverse.
+    text_column = sy-colno.
+*    HIDE NODE-NAME.
+  else.
+    position text_column.
+  endif.
+  write_text node-text node-tlength node-tpos
+             node-tcolor node-tintensiv node-kind
+             node-hotspot node-input.
+  write_text node-text1 node-tlength1 node-tpos1
+             node-tcolor1 node-tintensiv1 node-kind1
+             node-hotspot1 node-input1.
+  write_text node-text2 node-tlength2 node-tpos2
+             node-tcolor2 node-tintensiv2 node-kind2
+             node-hotspot2 node-input2.
+  write_text node-text3 node-tlength3 node-tpos3
+             node-tcolor3 node-tintensiv3 node-kind3
+             node-hotspot3 node-input3.
+  write_text node-text4 node-tlength4 node-tpos4
+             node-tcolor4 node-tintensiv4 node-kind4
+             node-hotspot4 node-input4.
+  write_text node-text5 node-tlength5 node-tpos5
+             node-tcolor5 node-tintensiv5 node-kind5
+             node-hotspot5 node-input5.
+  write_text node-text6 node-tlength6 node-tpos6
+             node-tcolor6 node-tintensiv6 node-kind6
+             node-hotspot6 node-input6.
+  write_text node-text7 node-tlength7 node-tpos7
+             node-tcolor7 node-tintensiv7 node-kind7
+             node-hotspot7 node-input7.
+  write_text node-text8 node-tlength8 node-tpos8
+             node-tcolor8 node-tintensiv8 node-kind8
+             node-hotspot8 node-input8.
+  write_text node-text9 node-tlength9 node-tpos9
+             node-tcolor9 node-tintensiv9 node-kind9
+             node-hotspot9 node-input9.
+  move 'NODE' to hide_type.
+  hide hide_type.
+
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM WRITE_TEXT                                               *
+*---------------------------------------------------------------------*
+form _write_text
+  using text like snodetext-text
+        length like snodetext-tlength
+        position like snodetext-tpos
+        color like snodetext-tcolor
+        value(intensive) like snodetext-tintensiv
+        kind like snodetext-kind
+        hotspot like snodetext-hotspot
+        input like snodetext-input.
+  field-symbols:
+    <icon>,
+    <symbol>,
+    <checkbox>.
+  CLASS cl_abap_list_utilities DEFINITION LOAD.              "VOG301002
+  data:
+    pos type i,
+    inverse like intensive,
+    iqi type seuicqinfo,
+    iqj type seuicqinf,                                       "hk100304
+    cbw type seucbwtext,
+    pos2 type i,
+    len2 type i.
+  check not ( length is initial ).
+  if position is initial.
+    pos = sy-colno.
+  else.
+    pos = position.
+  endif.
+* inverse just for internal use
+  if intensive na ' 0'.
+    if intensive = '2'.
+      inverse = '1'.
+      intensive = '0'.
+    elseif intensive = '3'.
+      inverse = '1'.
+      intensive = '1'.
+    else.
+      inverse = '0'.
+      intensive = '1'.
+    endif.
+  endif.
+  if hotspot na ' 0'.
+    hotspot = '1'.
+  endif.
+  if input na ' 0'.
+    input = '1'.
+    append sy-linno
+      to inputlines.                                          "DS200197
+  endif.
+  if text = space
+    and ( kind = stree_txttype_icon
+      or kind = stree_txttype_symbol ).
+    kind = stree_txttype_text.
+  endif.
+  case kind.
+* just a text
+    when stree_txttype_text.
+      len2 = length.
+      if len2 > max_text_length. len2 = max_text_length. endif.
+      length =
+        CL_ABAP_LIST_UTILITIES=>DYNAMIC_OUTPUT_LENGTH( text(len2) ).
+      if length < len2. length = len2. endif.
+      write at pos(length) text
+        color = color
+        intensified = intensive
+        inverse = inverse
+        hotspot = hotspot
+        input = input.
+* text without gap
+    when stree_txttype_text_no_gap.
+      len2 = length.
+      if len2 > max_text_length. len2 = max_text_length. endif.
+      length =
+        CL_ABAP_LIST_UTILITIES=>DYNAMIC_OUTPUT_LENGTH( text(len2) ).
+      if length < len2. length = len2. endif.
+      pos = pos - 1.
+      write at pos(length) text
+        color = color
+        intensified = intensive
+        inverse = inverse
+        hotspot = hotspot
+        input = input.
+
+** an icon by icon-id with quickinfo for accessibility        "hk100304
+    when stree_txttype_icon_4.                                "hk100304
+      iqj = text.                                             "hk100304
+      SELECT SINGLE name FROM icon INTO iqi-icon              "hk180304
+                         WHERE id = iqj-icon_id.              "hk180304
+      assign (iqi-icon) to <icon>.                            "hk180304
+*(DEL)write at pos(length) iqj-icon_id                        "hk180304
+      write at pos(length) <icon>            "for SELNAME     "hk180304
+        as icon quickinfo  iqj-quickinfo                      "hk100304
+        color       = color                                   "hk100304
+        intensified = intensive                               "hk100304
+        hotspot     = hotspot.                                "hk100304
+* an icon by name so that the icon name is received at get cursor
+    when stree_txttype_icon.
+      iqi = text.
+      assign (iqi-icon) to <icon>.
+      write at pos(length) <icon>
+        as icon quickinfo iqi-quickinfo
+        color = color
+        intensified = intensive
+        hotspot = hotspot.
+* an icon by name so that the field name is received at get cursor
+    when stree_txttype_icon_2.
+      iqi = text.
+      assign (iqi-icon) to <icon>.
+      clear text.
+      text = <icon>.
+      write at pos(length) text
+        as icon quickinfo iqi-quickinfo
+        color = color
+        intensified = intensive
+        hotspot = hotspot.
+* an icon by id so that the field name is received at get cursor
+    when stree_txttype_icon_3.
+      iqi = text.
+      clear text.
+      text = iqi-icon.
+      write at pos(length) text
+        as icon quickinfo iqi-quickinfo
+        color = color
+        intensified = intensive
+        hotspot = hotspot.
+
+** a symbol by symbol-id with quickinfo for accessibility     "hk100304
+    when stree_txttype_symbol_4.                              "hk100304
+      iqj = text.                                             "hk100304
+      iqi-icon =                                              "hk290404
+         cl_abap_list_symbols=>get_symbol_name( iqj-icon_id )."hk290404
+      assign (iqi-icon) to <symbol>.                          "hk290404
+      write at pos(length) <symbol>                           "hk290404
+        as symbol quickinfo iqj-quickinfo                     "hk100304
+        color       = color                                   "hk100304
+        intensified = intensive                               "hk100304
+        hotspot     = hotspot.                                "hk100304
+* a symbol by name so that the symbol name is received at get cursor
+    when stree_txttype_symbol.
+      iqi = text.
+      assign (iqi-icon) to <symbol>.
+      write at pos(length) <symbol>
+        as symbol quickinfo iqi-quickinfo
+        color = color
+        intensified = intensive
+        hotspot = hotspot.
+* a symbol by name so that the field name is received at get cursor
+    when stree_txttype_symbol_2.
+      iqi = text.
+      assign (iqi-icon) to <symbol>.
+      clear text.
+      text = <symbol>.
+      write at pos(length) text
+        as symbol quickinfo iqi-quickinfo
+        color = color
+        intensified = intensive
+        hotspot = hotspot.
+* a symbol by id so that the field name is received at get cursor
+    when stree_txttype_symbol_3.
+      iqi = text.
+      clear text.
+      text = iqi-icon.
+      write at pos(length) text
+        as symbol quickinfo iqi-quickinfo
+        color = color
+        intensified = intensive
+        hotspot = hotspot.
+* checkbox
+    when stree_txttype_checkbox.
+      assign text(1) to <checkbox>.
+      if <checkbox> ne space.
+        <checkbox> = 'X'.
+      endif.
+      write at pos <checkbox>
+        as checkbox
+        color = color
+        intensified = intensive
+        input = input.
+* checkbox
+    when stree_txttype_checkbox_w_text.
+      cbw = text.
+      assign cbw-value to <checkbox>.
+      if <checkbox> ne space.
+        <checkbox> = 'X'.
+      endif.
+      if cbw-cbox_right = space.
+        pos2 = pos + 2.
+        len2 = length - 2.
+        write at pos <checkbox>
+          as checkbox
+          color = color
+          intensified = intensive
+          input = input.
+        write at pos2(len2) cbw-text
+          color = color
+          intensified = intensive.
+      else.
+        len2 = length - 2.
+        pos2 = pos + len2.
+        write at pos(len2) cbw-text
+          color = color
+          intensified = intensive.
+        write at pos2 <checkbox>
+          as checkbox
+          color = color
+          intensified = intensive
+          input = input.
+        add 1 to sy-colno.           "for a gap like in the left case
+      endif.
+  endcase.
+endform.
+
+form _color_intensity
+  using intensity like snodetext-tintensiv
+  changing inverse like snodetext-tintensiv
+           intensive like snodetext-tintensiv.
+  if intensity na ' 0'.
+    if intensity = '2'.
+      inverse = '1'.
+      intensive = '0'.
+    elseif intensity = '3'.
+      inverse = '1'.
+      intensive = '1'.
+    else.
+      inverse = '0'.
+      intensive = '1'.
+    endif.
+  endif.
+endform.

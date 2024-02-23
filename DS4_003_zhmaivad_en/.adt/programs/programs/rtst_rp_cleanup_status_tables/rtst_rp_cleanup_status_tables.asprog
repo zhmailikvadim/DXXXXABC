@@ -1,0 +1,279 @@
+*&---------------------------------------------------------------------*
+*& Report rtst_rp_cleanup_status_tables
+*&---------------------------------------------------------------------*
+*& This report can be used to clean up the status tables that are used
+*& in the 'Receive Products' App. These status tables are
+*6 RTST_RP_POST_DOC, RTST_RP_POST_ITM and RTST_RP_STAT_ITM. If you clean
+*& up entries for Handling Units, that have already been posted, these
+*& Handling Units will not be processable any more with the App, because
+*& material documents of the corresponding purchase order item will be
+*& detected for these Handling Units that are not contained any more in
+*& the Status Tables of the App.
+*& For Purchase Orders and Deliveries that are removed from the Status
+*& Tables the correct posting state will still be displayed. Only the
+*& information which quantity was entered for an item/article will be lost.
+*&---------------------------------------------------------------------*
+REPORT rtst_rp_cleanup_status_tables.
+
+SELECTION-SCREEN BEGIN OF BLOCK main.
+  SELECTION-SCREEN BEGIN OF LINE.
+    SELECTION-SCREEN COMMENT (65) TEXT-prc FOR FIELD num_days.
+    PARAMETERS num_days TYPE rtst_rp_not_proc_days DEFAULT '100'.
+    SELECTION-SCREEN COMMENT (10) TEXT-day FOR FIELD num_days.
+  SELECTION-SCREEN END OF LINE.
+  PARAMETERS simulate TYPE abap_bool AS CHECKBOX DEFAULT abap_true.
+SELECTION-SCREEN END OF BLOCK main.
+
+DATA lt_documents        TYPE STANDARD TABLE OF rtst_rp_document_internal_id.
+DATA lt_documents_remove TYPE STANDARD TABLE OF rtst_rp_document_internal_id.
+DATA lv_count            TYPE i.
+DATA ltr_documents       TYPE RANGE OF rtst_rp_document_internal_id.
+DATA lsr_document        LIKE LINE OF ltr_documents.
+DATA lv_lines            TYPE i.
+
+CONSTANTS lc_package_size TYPE i VALUE 10.
+
+GET TIME STAMP FIELD DATA(lv_timestamp_now).
+
+* calculate reference timestamp
+DATA(lv_ref_timestamp) = cl_abap_tstmp=>subtractsecs( tstmp = lv_timestamp_now secs = num_days * 24 * 60 * 60 ).
+
+* get documents that qualify for deletion
+SELECT DISTINCT document_internal_id FROM rtst_rp_post_doc APPENDING TABLE lt_documents WHERE last_processed_timestamp <= lv_ref_timestamp. "#EC CI_NOFIELD.
+SELECT DISTINCT document_internal_id FROM rtst_rp_stat_itm APPENDING TABLE lt_documents WHERE last_processed_timestamp <= lv_ref_timestamp. "#EC CI_NOFIELD.
+SELECT DISTINCT document_internal_id FROM rtst_rp_post_itm APPENDING TABLE lt_documents WHERE last_processed_timestamp <= lv_ref_timestamp. "#EC CI_NOFIELD.
+
+IF lt_documents IS NOT INITIAL.
+
+  SORT lt_documents.
+  DELETE ADJACENT DUPLICATES FROM lt_documents.
+
+* get documents of qualified documents that still have entries with last_processed_timestamp > lv_ref_timestamp
+  SELECT DISTINCT document_internal_id FROM rtst_rp_post_doc APPENDING TABLE lt_documents_remove
+  FOR ALL ENTRIES IN lt_documents
+  WHERE document_internal_id = lt_documents-table_line
+      AND last_processed_timestamp > lv_ref_timestamp. "#EC CI_NOFIELD.
+
+  SELECT DISTINCT document_internal_id FROM rtst_rp_stat_itm APPENDING TABLE lt_documents_remove
+  FOR ALL ENTRIES IN lt_documents
+  WHERE document_internal_id = lt_documents-table_line
+    AND last_processed_timestamp > lv_ref_timestamp.
+
+  SELECT DISTINCT document_internal_id FROM rtst_rp_post_itm APPENDING TABLE lt_documents_remove
+  FOR ALL ENTRIES IN lt_documents
+  WHERE document_internal_id = lt_documents-table_line
+      AND last_processed_timestamp > lv_ref_timestamp. "#EC CI_NOFIRST.
+
+  SORT lt_documents_remove.
+  DELETE ADJACENT DUPLICATES FROM lt_documents_remove.
+
+  LOOP AT lt_documents_remove ASSIGNING FIELD-SYMBOL(<lv_document_internal_id>).
+    READ TABLE lt_documents WITH KEY table_line = <lv_document_internal_id> BINARY SEARCH TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0.
+      DELETE lt_documents INDEX sy-tabix.
+    ENDIF.
+  ENDLOOP.
+
+ENDIF.
+
+* now we have all the documents that have no entries with last_processed_timestamp > lv_ref_timestamp and that can be removed
+lsr_document-option = 'EQ'.
+lsr_document-sign = 'I'.
+
+lv_lines = lines( lt_documents ).
+lv_count = 0.
+
+IF simulate = abap_false.
+
+  LOOP AT lt_documents ASSIGNING <lv_document_internal_id>.
+
+    DATA(lv_tabix) = sy-tabix.
+
+    ADD 1 TO lv_count.
+    lsr_document-low = <lv_document_internal_id>.
+    APPEND lsr_document TO ltr_documents.
+
+    IF lv_count = lc_package_size OR lv_tabix = lv_lines .
+
+      DELETE FROM rtst_rp_post_doc WHERE document_internal_id IN ltr_documents. "#EC CI_NOFIELD.
+      DELETE FROM rtst_rp_post_itm WHERE document_internal_id IN ltr_documents. "#EC CI_NOFIRST.
+      DELETE FROM rtst_rp_stat_itm WHERE document_internal_id IN ltr_documents. "#EC CI_NOFIELD.
+
+      CLEAR ltr_documents.
+      lv_count = 0.
+
+    ENDIF.
+
+  ENDLOOP.
+
+ENDIF.
+
+CONVERT TIME STAMP lv_ref_timestamp TIME ZONE sy-zonlo INTO DATE DATA(lv_date) TIME DATA(lv_time).
+
+DATA lv_date_convert(10) TYPE c.
+DATA lv_time_convert(10) TYPE c.
+
+WRITE lv_date TO lv_date_convert.
+WRITE lv_time TO lv_time_convert.
+
+INITIALIZATION.
+
+  DATA:  BEGIN OF ty_message OCCURS 1.
+           INCLUDE STRUCTURE rw17a.
+  DATA:  END OF ty_message.
+
+
+
+START-OF-SELECTION.
+
+  DATA: lv_temp_lines(100) TYPE c.
+
+  WRITE lv_lines TO lv_temp_lines LEFT-JUSTIFIED.
+
+  IF simulate = abap_false.
+    ty_message-msgcl = 'RTST_RP'.
+    ty_message-msgno = '061'.
+    ty_message-msgar = 'S'.
+    ty_message-msgv1 = lv_temp_lines.
+    ty_message-msgv2 = lv_date_convert.
+    ty_message-msgv3 = lv_time_convert.
+
+    APPEND ty_message.
+
+    MESSAGE s061(rtst_rp) WITH lv_lines lv_date_convert lv_time_convert.
+  ELSE.
+    ty_message-msgcl = 'RTST_RP'.
+    ty_message-msgno = '062'.
+    ty_message-msgar = 'S'.
+    ty_message-msgv1 = lv_temp_lines.
+    ty_message-msgv2 = lv_date_convert.
+    ty_message-msgv3 = lv_time_convert.
+
+    APPEND ty_message.
+
+    MESSAGE s062(rtst_rp) WITH lv_lines lv_date_convert lv_time_convert.
+  ENDIF.
+
+  PERFORM write_application_log TABLES ty_message.
+
+
+*&---------------------------------------------------------------------*
+*& Form write_application_log
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*&      --> GT_MESSAGE
+*&---------------------------------------------------------------------*
+FORM write_application_log  TABLES   p_gt_message STRUCTURE ty_message.
+
+  CONSTANTS :
+    c_object           TYPE bal_s_log-object    VALUE `W_SRS_MOB`,
+    c_subobject        TYPE bal_s_log-subobject VALUE `MOBILE_GR`,
+    c_probclass_medium TYPE bal_s_msg-probclass VALUE '3',
+    c_probclass_low    TYPE bal_s_msg-probclass VALUE '4'.
+
+  DATA   : g_log        TYPE bal_s_log,
+           g_log_handle TYPE balloghndl.
+
+  DATA: lt_log_handle TYPE bal_t_logh.
+
+  g_log = VALUE #(
+  extnumber = TEXT-001
+  aluser    = sy-uname
+  alprog    = sy-repid
+  object    = c_object
+  subobject = c_subobject
+  ).
+* To create Log Handle
+  CALL FUNCTION 'BAL_LOG_CREATE'
+    EXPORTING
+      i_s_log      = g_log
+    IMPORTING
+      e_log_handle = g_log_handle
+    EXCEPTIONS
+      OTHERS       = 1.
+
+  IF sy-subrc <> 0 .
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+* To create Application Log Handle
+  IF NOT sy-batch IS INITIAL.
+    CALL FUNCTION 'BP_ADD_APPL_LOG_HANDLE'
+      EXPORTING
+        loghandle = g_log_handle.
+  ENDIF.
+
+* Appending Info Log - Authorisation issues to mail loop so that it will be displayed too in Application log.
+
+  DESCRIBE TABLE p_gt_message LINES sy-tfill.
+  IF sy-tfill > 0.
+    LOOP AT p_gt_message.
+
+      CHECK g_log_handle IS NOT INITIAL.
+
+      DATA(ls_appl_msg) = VALUE bal_s_msg(
+            msgid = p_gt_message-msgcl
+            msgno =  p_gt_message-msgno
+            msgty =  p_gt_message-msgar
+            msgv1 =  p_gt_message-msgv1
+            msgv2 =  p_gt_message-msgv2
+            msgv3 =  p_gt_message-msgv3 ).
+
+      GET TIME STAMP FIELD ls_appl_msg-time_stmp.
+
+      "Problem Class
+      IF  p_gt_message-msgar = `E`.
+        ls_appl_msg-probclass = c_probclass_medium.
+      ELSE.
+        ls_appl_msg-probclass = c_probclass_low.
+      ENDIF.
+* To Add messages to Log Handle
+      CALL FUNCTION 'BAL_LOG_MSG_ADD'
+        EXPORTING
+          i_log_handle     = g_log_handle
+          i_s_msg          = ls_appl_msg
+        EXCEPTIONS
+          log_not_found    = 1
+          msg_inconsistent = 2
+          log_is_full      = 3
+          OTHERS           = 4.
+      IF sy-subrc <> 0.
+* Implement suitable error handling here
+      ENDIF.
+
+    ENDLOOP.
+  ENDIF.
+
+  APPEND g_log_handle TO lt_log_handle.
+* To save messages added  Log Handle
+  CALL FUNCTION 'BAL_DB_SAVE'
+    EXPORTING
+      i_save_all       = abap_true
+      i_t_log_handle   = lt_log_handle
+    EXCEPTIONS
+      log_not_found    = 1
+      save_not_allowed = 2
+      numbering_error  = 3
+      OTHERS           = 4.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+    WITH sy-msgv1 sy-msgv2 sy-msgv3.
+  ENDIF.
+
+  CALL FUNCTION 'BAL_DSP_LOG_DISPLAY'
+    EXPORTING
+      i_t_log_handle       = lt_log_handle
+      i_amodal             = ' '
+    EXCEPTIONS
+      profile_inconsistent = 1
+      internal_error       = 2
+      no_data_available    = 3
+      no_authority         = 4
+      OTHERS               = 5.
+  IF sy-subrc <> 0.
+* Implement suitable error handling here
+  ENDIF.
+
+ENDFORM.

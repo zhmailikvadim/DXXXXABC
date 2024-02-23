@@ -1,0 +1,114 @@
+class ZCL_SD_DN_EVT_UPL_DATA_CHECK definition
+  public
+  final
+  create public .
+
+public section.
+
+  class-methods PROCESS
+    importing
+      !IT_DATA type ZSD_T_DN_EVENTS_INT_PROC
+      !IV_SHOW_POPUP_MESSAGE type ABAP_BOOL default ABAP_FALSE
+    changing
+      !CT_RETURN type BAPIRET2_T .
+protected section.
+private section.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_DN_EVT_UPL_DATA_CHECK IMPLEMENTATION.
+
+
+  METHOD process.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 15.06.2023 | 22319     : P&FE - [Build] - Indicator o *
+*              |            | DS4K955546                               *
+*----------------------------------------------------------------------*
+* HURTSALE     | 30.10.2023 | 26381     : P&FE - Manual data validated *
+*              |            | DS4K968632                               *
+*----------------------------------------------------------------------*
+
+    TYPES:
+      BEGIN OF ltyp_filter,
+        tsegevttyp TYPE tsegevttyp,
+      END OF ltyp_filter,
+
+      BEGIN OF ltyp_cust,
+        vstga TYPE vstga,
+      END OF ltyp_cust.
+
+    DATA: lts_cust      TYPE SORTED TABLE OF ltyp_cust WITH NON-UNIQUE KEY vstga,
+          lt_return_tmp TYPE bapiret2_t.
+
+    LOOP AT it_data ASSIGNING FIELD-SYMBOL(<ls_data_tmp>)
+      GROUP BY ( event_type = <ls_data_tmp>-event_type ) ASSIGNING FIELD-SYMBOL(<ls_data_grp>).
+* Get ZHM customizing
+      TRY.
+          zcl_pe_hm_complex=>get_table(
+            EXPORTING
+              iv_id     = '024F85009E261EEE82E7DAF7465300D2'
+              is_filter = VALUE ltyp_filter( tsegevttyp = <ls_data_grp>-event_type )
+            IMPORTING
+              et_table  = lts_cust ).
+
+          DATA(lv_refu_event) = zcl_pe_hm_basic=>get_value( iv_id = '1987' ).
+          DATA(lv_pod_event) = zcl_pe_hm_basic=>get_value( iv_id = '795' ).
+          DATA(lt_partial_refu_pod_reasons) = zcl_pe_hm_basic=>get_table( iv_id = '2611' ).
+        CATCH zcx_pe_hm.
+          CLEAR: lts_cust, lv_refu_event.
+      ENDTRY.
+      CHECK lts_cust IS NOT INITIAL.
+* Check
+      LOOP AT GROUP <ls_data_grp> ASSIGNING FIELD-SYMBOL(<ls_data>).
+
+        "To validate POD and REFU events
+        IF <ls_data_grp>-event_type = lv_refu_event OR
+           <ls_data_grp>-event_type = lv_pod_event.
+          DATA(lv_refu_part_reason_code) = VALUE #( lt_partial_refu_pod_reasons[ field1 = lv_refu_event ]-field2 OPTIONAL ).
+          DATA(lv_pod_part_reason_code) = VALUE #( lt_partial_refu_pod_reasons[ field1 = lv_pod_event ]-field2 OPTIONAL ).
+
+          IF <ls_data>-delivery_note IS INITIAL.
+            MESSAGE e015(zsd_delevtupd) INTO DATA(lv_msg) ##NEEDED.
+            cl_bapi_msg=>add_message( CHANGING ct_message = lt_return_tmp ).
+          ENDIF.
+          IF <ls_data>-begin_actual_date IS INITIAL.
+            MESSAGE e018(zsd_delevtupd) INTO lv_msg.
+            cl_bapi_msg=>add_message( CHANGING ct_message = lt_return_tmp ).
+          ENDIF.
+          IF <ls_data>-handling_unit IS INITIAL AND
+              ( <ls_data>-reason = lv_refu_part_reason_code OR
+                <ls_data>-reason = lv_pod_part_reason_code ).
+            MESSAGE e017(zsd_delevtupd) WITH lv_pod_part_reason_code lv_refu_part_reason_code INTO lv_msg.
+            cl_bapi_msg=>add_message( CHANGING ct_message = lt_return_tmp ).
+          ENDIF.
+
+        ENDIF.
+
+        IF <ls_data>-reason IS INITIAL.
+          MESSAGE e013 WITH |"{ <ls_data_grp>-event_type }"| INTO lv_msg.
+          cl_bapi_msg=>add_message( CHANGING ct_message = lt_return_tmp ).
+        ELSEIF NOT line_exists( lts_cust[ vstga = <ls_data>-reason ] ).
+          MESSAGE e012 WITH |"{ <ls_data_grp>-event_type }"| INTO lv_msg.
+          cl_bapi_msg=>add_message( CHANGING ct_message = lt_return_tmp ).
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+* Reduce duplicate messages
+    SORT lt_return_tmp BY type id number message_v1.
+    DELETE ADJACENT DUPLICATES FROM lt_return_tmp COMPARING type id number message_v1.
+    APPEND LINES OF lt_return_tmp TO ct_return.
+
+    IF cl_bapi_msg=>contains_error( it_message = ct_return ) AND
+       iv_show_popup_message = abap_true.
+      /aif/cl_util=>show_messages( it_message = ct_return ).
+      LEAVE LIST-PROCESSING.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

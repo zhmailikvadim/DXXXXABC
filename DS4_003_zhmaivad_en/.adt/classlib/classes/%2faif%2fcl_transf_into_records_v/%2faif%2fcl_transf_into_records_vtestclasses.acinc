@@ -1,0 +1,791 @@
+*"* use this source file for your ABAP unit test classes
+
+class lcl_tests definition deferred.
+class /aif/cl_transf_into_records_v definition local friends lcl_tests.
+
+"! The lcl_create_new_record_matcher validates the parameters of the table record buffer's create_new_record-method
+"! (The method needs a custom matcher, because of it deep structured it_key_values parameters)
+class lcl_create_new_record_matcher definition.
+
+  public section.
+    interfaces if_abap_testdouble_matcher.
+
+    methods:
+      constructor importing iv_counter type i optional.
+
+  private section.
+    data: mv_exp_counter_value type i.
+
+endclass.
+
+class lcl_create_new_record_matcher implementation.
+
+  method if_abap_testdouble_matcher~matches.
+
+    field-symbols: <lt_key_values>    type /aif/if_table_record_buffer=>lty_key_value_tt,
+                   <lv_act_counter>   type i,
+                   <lv_exp_counter>   type i,
+                   <lv_act_tablename> type tabname16,
+                   <lv_exp_tablename> type tabname16.
+
+    " evaluate counter-parameter
+    if method_name = 'CREATE_NEW_RECORD'.
+
+      " read parameters
+      data(lr_act_key_values_tab) = actual_arguments->get_param_importing( 'it_key_values' ).
+      data(lr_act_tablename) = actual_arguments->get_param_importing( 'iv_tablename' ).
+      data(lr_exp_key_values_tab) = configured_arguments->get_param_importing( 'it_key_values' ).
+      data(lr_exp_tablename) = configured_arguments->get_param_importing( 'iv_tablename' ).
+
+      " assign tablenames
+      assign lr_act_tablename->* to <lv_act_tablename>.
+      assign lr_exp_tablename->* to <lv_exp_tablename>.
+
+      " extract actual counter value from parameter table
+      assign lr_act_key_values_tab->* to <lt_key_values>.
+      data(lr_act_counter) = <lt_key_values>[ key_name = 'COUNTER' ]-key_value.
+      assign lr_act_counter->* to <lv_act_counter>.
+
+      " extract expected counter value from parameter table
+      assign lr_exp_key_values_tab->* to <lt_key_values>.
+      data(lr_exp_counter) = <lt_key_values>[ key_name = 'COUNTER' ]-key_value.
+      assign lr_exp_counter->* to <lv_exp_counter>.
+
+      " validate result
+      if <lv_act_counter> is assigned and <lv_exp_counter> is assigned
+         and <lv_act_tablename> is assigned and <lv_exp_tablename> is assigned.
+        if <lv_exp_counter> = <lv_act_counter>
+           and <lv_exp_tablename> = <lv_act_tablename>.
+          result = abap_true.
+        endif.
+      else.
+        result = abap_false.
+      endif.
+    endif.
+
+  endmethod.
+
+  method constructor.
+    mv_exp_counter_value = iv_counter.
+  endmethod.
+
+endclass.
+
+class lcl_tests definition for testing
+  duration short
+  risk level harmless
+.
+
+  private section.
+
+    data: "! class under test
+      mo_cut                      type ref to /aif/cl_transf_into_records_v,
+
+      "! mocked object for table record buffer
+      mo_table_record_buffer_mock type ref to /aif/if_table_record_buffer,
+
+      "! a reference variable/attribute, which acts as nullpointer
+      mo_null_pointer             type ref to data.
+
+    constants: "! a constant with a value to identify if a field was not changed
+               should_not_get_touched type char30 value '123'.
+
+    methods:
+      "! preparations for the next unit test / is called directly before executing every unit test
+      setup,
+
+      "! calling the constructor w/o a table record buffer instance should create and init a new instance with COUNTER as nonunique-key
+      constructor_create_tab_rec_buf for testing raising /aif/cx_struct_pers_base,
+
+      "! visiting a field when the mapping entry is missing should throw an exception
+      visit_field_w_missing_mapping for testing,
+
+      "! visiting a field when the target record does already exist in the record buffer should result in reusing the existing record.
+      visit_field_w_existing_record for testing,
+
+      "! visiting a field when the target record does not exist in the record buffer should result in creating a new record.
+      visit_field_w_o_record for testing,
+
+      "! visiting two fields (with different data types) should use the same record and the same ids.
+      visit_two_fields for testing,
+
+      "! visiting a table line and then a field should result in an incremented row id and a corresponding parent id
+      visit_table_line_and_field for testing,
+
+      "! visiting two table lines and then a single field should result in an row id incremented by 2 and a corresponding parent id
+      visit_two_table_lines_and_fld for testing raising /aif/cx_struct_pers_base,
+
+      "! visiting a structure and a field should behave like visiting a field alone
+      visit_structure_and_field for testing,
+
+      "! visiting a structure and a tableline should behave like visiting a tableline alone
+      visit_structure_table_field for testing,
+
+      "! visiting a raw structure with having no fields in the structure's root should despite create a record for the structure's root
+      visit_root_structure_wo_fields for testing,
+
+      "! visiting a raw structure with having a subtable with no fields should despite create a record for the subtable
+      visit_subtable_wo_fields for testing,
+
+      "! calling the init method should create a record for the structure's root
+      init_should_create_root_record for testing,
+
+      "! calling the init method w/o a valid mapping should raise an exception
+      init_wo_mapping_shall_throw_cx for testing raising /aif/cx_struct_pers_base,
+
+      "! getting the table records returns the local table record buffer instance
+      get_table_records_returns_obj for testing.
+
+endclass.       "lcl_Tests
+
+
+class lcl_tests implementation.
+
+
+  method setup.
+
+    mo_table_record_buffer_mock ?= cl_abap_testdouble=>create( '/aif/if_table_record_buffer' ).
+    mo_cut = new /aif/cl_transf_into_records_v( io_table_record_buffer = mo_table_record_buffer_mock ).
+
+  endmethod.
+
+
+  method visit_field_w_missing_mapping.
+
+    try.
+        types: begin of lty_line_type_t_root,
+                 parent_id    type i,
+                 a_column     type char30,
+                 other_column type char30,
+               end of lty_line_type_t_root,
+
+               lty_t_root type standard table of lty_line_type_t_root with empty key.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt(  ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " call method
+        data(lv_exception_was_thrown) = abap_false.
+        try.
+            mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'the value' )
+                                                           iv_component_path = 'A_FIELD' ).
+          catch cx_root.
+            lv_exception_was_thrown = abap_true.
+        endtry.
+
+        " assert and verify result
+        cl_aunit_assert=>assert_equals( act = lv_exception_was_thrown
+                                        exp = abap_true ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_field_w_existing_record.
+
+    try.
+        types: begin of lty_line_type_t_root,
+                 parent_id    type i,
+                 a_column     type char30,
+                 other_column type char30,
+               end of lty_line_type_t_root,
+
+               lty_t_root type standard table of lty_line_type_t_root with empty key.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''           to_dbtab_name = 'T_ROOT'        to_column_name = ''           )
+                                                   ( from_comp_path = 'A_FIELD'    to_dbtab_name = 'T_ROOT'        to_column_name = 'A_COLUMN'   ) ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " prepare mock
+        data(ls_record) = value lty_line_type_t_root( parent_id = 0    a_column = ''    other_column = should_not_get_touched ).
+
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->returning( value = ref #( ls_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->get_record_with_key( iv_tablename = 'T_ROOT'
+                                                          iv_keyname = 'COUNTER'
+                                                          iv_keyvalue = 1 ).
+
+
+
+        " call method
+        mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'the value' )
+                                                       iv_component_path = 'A_FIELD' ).
+
+        " assert and verify result
+        cl_aunit_assert=>assert_equals( act = ls_record-a_column
+                                        exp = 'the value' ).
+        cl_aunit_assert=>assert_equals( act = ls_record-other_column
+                                        exp = should_not_get_touched ).
+        cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_field_w_o_record.
+
+    try.
+        types: begin of lty_line_type_t_root,
+                 parent_id    type i,
+                 counter      type i,
+                 a_column     type char30,
+                 other_column type char30,
+               end of lty_line_type_t_root,
+
+               lty_t_root type standard table of lty_line_type_t_root with empty key.
+
+        data lr_null_pointer type ref to data.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''           to_dbtab_name = 'T_ROOT'        to_column_name = ''           )
+                                                              ( from_comp_path = 'A_FIELD'    to_dbtab_name = 'T_ROOT'        to_column_name = 'A_COLUMN'   ) ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " prepare mock
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->returning( value = lr_null_pointer )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->get_record_with_key( iv_tablename = 'T_ROOT'
+                                                          iv_keyname = 'COUNTER'
+                                                          iv_keyvalue = 1 ).
+
+        data(ls_record) = value lty_line_type_t_root( other_column = should_not_get_touched
+                                                      counter = 1 ).
+
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_ROOT'
+                                                        it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_record-counter ) ) ) ).
+
+
+        " call method
+        mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'the value' )
+                                                       iv_component_path = 'A_FIELD' ).
+
+        " assert and verify result
+        cl_aunit_assert=>assert_equals( act = ls_record-parent_id
+                                        exp = 0 ).
+        cl_aunit_assert=>assert_equals( act = ls_record-a_column
+                                        exp = 'the value' ).
+        cl_aunit_assert=>assert_equals( act = ls_record-other_column
+                                        exp = should_not_get_touched ).
+        cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_two_fields.
+
+    try.
+        types: begin of lty_line_type_t_root,
+                 parent_id     type i,
+                 first_column  type char30,
+                 second_column type i,
+               end of lty_line_type_t_root,
+
+               lty_t_root type standard table of lty_line_type_t_root with empty key.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''               to_dbtab_name = 'T_ROOT'        to_column_name = ''               )
+                                                   ( from_comp_path = 'FIRST_FIELD'    to_dbtab_name = 'T_ROOT'        to_column_name = 'FIRST_COLUMN'   )
+                                                   ( from_comp_path = 'SECOND_FIELD'   to_dbtab_name = 'T_ROOT'        to_column_name = 'SECOND_COLUMN'  ) ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " prepare mock
+        data(ls_record) = value lty_line_type_t_root( parent_id = should_not_get_touched ).
+
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->returning( value = ref #( ls_record ) )->and_expect( )->is_called_times( 2 ).
+        mo_table_record_buffer_mock->get_record_with_key( iv_tablename = 'T_ROOT'
+                                                          iv_keyname = 'COUNTER'
+                                                          iv_keyvalue = 1 ).
+
+        " call method
+        mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'a char30 value' )
+                                                       iv_component_path = 'FIRST_FIELD' ).
+
+        mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 69190 )
+                                                       iv_component_path = 'SECOND_FIELD' ).
+
+        " assert and verify result
+        cl_aunit_assert=>assert_equals( act = ls_record-first_column
+                                        exp = 'a char30 value' ).
+        cl_aunit_assert=>assert_equals( act = ls_record-second_column
+                                        exp = 69190 ).
+        cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_table_line_and_field.
+
+    try.
+        types: begin of lty_line_type_t_subtable,
+                 parent_id type i,
+                 counter   type i,
+                 a_column  type char30,
+               end of lty_line_type_t_subtable,
+
+               lty_t_subtable type standard table of lty_line_type_t_subtable with empty key.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''                    to_dbtab_name = 'T_ROOT'            to_column_name = ''           )
+                                                   ( from_comp_path = 'SUBTABLE'            to_dbtab_name = 'T_SUBTABLE'        to_column_name = ''           )
+                                                   ( from_comp_path = 'SUBTABLE-A_FIELD'    to_dbtab_name = 'T_SUBTABLE'        to_column_name = 'A_COLUMN'   ) ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " prepare mock
+        data(ls_record) = value lty_line_type_t_subtable( counter = 2 ).
+
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_SUBTABLE'
+                                                        it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_record-counter ) ) ) ).
+
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->returning( value = ref #( ls_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->get_record_with_key( iv_tablename = 'T_SUBTABLE'
+                                                          iv_keyname = 'COUNTER'
+                                                          iv_keyvalue = 2 ).
+
+        " call method
+        mo_cut->/aif/if_structure_visitor~visit_tableline( ir_line = mo_null_pointer
+                                                           iv_index = 1
+                                                           iv_component_path = 'SUBTABLE' ).
+        mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'the value' )
+                                                       iv_component_path = 'SUBTABLE-A_FIELD' ).
+        mo_cut->/aif/if_structure_visitor~finished_tableline( ir_line = mo_null_pointer
+                                                              iv_index = 1
+                                                              iv_component_path = 'SUBTABLE' ).
+
+        " assert and verify result
+*        cl_aunit_assert=>assert_equals( act = ls_record-parent_id
+*                                        exp = 1 ).
+        cl_aunit_assert=>assert_equals( act = ls_record-a_column
+                                        exp = 'the value' ).
+        cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_structure_and_field.
+
+    try.
+        data lr_null_pointer type ref to data.
+
+        mo_cut->/aif/if_structure_visitor~visit_structure( ir_structure = lr_null_pointer
+                                                           iv_component_path = 'SUBSTRUCTURE' ).
+
+        me->visit_field_w_existing_record( ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_structure_table_field.
+
+    try.
+        " testing the following structure:
+        " ROOT
+        "   - SUBSTRUCTURE
+        "   - SUBTABLE (with one row)
+        "       - A_FIELD
+        "   - A_FIELD
+
+        data lr_null_pointer type ref to data.
+
+        mo_cut->/aif/if_structure_visitor~visit_structure( ir_structure = lr_null_pointer
+                                                           iv_component_path = 'SUBSTRUCTURE' ).
+
+        mo_cut->/aif/if_structure_visitor~visit_table( ir_table = lr_null_pointer
+                                                       iv_component_path = 'SUBTABLE' ).
+
+        me->visit_table_line_and_field( ).
+
+        mo_cut->/aif/if_structure_visitor~finished_table( ir_table = lr_null_pointer
+                                                          iv_component_path = 'SUBTABLE' ).
+
+        me->visit_field_w_o_record( ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_two_table_lines_and_fld.
+
+    types: begin of lty_line_type_t_subtable,
+             parent_id      type i,
+             counter        type i,
+             a_column       type char30,
+             another_column type char30,
+           end of lty_line_type_t_subtable,
+
+           begin of lty_line_type_t_subsubtable,
+             parent_id type i,
+             counter   type i,
+             a_column  type char30,
+           end of lty_line_type_t_subsubtable.
+
+    " init mapping
+    data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''                                     to_dbtab_name = 'T_ROOT'            to_column_name = ''               )
+                                               ( from_comp_path = 'SUBTABLE'                             to_dbtab_name = 'T_SUBTABLE'        to_column_name = ''               )
+                                               ( from_comp_path = 'SUBTABLE-A_FIELD'                     to_dbtab_name = 'T_SUBTABLE'        to_column_name = 'A_COLUMN'       )
+                                               ( from_comp_path = 'SUBTABLE-SUBSUBTABLE'                 to_dbtab_name = 'T_SUBSUBTABLE'     to_column_name = ''               )
+                                               ( from_comp_path = 'SUBTABLE-SUBSUBTABLE-A_FIELD'         to_dbtab_name = 'T_SUBSUBTABLE'     to_column_name = 'A_COLUMN'       )
+                                               ( from_comp_path = 'SUBTABLE-SUBSUBTABLE-DIFFERENT_FIELD' to_dbtab_name = 'T_SUBSUBTABLE2'    to_column_name = 'A_COLUMN'       ) " one field of subsubtable goes into different table
+                                               ( from_comp_path = 'SUBTABLE-ANOTHER_FIELD'               to_dbtab_name = 'T_SUBTABLE'        to_column_name = 'ANOTHER_COLUMN' ) ).
+
+    mo_cut->set_mapping( lt_mapping ).
+
+    " prepare mock
+    " -1- provide existing record for subtable
+    data(ls_subtable_record) = value lty_line_type_t_subtable( counter = 2 ).
+
+    cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_subtable_record ) )->and_expect( )->is_called_times( 3 ).
+    " 3, because the first one gets created by
+    " visit_tableline and usually should get reused
+    mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_SUBTABLE'
+                                                    it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_subtable_record-counter ) ) ) ).
+
+    " -2- provide record for subsubtable
+    data(ls_subsubtable_record) = value lty_line_type_t_subtable( counter = 3 ).
+
+    cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_subsubtable_record ) )->and_expect( )->is_called_once( ).
+    mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_SUBSUBTABLE'
+                                                    it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_subsubtable_record-counter ) ) ) ).
+
+    cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->returning( value = ref #( ls_subsubtable_record ) )->and_expect( )->is_called_once( ).
+    mo_table_record_buffer_mock->get_record_with_key( iv_tablename = 'T_SUBSUBTABLE'
+                                                      iv_keyname = 'COUNTER'
+                                                      iv_keyvalue = 3 ).
+
+    " -3- provide record for subsubtable2
+    data(ls_subsubtable2_record) = value lty_line_type_t_subtable( counter = 3 ).
+    cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_subsubtable2_record ) )->and_expect( )->is_called_once( ).
+    mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_SUBSUBTABLE2'
+                                                    it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_subsubtable2_record-counter ) ) ) ).
+
+    " call method
+    " -1- process subtable with field
+    mo_cut->/aif/if_structure_visitor~visit_tableline( ir_line = mo_null_pointer
+                                                       iv_index = 1
+                                                       iv_component_path = 'SUBTABLE' ).
+    mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'a value for the first column' )
+                                                   iv_component_path = 'SUBTABLE-A_FIELD' ).
+
+    " -2- process subsubtable with two fields
+    mo_cut->/aif/if_structure_visitor~visit_tableline( ir_line = mo_null_pointer
+                                                       iv_index = 1
+                                                       iv_component_path = 'SUBTABLE-SUBSUBTABLE' ).
+    mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'the value' )
+                                                   iv_component_path = 'SUBTABLE-SUBSUBTABLE-A_FIELD' ).
+    mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'the value' )
+                                                   iv_component_path = 'SUBTABLE-SUBSUBTABLE-DIFFERENT_FIELD' ).
+    mo_cut->/aif/if_structure_visitor~finished_tableline( ir_line = mo_null_pointer
+                                                          iv_index = 1
+                                                          iv_component_path = 'SUBTABLE-SUBSUBTABLE' ).
+
+    " -3- process rest of subtable with one field
+    mo_cut->/aif/if_structure_visitor~visit_field( ir_field = ref #( 'a value for the second column' )
+                                                   iv_component_path = 'SUBTABLE-ANOTHER_FIELD' ).
+    mo_cut->/aif/if_structure_visitor~finished_tableline( ir_line = mo_null_pointer
+                                                          iv_index = 1
+                                                          iv_component_path = 'SUBTABLE' ).
+
+    " assert and verify result
+*    cl_aunit_assert=>assert_equals( act = ls_subtable_record-counter
+*                                    exp = 2 ).
+    cl_aunit_assert=>assert_equals( act = ls_subtable_record-a_column
+                                    exp = 'a value for the first column' ).
+    cl_aunit_assert=>assert_equals( act = ls_subtable_record-another_column
+                                    exp = 'a value for the second column' ).
+    cl_aunit_assert=>assert_equals( act = ls_subsubtable_record-a_column
+                                    exp = 'the value' ).
+    cl_aunit_assert=>assert_equals( act = ls_subsubtable2_record-a_column
+                                    exp = 'the value' ).
+*    cl_aunit_assert=>assert_equals( act = ls_subsubtable2_record-parent_id
+*                                    exp = 2 ).
+    cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+
+  endmethod.
+
+
+  method get_table_records_returns_obj.
+
+    try.
+        " call method
+        data(lo_returned_object) = mo_cut->get_table_records( ).
+
+        " assert and verify result
+        cl_aunit_assert=>assert_equals( act = lo_returned_object
+                                        exp = mo_table_record_buffer_mock )..
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_root_structure_wo_fields.
+
+    " This test uses the following raw structure:
+    " RAW
+    "   - SUBTABLE
+    "      - FIELD1 (will not be visited in this test)
+    " Especially the raw structure contains no field
+
+    try.
+        types: begin of lty_line_type_t_root,
+                 parent_id type i,
+                 counter   type i,
+               end of lty_line_type_t_root.
+        types: begin of lty_line_type_t_subtable,
+                 parent_id type i,
+                 counter   type i,
+                 a_column  type char30,
+               end of lty_line_type_t_subtable.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''                                     to_dbtab_name = 'T_ROOT'            to_column_name = ''               )
+                                                              ( from_comp_path = 'SUBTABLE'                             to_dbtab_name = 'T_SUBTABLE'        to_column_name = ''               )
+                                                              ( from_comp_path = 'SUBTABLE-A_FIELD'                     to_dbtab_name = 'T_SUBTABLE'        to_column_name = 'A_COLUMN'       ) ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " prepare mock
+        data lr_nullpointer type ref to data.
+        " -1- provide a new record for root structure
+        data(ls_root_record) = value lty_line_type_t_root( counter = 1 ).
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_root_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_ROOT'
+                                                        it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_root_record-counter ) ) ) ).
+
+        " -2- provide a record for subtable
+        data(ls_subtable_record) = value lty_line_type_t_subtable( counter = 2 ).
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_subtable_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_SUBTABLE'
+                                                    it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_subtable_record-counter ) ) ) ).
+
+        " call method
+        " -1- init
+        mo_cut->/aif/if_structure_visitor~init( ).
+
+        " -2- process subtable with field (but do not visit the field in this test)
+        mo_cut->/aif/if_structure_visitor~visit_tableline( ir_line = mo_null_pointer
+                                                           iv_index = 1
+                                                           iv_component_path = 'SUBTABLE' ).
+        mo_cut->/aif/if_structure_visitor~finished_tableline( ir_line = mo_null_pointer
+                                                              iv_index = 1
+                                                              iv_component_path = 'SUBTABLE' ).
+
+        " assert and verify result
+        " -1- subtable record
+*        cl_aunit_assert=>assert_equals( act = ls_subtable_record-parent_id
+*                                        exp = 1 ).
+        cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+
+        " -2- root record
+        cl_aunit_assert=>assert_equals( act = ls_root_record-parent_id
+                                        exp = 0 ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method visit_subtable_wo_fields.
+
+    " This test uses the following raw structure:
+    " RAW
+    "   - SUBTABLE
+    "      - SUBSUBTABLE
+    "         - FIELD1 (will not be visited in this test)
+    " Especially the subtable contains no field
+
+    try.
+        types: begin of lty_line_type_t_root,
+                 parent_id type i,
+                 counter   type i,
+               end of lty_line_type_t_root.
+        types: begin of lty_line_type_t_subtable,
+                 parent_id type i,
+                 counter   type i,
+               end of lty_line_type_t_subtable.
+        types: begin of lty_line_type_t_subsubtable,
+                 parent_id type i,
+                 counter   type i,
+                 a_column  type char30,
+               end of lty_line_type_t_subsubtable.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''                                     to_dbtab_name = 'T_ROOT'            to_column_name = ''               )
+                                                              ( from_comp_path = 'SUBTABLE'                             to_dbtab_name = 'T_SUBTABLE'        to_column_name = ''               )
+                                                              ( from_comp_path = 'SUBTABLE-SUBSUBTABLE'                 to_dbtab_name = 'T_SUBSUBTABLE'     to_column_name = ''               )
+                                                              ( from_comp_path = 'SUBTABLE-SUBSUBTABLE-A_FIELD'         to_dbtab_name = 'T_SUBSUBTABLE'     to_column_name = 'A_COLUMN'       ) ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " prepare mock
+        data lr_nullpointer type ref to data.
+        " -1- record for root structure
+        data(ls_root_record) = value lty_line_type_t_root( counter = 1 ).
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_root_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_ROOT'
+                                                        it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_root_record-counter ) ) ) ).
+
+        " -2- record for subtable
+        data(ls_subtable_record) = value lty_line_type_t_subtable( counter = 2 ).
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_subtable_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_SUBTABLE'
+                                                    it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_subtable_record-counter ) ) ) ).
+
+        " -3- record for subsubtable
+        data(ls_subsubtable_record) = value lty_line_type_t_subsubtable( counter = 3 ).
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_subsubtable_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_SUBSUBTABLE'
+                                                    it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_subsubtable_record-counter ) ) ) ).
+
+        " call method
+        " -0- init
+        mo_cut->/aif/if_structure_visitor~init( ).
+        " -1- process subtable
+        mo_cut->/aif/if_structure_visitor~visit_table( ir_table = mo_null_pointer
+                                                       iv_component_path = 'SUBTABLE' ).
+        mo_cut->/aif/if_structure_visitor~visit_tableline( ir_line = mo_null_pointer
+                                                           iv_index = 1
+                                                           iv_component_path = 'SUBTABLE' ).
+
+        " -2- process subsubtable (field will not be visited in this test)
+        mo_cut->/aif/if_structure_visitor~visit_table( ir_table = mo_null_pointer
+                                                       iv_component_path = 'SUBTABLE-SUBSUBTABLE' ).
+        mo_cut->/aif/if_structure_visitor~visit_tableline( ir_line = mo_null_pointer
+                                                           iv_index = 1
+                                                           iv_component_path = 'SUBTABLE-SUBSUBTABLE' ).
+        mo_cut->/aif/if_structure_visitor~finished_tableline( ir_line = mo_null_pointer
+                                                              iv_index = 1
+                                                              iv_component_path = 'SUBTABLE-SUBSUBTABLE' ).
+        mo_cut->/aif/if_structure_visitor~finished_table( ir_table = mo_null_pointer
+                                                          iv_component_path = 'SUBTABLE-SUBSUBTABLE' ).
+
+        " -3- end process subtable
+        mo_cut->/aif/if_structure_visitor~finished_tableline( ir_line = mo_null_pointer
+                                                              iv_index = 1
+                                                              iv_component_path = 'SUBTABLE' ).
+        mo_cut->/aif/if_structure_visitor~finished_table( ir_table = mo_null_pointer
+                                                          iv_component_path = 'SUBTABLE' ).
+
+        " assert and verify result
+        cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+
+        " -1- subsubtable record
+*        cl_aunit_assert=>assert_equals( act = ls_subsubtable_record-parent_id
+*                                        exp = 2 ).
+*
+*        " -2- subtable record
+*        cl_aunit_assert=>assert_equals( act = ls_subtable_record-parent_id
+*                                        exp = 1 ).
+
+        " -3- root record
+        cl_aunit_assert=>assert_equals( act = ls_root_record-parent_id
+                                        exp = 0 ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+  method init_should_create_root_record.
+
+    try.
+        types: begin of lty_line_type_t_root,
+                 parent_id type i,
+                 counter   type i,
+               end of lty_line_type_t_root.
+
+        " init mapping
+        data(lt_mapping) = value /aif/mapping_instruction_tt( ( from_comp_path = ''              to_dbtab_name = 'T_ROOT'            to_column_name = ''               ) ).
+
+        mo_cut->set_mapping( lt_mapping ).
+
+        " prepare mock
+        data(ls_root_record) = value lty_line_type_t_root( counter = 1 ).
+        cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_root_record ) )->and_expect( )->is_called_once( ).
+        mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_ROOT'
+                                                        it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_root_record-counter ) ) ) ).
+
+        " call method
+        mo_cut->/aif/if_structure_visitor~init( ).
+
+        " assert and verify result
+        cl_abap_testdouble=>verify_expectations( mo_table_record_buffer_mock ).
+
+        cl_aunit_assert=>assert_equals( act = ls_root_record-parent_id
+                                        exp = 0 ).
+      catch cx_root.
+        cl_aunit_assert=>fail( ).
+    endtry.
+
+  endmethod.
+
+
+  method init_wo_mapping_shall_throw_cx.
+
+    types: begin of lty_line_type_t_root,
+             parent_id type i,
+             counter   type i,
+           end of lty_line_type_t_root.
+
+    " use an empty mapping
+    data(lt_mapping) = value /aif/mapping_instruction_tt( ).
+    mo_cut->set_mapping( lt_mapping ).
+
+    " prepare mock
+    data(ls_root_record) = value lty_line_type_t_root( counter = 1 ).
+    cl_abap_testdouble=>configure_call( mo_table_record_buffer_mock )->set_matcher( new lcl_create_new_record_matcher( ) )->returning( value = ref #( ls_root_record ) )->and_expect( )->is_called_once( ).
+    mo_table_record_buffer_mock->create_new_record( iv_tablename = 'T_ROOT'
+                                                    it_key_values = value #( ( key_name = 'COUNTER' key_value = ref #( ls_root_record-counter ) ) ) ).
+
+    " call method
+    try.
+        mo_cut->/aif/if_structure_visitor~init( ).
+        cl_aunit_assert=>fail( ).
+      catch /aif/cx_struct_pers_base.
+    endtry.
+
+  endmethod.
+
+
+  method constructor_create_tab_rec_buf.
+
+    data(lo_cut) = new /aif/cl_transf_into_records_v( ).
+    cl_abap_unit_assert=>assert_not_initial( lo_cut->mo_table_record_buffer ).
+
+    " Further check if the table record buffer really was created with the correct parameters (COUNTER should be key)
+    data(ls_record) = value /aif/midx_templ( ifname = 'a_value_row_1'      ns = 'v1' ).
+    lo_cut->mo_table_record_buffer->add_record_to_table( is_record = ls_record  iv_tablename = '/aif/midx_templ' ).
+    data(lr_records) = lo_cut->mo_table_record_buffer->get_all_records_of_table( '/aif/midx_templ' ).
+    data(lo_table_descriptor) = cast cl_abap_tabledescr( cl_abap_typedescr=>describe_by_data_ref( lr_records ) ).
+    cl_abap_unit_assert=>assert_equals( act = lo_table_descriptor->key
+                                         exp = value abap_keydescr_tab( ( name = 'COUNTER' ) ) ).
+
+  endmethod.
+
+endclass.

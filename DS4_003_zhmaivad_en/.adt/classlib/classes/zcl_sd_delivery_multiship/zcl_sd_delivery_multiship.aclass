@@ -1,0 +1,1514 @@
+CLASS zcl_sd_delivery_multiship DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    TYPES:
+      BEGIN OF mtyp_delivery_data,
+        vgbel     TYPE vgbel,
+        vgpos     TYPE vgpos,
+        kostk     TYPE kostk,
+        pkstk     TYPE pkstk,
+        zcanid_db TYPE zz1_zcancind,
+        delhu     TYPE zsd_t_deliv_cus-zdelhu,
+        multiship TYPE zsd_t_deliv_cus-zmultiship,
+        zcanind   TYPE zsd_t_deliv_cus-zcanind,
+        zsorej    TYPE zsd_t_deliv_cus-zsorej,
+        zsodnbl   TYPE zsd_t_deliv_cus-zsodnbl,
+        wbstk     TYPE wbstk,
+      END OF mtyp_delivery_data .
+
+    CONSTANTS gc_cimtyp TYPE edi_cimtyp VALUE 'ZFSHDLV04' ##NO_TEXT.
+    CONSTANTS:
+      BEGIN OF gc_segnam,
+        header         TYPE edilsegtyp VALUE 'E1EDL20',
+        item           TYPE edilsegtyp VALUE 'E1EDL24',
+        controlling    TYPE edilsegtyp VALUE 'E1EDL18',
+        multiship      TYPE edilsegtyp VALUE 'ZE1EDL20',
+        item_cust      TYPE edilsegtyp VALUE 'ZE1EDL24',
+        al_hndlng_unit TYPE edilsegtyp VALUE 'ZE1EDL37',
+        act_gi_time    TYPE edilsegtyp VALUE 'E1EDT13',
+        hu_header      TYPE edilsegtyp VALUE 'E1EDL37',
+        hu_item        TYPE edilsegtyp VALUE 'E1EDL44',
+        hu_item_con    TYPE edilsegtyp VALUE 'ZE1EDL44',
+      END OF gc_segnam .
+    CONSTANTS:
+      BEGIN OF gc_multiship,
+        pgi_parent  TYPE zsd_multiship_flag VALUE 'H',
+        split_child TYPE zsd_multiship_flag VALUE 'V',
+      END OF gc_multiship .
+    CONSTANTS:
+      BEGIN OF gc_multiship_idoc,
+        blank    TYPE zsd_multiship_flag_wms VALUE '',
+        multiple TYPE zsd_multiship_flag_wms VALUE 'M',
+        final    TYPE zsd_multiship_flag_wms VALUE 'F',
+      END OF gc_multiship_idoc .
+    CONSTANTS:
+      BEGIN OF gc_cancid,
+        reason TYPE zsd_cancind VALUE 'R',
+        block  TYPE zsd_cancind VALUE 'B',
+      END OF gc_cancid .
+
+    CLASS-METHODS preprocess_delivery
+      IMPORTING
+        !is_idoc_control  TYPE edidc
+        !it_idoc_data     TYPE edidd_tt
+      CHANGING
+        !cs_delivery_head TYPE vbkok
+        !ct_delivery_item TYPE delif_t_vbpok
+        !ct_packing_head  TYPE delif_t_verko
+        !ct_packing_item  TYPE delif_t_verpo
+        !ct_prot          TYPE delif_t_prott .
+    CLASS-METHODS postprocess_delivery
+      IMPORTING
+        !is_delivery_head TYPE vbkok
+      CHANGING
+        !ct_prot          TYPE delif_t_prott .
+    CLASS-METHODS update_so
+      IMPORTING
+        !is_delivery_item_key TYPE /spe/lips_key
+      CHANGING
+        !ct_prot              TYPE delif_t_prott .
+    CLASS-METHODS apply_rej_reason
+      IMPORTING
+        !iv_vgbeln TYPE i_deliverydocumentitem-referencesddocument
+        !iv_vgpos  TYPE i_deliverydocumentitem-referencesddocumentitem
+        !iv_reason TYPE zsd_t_deliv_cus-zsorej
+      CHANGING
+        !ct_prot   TYPE delif_t_prott .
+    CLASS-METHODS apply_deliv_block
+      IMPORTING
+        !iv_vgbeln TYPE i_deliverydocumentitem-referencesddocument
+        !iv_vgpos  TYPE i_deliverydocumentitem-referencesddocumentitem
+        !iv_block  TYPE zsd_t_deliv_cus-zsodnbl
+      CHANGING
+        !ct_prot   TYPE delif_t_prott .
+    CLASS-METHODS get_delivery_data
+      IMPORTING
+        !iv_posnr      TYPE posnr_vl OPTIONAL
+        !iv_vbeln      TYPE vbeln_vl
+      RETURNING
+        VALUE(rs_data) TYPE mtyp_delivery_data .
+    CLASS-METHODS is_so_update_relevant
+      IMPORTING
+        !iv_vbeln        TYPE vbpok-vbeln_vl
+        !iv_posnr        TYPE vbpok-posnr_vl OPTIONAL
+      RETURNING
+        VALUE(rv_result) TYPE abap_bool .
+  PROTECTED SECTION.
+private section.
+
+  types:
+    BEGIN OF mtyp_delivery_item,
+        deliverydocument       TYPE i_deliverydocumentitem-deliverydocument,
+        deliverydocumentitem   TYPE i_deliverydocumentitem-deliverydocumentitem,
+        actualdeliveryquantity TYPE i_deliverydocumentitem-actualdeliveryquantity,
+      END OF mtyp_delivery_item .
+  types:
+    mtyp_t_delivery_item TYPE SORTED TABLE OF mtyp_delivery_item WITH NON-UNIQUE KEY deliverydocument deliverydocumentitem .
+  types:
+    BEGIN OF mtyp_item_for_so_update,
+        vbeln TYPE vbeln_vl,
+        posnr TYPE posnr_vl,
+        upd   TYPE abap_bool,
+      END OF mtyp_item_for_so_update .
+  types:
+    mtyp_t_item_for_so_update TYPE SORTED TABLE OF mtyp_item_for_so_update WITH UNIQUE KEY vbeln posnr .
+  types:
+    BEGIN OF mtyp_item_segment,
+        posnr TYPE vbpok-posnr_vl.
+        INCLUDE TYPE ze1edl24 AS data.
+    TYPES:
+      END OF mtyp_item_segment .
+  types:
+    mtyp_t_item_segment TYPE SORTED TABLE OF mtyp_item_segment WITH UNIQUE KEY posnr .
+
+  constants GC_PMODE type LEDSPD_PMODE value 'Z003' ##NO_TEXT.
+  constants GC_UPDKZ type LEDSPD_FLOW-UPDKZ value 'I' ##NO_TEXT.
+  class-data GTS_ITEMS_FOR_SO_UPDATE type MTYP_T_ITEM_FOR_SO_UPDATE .
+
+  class-methods GET_PROT_FROM_CX
+    importing
+      !IIF_MESSAGE type ref to IF_MESSAGE
+    returning
+      value(RS_RESULT) type PROTT .
+  class-methods SPLIT_DELIVERY
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IV_SEQ_NO type ZZ1_SEQ_NO
+    changing
+      !CS_DELIVERY_HEAD type VBKOK
+      !CT_DELIVERY_ITEM type DELIF_T_VBPOK
+      !CT_PACKING_HEAD type DELIF_T_VERKO   ##NEEDED
+      !CT_PACKING_ITEM type DELIF_T_VERPO
+      !CT_PROT type DELIF_T_PROTT .
+  class-methods UPDATE_CANIND
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IT_IDOC_DATA type EDIDD_TT
+      !IS_DELIVERY type MTYP_DELIVERY_DATA
+    changing
+      !CS_DELIVERY_HEAD type VBKOK   ##NEEDED
+      !CT_DELIVERY_ITEM type DELIF_T_VBPOK
+      !CT_PROT type DELIF_T_PROTT .
+  class-methods UPDATE_DELIVERY_DATES
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IT_IDOC_DATA type EDIDD_TT
+    changing
+      !CS_DELIVERY_HEAD type VBKOK
+      !CT_DELIVERY_ITEM type DELIF_T_VBPOK
+      !CT_PROT type DELIF_T_PROTT  ##NEEDED.
+  class-methods PARSE_MULTISHIP_SEGMENT
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IT_IDOC_DATA type EDIDD_TT
+    returning
+      value(RS_RESULT) type ZE1EDL20 .
+  class-methods PARSE_ITEM_SEGMENT
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IT_IDOC_DATA type EDIDD_TT
+    returning
+      value(RTS_RESULT) type MTYP_T_ITEM_SEGMENT .
+  class-methods GET_PROT_FROM_SY
+    returning
+      value(RS_RESULT) type PROTT .
+  class-methods DELETE_HU
+    importing
+      !IV_VBELN type VBELN
+    changing
+      !CT_PROT type TAB_PROTT .
+  class-methods IS_PROT_ERROR
+    importing
+      !IT_CT_PROT type TAB_PROTT
+    returning
+      value(RV_RESULT) type ABAP_BOOL .
+  class-methods GET_NR_RANGE
+    importing
+      !IV_VBELN type VBELN_VL
+    returning
+      value(RV_RESULT) type INRI-NRRANGENR .
+  class-methods GET_PROT_FROM_BAPIRET
+    importing
+      !IT_RETURN type BAPIRET2_T
+    returning
+      value(RT_RESULT) type TAB_PROTT .
+  class-methods UPDATE_IDOC
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IV_VBELN type VBELN_VL
+    changing
+      !CT_PROT type TAB_PROTT .
+  class-methods IS_DUPLICATE
+    importing
+      !IV_VBELN type VBELN_VL
+      !IV_SEQ_NO type ZZ1_SEQ_NO
+    returning
+      value(RV_RESULT) type ABAP_BOOL .
+  class-methods UPDATE_SERIALS
+    importing
+      !IV_VBELN type VBELN_VL
+    changing
+      !CT_PROT type DELIF_T_PROTT .
+  class-methods IS_CHILD
+    importing
+      !IV_VBELN type VBELN_VL
+    returning
+      value(RV_RESULT) type ABAP_BOOL .
+  class-methods IS_PREVIOUS_DATA_RECEIVED
+    importing
+      !IV_VBELN type VBELN_VL
+      !IV_SEQ_NO type ZZ1_SEQ_NO
+    returning
+      value(RV_RESULT) type ABAP_BOOL .
+  class-methods CHANGE_FIELDS_27407
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IT_IDOC_DATA type EDIDD_TT
+    changing
+      !CT_PACKING_HEAD type DELIF_T_VERKO .
+  class-methods GET_DELIVERY_ITEMS_DB
+    importing
+      !IT_DELIVERY_ITEM type DELIF_T_VBPOK
+    returning
+      value(RTS_RESULT) type MTYP_T_DELIVERY_ITEM .
+  class-methods SET_SO_UPDATE
+    importing
+      !IV_VBELN type VBPOK-VBELN_VL
+      !IV_POSNR type VBPOK-POSNR_VL
+      !IV_UPDATE type ABAP_BOOL default ABAP_TRUE .
+  class-methods CHANGE_FIELDS_PACKING_ITEM
+    importing
+      !IS_IDOC_CONTROL type EDIDC
+      !IT_IDOC_DATA type EDIDD_TT
+    changing
+      !CT_PACKING_ITEM type DELIF_T_VERPO .
+  class-methods UPDATE_TO_STATUS
+    importing
+      !IS_DELIVERY_HEAD type VBKOK
+      !IT_DELIVERY_ITEM type DELIF_T_VBPOK
+      !IS_SEGMENT_ZE1EDL20 type ZE1EDL20 .
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_DELIVERY_MULTISHIP IMPLEMENTATION.
+
+
+  METHOD apply_deliv_block.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 06.01.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 01.07.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+    DATA: lt_return           TYPE STANDARD TABLE OF bapiret2,
+          lt_order_item_in    TYPE STANDARD TABLE OF bapisditm,
+          lt_order_item_inx   TYPE STANDARD TABLE OF bapisditmx,
+          lt_schedule_lines   TYPE STANDARD TABLE OF bapischdl,
+          lt_schedule_linesx  TYPE STANDARD TABLE OF bapischdlx,
+          ls_order_header_in  TYPE bapisdh1,
+          ls_order_header_inx TYPE bapisdh1x,
+          ls_return           TYPE bapiret2.
+
+    SELECT MIN( scheduleline ) FROM i_salesdocumentscheduleline INTO @DATA(lv_sched_line)
+     WHERE salesdocument = @iv_vgbeln
+       AND salesdocumentitem = @iv_vgpos.            "#EC CI_SEL_NESTED
+    IF sy-subrc <> 0.
+      MESSAGE e010 WITH iv_vgbeln INTO DATA(lv_msg) ##NEEDED.
+      APPEND get_prot_from_sy( ) TO ct_prot.
+
+    ELSE.
+      ls_order_header_in = VALUE #( collect_no = iv_vgbeln ).
+      ls_order_header_inx = VALUE #( updateflag = 'U').
+      lt_order_item_in = VALUE #( ( itm_number = iv_vgpos ) ).
+      lt_order_item_inx = VALUE #( ( itm_number = iv_vgpos
+                                     updateflag = 'U' ) ).
+      lt_schedule_lines = VALUE #( ( itm_number = iv_vgpos
+                                     sched_line = lv_sched_line
+                                     req_dlv_bl = iv_block ) ).
+      lt_schedule_linesx = VALUE #( ( itm_number = iv_vgpos
+                                      sched_line = lv_sched_line
+                                      updateflag = 'U'
+                                      req_dlv_bl = abap_true ) ).
+
+      CALL FUNCTION 'BAPI_SALESORDER_CHANGE'
+        EXPORTING
+          salesdocument    = iv_vgbeln
+          order_header_in  = ls_order_header_in
+          order_header_inx = ls_order_header_inx
+        TABLES
+          return           = lt_return
+          order_item_in    = lt_order_item_in
+          order_item_inx   = lt_order_item_inx
+          schedule_lines   = lt_schedule_lines
+          schedule_linesx  = lt_schedule_linesx.
+
+      IF cl_edoc_br_bapiret_utils=>check_for_errors( lt_return ) = abap_true.
+        APPEND LINES OF get_prot_from_bapiret( lt_return ) TO ct_prot.
+
+      ELSE.
+        CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+          EXPORTING
+            wait   = abap_true
+          IMPORTING
+            return = ls_return.
+        IF cl_edoc_br_bapiret_utils=>check_for_errors( VALUE #( ( ls_return ) ) ) = abap_true.
+          APPEND LINES OF get_prot_from_bapiret( VALUE #( ( ls_return ) ) ) TO ct_prot.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD apply_rej_reason.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 06.01.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+    SELECT SINGLE creationdate FROM i_salesdocumentitem INTO @DATA(lv_creation_date)
+     WHERE salesdocument = @iv_vgbeln
+       AND salesdocumentitem = @iv_vgpos.            "#EC CI_SEL_NESTED
+    IF sy-subrc <> 0.
+      MESSAGE e009 WITH iv_vgbeln INTO DATA(lv_msg) ##NEEDED.
+      APPEND get_prot_from_sy( ) TO ct_prot.
+
+    ELSE.
+      DATA(lt_erdat_range) = VALUE date_t_range( ( sign = 'I' option = 'EQ' low = lv_creation_date ) ).
+      DATA(lt_vbeln_range) = VALUE dpicb_range_vbeln_tab( ( sign = 'I' option = 'EQ' low = iv_vgbeln ) ).
+      DATA(lt_posnr_range) = VALUE dpicb_range_so_item_tab( ( sign = 'I' option = 'EQ' low = iv_vgpos ) ).
+
+      SUBMIT rfm_schedule_excess_req
+        WITH rb_sales = abap_true
+        WITH so_erdat IN lt_erdat_range
+        WITH so_vbeln IN lt_vbeln_range
+        WITH so_posnr IN lt_posnr_range
+        WITH p_rej = '03'
+        WITH p_abgru = iv_reason
+        WITH p_parall = abap_true AND RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD change_fields_27407.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* UAKASAZA     | 28.11.2022 | 15643 : [Platform][CR 6165] Delivery Note - WMS *
+*              |            | DS4K936840                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 04.05.2023 | 20978     : [CR 6165] Delivery Note      *
+*              |            | DS4K951533                               *
+*----------------------------------------------------------------------*
+
+    DATA ls_ze1edl37 TYPE ze1edl37.
+    DATA ls_e1edl37 TYPE e1edl37.
+
+    LOOP AT it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment_e1edl37>) WHERE docnum = is_idoc_control-docnum AND segnam = gc_segnam-hu_header. "#EC CI_STDSEQ.
+      ls_e1edl37 = <ls_segment_e1edl37>-sdata.
+      READ TABLE it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment_ze1edl37>) WITH KEY docnum = is_idoc_control-docnum segnam = gc_segnam-al_hndlng_unit psgnum = <ls_segment_e1edl37>-segnum. "#EC CI_STDSEQ.
+      IF sy-subrc EQ 0.
+        ls_ze1edl37 = <ls_segment_ze1edl37>-sdata.
+        READ TABLE ct_packing_head ASSIGNING FIELD-SYMBOL(<ls_pack_head>) WITH KEY exidv = ls_e1edl37-exidv.
+        IF sy-subrc EQ 0.
+          <ls_pack_head>-spe_ident_01 = ls_ze1edl37-spe_ident_01.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD change_fields_packing_item.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ANIPEVIN     | 13.09.2023 | 20978     : [CR 6165] Delivery Note      *
+*              |            | DS4K951533                               *
+*----------------------------------------------------------------------*
+* ANIPEVIN     | 14.09.2023 | 24918     : [Build] -STO:country/region o*
+*              |            |  DS4K963031                              *
+*----------------------------------------------------------------------*
+* ANIPEVIN     | 01.11.2023 | 26379     : [Build] -STO:country/region o*
+*              |            |  DS4K968771                              *
+*----------------------------------------------------------------------*
+
+    DATA: ls_ze1edl44 TYPE ze1edl44,
+          ls_e1edl37  TYPE e1edl37,
+          ls_e1edl20  TYPE e1edl20.
+
+    LOOP AT it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment_e1edl37>) WHERE docnum = is_idoc_control-docnum AND segnam = gc_segnam-hu_header. "#EC CI_STDSEQ.
+      ls_e1edl37 = <ls_segment_e1edl37>-sdata.
+      READ TABLE it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment_e1edl44>) WITH KEY docnum = is_idoc_control-docnum segnam = gc_segnam-hu_item psgnum = <ls_segment_e1edl37>-segnum. "#EC CI_STDSEQ.
+      IF sy-subrc EQ 0.
+        READ TABLE it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment_ze1edl44>) WITH KEY docnum = is_idoc_control-docnum segnam = gc_segnam-hu_item_con psgnum = <ls_segment_e1edl44>-segnum. "#EC CI_STDSEQ.
+        IF sy-subrc EQ 0.
+          ls_ze1edl44 = <ls_segment_ze1edl44>-sdata.
+          READ TABLE it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment_e1edl20>) WITH KEY docnum = is_idoc_control-docnum segnam = gc_segnam-header.
+          IF sy-subrc EQ 0.
+            ls_e1edl20 = <ls_segment_e1edl20>-sdata.
+            LOOP AT ct_packing_item ASSIGNING FIELD-SYMBOL(<ls_pack_item>) WHERE exidv_ob = ls_e1edl37-exidv
+                                                                            AND  vbeln    = ls_e1edl20-vbeln.
+              <ls_pack_item>-spe_idplate = ls_ze1edl44-spe_idplate.
+              DATA(lv_flag) = abap_true.
+            ENDLOOP.
+            IF lv_flag = abap_false.
+              LOOP AT ct_packing_item ASSIGNING <ls_pack_item> WHERE exidv_ob = ls_e1edl37-exidv.
+                <ls_pack_item>-spe_idplate = ls_ze1edl44-spe_idplate.
+              ENDLOOP.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD delete_hu.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    CHECK iv_vbeln IS NOT INITIAL.
+
+    DATA(lt_vreko) = VALUE tab_verko( ( object = '01'
+                                        objkey = iv_vbeln ) ).
+    CALL FUNCTION 'WS_DELIVERY_UPDATE_2'
+      EXPORTING
+        vbkok_wa               = VALUE vbkok( vbeln_vl = iv_vbeln
+                                              vbtyp_vl = 'J'
+                                              vbeln = iv_vbeln )
+        synchron               = abap_true
+        commit                 = abap_true
+        delivery               = iv_vbeln
+        if_confirm_central     = abap_true
+        if_database_update_1   = '1'
+        if_error_messages_send = 'X'
+      TABLES
+        prot                   = ct_prot
+        verko_tab              = lt_vreko.
+  ENDMETHOD.
+
+
+  METHOD get_delivery_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 06.01.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 01.07.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+* ANIPEVIN     | 28.08.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+    CHECK iv_vbeln IS NOT INITIAL.
+
+* Get additional main data
+    IF iv_posnr IS NOT INITIAL.
+      SELECT
+        lik~deliverydocument AS vbeln,
+        lik~salesorganization AS vkorg,
+        lik~shippingpoint AS vstel,
+        lik~overallpickingstatus AS kostk,
+        lik~overallpackingstatus AS pkstk,
+        lik~overallgoodsmovementstatus AS wbstk,
+        lip~distributionchannel AS vtweg,
+        lip~referencesddocument AS vgbel,
+        lip~referencesddocumentitem AS vgpos,
+        lip~zz1_zcancind_dli AS zcancid_db
+      INTO @DATA(ls_delivery_data)
+      UP TO 1 ROWS
+      FROM i_deliverydocument AS lik
+      JOIN i_deliverydocumentitem AS lip
+        ON lip~deliverydocument = lik~deliverydocument
+      WHERE lip~deliverydocument = @iv_vbeln
+        AND lip~deliverydocumentitem = @iv_posnr
+        ORDER BY lip~deliverydocumentitem.
+      ENDSELECT.
+    ELSE.
+      SELECT
+        lik~deliverydocument AS vbeln,
+        lik~salesorganization AS vkorg,
+        lik~shippingpoint AS vstel,
+        lik~overallpickingstatus AS kostk,
+        lik~overallpackingstatus AS pkstk,
+        lip~distributionchannel AS vtweg
+      INTO CORRESPONDING FIELDS OF @ls_delivery_data
+      UP TO 1 ROWS
+      FROM i_deliverydocument AS lik
+      JOIN i_deliverydocumentitem AS lip
+        ON lip~deliverydocument = lik~deliverydocument
+      WHERE lip~deliverydocument = @iv_vbeln
+      ORDER BY lip~deliverydocumentitem.
+      ENDSELECT.
+    ENDIF.
+    IF sy-subrc = 0.
+* Get customizing data
+      SELECT
+         vtweg,
+         vstel,
+         zmultiship,
+         zdelhu,
+         zcanind,
+         zsorej,
+         zsodnbl
+        FROM zsd_t_deliv_cus
+        INTO TABLE @DATA(lt_cust)
+        WHERE vkorg = @ls_delivery_data-vkorg
+        ORDER BY vtweg, vstel.
+      IF sy-subrc = 0.
+* First read by values
+        READ TABLE lt_cust WITH KEY vtweg = ls_delivery_data-vtweg
+                                    vstel = ls_delivery_data-vstel
+                                    ASSIGNING FIELD-SYMBOL(<ls_cust>) BINARY SEARCH.
+        IF sy-subrc = 0.
+
+          DATA(lv_cust_found) = abap_true.
+        ELSE.
+* If nothing found, read by mask
+          LOOP AT lt_cust ASSIGNING <ls_cust>.
+            CHECK ls_delivery_data-vtweg CP <ls_cust>-vtweg
+              AND ls_delivery_data-vstel CP <ls_cust>-vstel.
+
+            lv_cust_found = abap_true.
+            EXIT.
+          ENDLOOP.
+        ENDIF.
+
+        IF lv_cust_found = abap_true.
+          rs_data = CORRESPONDING #( ls_delivery_data ).
+          rs_data-multiship = <ls_cust>-zmultiship.
+          rs_data-delhu = <ls_cust>-zdelhu.
+          IF ls_delivery_data-zcancid_db IS NOT INITIAL.
+            rs_data-zcanind = ls_delivery_data-zcancid_db.
+          ELSE.
+            rs_data-zcanind = <ls_cust>-zcanind.
+          ENDIF.
+          rs_data-zsorej = <ls_cust>-zsorej.
+          rs_data-zsodnbl = <ls_cust>-zsodnbl.
+        ELSE.
+          CLEAR rs_data.
+        ENDIF.
+      ELSE.
+        CLEAR rs_data.
+      ENDIF.
+    ELSE.
+      CLEAR rs_data.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_delivery_items_db.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 17.03.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+    CHECK it_delivery_item IS NOT INITIAL.
+
+    SELECT * FROM i_deliverydocumentitem
+     INTO CORRESPONDING FIELDS OF TABLE @rts_result
+    FOR ALL ENTRIES IN @it_delivery_item
+    WHERE deliverydocument = @it_delivery_item-vbeln_vl
+      AND deliverydocumentitem = @it_delivery_item-posnr_vl. "#EC CI_SUBRC
+  ENDMETHOD.
+
+
+  METHOD get_nr_range.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    SELECT SINGLE tvlk~numki INTO @rv_result              "#EC CI_SUBRC
+           FROM likp
+           JOIN tvlk                                   "#EC CI_BUFFJOIN
+             ON tvlk~lfart = likp~lfart
+           WHERE likp~vbeln = @iv_vbeln ##WARN_OK.
+  ENDMETHOD.
+
+
+  METHOD get_prot_from_bapiret.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    rt_result = VALUE #( FOR <ls_bapiret> IN it_return ( msgid = <ls_bapiret>-id
+                                                         msgno = <ls_bapiret>-number
+                                                         msgty = <ls_bapiret>-type
+                                                         msgv1 = <ls_bapiret>-message_v1
+                                                         msgv2 = <ls_bapiret>-message_v2
+                                                         msgv3 = <ls_bapiret>-message_v3
+                                                         msgv4 = <ls_bapiret>-message_v4 ) ).
+  ENDMETHOD.
+
+
+  METHOD get_prot_from_cx.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 14.04.2023 | 20204 : [Defect] -Child DN checking for min Quan  *
+*              |            | DS4K949911                               *
+*----------------------------------------------------------------------*
+    TRY.
+        cl_message_helper=>set_msg_vars_for_if_msg( iif_message ).
+
+        IF iif_message IS INSTANCE OF if_t100_dyn_msg.
+          sy-msgty = CAST if_t100_dyn_msg( iif_message )->msgty.
+        ELSE.
+          sy-msgty = if_msg_output=>msgtype_error.
+        ENDIF.
+
+        rs_result = get_prot_from_sy( ).
+      CATCH cx_sy_message_illegal_text INTO DATA(lo_cx).
+        rs_result = get_prot_from_cx( lo_cx ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD get_prot_from_sy.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    rs_result-msgid = sy-msgid.
+    rs_result-msgno = sy-msgno.
+    rs_result-msgty = sy-msgty.
+    rs_result-msgv1 = sy-msgv1.
+    rs_result-msgv2 = sy-msgv2.
+    rs_result-msgv3 = sy-msgv3.
+    rs_result-msgv4 = sy-msgv4.
+  ENDMETHOD.
+
+
+  METHOD is_child.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    SELECT SINGLE @abap_true INTO @rv_result              "#EC CI_SUBRC
+     FROM ledspd_flow
+     WHERE vbeln_new = @iv_vbeln
+       AND updkz = @gc_updkz
+       AND pmode = @gc_pmode.
+  ENDMETHOD.
+
+
+  METHOD is_duplicate.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    SELECT SINGLE @abap_true INTO @rv_result              "#EC CI_SUBRC
+     FROM ledspd_flow
+     JOIN likp
+       ON likp~vbeln = ledspd_flow~vbeln_new
+     WHERE ledspd_flow~vbeln = @iv_vbeln
+       AND ledspd_flow~updkz = @gc_updkz
+       AND ledspd_flow~pmode = @gc_pmode
+       AND likp~zz1_seq_no_dlh = @iv_seq_no.
+  ENDMETHOD.
+
+
+  METHOD is_previous_data_received.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* UAKASAZA     | 28.11.2022 | 15643     : Platform][CR 6165] Delivery Note - WMS *
+*              |            | DS4K936840                               *
+*----------------------------------------------------------------------*
+    IF iv_seq_no > 1.
+      DATA(lv_seq_no) = CONV zz1_seq_no( iv_seq_no - 1 ).
+      SELECT SINGLE @abap_true                            "#EC CI_SUBRC
+        FROM ledspd_flow AS a
+        INNER JOIN c_outbounddeliveryfs AS b
+        ON a~vbeln_new = b~outbounddelivery
+        WHERE a~vbeln = @iv_vbeln
+          AND a~updkz = @gc_updkz
+          AND a~pmode = @gc_pmode
+          AND b~zz1_seq_no_dlh = @lv_seq_no
+        INTO @rv_result.
+    ELSE.
+      rv_result = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD is_prot_error.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    rv_result = xsdbool( line_exists( it_ct_prot[ msgty = if_msg_output=>msgtype_error ] ) ).
+  ENDMETHOD.
+
+
+  METHOD is_so_update_relevant.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 17.03.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 01.07.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+    IF iv_posnr IS NOT INITIAL.
+      rv_result = VALUE #( gts_items_for_so_update[ vbeln = iv_vbeln
+                                                    posnr = iv_posnr ]-upd DEFAULT abap_false ).
+    ELSE.
+      rv_result = VALUE #( gts_items_for_so_update[ vbeln = iv_vbeln ]-upd DEFAULT abap_false ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD parse_item_segment.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 06.01.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+    DATA: ls_segment_data TYPE e1edl24.
+
+    LOOP AT it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment>)
+      WHERE docnum = is_idoc_control-docnum
+        AND segnam = gc_segnam-item.
+
+      READ TABLE it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment_cust>)
+      WITH KEY docnum = is_idoc_control-docnum
+               segnam = gc_segnam-item_cust
+               psgnum = <ls_segment>-segnum.
+      CHECK sy-subrc = 0.
+
+      ls_segment_data = <ls_segment>-sdata.
+
+      INSERT VALUE #( posnr = ls_segment_data-posnr
+                      data = <ls_segment_cust>-sdata ) INTO TABLE rts_result.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD parse_multiship_segment.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+
+    LOOP AT it_idoc_data ASSIGNING FIELD-SYMBOL(<ls_segment>)
+     WHERE docnum = is_idoc_control-docnum
+       AND segnam = gc_segnam-multiship.
+
+      rs_result = <ls_segment>-sdata.
+      rs_result-zseq_no = |{ rs_result-zseq_no ALPHA = OUT }|.
+      EXIT.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD postprocess_delivery.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 01.07.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+* ANIPEVIN     | 17.11.2023 | 26869     : : Defect - [Platform] Zero/shor*
+*              |            | DS4K970885                               *
+*----------------------------------------------------------------------*
+
+    CONSTANTS:lc_ztsu TYPE char4 VALUE 'ZTSU'.
+
+    CHECK is_so_update_relevant( is_delivery_head-vbeln_vl ) = abap_true.
+
+    DATA: lv_nacha  TYPE  na_nacha VALUE  '8',
+          lv_sorv2  TYPE  na_sorv2 VALUE '01',
+          lv_vermo  TYPE  na_vermo_new VALUE '1',
+          lv_time   TYPE  tbtcjob-laststrttm,
+          lv_date   TYPE  dats,
+          lv_value  TYPE  t,
+          lv_value1 TYPE  i,
+          lv_rel    TYPE  btch0000-char1 ##NEEDED .
+
+    DATA(lv_job_name) = CONV btcjob( |SD70AV2A_{ is_delivery_head-vbeln_vl }_{ lc_ztsu }| ).
+
+    DATA(lo_job) = NEW cl_bp_abap_job( ).
+    lo_job->set_name( lv_job_name ).
+
+    DATA(lif_engine) = CAST if_bp_job_engine( lo_job ).
+
+    lif_engine->generate_job_count( EXCEPTIONS cant_create_job  = 1
+                                               invalid_job_data = 2
+                                               jobname_missing  = 3
+                                               OTHERS           = 4 ).
+
+    IF sy-subrc = 0 AND lo_job->jobcount IS NOT INITIAL.
+
+      SUBMIT sd70av2a WITH rg_kschl EQ lc_ztsu
+                      WITH rg_nacha EQ lv_nacha
+                      WITH pm_nsort EQ lv_sorv2
+                      WITH pm_vermo EQ lv_vermo
+                      WITH rg_vbeln EQ is_delivery_head-vbeln_vl
+                      VIA JOB lo_job->name NUMBER lo_job->jobcount AND RETURN.
+
+      IF sy-subrc = 0.
+
+        TRY.
+            DATA(lt_value) =  zcl_pe_hm_basic=>get_table( iv_id = '2696' ).
+          CATCH zcx_pe_hm.
+            RETURN.
+        ENDTRY.
+
+        DATA(ls_val) = VALUE #( lt_value[ 1 ] OPTIONAL ).
+        IF ls_val IS NOT INITIAL.
+          lv_value1 = ls_val-field1.
+          lv_value  = lv_value1.
+        ENDIF.
+
+        CALL FUNCTION 'EWU_ADD_TIME'
+          EXPORTING
+            i_starttime = sy-uzeit
+            i_startdate = sy-datum
+            i_addtime   = lv_value
+          IMPORTING
+            e_endtime   = lv_time
+            e_enddate   = lv_date.
+
+        CALL FUNCTION 'JOB_CLOSE'  "#EC CI_SUBRC
+          EXPORTING
+            jobcount             = lo_job->jobcount
+            jobname              = lo_job->name
+            sdlstrtdt            = lv_date
+            sdlstrttm            = lv_time
+            targetsystem         = sy-host
+          IMPORTING
+            job_was_released     = lv_rel
+          EXCEPTIONS
+            cant_start_immediate = 1
+            invalid_startdate    = 2
+            jobname_missing      = 3
+            job_close_failed     = 4
+            job_nosteps          = 5
+            job_notex            = 6
+            lock_failed          = 7
+            invalid_target       = 8
+            invalid_time_zone    = 9
+            OTHERS               = 10.
+        IF sy-subrc <> 0.
+* Implement suitable error handling here
+        ENDIF.
+
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD preprocess_delivery.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+* UAKASAZA     | 28.11.2022 | 15643 : [Platform][CR 6165] Delivery Note - WMS *
+*              |            | DS4K936840                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 06.01.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 01.07.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+* ANIPEVIN     | 14.09.2023 | 24918     : [Build] -STO:country/region o*
+*              |            |  DS4K963031                              *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 10.10.2023 | 24918     : [Build] -STO:country/region o*
+*              |            |  DS4K963031                              *
+*----------------------------------------------------------------------*
+    CHECK cs_delivery_head-vbeln_vl IS NOT INITIAL.
+
+    DATA(ls_segment) = parse_multiship_segment( is_idoc_control = is_idoc_control
+                                                it_idoc_data    = it_idoc_data ).
+
+    DATA(ls_delivery) = get_delivery_data( cs_delivery_head-vbeln_vl ).
+    CHECK ls_delivery IS NOT INITIAL.
+
+    update_to_status( is_delivery_head = cs_delivery_head it_delivery_item = ct_delivery_item is_segment_ze1edl20 = ls_segment ).
+
+* Delete HU
+    IF ls_delivery-delhu = abap_true.
+      IF ls_delivery-kostk = /spe/cl_id_handling=>c_statv-partially_processed OR
+         ls_delivery-kostk = /spe/cl_id_handling=>c_statv-completely_processed.
+
+        MESSAGE e001 INTO DATA(lv_msg) ##NEEDED.
+        APPEND get_prot_from_sy( ) TO ct_prot.
+        RETURN.
+      ELSEIF ls_delivery-pkstk = /spe/cl_id_handling=>c_statv-partially_processed  OR
+             ls_delivery-pkstk = /spe/cl_id_handling=>c_statv-completely_processed.
+
+        delete_hu(
+          EXPORTING
+            iv_vbeln = cs_delivery_head-vbeln_vl
+          CHANGING
+            ct_prot  = ct_prot ).
+
+        IF is_prot_error( ct_prot ) = abap_false.
+          RETURN.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+* Full Pick, Short Pick & Zero Pick
+    IF ls_segment-zmultiship_flag = gc_multiship_idoc-blank AND
+       ( ls_delivery-multiship = gc_multiship-pgi_parent OR ls_delivery-multiship = gc_multiship-split_child ).
+
+      IF ls_delivery-kostk = /spe/cl_id_handling=>c_statv-partially_processed OR
+         ls_delivery-kostk = /spe/cl_id_handling=>c_statv-completely_processed.
+
+        MESSAGE e001 INTO lv_msg.
+        APPEND get_prot_from_sy( ) TO ct_prot.
+      ENDIF.
+* Multiple Picking & Packing
+    ELSEIF ls_delivery-multiship = gc_multiship-pgi_parent.
+
+      IF ls_delivery-kostk = /spe/cl_id_handling=>c_statv-completely_processed OR
+         ls_delivery-pkstk = /spe/cl_id_handling=>c_statv-completely_processed.
+
+        IF ls_segment-zmultiship_flag = gc_multiship_idoc-multiple.
+
+          MESSAGE e002 INTO lv_msg.
+          APPEND get_prot_from_sy( ) TO ct_prot.
+        ELSEIF ls_segment-zmultiship_flag = gc_multiship_idoc-final.
+
+          MESSAGE e003 INTO lv_msg.
+          APPEND get_prot_from_sy( ) TO ct_prot.
+        ENDIF.
+      ENDIF.
+* MultiShip
+    ELSEIF ls_delivery-multiship = gc_multiship-split_child.
+      IF ls_segment-zmultiship_flag = gc_multiship_idoc-multiple.
+
+        split_delivery(
+          EXPORTING
+            iv_seq_no        = CONV #( ls_segment-zseq_no )
+            is_idoc_control  = is_idoc_control
+          CHANGING
+            cs_delivery_head = cs_delivery_head
+            ct_delivery_item = ct_delivery_item
+            ct_packing_head  = ct_packing_head
+            ct_packing_item  = ct_packing_item
+            ct_prot          = ct_prot ).
+      ELSEIF ls_segment-zmultiship_flag = gc_multiship_idoc-final.
+
+        IF ls_delivery-kostk = /spe/cl_id_handling=>c_statv-partially_processed OR
+           ls_delivery-kostk = /spe/cl_id_handling=>c_statv-completely_processed OR
+           ls_delivery-pkstk = /spe/cl_id_handling=>c_statv-partially_processed  OR
+           ls_delivery-pkstk = /spe/cl_id_handling=>c_statv-completely_processed.
+
+          MESSAGE e002 INTO lv_msg.
+          APPEND get_prot_from_sy( ) TO ct_prot.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF ( ls_segment-zmultiship_flag = gc_multiship_idoc-blank OR
+         ls_segment-zmultiship_flag = gc_multiship_idoc-final ).
+
+      update_canind(
+        EXPORTING
+          is_idoc_control  = is_idoc_control
+          it_idoc_data     = it_idoc_data
+          is_delivery      = ls_delivery
+        CHANGING
+          cs_delivery_head = cs_delivery_head
+          ct_delivery_item = ct_delivery_item
+          ct_prot          = ct_prot ).
+    ENDIF.
+
+    update_delivery_dates(
+      EXPORTING
+        is_idoc_control  = is_idoc_control
+        it_idoc_data     = it_idoc_data
+      CHANGING
+        cs_delivery_head = cs_delivery_head
+        ct_delivery_item = ct_delivery_item
+        ct_prot          = ct_prot ).
+
+    " change fields according to US T4MTEMP-27407
+    change_fields_27407(
+      EXPORTING
+        is_idoc_control  = is_idoc_control
+        it_idoc_data     = it_idoc_data
+      CHANGING
+        ct_packing_head  = ct_packing_head ).
+
+*-->> Begin of changes by ANIPEVIN on 13.09.2023 for 55041
+    change_fields_packing_item(
+      EXPORTING
+        is_idoc_control  = is_idoc_control
+        it_idoc_data     = it_idoc_data
+      CHANGING
+        ct_packing_item  = ct_packing_item ).
+*-->> End of changes by ANIPEVIN on 13.09.2023 for 55041
+
+    update_to_status( is_delivery_head = cs_delivery_head it_delivery_item = ct_delivery_item is_segment_ze1edl20 = ls_segment ).
+  ENDMETHOD.
+
+
+  METHOD set_so_update.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 17.03.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+    INSERT VALUE #( vbeln = iv_vbeln
+                    posnr = iv_posnr
+                    upd = iv_update ) INTO TABLE gts_items_for_so_update.
+  ENDMETHOD.
+
+
+  METHOD split_delivery.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+* UAKASAZA     | 28.11.2022 | 15643 : [Platform][CR 6165] Delivery Note - WMS *
+*              |            | DS4K936840                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 14.04.2023 | 20204 : [Defect] -Child DN checking for min Quan  *
+*              |            | DS4K949911                               *
+*----------------------------------------------------------------------*
+
+    DATA: lv_vbeln_new TYPE vbeln_vl,
+          lt_item      TYPE TABLE OF bapiobdlvitemdsp,
+          lt_return    TYPE bapiret2_t,
+          ls_return    TYPE bapiret2.
+
+    IF is_duplicate( iv_vbeln = cs_delivery_head-vbeln_vl
+                     iv_seq_no = iv_seq_no ) = abap_true.
+
+      MESSAGE e006 INTO DATA(lv_msg) ##NEEDED.
+      APPEND get_prot_from_sy(  ) TO ct_prot.
+      RETURN.
+    ENDIF.
+
+    IF is_previous_data_received( iv_vbeln = cs_delivery_head-vbeln_vl
+                                  iv_seq_no = iv_seq_no ) = abap_false.
+      MESSAGE e007 INTO lv_msg ##NEEDED.
+      APPEND get_prot_from_sy(  ) TO ct_prot.
+      RETURN.
+    ENDIF.
+
+    IF is_child( iv_vbeln = cs_delivery_head-vbeln_vl ) = abap_false.
+
+      TRY.
+          cl_numberrange_runtime=>number_get(
+            EXPORTING
+              nr_range_nr = get_nr_range( cs_delivery_head-vbeln_vl )
+              object      = 'RV_BELEG'
+            IMPORTING
+              number      = DATA(lv_number) ).
+
+          lv_vbeln_new = |{ lv_number ALPHA = OUT }|.
+        CATCH cx_nr_object_not_found  cx_number_ranges INTO DATA(lo_cx).
+          APPEND get_prot_from_cx( lo_cx ) TO ct_prot.
+          RETURN.
+      ENDTRY.
+
+      LOOP AT ct_delivery_item ASSIGNING FIELD-SYMBOL(<ls_delivery_item>).
+        APPEND VALUE #( deliv_numb = lv_vbeln_new
+                        deliv_item = <ls_delivery_item>-posnr_vl
+                        curr_qty = 'A'
+                        dlv_qty = <ls_delivery_item>-lfimg
+                        sales_unit = 'EA'
+                        sales_qty_num = '1'
+                        sales_qty_denom = '1' ) TO lt_item.
+      ENDLOOP.
+
+      zcl_sd_deliv_note_quan_switch=>deactivate_check( ).
+
+      CALL FUNCTION 'BAPI_OUTB_DELIVERY_SPLIT_DEC'
+        EXPORTING
+          delivery              = cs_delivery_head-vbeln_vl
+          deliverynew           = lv_vbeln_new
+          deliveryitemsbelongto = 'N'
+          businessprocess       = gc_pmode
+        TABLES
+          itemdata              = lt_item
+          return                = lt_return.
+
+      zcl_sd_deliv_note_quan_switch=>activate_check( ).
+
+      APPEND LINES OF get_prot_from_bapiret( lt_return ) TO ct_prot.
+      IF is_prot_error( ct_prot ) = abap_true.
+        CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+        RETURN.
+      ENDIF.
+
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+        EXPORTING
+          wait   = abap_true
+        IMPORTING
+          return = ls_return.
+      IF ls_return-type = if_msg_output=>msgtype_error.
+        APPEND LINES OF get_prot_from_bapiret( VALUE #( ( ls_return ) ) ) TO ct_prot.
+        RETURN.
+      ENDIF.
+
+* Change the IDOC segments
+      update_idoc(
+        EXPORTING
+          iv_vbeln        = lv_vbeln_new
+          is_idoc_control = is_idoc_control
+        CHANGING
+          ct_prot         = ct_prot ).
+* Fill new delivery
+      cs_delivery_head-vbeln_vl = lv_vbeln_new.
+
+      LOOP AT ct_delivery_item ASSIGNING <ls_delivery_item>.
+        <ls_delivery_item>-vbeln = <ls_delivery_item>-vbeln_vl = lv_vbeln_new.
+      ENDLOOP.
+      LOOP AT ct_packing_item ASSIGNING FIELD-SYMBOL(<ls_packing_item>).
+        <ls_packing_item>-vbeln = lv_vbeln_new.
+      ENDLOOP.
+
+      update_serials(
+        EXPORTING
+          iv_vbeln = lv_vbeln_new
+        CHANGING
+          ct_prot  = ct_prot ).
+    ENDIF.
+
+* PGI
+    cs_delivery_head-wabuc = abap_true.
+* Update seq_no
+    cs_delivery_head-zz1_seq_no_dlh = iv_seq_no.
+    cs_delivery_head-update_extension_fields = abap_true.
+  ENDMETHOD.
+
+
+  METHOD update_canind.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 06.01.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+* SHNIPALI     | 01.11.2023 | 26040     :  CR 6165 - Pick, Pack, PGI   *
+*              |            | DS4K967462                               *
+*----------------------------------------------------------------------*
+
+    CHECK ct_delivery_item IS NOT INITIAL.
+
+    DATA(lts_delivery_item_db) = get_delivery_items_db( ct_delivery_item ).
+
+    DATA(lts_segment) = parse_item_segment( is_idoc_control = is_idoc_control
+                                            it_idoc_data    = it_idoc_data ).
+
+    LOOP AT ct_delivery_item ASSIGNING FIELD-SYMBOL(<ls_delivery_item>).
+
+      READ TABLE lts_delivery_item_db ASSIGNING FIELD-SYMBOL(<ls_delivery_item_db>)
+       WITH TABLE KEY deliverydocument = <ls_delivery_item>-vbeln_vl
+                      deliverydocumentitem = <ls_delivery_item>-posnr_vl.
+      CHECK sy-subrc = 0 AND <ls_delivery_item>-lfimg < <ls_delivery_item_db>-actualdeliveryquantity.
+
+      <ls_delivery_item>-zz1_zcancind_dli = VALUE #( lts_segment[ posnr = <ls_delivery_item>-posnr_vl ]-zcancind OPTIONAL ).
+      IF <ls_delivery_item>-zz1_zcancind_dli IS INITIAL.
+        <ls_delivery_item>-zz1_zcancind_dli = is_delivery-zcanind.
+      ENDIF.
+
+      IF <ls_delivery_item>-zz1_zcancind_dli IS NOT INITIAL.
+        <ls_delivery_item>-update_extension_fields = abap_true.
+
+        set_so_update( iv_vbeln = <ls_delivery_item>-vbeln_vl
+                       iv_posnr = <ls_delivery_item>-posnr_vl ).
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD update_delivery_dates.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 17.03.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+    CHECK ct_delivery_item IS NOT INITIAL.
+
+    DATA(lts_segment) = parse_item_segment( is_idoc_control = is_idoc_control
+                                            it_idoc_data    = it_idoc_data ).
+
+    LOOP AT ct_delivery_item ASSIGNING FIELD-SYMBOL(<ls_delivery_item>).
+
+      READ TABLE lts_segment ASSIGNING FIELD-SYMBOL(<ls_item_segment>)
+       WITH TABLE KEY posnr = <ls_delivery_item>-posnr_vl.
+
+      CHECK sy-subrc = 0.
+
+      <ls_delivery_item>-zz1_wmsdate_dli = <ls_item_segment>-ziedd.
+      <ls_delivery_item>-zz1_wmstime_dli = <ls_item_segment>-ziedz.
+      <ls_delivery_item>-update_extension_fields = abap_true.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD update_idoc.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    DATA: lt_idoc_data           TYPE STANDARD TABLE OF edidd,
+          ls_segment_header      TYPE e1edl20,
+          ls_segment_controlling TYPE e1edl18.
+
+    CALL FUNCTION 'EDI_DOCUMENT_OPEN_FOR_EDIT'
+      EXPORTING
+        document_number               = is_idoc_control-docnum
+      TABLES
+        idoc_data                     = lt_idoc_data
+      EXCEPTIONS
+        document_foreign_lock         = 1
+        document_not_exist            = 2
+        document_not_open             = 3
+        status_is_unable_for_changing = 4
+        OTHERS                        = 5.
+    IF sy-subrc <> 0.
+      APPEND get_prot_from_sy(  ) TO ct_prot.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_idoc_data ASSIGNING FIELD-SYMBOL(<ls_idoc_data>).
+      CASE <ls_idoc_data>-segnam.
+        WHEN gc_segnam-header.
+* Change vbelnr to child
+          ls_segment_header = <ls_idoc_data>-sdata.
+          ls_segment_header-vbeln = iv_vbeln.
+          <ls_idoc_data>-sdata = ls_segment_header.
+        WHEN gc_segnam-controlling.
+* Add PGI
+          ls_segment_controlling =  <ls_idoc_data>-sdata.
+          IF ls_segment_controlling-qualf  IS INITIAL.
+            ls_segment_controlling-qualf = 'PGI'.
+            <ls_idoc_data>-sdata = ls_segment_controlling.
+          ENDIF.
+        WHEN OTHERS.
+          DELETE lt_idoc_data.
+      ENDCASE.
+    ENDLOOP.
+
+    CALL FUNCTION 'EDI_CHANGE_DATA_SEGMENTS'
+      TABLES
+        idoc_changed_data_range = lt_idoc_data
+      EXCEPTIONS
+        idoc_not_open           = 1
+        data_record_not_exist   = 2
+        OTHERS                  = 3.
+    IF sy-subrc <> 0.
+      APPEND get_prot_from_sy(  ) TO ct_prot.
+      RETURN.
+    ENDIF.
+
+    CALL FUNCTION 'EDI_DOCUMENT_CLOSE_EDIT'
+      EXPORTING
+        document_number  = is_idoc_control-docnum
+        do_commit        = abap_true
+        do_update        = abap_true
+        write_all_status = abap_true
+      EXCEPTIONS
+        idoc_not_open    = 1
+        db_error         = 2
+        OTHERS           = 3.
+    IF sy-subrc <> 0.
+      APPEND get_prot_from_sy(  ) TO ct_prot.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD update_serials.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 05.07.2022 | 11667     : Platform-API/IDoc extension - WMS to S4 *
+*              |            | DS4K921380                               *
+*----------------------------------------------------------------------*
+    FIELD-SYMBOLS: <lt_sernr> TYPE shp_sernr_update_t.
+
+* Unfortunately there is no such a parameter in 002 customer-exit
+    ASSIGN ('(SAPLV55K)t_sernr') TO <lt_sernr>.
+    IF sy-subrc <> 0.
+      MESSAGE e005 WITH iv_vbeln INTO DATA(lv_msg) ##NEEDED.
+      APPEND get_prot_from_sy( ) TO ct_prot.
+      RETURN.
+    ENDIF.
+
+    LOOP AT <lt_sernr> ASSIGNING FIELD-SYMBOL(<ls_sernr>).
+      <ls_sernr>-rfbel = iv_vbeln.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD update_so.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KARPOSER     | 06.01.2023 | 16144     : Zero/short Pick scenario     *
+*              |            | DS4K938033                               *
+*----------------------------------------------------------------------*
+* KARPOSER     | 01.07.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+* ANIPEVIN     | 28.08.2023 | 22902     : : Zero/short Pick scenario   *
+*              |            | DS4K957244                               *
+*----------------------------------------------------------------------*
+    DATA(ls_delivery) = get_delivery_data( iv_vbeln = is_delivery_item_key-vbeln
+                                           iv_posnr = is_delivery_item_key-posnr ).
+
+    CHECK ls_delivery-zcanind IS NOT INITIAL.
+
+    IF ls_delivery-wbstk <> /spe/cl_id_handling=>c_statv-completely_processed.
+      " MEssage
+      RETURN.
+    ENDIF.
+
+    IF ls_delivery-zcanind = gc_cancid-reason.
+      IF ls_delivery-zsorej IS INITIAL.
+        " Message
+        RETURN.
+      ENDIF.
+
+      apply_rej_reason(
+        EXPORTING
+          iv_vgbeln = ls_delivery-vgbel
+          iv_vgpos  = ls_delivery-vgpos
+          iv_reason = ls_delivery-zsorej
+        CHANGING
+          ct_prot   = ct_prot ).
+
+    ELSEIF ls_delivery-zcanind = gc_cancid-block.
+      IF ls_delivery-zsodnbl IS INITIAL.
+        "message
+        RETURN.
+      ENDIF.
+
+      apply_deliv_block(
+        EXPORTING
+          iv_vgbeln = ls_delivery-vgbel
+          iv_vgpos  = ls_delivery-vgpos
+          iv_block  = ls_delivery-zsodnbl
+        CHANGING
+          ct_prot   = ct_prot ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD update_to_status.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ZHMAIVAD     | 10.10.2023 | 24918     : [Build] -STO:country/region o*
+*              |            |  DS4K963031                              *
+*----------------------------------------------------------------------*
+    DATA(lt_multiship_pgi_params) = zcl_sd_sto_status_update=>get_buffer_data_shared(  ).
+    DELETE lt_multiship_pgi_params WHERE vbeln = is_delivery_head-vbeln_vl.
+    APPEND VALUE #( vbeln = is_delivery_head-vbeln_vl  multiship_flag_wms = is_segment_ze1edl20-zmultiship_flag ) TO lt_multiship_pgi_params.
+    zcl_sd_sto_status_update=>set_buffer_data_shared( lt_multiship_pgi_params ).
+    DATA(lt_delivery_item) = it_delivery_item.
+    DELETE lt_delivery_item WHERE lfimg <> 0.
+    IF lt_delivery_item IS NOT INITIAL.
+      SELECT  purchaseorder, purchaseorderitem
+        INTO TABLE @DATA(lt_purchase_order_keys)
+        FROM i_deliverydocumentitem
+        FOR ALL ENTRIES IN @it_delivery_item
+        WHERE deliverydocument = @it_delivery_item-vbeln_vl AND deliverydocumentitem = @it_delivery_item-posnr_vl.
+      IF sy-subrc = 0.
+        LOOP AT lt_purchase_order_keys ASSIGNING FIELD-SYMBOL(<ls_purchase_order_keys>).
+          zcl_sd_sto_status_update=>set_text_po_item(
+             iv_po_number = <ls_purchase_order_keys>-purchaseorder
+             iv_po_item   = <ls_purchase_order_keys>-purchaseorderitem
+             iv_status    = zcl_sd_sto_status_update=>gc_sto_status-shipped ).
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

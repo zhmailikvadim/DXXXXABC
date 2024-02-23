@@ -1,0 +1,490 @@
+class /aif/cl_table_generator definition
+  public
+  create public .
+
+  type-pools: abap.
+
+  public section.
+
+    interfaces /aif/if_table_generator.
+
+    methods:
+      "! Create instance
+      constructor
+        importing
+          io_db_table_access    type ref to /aif/if_table_generator_dbw optional
+          io_log_writer         type ref to /aif/if_appl_log_writer
+          io_util               type ref to /aif/if_struc_pers_util optional
+          iv_runs_in_background type /aif/boolean default abap_false.
+
+  protected section.
+  private section.
+
+    constants:
+      "! Defines the maximum number of tries to lock an object in background mode
+      mc_max_attempts_to_lock type i value 100.
+
+    data:
+      "! Instance of the database and function module wrapper
+      mo_access_table       type ref to /aif/if_table_generator_dbw,
+
+      "! Instance of the util interface
+      mo_util               type ref to /aif/if_struc_pers_util,
+
+      "! Instance of the application log writer interface
+      mo_log_writer         type ref to /aif/if_appl_log_writer,
+
+      "! Indicates if the class is used in background mode
+      mv_runs_in_background type /aif/boolean.
+
+    methods:
+      "! create table in ddic
+      create_dbtab_in_ddic
+        importing
+          !is_table type /aif/db_table
+        raising
+          /aif/cx_struct_pers_base,
+
+      "! activate table to ddic
+      activate_db_table
+        importing
+          !iv_table_name type tabname16
+        raising
+          /aif/cx_struct_pers_base,
+
+      "! add object to transport request
+      add_to_tr
+        importing
+          !iv_table_name        type tabname16
+          !iv_transport_request type trkorr optional
+          !iv_package           type devclass optional
+        raising
+          /aif/cx_struct_pers_base,
+
+      "! assign a dbtab to a given package
+      assign_table_to_package
+        importing
+          iv_table_name   type tabname16
+          iv_package_name type devclass
+        raising
+          /aif/cx_struct_pers_base,
+
+      "! lock dbtab
+      lock_table
+        importing
+          !iv_table_name   type tabname16
+        returning
+          value(rv_locked) type /aif/boolean,
+
+      "! release lock of dbtab
+      unlock_table
+        importing
+          !iv_table_name type tabname16,
+
+      "! lock change request before adding object to transport request
+      lock_tr
+        importing
+          !iv_transport_request type trkorr
+        returning
+          value(rv_locked)      type /aif/boolean,
+
+      "! unlock change request
+      unlock_tr
+        importing
+          !iv_transport_request type trkorr.
+
+
+
+ENDCLASS.
+
+
+
+CLASS /AIF/CL_TABLE_GENERATOR IMPLEMENTATION.
+
+
+  METHOD /aif/if_table_generator~generate_tables.
+
+    DATA: ls_table     TYPE /aif/db_table,
+          lo_exception TYPE REF TO /aif/cx_struct_pers_base,
+          lv_package   TYPE devclass,
+          lt_columns   TYPE /aif/column_tt.
+
+*   create/change table, add to transport request, and activate table.
+    LOOP AT it_db_scheme INTO ls_table.
+
+*     add admin fields to the root table (e.g. create-date/time, etc.)
+      IF ls_table-is_root_table = abap_true.
+        lt_columns = mo_util->get_admin_columns_for_root_tab( ).
+        INSERT LINES OF lt_columns INTO ls_table-columns INDEX 1.
+      ENDIF.
+
+*     add general fields to every table (e.g. mandt, ifkeys, counter, parent_id, etc.)
+      CLEAR lt_columns.
+      lt_columns = mo_util->get_general_columns( ).
+      INSERT LINES OF lt_columns INTO ls_table-columns INDEX 1.
+
+*     create dbtab in ddic
+      TRY.
+          me->create_dbtab_in_ddic( EXPORTING is_table = ls_table ).
+        CATCH /aif/cx_struct_pers_base INTO lo_exception.
+          mo_log_writer->add_exception_to_log( io_exception = lo_exception
+                                               iv_message_type = 'E' ).
+          IF 1 = 2. MESSAGE e203(/aif/pers_tbl_gen) WITH ls_table-name. ENDIF.
+          mo_log_writer->add_msg_to_log(
+            iv_msgid              = '/AIF/PERS_TBL_GEN'
+            iv_msgno              = '203'
+            iv_msgty              = 'E'
+            iv_msgv1              = ls_table-name
+            iv_ignore_trace_level = abap_true ).
+          CONTINUE.
+      ENDTRY.
+
+      " write success message to log
+      IF 1 = 2. MESSAGE s122(/aif/pers_tbl_gen) WITH ls_table-name. ENDIF.
+      mo_log_writer->add_msg_to_log(
+        iv_msgty              = 'S'
+        iv_msgid              = '/AIF/PERS_TBL_GEN'
+        iv_msgno              = '122'
+        iv_msgv1              = ls_table-name
+        iv_ignore_trace_level = abap_true ).
+
+*     assign dbtab to package
+      lv_package = to_upper( ls_table-package ).
+      TRY.
+          IF lv_package = '$TMP'.
+            me->assign_table_to_package( iv_table_name     = ls_table-name
+                                         iv_package_name   = lv_package ).
+          ELSE.
+*     add dbtab to transport request
+            me->add_to_tr( iv_table_name = ls_table-name
+                           iv_package = lv_package
+                           iv_transport_request = iv_transport_request ).
+          ENDIF.
+        CATCH /aif/cx_struct_pers_base INTO lo_exception.
+          mo_log_writer->add_exception_to_log( io_exception = lo_exception
+                                               iv_message_type = 'W' ).
+      ENDTRY.
+
+*     activate dbtab
+      CLEAR lo_exception.
+      TRY.
+          me->activate_db_table( EXPORTING iv_table_name = ls_table-name  ).
+        CATCH /aif/cx_struct_pers_base INTO lo_exception.
+          mo_log_writer->add_exception_to_log( io_exception = lo_exception
+                                               iv_message_type = 'W' ).
+      ENDTRY.
+
+      IF lo_exception IS INITIAL.
+        IF 1 = 2. MESSAGE i124(/aif/pers_tbl_gen) WITH ls_table-name. ENDIF.
+        mo_log_writer->add_msg_to_log(
+          iv_msgty              = 'I'
+          iv_msgid              = '/AIF/PERS_TBL_GEN'
+          iv_msgno              = '124'
+          iv_msgv1              = ls_table-name
+          iv_ignore_trace_level = abap_true ).
+      ENDIF.
+
+    ENDLOOP.
+
+* save log
+    mo_log_writer->save_log( ).
+
+  ENDMETHOD.
+
+
+  method activate_db_table.
+
+    data: lv_activation_result type sy-subrc,
+          lv_char30            type char30,
+          lo_exception         type ref to /aif/cx_struct_pers_base,
+          lv_lock_result       type /aif/boolean.
+
+    lv_char30 = iv_table_name.
+
+* lock and activate the structure
+    lv_lock_result = me->lock_table( iv_table_name ).
+    if lv_lock_result = abap_false.
+      if 1 = 2. message e116(/aif/pers_tbl_gen) with iv_table_name. endif.
+      raise exception type /aif/cx_struct_pers_base
+        exporting
+          textid        = /aif/cx_struct_pers_base=>lock_dbtab_failed
+          ddic_obj_name = lv_char30.
+    endif.
+
+    try.
+        lv_activation_result = mo_access_table->activate_table( name = lv_char30 ).
+      catch /aif/cx_struct_pers_base into lo_exception.
+        me->unlock_table( iv_table_name ).
+        if 1 = 2. message e202(/aif/pers_tbl_gen) with iv_table_name. endif.
+        raise exception type /aif/cx_struct_pers_base
+          exporting
+            previous      = lo_exception
+            textid        = /aif/cx_struct_pers_base=>activation_failed
+            ddic_obj_name = lv_char30.
+    endtry.
+
+    if lv_activation_result <> 4 and lv_activation_result <> 0.
+      me->unlock_table( iv_table_name ).
+      if 1 = 2. message e202(/aif/pers_tbl_gen) with iv_table_name. endif.
+      raise exception type /aif/cx_struct_pers_base
+        exporting
+          textid        = /aif/cx_struct_pers_base=>activation_failed
+          ddic_obj_name = lv_char30.
+    endif.
+
+    me->unlock_table( iv_table_name ).
+
+  endmethod.
+
+
+  method add_to_tr.
+
+    data: lv_object_name type sobj_name,
+          lv_ddobj_name  type ddobjname,
+          lv_tr          type trkorr,
+          lo_exception   type ref to /aif/cx_struct_pers_base,
+          lv_lock_result type /aif/boolean,
+          lv_trobj_name  type  trobj_name.
+
+    lv_object_name = iv_table_name.
+    lv_ddobj_name = iv_table_name.
+
+    lv_lock_result = me->lock_tr( iv_transport_request ).
+    if lv_lock_result = abap_false.
+      if 1 = 2. message e207(/aif/pers_tbl_gen) with iv_transport_request. endif.
+      raise exception type /aif/cx_struct_pers_base
+        exporting
+          textid            = /aif/cx_struct_pers_base=>lock_tr_failed
+          transport_request = iv_transport_request.
+    endif.
+
+    lv_tr = iv_transport_request .
+    lv_trobj_name = iv_table_name.
+
+    try.
+        mo_access_table->add_tr( object_type = 'TABL'
+                                 object_name = lv_trobj_name
+                                 devclass = iv_package
+                                 korrnum  = lv_tr ).
+      catch /aif/cx_struct_pers_base into lo_exception.
+        me->unlock_tr( iv_transport_request ).
+        if 1 = 2. message e201(/aif/pers_tbl_gen) with iv_table_name iv_transport_request. endif.
+        raise exception type /aif/cx_struct_pers_base
+          exporting
+            previous          = lo_exception
+            textid            = /aif/cx_struct_pers_base=>assign_dbtab_to_tr_failed
+            ddic_obj_name     = lv_ddobj_name
+            transport_request = iv_transport_request.
+    endtry.
+
+    me->unlock_tr( iv_transport_request ).
+
+  endmethod.
+
+
+  method assign_table_to_package.
+
+    data: lv_obj_name   type sobj_name.
+
+    lv_obj_name = iv_table_name.
+
+* Create object in object directory (tadir)
+    mo_access_table->trint_tadir_insert( iv_author = sy-uname
+                                         iv_masterlang = sy-langu
+                                         iv_package_name = iv_package_name
+                                         iv_obj_name     = lv_obj_name ).
+
+  endmethod.
+
+
+  METHOD constructor.
+
+    mo_access_table = io_db_table_access.
+    IF mo_access_table IS INITIAL.
+      CREATE OBJECT mo_access_table TYPE lcl_table_generator_dbw.
+    ENDIF.
+
+    mo_util = io_util.
+    IF mo_util IS INITIAL.
+      CREATE OBJECT mo_util TYPE /aif/cl_struc_pers_util.
+    ENDIF.
+
+    mo_log_writer = io_log_writer.
+    IF mo_log_writer IS INITIAL.
+
+*      create object mo_log_writer type /aif/cl_appl_log_writer.
+      TRY.
+      CREATE OBJECT mo_log_writer TYPE /aif/cl_appl_log_writer
+        EXPORTING
+          iv_subobj    = '/AIF/PERS_TBL_GENE'
+          iv_extnumber = '/AIF/PERS_TBL_GENE'.
+        CATCH /aif/cx_error_handling_general.                "#EC NO_HANDLER
+*         to handle the exception
+      ENDTRY.
+    ENDIF.
+
+    mv_runs_in_background = iv_runs_in_background.
+
+  ENDMETHOD.
+
+
+  method create_dbtab_in_ddic.
+    data: lt_dd03p       type standard table of dd03p with non-unique default key,
+          ls_dd03p       type dd03p,
+          ls_dd02v       type dd02v,
+          ls_dd09l       type dd09l,
+          ls_column      type /aif/column,
+          lv_ddobj_name  type ddobjname,
+          lo_exception   type ref to /aif/cx_struct_pers_base,
+          lv_lock_result type /aif/boolean.
+
+* Fill dd02v entry -> table header with general info
+    ls_dd02v-tabclass = 'TRANSP'.
+    ls_dd02v-tabname = is_table-name.
+    concatenate 'Generated table: ' ##NO_TEXT is_table-name into ls_dd02v-ddtext.
+    ls_dd02v-ddlanguage = 'EN'.
+    ls_dd02v-contflag = 'A'.
+    ls_dd02v-exclass = '1'. " Cannot be enhanced
+    ls_dd02v-mainflag = ' '. " Maintenance allowed with Restrictions
+    ls_dd02v-as4user = sy-uname.
+    ls_dd02v-as4date = sy-datum.
+    ls_dd02v-as4time = sy-uzeit.
+    ls_dd02v-applclass = ''.
+    ls_dd02v-authclass = ''.
+
+* Fill dd09l entry -> technical settings
+    ls_dd09l-tabname = is_table-name.
+    ls_dd09l-tabart = 'APPL1'.
+    ls_dd09l-tabkat = 9.
+*    ls_dd09l-bufallow = 'N'.
+
+* Fill dd03p entries -> columns
+    loop at is_table-columns into ls_column.
+      clear ls_dd03p.
+
+      move-corresponding ls_column-elementary_type_info to ls_dd03p.
+
+      ls_dd03p-tabname = is_table-name.
+      ls_dd03p-ddlanguage = sy-langu.
+      ls_dd03p-adminfield = abap_false.
+      ls_dd03p-keyflag = ls_column-is_key.
+      ls_dd03p-fieldname = ls_column-name.
+      ls_dd03p-position = sy-tabix.
+      ls_dd03p-notnull = abap_false.
+
+      if ls_column-is_include = abap_true.
+*        ls_dd03p-notnull = abap_false.
+        ls_dd03p-groupname = ls_column-group_name.
+        ls_dd03p-rollname = ''.
+        ls_dd03p-precfield = ls_column-type_name.
+      else.
+*        ls_dd03p-notnull = abap_true.
+        ls_dd03p-groupname = ''.
+        ls_dd03p-rollname = ls_column-type_name.
+        ls_dd03p-precfield = ''.
+
+        ls_dd03p-reftable = ls_column-elementary_type_info-reftable.
+        ls_dd03p-reffield = ls_column-elementary_type_info-reffield.
+      endif.
+
+      append ls_dd03p to lt_dd03p.
+    endloop.
+
+* Put dbtab in DDic
+    lv_lock_result = me->lock_table( iv_table_name = is_table-name ).
+    if lv_lock_result = abap_true.
+      lv_ddobj_name = is_table-name.
+      try.
+          mo_access_table->put_table( name      = lv_ddobj_name
+                                      dd02v_wa  = ls_dd02v
+                                      dd09l_wa  = ls_dd09l
+                                      dd03p_tab = lt_dd03p ).
+        catch /aif/cx_struct_pers_base into lo_exception.
+          me->unlock_table( is_table-name ).
+          if 1 = 2. message e205(/aif/pers_tbl_gen) with lv_ddobj_name. endif.
+          raise exception type /aif/cx_struct_pers_base
+            exporting
+              previous      = lo_exception
+              textid        = /aif/cx_struct_pers_base=>create_dbtab_in_ddic_failed
+              ddic_obj_name = lv_ddobj_name.
+      endtry.
+      me->unlock_table( is_table-name ).
+    else.
+      if 1 = 2. message e116(/aif/pers_tbl_gen) with lv_ddobj_name. endif.
+      raise exception type /aif/cx_struct_pers_base
+        exporting
+          textid        = /aif/cx_struct_pers_base=>lock_dbtab_failed
+          ddic_obj_name = lv_ddobj_name.
+    endif.
+
+  endmethod.
+
+
+  method lock_table.
+    data: ls_lockobj type  /aif/t_funcgenlk,
+          lv_count   type i.
+
+    ls_lockobj-new_name = iv_table_name.
+    ls_lockobj-objtype = 'TABL'.
+
+    clear: rv_locked, lv_count.
+
+    do.
+      rv_locked = mo_access_table->enqueue_aif_efgobj( is_lockobj = ls_lockobj
+                                      iv_new_name = abap_true
+                                      iv_objtype = abap_true ).
+
+      if rv_locked = abap_false and mv_runs_in_background = abap_true and lv_count < mc_max_attempts_to_lock.
+        lv_count  = lv_count + 1.
+        if sy-subrc = 1.
+          wait up to 1 seconds.
+        elseif sy-subrc = 2.
+          wait up to 10 seconds.
+        endif.
+        continue. " -> try again
+      else.
+        exit.
+      endif.
+
+    enddo.
+
+  endmethod.
+
+
+  method lock_tr.
+
+    data lv_count type i.
+
+    do.
+      rv_locked = mo_access_table->enqueue_e_trkorr( iv_transport_request ).
+
+      if rv_locked = abap_false and mv_runs_in_background = abap_true and lv_count < mc_max_attempts_to_lock.
+        lv_count  = lv_count + 1.
+        if sy-subrc = 1.
+          wait up to 1 seconds.
+        elseif sy-subrc = 2.
+          wait up to 10 seconds.
+        endif.
+        continue. " -> try again
+      else.
+        exit.
+      endif.
+    enddo.
+
+  endmethod.
+
+
+  method unlock_table.
+    data: ls_lockobj type  /aif/t_funcgenlk.
+    ls_lockobj-new_name = iv_table_name.
+    ls_lockobj-objtype = 'TABL'.
+    mo_access_table->dequeue_aif_efgobj( is_lockobj  = ls_lockobj
+                                         iv_new_name = abap_true
+                                         iv_objtype  = abap_true ).
+  endmethod.
+
+
+  method unlock_tr.
+    mo_access_table->dequeue_e_trkorr( iv_transport_request ).
+  endmethod.
+ENDCLASS.

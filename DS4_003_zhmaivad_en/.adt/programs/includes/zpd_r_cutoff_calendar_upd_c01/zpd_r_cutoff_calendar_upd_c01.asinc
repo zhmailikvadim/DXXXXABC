@@ -1,0 +1,203 @@
+*&---------------------------------------------------------------------*
+*& Include zpd_r_cutoff_calendar_upd_c01
+*&---------------------------------------------------------------------*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MOTOLANT     | 08.02.2023 | FB_17208_SC_Feature - [Build] - Event Trigger to upd      *
+*              |            | DS4K942266                               *
+*----------------------------------------------------------------------*
+CLASS lcl_cutoff_update DEFINITION FINAL CREATE PRIVATE.
+
+  PUBLIC SECTION.
+
+    CLASS-METHODS:
+      get_instance
+        RETURNING VALUE(ro_instance) TYPE REF TO lcl_cutoff_update.
+
+    METHODS:
+      start_of_selection,
+      end_of_selection.
+
+  PRIVATE SECTION.
+    METHODS get_changed_routes
+      IMPORTING
+        iv_since TYPE timestampl
+      RETURNING
+        VALUE(rt_changed_routes) TYPE zif_pd_cutoff_calendar_const=>gtyp_t_routes.
+    CLASS-DATA:
+      go_instance TYPE REF TO lcl_cutoff_update.
+
+    DATA:
+      mt_messages TYPE bapiret2_t.
+
+    METHODS:
+      show_log.
+
+ENDCLASS.
+
+CLASS lcl_cutoff_update IMPLEMENTATION.
+
+  METHOD get_instance.
+
+    IF go_instance IS INITIAL.
+      go_instance = NEW #( ).
+    ENDIF.
+
+    ro_instance = go_instance.
+
+  ENDMETHOD.
+
+  METHOD start_of_selection.
+
+    DATA:
+      lo_processor TYPE REF TO zcl_pd_cutoff_calendar_update.
+
+
+    " Get last update run
+    DATA(lv_tstamp_prev) = zcl_pe_abap_runtime=>get_last_execution( )-timestamp.
+
+    " Update last executed at: &1
+    MESSAGE ID zif_pd_cutoff_calendar_const=>gc_message_class
+          TYPE zif_pd_cutoff_calendar_const=>gc_message_type-information
+        NUMBER 038
+          WITH lv_tstamp_prev
+          INTO DATA(lv_dummy_msg) ##NEEDED.
+    zcl_pd_cutoff_calendar_update=>add_bapiret_msg_by_symsg( CHANGING ct_messages = mt_messages ).
+
+    " Get current execution timestamp before data selection
+    GET TIME STAMP FIELD DATA(lv_tstamp_curr).
+
+    " Select changed routes since previous execution
+    DATA(lt_changed_routes) = get_changed_routes( lv_tstamp_prev ).
+
+    IF lt_changed_routes IS NOT INITIAL.
+      " Initialize processor class
+      TRY.
+          lo_processor = NEW #( ).
+
+        CATCH zcx_pe_hm INTO DATA(lo_hm_exception).
+          zcl_pd_cutoff_calendar_update=>add_bapiret_msg_by_exception( EXPORTING iif_t100_dyn_msg = lo_hm_exception CHANGING ct_messages = mt_messages ).
+          RETURN.
+      ENDTRY.
+
+      " Execute update
+      lo_processor->update( lt_changed_routes ).
+
+      " Get processing messages
+      INSERT LINES OF lo_processor->get_messages( )
+        INTO TABLE mt_messages.
+
+    ELSE.
+      " No data for processing.
+      MESSAGE ID zif_pd_cutoff_calendar_const=>gc_message_class
+            TYPE zif_pd_cutoff_calendar_const=>gc_message_type-information
+          NUMBER 001
+            INTO lv_dummy_msg.
+      zcl_pd_cutoff_calendar_update=>add_bapiret_msg_by_symsg( CHANGING ct_messages = mt_messages ).
+    ENDIF.
+
+
+    " Save current execution run for next time
+    TRY.
+        " Only save new execution time if there were no errors during execution
+        IF zcl_pd_cutoff_calendar_update=>is_bapiret_error( mt_messages ) = abap_false.
+          zcl_pe_abap_runtime=>save( is_info = VALUE #( timestamp = lv_tstamp_curr ) ).
+        ENDIF.
+
+      CATCH zcx_pe_runtime_info INTO DATA(lo_runtime_exception).
+        " Failed to save execution time
+        MESSAGE ID zif_pd_cutoff_calendar_const=>gc_message_class
+              TYPE zif_pd_cutoff_calendar_const=>gc_message_type-error
+            NUMBER 040
+              INTO lv_dummy_msg.
+        zcl_pd_cutoff_calendar_update=>add_bapiret_msg_by_symsg( CHANGING ct_messages = mt_messages ).
+
+        zcl_pd_cutoff_calendar_update=>add_bapiret_msg_by_exception( EXPORTING iif_t100_dyn_msg = lo_runtime_exception CHANGING ct_messages = mt_messages ).
+    ENDTRY.
+
+
+  ENDMETHOD.
+
+  METHOD get_changed_routes.
+
+    IF iv_since IS NOT INITIAL.
+      TRY.
+          DATA(lv_timestamp) = cl_abap_tstmp=>move_to_short( iv_since ).
+
+          DATA(lt_timestamp_range) = VALUE zsc_tt_timestamp_range(
+            ( sign   = if_fsbp_const_range=>sign_include
+              option = if_fsbp_const_range=>option_greater
+              low    = lv_timestamp )
+          ).
+
+        CATCH cx_parameter_invalid_type cx_parameter_invalid_range INTO DATA(lo_param_exception).
+          " Failed to get changed routes
+          MESSAGE ID zif_pd_cutoff_calendar_const=>gc_message_class
+                TYPE zif_pd_cutoff_calendar_const=>gc_message_type-error
+              NUMBER 041
+                INTO DATA(lv_dummy_msg) ##NEEDED.
+          zcl_pd_cutoff_calendar_update=>add_bapiret_msg_by_symsg( CHANGING ct_messages = mt_messages ).
+
+          zcl_pd_cutoff_calendar_update=>add_bapiret_msg_by_exception( EXPORTING iif_message = lo_param_exception CHANGING ct_messages = mt_messages ).
+          RETURN.
+      ENDTRY.
+    ENDIF.
+
+    SELECT dept_country,
+           dept_city,
+           arv_country,
+           arv_city,
+           transp_mode
+      FROM wrf_pscd_route
+     WHERE timestamp IN @lt_timestamp_range
+      INTO CORRESPONDING FIELDS OF TABLE @rt_changed_routes
+      ##TOO_MANY_ITAB_FIELDS. "#EC CI_SUBRC
+
+  ENDMETHOD.
+
+
+
+  METHOD end_of_selection.
+
+    show_log( ).
+
+  ENDMETHOD.
+
+  METHOD show_log.
+
+    IF mt_messages IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CASE sy-batch.
+      WHEN abap_true.
+
+        LOOP AT mt_messages ASSIGNING FIELD-SYMBOL(<ls_message>).
+          MESSAGE ID <ls_message>-id TYPE if_xo_const_message=>info NUMBER <ls_message>-number
+            WITH <ls_message>-message_v1 <ls_message>-message_v2 <ls_message>-message_v3 <ls_message>-message_v4.
+        ENDLOOP.
+
+      WHEN OTHERS.
+
+        CALL FUNCTION 'SUSR_DISPLAY_LOG'
+          TABLES
+            it_log_bapiret2 = mt_messages
+          EXCEPTIONS
+            parameter_error = 1
+            OTHERS          = 2.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+
+    ENDCASE.
+
+    CLEAR mt_messages.
+
+  ENDMETHOD.
+
+ENDCLASS.

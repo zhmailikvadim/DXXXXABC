@@ -1,0 +1,503 @@
+class /IWNGW/CL_NOTIFICATION_API definition
+  public
+  final
+  create public .
+
+public section.
+
+  types:
+    BEGIN OF ty_s_invalid_user,
+        notif_id  TYPE /iwngw/notification_id,
+        type_key  TYPE /iwngw/notification_type_key,
+        recipient TYPE /iwngw/if_notif_provider=>ty_t_notification_recipient,
+      END OF ty_s_invalid_user .
+  types:
+    ty_t_invalid_user TYPE STANDARD TABLE OF ty_s_invalid_user .
+
+  class-methods CREATE_NOTIFICATIONS
+    importing
+      !IV_PROVIDER_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_S_PROVIDER-ID
+      !IT_NOTIFICATION type /IWNGW/IF_NOTIF_PROVIDER=>TY_T_NOTIFICATION
+    raising
+      /IWNGW/CX_NOTIFICATION_API .
+  class-methods DELETE_NOTIFICATIONS
+    importing
+      !IV_PROVIDER_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_S_PROVIDER-ID
+      !IT_NOTIFICATION_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_T_NOTIFICATION_ID
+    raising
+      /IWNGW/CX_NOTIFICATION_API .
+  class-methods GET_PROVIDER_CONFIG
+    importing
+      !IV_PROVIDER_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_S_PROVIDER-ID
+    returning
+      value(RS_RESULT) type /IWNGW/IF_NOTIF_PROVIDER=>TY_S_PROVIDER_CONFIG .
+  class-methods CLEAR_CACHE
+    importing
+      !IV_PROVIDER_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_S_PROVIDER-ID
+      !IT_NOTIF_TYPE_KEY type /IWNGW/IF_NOTIF_PROVIDER=>TY_T_NOTIFICATION_TYPE_ID optional
+    exporting
+      !ET_RETURN type /IWNGW/IF_NOTIF_PROVIDER=>TY_T_RETURN_CACHE
+    raising
+      /IWNGW/CX_NOTIFICATION_API .
+  PROTECTED SECTION.
+private section.
+
+  types:
+    BEGIN OF ty_s_uname_lang,
+        uname    TYPE uname,
+        language TYPE spras,
+      END OF ty_s_uname_lang .
+
+  class-methods GET_USER_LANG
+    importing
+      !IV_UNAME type UNAME
+    returning
+      value(RV_LANG) type SPRAS
+    raising
+      /IWNGW/CX_NOTIFICATION_API .
+ENDCLASS.
+
+
+
+CLASS /IWNGW/CL_NOTIFICATION_API IMPLEMENTATION.
+
+
+  METHOD clear_cache.
+
+    DATA: lx_provider_reg  TYPE REF TO /iwngw/cx_cos_provider_reg,
+          lv_sap_origin    TYPE /iwngw/hub_med_sap_origin,
+          lv_function_name TYPE rs38l_fnam VALUE '/IWNGW/FM_HUB_CACHE_CLEANUP',
+          lv_destination   TYPE rfcdest.
+
+    CLEAR: et_return.
+    TRY.
+        /iwngw/cl_cos_provider_reg_cof=>assert_provider_id( iv_provider_id ).
+      CATCH /iwngw/cx_cos_provider_reg INTO lx_provider_reg.
+        RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+          EXPORTING
+            textid      = /iwngw/cx_notification_api=>provider_not_active
+            provider_id = iv_provider_id
+            previous    = lx_provider_reg.
+    ENDTRY.
+
+    /iwngw/cl_hub_cof_settings=>get_bep_sap_origin( IMPORTING ev_sap_origin = lv_sap_origin ).
+    /iwngw/cl_hub_cof_settings=>get_hub_destination( IMPORTING ev_destination = lv_destination ).
+
+    IF it_notif_type_key IS NOT INITIAL.
+      READ TABLE it_notif_type_key WITH KEY type_key = ' '
+                                            version  = ' ' TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+        RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+          EXPORTING
+            textid = /iwngw/cx_notification_api=>invalid_type_key.
+      ENDIF.
+    ENDIF.
+
+
+    IF lv_destination = 'NONE'.
+      CALL FUNCTION lv_function_name
+        EXPORTING
+          iv_metadata_cache = abap_true
+          iv_data_cache     = abap_false
+          iv_sap_origin     = lv_sap_origin
+          iv_provider_id    = iv_provider_id
+          it_notif_type_key = it_notif_type_key
+        IMPORTING
+          et_return         = et_return
+        EXCEPTIONS
+          OTHERS            = 4.
+    ELSE.
+      CALL FUNCTION lv_function_name
+        DESTINATION lv_destination
+        EXPORTING
+          iv_metadata_cache     = abap_true
+          iv_data_cache         = abap_false
+          iv_sap_origin         = lv_sap_origin
+          iv_provider_id        = iv_provider_id
+          it_notif_type_key     = it_notif_type_key
+        IMPORTING
+          et_return             = et_return
+        EXCEPTIONS
+          system_failure        = 1
+          communication_failure = 2
+          rfc_no_auth           = 4
+          OTHERS                = 5.
+    ENDIF.
+    IF sy-subrc <> 0.
+      CASE sy-subrc.
+        WHEN 1.
+          RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+            EXPORTING
+              textid = /iwngw/cx_notification_api=>system_failure.
+        WHEN 2.
+          RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+            EXPORTING
+              textid = /iwngw/cx_notification_api=>communication_failure.
+        WHEN 4.
+          RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+            EXPORTING
+              textid = /iwngw/cx_notification_api=>missing_rfc_auth.
+        WHEN OTHERS.
+          RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+            EXPORTING
+              textid = /iwngw/cx_notification_api=>missing_auth_object.
+      ENDCASE.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD create_notifications.
+    DATA lv_sap_origin TYPE /iwngw/hub_med_sap_origin.
+
+    DATA lt_uname_lang_cache TYPE HASHED TABLE OF ty_s_uname_lang WITH UNIQUE KEY uname.
+    DATA lt_uname_lang TYPE STANDARD TABLE OF ty_s_uname_lang.
+    DATA ls_uname_lang LIKE LINE OF lt_uname_lang.
+    DATA lv_lang TYPE spras.
+
+    DATA lt_notif TYPE /iwngw/if_notif_provider=>ty_t_notification.
+    DATA ls_notif LIKE LINE OF it_notification.
+    DATA ls_recip TYPE /iwngw/if_notif_provider=>ty_s_notification_recipient.
+    DATA lt_invalid_recip TYPE /iwngw/if_notif_provider=>ty_t_notification_recipient.
+    DATA ls_invalid_user TYPE ty_s_invalid_user.
+    DATA lt_invalid_user TYPE ty_t_invalid_user.
+
+    DATA lt_nprop TYPE /iwngw/t_bep_in_nprop_resolve.
+    DATA lt_nprop_all TYPE /iwngw/t_bep_in_nprop_resolve.
+    DATA ls_nprop LIKE LINE OF lt_nprop.
+    DATA lt_nprop_resolved TYPE /iwngw/t_bep_in_nprop_resolve.
+    DATA lt_nprop_res_ret TYPE /iwngw/t_bep_in_nprop_resolve.
+    DATA ls_nprop_resolved LIKE LINE OF lt_nprop_resolved.
+    DATA lt_nprop_to_resolve TYPE /iwngw/t_bep_in_nprop_resolve.
+
+    DATA lx_provider_reg TYPE REF TO /iwngw/cx_cos_provider_reg.
+
+    DATA: lo_log           TYPE REF TO /iwngw/cl_nc_logger,
+          lv_invalid_check TYPE char1,
+          lv_text          TYPE char200.
+
+    TYPES: ty_t_range_lang TYPE RANGE OF sy-langu.
+    DATA: lt_range_lang TYPE ty_t_range_lang,
+          ls_range_lang LIKE LINE OF lt_range_lang.
+
+    FIELD-SYMBOLS: <fs_param_bundle> TYPE /iwngw/if_notif_provider=>ty_s_notification_param_bundle,
+                   <fs_parameter>    TYPE /iwngw/if_notif_provider=>ty_s_notification_parameter.
+
+    " Logging the step to application log
+    lo_log = /iwngw/cl_nc_logger=>get_logger( iv_use_buffer = 'X' iv_subobject = 'CREATE' iv_program = sy-repid ).
+    lo_log->init_logger( iv_system = 'BEP' ).
+    IF lines( it_notification ) EQ 1.
+      READ TABLE it_notification INTO ls_notif INDEX 1.
+      lo_log->log_message(
+        EXPORTING
+          iv_msg_type = 'I'
+          iv_msg_id = '/IWNGW/CM_BEP_RT'
+          iv_msg_number = '024'
+          iv_msg_v1 = ls_notif-id ).
+
+    ELSEIF lines( it_notification ) GT 1.
+      lo_log->log_message(
+        EXPORTING
+          iv_msg_type = 'I'
+          iv_msg_id = '/IWNGW/CM_BEP_RT'
+          iv_msg_number = '025' ).
+    ENDIF.
+
+    " assert notification provider id is registered and active
+    TRY.
+        /iwngw/cl_cos_provider_reg_cof=>assert_provider_id( iv_provider_id ).
+      CATCH /iwngw/cx_cos_provider_reg INTO lx_provider_reg.
+        " Logging the exception to application log
+        lo_log->log_exception( io_exception =  lx_provider_reg ).
+        lo_log->save_log( ).
+        RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+          EXPORTING
+            textid      = /iwngw/cx_notification_api=>provider_not_active
+            provider_id = iv_provider_id
+            previous    = lx_provider_reg.
+    ENDTRY.
+
+    " Also request the data to reduce the number of round trips.
+    " Get all recipients and their languages, best guess for Hub, not guaranteed to have the same languag
+    "  If language not synchronized between BEP and Hub will go through the normal data resolution channel.
+    "  This can also happen if a user logs in with a different language in the Client UI,
+    "   in that case a resolution of the data will have to be done as well.
+    /iwngw/cl_hub_cof_settings=>get_bep_sap_origin(
+      IMPORTING
+        ev_sap_origin = lv_sap_origin ).
+
+    IF lv_sap_origin IS INITIAL.
+      lo_log->log_message(
+      EXPORTING
+        iv_msg_type = 'E'
+        iv_msg_id = '/IWNGW/CM_BEP_RT'
+        iv_msg_number = '019'
+        iv_exception = 'X' ).
+
+      lo_log->save_log( ).
+
+      RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+        EXPORTING
+          textid      = /iwngw/cx_notification_api=>no_system_alias
+          provider_id = iv_provider_id
+          previous    = lx_provider_reg.
+    ENDIF.
+
+    lt_notif = it_notification.
+
+    LOOP AT lt_notif INTO ls_notif.
+      CLEAR: lt_uname_lang, lt_invalid_recip, lt_nprop_all.
+
+      "Deleting duplicate recepients
+      SORT ls_notif-recipients.
+      DELETE ADJACENT DUPLICATES FROM ls_notif-recipients COMPARING ALL FIELDS.
+      MODIFY lt_notif FROM ls_notif TRANSPORTING recipients WHERE id = ls_notif-id.
+
+      LOOP AT ls_notif-recipients INTO ls_recip.
+
+        READ TABLE lt_uname_lang_cache INTO ls_uname_lang WITH TABLE KEY uname = ls_recip-id.
+        IF sy-subrc = 0. " Found, so just add
+          APPEND ls_uname_lang TO lt_uname_lang.
+        ELSE. " Not found, so resolve and add
+          TRY.
+              lv_lang = /iwngw/cl_notification_api=>get_user_lang( iv_uname = ls_recip-id ).
+            CATCH /iwngw/cx_notification_api.
+              IF lv_invalid_check NE abap_true.
+                lv_invalid_check = abap_true.
+                lo_log->log_message(
+                EXPORTING
+                 iv_msg_type = 'E'
+                 iv_exception = 'X'
+                 iv_msg_id = '/IWNGW/CM_BEP_RT'
+                 iv_msg_number = '022' ).
+              ENDIF.
+
+              lv_text = ls_notif-id .
+              lo_log->log_message(
+                EXPORTING
+                 iv_msg_type = 'E'
+                 iv_exception = 'X'
+                 iv_text = lv_text ).
+
+              APPEND ls_recip TO lt_invalid_recip.
+              DELETE ls_notif-recipients WHERE id = ls_recip-id.
+              CONTINUE.
+          ENDTRY.
+
+          ls_uname_lang-uname = ls_recip-id.
+          ls_uname_lang-language = lv_lang.
+          APPEND ls_uname_lang TO lt_uname_lang.
+          INSERT ls_uname_lang INTO TABLE lt_uname_lang_cache.
+        ENDIF.
+
+      ENDLOOP.
+
+* --- deleting the recipient which are invalid
+      IF lt_invalid_recip IS NOT INITIAL.
+        IF ls_notif-recipients IS INITIAL.
+          DELETE lt_notif WHERE id = ls_notif-id.
+        ELSE.
+          MODIFY lt_notif FROM ls_notif TRANSPORTING recipients WHERE id = ls_notif-id.
+        ENDIF.
+
+        ls_invalid_user-notif_id = ls_notif-id.
+        ls_invalid_user-type_key = ls_notif-type_key.
+        ls_invalid_user-recipient  = lt_invalid_recip.
+        APPEND ls_invalid_user TO lt_invalid_user.
+      ENDIF.
+
+      SORT lt_uname_lang BY language.
+      DELETE ADJACENT DUPLICATES FROM lt_uname_lang COMPARING language.
+
+      LOOP AT lt_uname_lang INTO ls_uname_lang.
+        ls_nprop-sap_origin = lv_sap_origin.
+        ls_nprop-provider_id = iv_provider_id.
+        ls_nprop-source_id = ls_notif-id.
+        ls_nprop-type_key = ls_notif-type_key.
+        ls_nprop-type_version = ls_notif-type_version.
+
+        ls_nprop-spras = ls_uname_lang-language.
+
+        APPEND ls_nprop TO lt_nprop_all.
+        " Build of NPROP for resolution when parameters are not passed for looped in notification
+        IF ls_notif-parameters IS INITIAL.
+          APPEND ls_nprop TO lt_nprop.
+        ENDIF.
+      ENDLOOP.
+      lt_nprop[] = lt_nprop_all[].
+      "If parameters are passed for looped in notification, add to resolved tables based on language
+      IF ls_notif-parameters IS NOT INITIAL.
+        LOOP AT ls_notif-parameters ASSIGNING <fs_param_bundle>.
+          ls_range_lang-option = 'EQ'.
+          ls_range_lang-sign = 'I'.
+          ls_range_lang-low = <fs_param_bundle>-language.
+          COLLECT ls_range_lang INTO lt_range_lang.
+          CLEAR ls_range_lang.
+          LOOP AT <fs_param_bundle>-parameters ASSIGNING <fs_parameter>.
+            CLEAR ls_nprop_resolved.
+            ls_nprop_resolved-sap_origin    = lv_sap_origin.
+            ls_nprop_resolved-provider_id   = iv_provider_id.
+            ls_nprop_resolved-source_id     = ls_notif-id.
+            ls_nprop_resolved-type_key      = ls_notif-type_key.
+            ls_nprop_resolved-type_version  = ls_notif-type_version.
+            ls_nprop_resolved-spras         = <fs_param_bundle>-language.
+            ls_nprop_resolved-prop_key      = <fs_parameter>-name.
+            ls_nprop_resolved-prop_value    = <fs_parameter>-value.
+            ls_nprop_resolved-prop_type     = <fs_parameter>-type.
+            ls_nprop_resolved-is_sensitive  = <fs_parameter>-is_sensitive.
+            APPEND ls_nprop_resolved TO lt_nprop_resolved.
+          ENDLOOP.
+        ENDLOOP.
+        DELETE lt_nprop WHERE spras IN lt_range_lang.
+      ENDIF.
+*Getting nprops which need to be resolved
+      APPEND LINES OF lt_nprop TO lt_nprop_to_resolve.
+      CLEAR lt_nprop.
+    ENDLOOP.
+
+    TRY.
+        " Get the set of properties via callback
+        /iwngw/cl_notif_provider_hndlr=>get_notification_data_nprop(
+          EXPORTING
+            it_nprop = lt_nprop_to_resolve
+          IMPORTING
+            et_nprop = lt_nprop_res_ret ).
+        APPEND LINES OF lt_nprop_res_ret TO lt_nprop_resolved.
+
+      CATCH /iwngw/cx_cos_provider_reg INTO lx_provider_reg.
+        lo_log->log_exception( io_exception =  lx_provider_reg ).
+        lo_log->save_log( ).
+        RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+          EXPORTING
+            textid      = /iwngw/cx_notification_api=>provider_not_active
+            provider_id = iv_provider_id
+            previous    = lx_provider_reg.
+    ENDTRY.
+
+    IF lt_notif IS NOT INITIAL.
+      /iwngw/cl_push_proxy=>create_notifications(
+         EXPORTING
+           iv_provider_id = iv_provider_id
+           it_notification = lt_notif
+           it_notification_prop = lt_nprop_resolved ).
+    ENDIF.
+
+    lo_log->save_log( ).
+    IF lt_invalid_user IS NOT INITIAL.
+
+      RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+        EXPORTING
+          user_list = lt_invalid_user.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD delete_notifications.
+    DATA: lt_invalid_notif_id TYPE /iwngw/if_notif_provider=>ty_t_notification_id,
+          lx_provider_reg     TYPE REF TO /iwngw/cx_cos_provider_reg,
+          ls_notif_id         LIKE LINE OF it_notification_id.
+    DATA: lo_log   TYPE REF TO /iwngw/cl_nc_logger.
+
+    lo_log = /iwngw/cl_nc_logger=>get_logger( iv_use_buffer = 'X' iv_subobject = 'DELETE' iv_program = sy-repid ).
+    lo_log->init_logger( iv_system = 'BEP' ).
+    IF lines( it_notification_id ) EQ 1.
+      CLEAR ls_notif_id.
+      READ TABLE it_notification_id INTO ls_notif_id INDEX 1.
+      lo_log->log_message(
+        EXPORTING
+          iv_msg_type = 'I'
+          iv_msg_id = '/IWNGW/CM_BEP_RT'
+          iv_msg_number = '030'
+          iv_msg_v1 = ls_notif_id-id ).
+    ELSEIF lines( it_notification_id ) GT 1.
+      lo_log->log_message(
+        EXPORTING
+          iv_msg_type = 'I'
+          iv_msg_id = '/IWNGW/CM_BEP_RT'
+          iv_msg_number = '034' ).
+    ENDIF.
+
+    " assert notification provider id is registered and active
+    TRY.
+        /iwngw/cl_cos_provider_reg_cof=>assert_provider_id( iv_provider_id ).
+      CATCH /iwngw/cx_cos_provider_reg INTO lx_provider_reg.
+        lo_log->save_log( ).
+        RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+          EXPORTING
+            textid      = /iwngw/cx_notification_api=>provider_not_active
+            provider_id = iv_provider_id
+            previous    = lx_provider_reg.
+    ENDTRY.
+    "Check for invalid inputs
+    LOOP AT it_notification_id INTO ls_notif_id.
+      IF ls_notif_id-id IS INITIAL.
+        APPEND ls_notif_id TO lt_invalid_notif_id.
+      ELSE.
+        IF ls_notif_id-type_key IS INITIAL AND ls_notif_id-type_version IS NOT INITIAL.
+          APPEND ls_notif_id TO lt_invalid_notif_id.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    "Raise exception when some / all input passed is invalid
+    IF lt_invalid_notif_id IS NOT INITIAL.
+      lo_log->log_message(
+      EXPORTING
+        iv_msg_type = 'E'
+        iv_msg_id = /iwngw/cx_notification_api=>invalid_input-msgid
+        iv_msg_number = /iwngw/cx_notification_api=>invalid_input-msgno
+        iv_exception = 'X' ).
+      lo_log->save_log( ).
+      RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+        EXPORTING
+          textid         = /iwngw/cx_notification_api=>invalid_input
+          source_id_list = lt_invalid_notif_id.
+    ENDIF.
+
+    " Call outbound proxy
+    /iwngw/cl_push_proxy=>delete_notifications(
+      EXPORTING
+        iv_provider_id           = iv_provider_id
+        it_notification_id       = it_notification_id ).
+
+    lo_log->save_log( ).
+  ENDMETHOD.
+
+
+  METHOD get_provider_config.
+    rs_result-id = iv_provider_id.
+    "check if given provider has been activated
+    rs_result-active  = /iwngw/cl_cos_provider_reg_cof=>is_provider_active( iv_provider_id = iv_provider_id ).
+  ENDMETHOD.
+
+
+  METHOD get_user_lang.
+    DATA ls_defaults TYPE usdefaults.
+
+
+    CALL FUNCTION 'SUSR_USER_DEFAULTS_GET'
+      EXPORTING
+        user_name           = iv_uname
+      IMPORTING
+        user_defaults       = ls_defaults
+      EXCEPTIONS
+        user_name_not_exist = 1
+        OTHERS              = 2.
+
+    IF sy-subrc <> 0.
+
+      RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+        EXPORTING
+          user_id = iv_uname.
+
+    ENDIF.
+
+
+    IF ls_defaults-langu IS INITIAL.
+      rv_lang = sy-langu.
+    ELSE.
+      rv_lang = ls_defaults-langu.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

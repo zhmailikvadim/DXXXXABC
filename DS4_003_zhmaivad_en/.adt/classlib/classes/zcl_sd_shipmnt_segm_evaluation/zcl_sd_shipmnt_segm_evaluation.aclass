@@ -1,0 +1,373 @@
+CLASS zcl_sd_shipmnt_segm_evaluation DEFINITION
+  PUBLIC FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    INTERFACES if_badi_interface.
+    INTERFACES zif_sd_badi_exit_saplv55k_021.
+
+  PRIVATE SECTION.
+    CONSTANTS gc_vbtyp_v  TYPE vbtypl_v   VALUE '7' ##NO_TEXT.
+    CONSTANTS gc_qualf002 TYPE edi_vtdt10 VALUE '002' ##NO_TEXT.
+    CONSTANTS gc_qualf499 TYPE edi_vtdt10 VALUE '499' ##NO_TEXT.
+    CONSTANTS gc_e1edt10  TYPE edilsegtyp VALUE 'E1EDT10' ##NO_TEXT.
+    CONSTANTS gc_e1edt20  TYPE edilsegtyp VALUE 'E1EDT20' ##NO_TEXT.
+    CONSTANTS gc_e1edt44  TYPE edilsegtyp VALUE 'E1EDT44' ##NO_TEXT.
+    CONSTANTS gc_e1edt18  TYPE edilsegtyp VALUE 'E1EDT18' ##NO_TEXT.
+
+    DATA ms_activities TYPE v56e_shipment_activities ##NEEDED.
+
+    METHODS get_new_delivery_date
+      IMPORTING it_idoc_data TYPE edidd_tt
+                iv_tknum     TYPE tknum
+                iv_signi     TYPE signi
+      EXPORTING ev_eindt     TYPE eindt.
+ENDCLASS.
+
+
+CLASS zcl_sd_shipmnt_segm_evaluation IMPLEMENTATION.
+  METHOD zif_sd_badi_exit_saplv55k_021~run.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ISAICSVI     | 27.12.2022 | 16367     : [Build] Auto delivery date u -
+    "              |            | DS4K938553                               -
+    " -----------------------------------------------------------------------
+    " ISAICSVI     | 23.05.2023 | 20997     : Feature - [CR][10121] ETA,AT -
+    "              |            | DS4K952835                               -
+    " -----------------------------------------------------------------------
+    " NIELOOLE     | 17.07.2023 | 20997     : Feature - [CR][10121] ETA,AT -
+    "              |            | DS4K952835                               -
+    " -----------------------------------------------------------------------
+    " ISAICSVI     | 25.08.2023 | 24470     : Feature - [CR] - Redesign TLT-
+    "              |            | DS4K961632                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 16.02.2024 | 29053     : P&FE - [Build] - comASN CR:  -
+    "              |            | DS4K979641                               -
+    " -----------------------------------------------------------------------
+
+    DATA ls_e1edt18 TYPE e1edt18.
+    DATA ls_e1edt20 TYPE e1edt20.
+    DATA lv_signi   TYPE signi.
+
+    ms_activities = cs_activities.
+
+    TRY.
+        FINAL(lr_qualf) = zcl_pe_hm_basic=>get_range( iv_id = '1687' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    DATA(lt_all_idoc_data) = ct_all_idoc_data.
+    DELETE lt_all_idoc_data WHERE docnum <> is_idoc_control-docnum.
+
+    ls_e1edt18 = VALUE #( lt_all_idoc_data[ segnam = gc_e1edt18 ]-sdata OPTIONAL ).
+
+    IF ls_e1edt18-qualf IN lr_qualf.
+
+      ls_e1edt20 = VALUE #( lt_all_idoc_data[ segnam = gc_e1edt20 ]-sdata OPTIONAL ).
+
+      lv_signi = ls_e1edt20-signi.
+
+      SELECT tknum, handle
+        UP TO 1 ROWS
+        FROM vttk
+        INTO @DATA(ls_vttk)
+        WHERE signi  = @lv_signi
+          AND sttrg <> @gc_vbtyp_v.
+      ENDSELECT.
+
+      IF sy-subrc = 0.
+
+        SELECT head_hdl, even FROM tsege
+          INTO TABLE @DATA(lt_events)
+          WHERE head_hdl = @ls_vttk-handle.
+
+        IF sy-subrc = 0.
+          TRY.
+              FINAL(lv_event_type) = zcl_pe_hm_basic=>get_value( iv_id = '1690' ).
+            CATCH zcx_pe_hm.
+              RETURN.
+          ENDTRY.
+        ENDIF.
+
+      ENDIF.
+
+      READ TABLE lt_events TRANSPORTING NO FIELDS WITH KEY even = lv_event_type.
+
+      IF sy-subrc <> 0.
+
+        get_new_delivery_date( EXPORTING it_idoc_data = lt_all_idoc_data
+                                         iv_tknum     = ls_vttk-tknum
+                                         iv_signi     = lv_signi
+                               IMPORTING ev_eindt     = cs_activities-header-data-dpten ).
+
+      ENDIF.
+
+      cs_activities-change-shipment_number = ls_vttk-tknum.
+
+    ENDIF.
+
+    " Check shipments without inbound deliveries
+    IF ls_e1edt20-signi IS NOT INITIAL.
+      SELECT meansoftransport INTO TABLE @DATA(lt_means_of_transport)
+        FROM i_deliverydocument
+        WHERE meansoftransport = @ls_e1edt20-signi AND deletionindicator <> 'X'.
+
+      IF sy-subrc <> 0 OR lines( lt_means_of_transport ) = 0.
+        RAISE abort_idoc_process.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_new_delivery_date.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ISAICSVI     | 27.12.2022 | 16367     : [Build] Auto delivery date u -
+    "              |            | DS4K938553                               -
+    " -----------------------------------------------------------------------
+    " ISAICSVI     | 23.05.2023 | 20997     : Feature - [CR][10121] ETA,AT -
+    "              |            | DS4K952835                               -
+    " -----------------------------------------------------------------------
+    " ISAICSVI     | 25.08.2023 | 24470     : Feature - [CR] - Redesign TLT-
+    "              |            | DS4K961632                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 16.02.2024 | 29053     : P&FE - [Build] - comASN CR:  -
+    "              |            | DS4K979641                               -
+    " -----------------------------------------------------------------------
+
+    TYPES: BEGIN OF ltyp_s_filter,
+             vsarttr TYPE vsarttr,
+           END OF ltyp_s_filter.
+
+    TYPES: BEGIN OF ltyp_s_event,
+             tsegevttyp     TYPE tsegevttyp,
+             tsegevttyparr  TYPE tsegevttyp,
+             tsegevttypfeed TYPE tsegevttyp,
+           END OF ltyp_s_event.
+
+    TYPES: BEGIN OF ltyp_s_country_filter,
+             land1      TYPE land1,
+             tsegevttyp TYPE tsegevttyp,
+           END OF ltyp_s_country_filter.
+
+    TYPES: BEGIN OF ltyp_s_country_event,
+             zpe_hm_active TYPE zpe_hm_active,
+           END OF ltyp_s_country_event.
+
+    DATA ls_data          TYPE e1edt10.
+    DATA lt_segment_data  TYPE STANDARD TABLE OF e1edt10.
+    DATA ls_e1edt44       TYPE e1edt44.
+    DATA lt_e1edt44       TYPE STANDARD TABLE OF e1edt44.
+    DATA lv_dport         TYPE zsc_destination_port.
+    DATA lv_vsart         TYPE vsarttr.
+    DATA lv_vbelv         TYPE vbeln_von.
+    DATA lv_werks         TYPE werks_d.
+    DATA lt_event         TYPE STANDARD TABLE OF ltyp_s_event.
+    DATA lv_dpten         TYPE dpten.
+    DATA lt_country_event TYPE STANDARD TABLE OF ltyp_s_country_event.
+    DATA lv_eindt         TYPE eindt.
+    DATA lv_fabkl         TYPE fabkl.
+
+    LOOP AT it_idoc_data[] ASSIGNING FIELD-SYMBOL(<ls_idoc_data>) WHERE segnam = gc_e1edt10.
+      CLEAR ls_data.
+      ls_data = <ls_idoc_data>-sdata.
+
+      IF ls_data-qualf = gc_qualf499.
+        APPEND ls_data TO lt_segment_data.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT it_idoc_data[] ASSIGNING FIELD-SYMBOL(<ls_idoc_data_qual>) WHERE segnam = gc_e1edt44.
+
+      ls_e1edt44 = <ls_idoc_data_qual>-sdata.
+
+      IF ls_e1edt44-quali = gc_qualf002.
+        APPEND ls_e1edt44 TO lt_e1edt44.
+      ENDIF.
+    ENDLOOP.
+
+    READ TABLE lt_e1edt44 ASSIGNING FIELD-SYMBOL(<ls_first_occurrence>) INDEX 1.
+
+    IF sy-subrc = 0.
+      lv_dport = <ls_first_occurrence>-knote.
+    ENDIF.
+
+    SELECT vsart FROM vttk
+      WHERE tknum = @iv_tknum
+      INTO @lv_vsart
+      UP TO 1 ROWS.
+    ENDSELECT.
+
+    IF sy-subrc <> 0.
+      CLEAR lv_vsart.
+    ENDIF.
+
+    SELECT precedingdocument FROM i_sddocumentmultilevelprocflow WITH
+      PRIVILEGED ACCESS
+      WHERE subsequentdocument = @iv_tknum
+      INTO @lv_vbelv
+      UP TO 1 ROWS.
+    ENDSELECT.
+
+    IF sy-subrc <> 0.
+      CLEAR lv_vbelv.
+    ENDIF.
+
+    SELECT referencesddocument     AS vgbel,
+           referencesddocumentitem AS vgpos,
+           plant                   AS werks
+      FROM i_deliverydocumentitem
+      WHERE deliverydocument = @lv_vbelv
+      INTO @FINAL(ls_lips)
+      UP TO 1 ROWS.
+    ENDSELECT.
+    IF sy-subrc = 0.
+      lv_werks = ls_lips-werks.
+    ENDIF.
+
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDD8EAB45AD67AC5F59'
+                                                is_filter       = VALUE ltyp_s_filter( vsarttr = lv_vsart )
+                                                iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-names
+                                      IMPORTING et_table        = lt_event ).
+      CATCH zcx_pe_hm.
+        CLEAR lt_event.
+    ENDTRY.
+
+    SELECT adrnr FROM tvkn
+      INTO @DATA(lv_adrnr)
+      UP TO 1 ROWS
+      WHERE knote = @lv_dport.
+    ENDSELECT.
+
+    IF sy-subrc = 0.
+
+      SELECT country, region FROM adrc
+        INTO @DATA(ls_adrc)
+        UP TO 1 ROWS
+        WHERE addrnumber = @lv_adrnr.
+      ENDSELECT.
+
+      IF sy-subrc <> 0.
+        CLEAR ls_adrc.
+      ENDIF.
+    ENDIF.
+
+    READ TABLE lt_event ASSIGNING FIELD-SYMBOL(<ls_event>) INDEX 1.
+
+    IF sy-subrc = 0.
+
+      FINAL(lv_event) = <ls_event>-tsegevttyparr.
+
+      LOOP AT lt_segment_data ASSIGNING FIELD-SYMBOL(<ls_segment_data_for_isdd>) WHERE     isdd  IS NOT INITIAL
+                                                                                       AND event  = lv_event.
+
+        FINAL(lv_isdd) = <ls_segment_data_for_isdd>-isdd.
+        EXIT.
+
+      ENDLOOP.
+
+      IF lv_isdd IS INITIAL.
+
+        LOOP AT lt_segment_data ASSIGNING FIELD-SYMBOL(<ls_segment_data_for_ntanf>) WHERE     ntanf IS NOT INITIAL
+                                                                                          AND event  = lv_event.
+
+          FINAL(lv_ntanf) = <ls_segment_data_for_ntanf>-ntanf.
+          EXIT.
+
+        ENDLOOP.
+
+      ENDIF.
+
+      IF lv_isdd <> space.
+        lv_dpten = lv_isdd.
+      ELSEIF lv_ntanf <> space.
+        lv_dpten = lv_ntanf.
+      ENDIF.
+
+      TRY.
+          zcl_pe_hm_complex=>get_table(
+            EXPORTING iv_id           = '0239FC3B8D041EDD8EB119C2A506BF59'
+                      is_filter       = VALUE ltyp_s_country_filter( land1      = ls_adrc-country
+                                                                     tsegevttyp = lv_event )
+                      iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-data_elements
+            IMPORTING et_table        = lt_country_event ).
+        CATCH zcx_pe_hm.
+          CLEAR lt_country_event.
+      ENDTRY.
+
+      " TODO: variable is assigned but never used (ABAP cleaner)
+      READ TABLE lt_country_event ASSIGNING FIELD-SYMBOL(<ls_country_event>) INDEX 1.
+
+      IF sy-subrc = 0.
+
+        zcl_sc_tlt_calculation=>calculate_dd_for_z1( EXPORTING iv_vsart  = lv_vsart
+                                                               iv_tltf   = lv_dpten
+                                                               iv_refdoc = CONV #( iv_signi )
+                                                               iv_dport  = lv_dport
+                                                               iv_werks  = lv_werks
+                                                     IMPORTING ev_eeind  = lv_eindt ).
+
+        IF lv_eindt IS INITIAL.
+
+          SELECT factorycalendar AS fabkl
+            FROM i_plant
+            WHERE plant = @lv_werks
+            INTO @lv_fabkl
+            UP TO 1 ROWS.
+          ENDSELECT.
+
+          IF sy-subrc <> 0.
+            CLEAR lv_fabkl.
+          ENDIF.
+
+          TRY.
+              cl_scal_api=>date_convert_to_factorydate( EXPORTING iv_correct_option   = '+'
+                                                                  iv_date             = lv_dpten
+                                                                  iv_factory_calendar = lv_fabkl
+                                                        IMPORTING ev_date             = lv_eindt ).
+
+            CATCH cx_scal.
+              RETURN.
+          ENDTRY.
+
+        ENDIF.
+      ENDIF.
+
+    ELSE.
+
+      SELECT factorycalendar AS fabkl
+        FROM i_plant
+        INTO @lv_fabkl
+        UP TO 1 ROWS
+        WHERE plant = @lv_werks.
+      ENDSELECT.
+      IF sy-subrc <> 0.
+        CLEAR lv_fabkl.
+      ENDIF.
+
+      TRY.
+          cl_scal_api=>date_convert_to_factorydate( EXPORTING iv_correct_option   = '+'
+                                                              iv_date             = lv_dpten
+                                                              iv_factory_calendar = lv_fabkl
+                                                    IMPORTING ev_date             = lv_eindt ).
+
+        CATCH cx_scal.
+          RETURN.
+      ENDTRY.
+
+    ENDIF.
+
+    IF lv_eindt IS NOT INITIAL.
+      ev_eindt = lv_eindt.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

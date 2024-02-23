@@ -1,0 +1,152 @@
+CLASS zcl_sp_shas_monitor_app_job DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES if_apj_dt_exec_object .
+    INTERFACES if_apj_rt_exec_object .
+
+    CONSTANTS:
+      BEGIN OF gc_sel_parameters,
+        ebeln                TYPE c LENGTH 8   VALUE 'S_EBELN',
+        ebelp                TYPE c LENGTH 8   VALUE 'S_EBELP',
+        data_type_char       TYPE c LENGTH 4   VALUE 'CHAR',
+        component_type_ebeln TYPE c LENGTH 30  VALUE 'EBELN',
+        component_type_ebelp TYPE c LENGTH 30  VALUE 'EBELP',
+      END OF gc_sel_parameters .
+  PROTECTED SECTION.
+private section.
+
+  types:
+    gtyp_r_ebeln TYPE RANGE OF char10 .
+  types:
+    gtyp_r_ebelp TYPE RANGE OF numc5 .
+ENDCLASS.
+
+
+
+CLASS ZCL_SP_SHAS_MONITOR_APP_JOB IMPLEMENTATION.
+
+
+  METHOD if_apj_dt_exec_object~get_parameters.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ISAICSVI     | 20.06.2023 | 22438     : Feature - [Build] - Fiori ap *
+*              |            | DS4K955768                               *
+*----------------------------------------------------------------------*
+
+
+    et_parameter_def = VALUE #(
+       ( selname        = gc_sel_parameters-ebeln
+         kind           = if_apj_dt_exec_object=>select_option
+         datatype       = gc_sel_parameters-data_type_char
+         length         =  10
+         param_text     = TEXT-001
+         component_type = gc_sel_parameters-component_type_ebeln
+         changeable_ind = abap_true )
+       ( selname        = gc_sel_parameters-ebelp
+         kind           = if_apj_dt_exec_object=>select_option
+         datatype       = gc_sel_parameters-data_type_char
+         length         =  5
+         param_text     = TEXT-002
+         component_type = gc_sel_parameters-component_type_ebelp
+         changeable_ind = abap_true ) )   ##TYPE ##NUMBER_OK.
+
+  ENDMETHOD.
+
+
+  METHOD if_apj_rt_exec_object~execute.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ISAICSVI     | 20.06.2023 | 22438     : Feature - [Build] - Fiori ap *
+*              |            | DS4K955768                               *
+*----------------------------------------------------------------------*
+
+
+    TYPES ltyp_elements TYPE SORTED TABLE OF string WITH UNIQUE DEFAULT KEY.
+
+    DATA: lr_sel_ebeln         TYPE gtyp_r_ebeln,
+          lr_sel_ebelp         TYPE gtyp_r_ebelp,
+          lts_elem             TYPE ltyp_elements,
+          lv_err_for_y         TYPE bool,
+          lt_result_with_y     TYPE STANDARD TABLE OF zsp_i_shas_item.
+
+    LOOP AT it_parameters ASSIGNING FIELD-SYMBOL(<ls_parameter>).
+      CASE <ls_parameter>-selname.
+        WHEN gc_sel_parameters-ebeln.
+          lr_sel_ebeln = VALUE #( BASE lr_sel_ebeln ( sign   = <ls_parameter>-sign
+                                                      option = <ls_parameter>-option
+                                                      low    = <ls_parameter>-low
+                                                      high   = <ls_parameter>-high  ) ).
+
+        WHEN gc_sel_parameters-ebelp.
+          lr_sel_ebelp = VALUE #( BASE lr_sel_ebelp ( sign   = <ls_parameter>-sign
+                                                      option = <ls_parameter>-option
+                                                      low    = <ls_parameter>-low
+                                                      high   = <ls_parameter>-high  ) ).
+      ENDCASE.
+    ENDLOOP.
+
+    DATA(lo_virtual_calc) = NEW zcl_sp_virtual_calc( ).
+
+    SELECT * FROM zsp_i_shas_item WHERE purchaseorder IN @lr_sel_ebeln AND
+                                           ebelp      IN @lr_sel_ebelp
+        ORDER BY purchaseorder,
+                 ebelp
+        INTO TABLE @DATA(lt_shas).
+
+    IF sy-subrc = 0.
+
+      TRY.
+          lo_virtual_calc->if_sadl_exit_calc_element_read~calculate( EXPORTING it_original_data = lt_shas it_requested_calc_elements = lts_elem
+                                                                     CHANGING ct_calculated_data = lt_shas ).
+        CATCH cx_sadl_exit.
+          RETURN.
+      ENDTRY.
+
+      LOOP AT lt_shas ASSIGNING FIELD-SYMBOL(<ls_shas>).
+
+        IF <ls_shas>-cutoff EQ sy-datum AND
+           <ls_shas>-zz1_custin_pdi = 'N' AND
+         ( <ls_shas>-vasreadiness_v = 'O' OR <ls_shas>-vasreadiness_v = 'C').
+
+          APPEND <ls_shas> TO lt_result_with_y.
+
+        ENDIF.
+      ENDLOOP.
+
+      IF lt_result_with_y IS NOT INITIAL.
+        lv_err_for_y = lo_virtual_calc->bapi_change_cus_status( iv_custin = 'Y' it_tab = lt_result_with_y ).
+      ENDIF.
+
+      IF lt_result_with_y IS NOT INITIAL AND lv_err_for_y EQ abap_true.
+
+        zcl_sp_shas_monitor_notif=>send_notification(
+          it_recipient = VALUE #( ( id = sy-uname  ) )
+          iv_type_key  =  zcl_sp_shas_monitor_notif=>gc_process_param-type_key_upd_failed
+        ).
+
+      ELSEIF lt_result_with_y IS NOT INITIAL AND lv_err_for_y EQ abap_false.
+
+        zcl_sp_shas_monitor_notif=>send_notification(
+          it_recipient = VALUE #( ( id = sy-uname  ) )
+          iv_type_key  =  zcl_sp_shas_monitor_notif=>gc_process_param-type_key_upd_success
+       ).
+
+
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

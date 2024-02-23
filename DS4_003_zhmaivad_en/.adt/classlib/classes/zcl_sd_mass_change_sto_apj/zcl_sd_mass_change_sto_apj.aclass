@@ -1,0 +1,279 @@
+CLASS zcl_sd_mass_change_sto_apj DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    INTERFACES if_apj_dt_exec_object .
+    INTERFACES if_apj_rt_exec_object .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    DATA mt_sto_numbers TYPE zif_sd_mass_change_sto_apj=>gtyp_t_sto_number .
+    DATA mt_messages TYPE bapirettab .
+    DATA mif_appl_log TYPE REF TO if_bali_log .
+
+    METHODS create_log
+      IMPORTING
+        VALUE(iv_sto_number) TYPE vdm_stocktransportorder
+      RETURNING
+        VALUE(rif_appl_log)  TYPE REF TO if_bali_log
+      RAISING
+        cx_bali_runtime .
+    METHODS save_log
+      RAISING
+        cx_bali_runtime .
+    METHODS process
+      RETURNING
+        VALUE(rv_success) TYPE abap_bool
+      RAISING
+        cx_bali_runtime .
+    METHODS add_message.
+ENDCLASS.
+
+
+
+CLASS zcl_sd_mass_change_sto_apj IMPLEMENTATION.
+  METHOD if_apj_rt_exec_object~execute.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+
+    DATA(lv_rej_reason) = VALUE #( it_parameters[ selname = zif_sd_mass_change_sto_apj=>gc_apj_parameter-storej_reason ]-low OPTIONAL ).
+
+    mt_sto_numbers = VALUE #( FOR ls_parameter IN it_parameters
+                              WHERE ( selname = zif_sd_mass_change_sto_apj=>gc_apj_parameter-sto_numbers )
+                              ( purchaseorder = ls_parameter-low(10)
+                                purchaseorderitem = ls_parameter-low+11(5)
+                                zrjcnreason = lv_rej_reason ) ).
+    " Execute
+    TRY.
+        DATA(lv_is_successfull) = process( ).
+
+        IF lv_is_successfull = abap_false.
+          CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+          RAISE EXCEPTION NEW cx_apj_rt_content( ).
+        ELSE.
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+        ENDIF.
+
+      CATCH cx_bali_runtime.
+        RAISE EXCEPTION NEW cx_apj_rt_content( ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD if_apj_dt_exec_object~get_parameters.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+
+    "STO List
+    INSERT INITIAL LINE INTO TABLE et_parameter_def ASSIGNING FIELD-SYMBOL(<ls_parameter_def>).
+    <ls_parameter_def>-selname = zif_sd_mass_change_sto_apj=>gc_apj_parameter-sto_numbers.
+    <ls_parameter_def>-param_text = 'STO Document ID'(001).
+    <ls_parameter_def>-kind = CONV #( if_apj_dt_exec_object=>select_option ).
+    <ls_parameter_def>-datatype = 'C'.
+    <ls_parameter_def>-length = 15.
+    <ls_parameter_def>-changeable_ind = abap_true.
+    <ls_parameter_def>-mandatory_ind = abap_true.
+
+    " STO Item Rejection Reason
+    INSERT INITIAL LINE INTO TABLE et_parameter_def ASSIGNING <ls_parameter_def>.
+    <ls_parameter_def>-selname = zif_sd_mass_change_sto_apj=>gc_apj_parameter-storej_reason.
+    <ls_parameter_def>-param_text = 'STO Item Rejection Reason'(002).
+    <ls_parameter_def>-kind = CONV #( if_apj_dt_exec_object=>parameter ).
+    <ls_parameter_def>-datatype = 'C'.
+    <ls_parameter_def>-length = 2.
+    <ls_parameter_def>-changeable_ind = abap_true.
+    <ls_parameter_def>-mandatory_ind = abap_true.
+  ENDMETHOD.
+
+
+  METHOD process.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+
+    CONSTANTS lc_tcode  TYPE sy-tcode VALUE 'ME22N'.
+    CONSTANTS lc_update TYPE trtyp    VALUE 'V'.
+
+    DATA lt_models      TYPE mmpur_models.
+    DATA lo_po_api      TYPE REF TO cl_po_header_handle_mm.
+    DATA ls_document    TYPE mepo_document.
+    DATA lv_result      TYPE mmpur_bool.
+    DATA lo_po_item_api TYPE REF TO cl_po_item_handle_mm.
+    DATA ls_model       LIKE LINE OF lt_models.
+
+    CLEAR mt_messages.
+
+    rv_success = abap_true.
+
+    IF mt_sto_numbers IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT mt_sto_numbers ASSIGNING FIELD-SYMBOL(<ls_sto>).
+      lo_po_api = NEW #( <ls_sto>-purchaseorder ).
+
+      IF sy-subrc <> 0.
+        MESSAGE e003(zsd_sto_rejection) WITH <ls_sto>-purchaseorder INTO DATA(lv_dummy_msg) ##NEEDED.
+        add_message( ).
+        RETURN.
+      ENDIF.
+
+      IF lo_po_api IS BOUND.
+        ls_document = VALUE #( process             = mmpur_po_process
+                               initiator-initiator = mmpur_initiator_call
+                               trtyp               = lc_update ).
+
+        ls_document-doc_key(10) = <ls_sto>-purchaseorder.
+        lo_po_api->set_state( im_state = cl_po_header_handle_mm=>c_available ).
+        lo_po_api->for_bapi = mmpur_yes.
+        lo_po_api->po_initialize( im_document = ls_document ).
+        lo_po_api->po_read(
+          EXPORTING
+            im_tcode     = lc_tcode
+            im_trtyp     = ls_document-trtyp
+            im_aktyp     = ls_document-trtyp
+            im_po_number = <ls_sto>-purchaseorder
+            im_document  = ls_document
+          IMPORTING
+            ex_result    = lv_result ).
+
+        IF lv_result = abap_true.
+          LOOP AT lo_po_api->if_purchase_order_mm~get_items( ) ASSIGNING FIELD-SYMBOL(<ls_po_item>). "#EC CI_NESTED
+            lo_po_item_api ?= <ls_po_item>-item.
+            lo_po_item_api->get_data(  IMPORTING ex_data = DATA(ls_mepo_item)  ).
+            lo_po_item_api->get_datax( IMPORTING ex_data = DATA(ls_mepo_itemx) ).
+
+            IF ls_mepo_item-ebelp <> <ls_sto>-purchaseorderitem.
+              CONTINUE.
+            ENDIF.
+
+            ls_mepo_item-zz1_abgru_pdi  = <ls_sto>-zrjcnreason.
+            ls_mepo_itemx-zz1_abgru_pdi = abap_true.
+
+            ls_mepo_item-eglkz  = abap_true.
+            ls_mepo_itemx-eglkz = abap_true.
+
+            lo_po_item_api->set_data(  ls_mepo_item  ).
+            lo_po_item_api->set_datax( ls_mepo_itemx ).
+
+            "->CNC STO status update S4 to OMNI
+            zcl_sd_sto_status_update=>update_from_sto_rejetion( EXPORTING is_mepo_item = ls_mepo_item CHANGING co_po_item_api = lo_po_item_api ).
+            "<-CNC STO status update S4 to OMNI
+
+            lo_po_item_api->my_parent ?= lo_po_api.
+            ls_model-model ?= lo_po_item_api.
+            APPEND ls_model TO lt_models.
+          ENDLOOP.
+
+          IF lt_models[] IS NOT INITIAL.
+            lo_po_api->if_flush_transport_mm~start( EXPORTING im_models = lt_models[] EXCEPTIONS illegal_call = 1 error = 2 OTHERS = 3 ).
+            IF sy-subrc <> 0.
+              MESSAGE e003(zsd_sto_rejection) WITH <ls_sto>-purchaseorder INTO lv_dummy_msg ##NEEDED.
+              add_message( ).
+              RETURN.
+            ENDIF.
+          ENDIF.
+
+          lo_po_api->po_post( EXPORTING  im_uncomplete  = mmpur_no
+                                         im_no_commit   = mmpur_yes
+                                         im_commit_wait = mmpur_no
+                              EXCEPTIONS failure        = 1
+                                         OTHERS         = 2 ).
+
+          IF sy-subrc <> 0.
+            MESSAGE e003(zsd_sto_rejection) WITH <ls_sto>-purchaseorder INTO lv_dummy_msg ##NEEDED.
+            add_message( ).
+            RETURN.
+          ENDIF.
+
+          lo_po_api->po_close( ).
+
+          " Initialize application log instance
+          mif_appl_log = create_log( iv_sto_number = <ls_sto>-purchaseorder ).
+          mif_appl_log->add_messages_from_bapirettab( message_table = mt_messages ).
+          " Save Log
+          save_log( ).
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+
+  ENDMETHOD.
+  METHOD create_log.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+
+    rif_appl_log = cl_bali_log=>create_with_header(
+      header = cl_bali_header_setter=>create(
+        object      = zif_sd_mass_change_sto_apj=>gc_appl_log_object
+        subobject   = zif_sd_mass_change_sto_apj=>gc_appl_log_subobject-details
+        external_id = CONV #( iv_sto_number ) ) ).
+  ENDMETHOD.
+
+  METHOD save_log.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+
+    cl_bali_log_db=>get_instance( )->save_log(
+          log = mif_appl_log
+          assign_to_current_appl_job = abap_true ).
+  ENDMETHOD.
+
+  METHOD add_message.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+
+    INSERT VALUE #( type = sy-msgty
+                    number = sy-msgno
+                    id = sy-msgid
+                    message_v1 = sy-msgv1
+                    message_v2 = sy-msgv2
+                    message_v3 = sy-msgv3
+                    message_v4 = sy-msgv4 ) INTO TABLE mt_messages.
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,260 @@
+class /aif/cl_transf_into_records_v definition
+  public
+  final
+  create public .
+
+  public section.
+
+    interfaces /aif/if_structure_visitor.
+
+    methods:
+      "! Creates an instance
+      "! @parameter it_mapping_table       | An itab containing the mappings assigning every field to a dbtab and column
+      "! @parameter io_table_record_buffer | Optionally inject an instance to buffer the resulting table records (if not provided, a new instance will be created automatically)
+      constructor importing io_table_record_buffer type ref to /aif/if_table_record_buffer optional,
+
+      "! Returns the resulting table records within the table buffer object
+      "! @parameter ro_table_record_buffer | object that contains the resulting table records
+      get_table_records returning value(ro_table_record_buffer) type ref to /aif/if_table_record_buffer,
+
+      "! Set the mapping table
+      set_mapping importing it_mapping_table type /aif/mapping_instruction_tt.
+
+  protected section.
+  private section.
+
+    data:
+      "! buffers all table records/rows, which results from the visited structure
+      mo_table_record_buffer type ref to /aif/if_table_record_buffer,
+
+      "! represents the last used row id. The row id is unique across one data message (for one version), but unique across all used dbtabs.
+      mv_last_row_id         type i,
+
+      "! contains the mapping entries to assign each structure component a dbtab and column
+      mt_mapping             type /aif/mapping_instruction_tt,
+
+      "! stack that contains the current row ids
+      mo_row_id_stack        type ref to /aif/cl_integer_stack.
+
+    methods:
+      "! return the next available row id and increments mv_last_row_id.
+      "! @parameter rv_row_id    | contains the next row id
+      get_next_row_id returning value(rv_row_id) type i,
+
+      "! creates a new record in the record buffer and sets the row and parent ids
+      create_and_prepare_record importing iv_row_id        type i
+                                          iv_parent_id     type i
+                                          iv_dbtab_name    type tabname16
+                                returning value(rs_record) type ref to data
+                                raising   /aif/cx_struct_pers_base.
+
+ENDCLASS.
+
+
+
+CLASS /AIF/CL_TRANSF_INTO_RECORDS_V IMPLEMENTATION.
+
+
+  method /aif/if_structure_visitor~finished_structure.
+    " do nothing
+  endmethod.
+
+
+  method /aif/if_structure_visitor~finished_table.
+    " do nothing
+  endmethod.
+
+
+  method /aif/if_structure_visitor~finished_tableline.
+
+    " remove current row_id from stack
+    mo_row_id_stack->pop( ).
+
+  endmethod.
+
+
+  method /aif/if_structure_visitor~init.
+
+    data: ls_mapping                   type /aif/mapping_instruction,
+          lv_row_id                    type i.
+
+    " retrieve mapping entry for root structure
+    read table mt_mapping into ls_mapping with key from_comp_path = ''.
+    if sy-subrc <> 0.
+      raise exception type /aif/cx_struct_pers_base
+        exporting
+          textid = /aif/cx_struct_pers_base=>mapping_incomplete.
+    endif.
+
+    " create record in buffer for root structure.
+    lv_row_id = mo_row_id_stack->top( ).
+    me->create_and_prepare_record( iv_row_id = lv_row_id
+                                   iv_parent_id = 0
+                                   iv_dbtab_name = ls_mapping-to_dbtab_name ).
+
+  endmethod.
+
+
+  method /aif/if_structure_visitor~visit_field.
+
+    field-symbols: <ls_target_record> type any,
+                   <lv_target_value>  type data,
+                   <lv_source_value>  type data.
+
+    data: ls_mapping   type /aif/mapping_instruction,
+          lr_record    type ref to data,
+          lv_row_id    type i,
+          lv_parent_id type i.
+
+    " retrieve mapping entry
+    read table mt_mapping into ls_mapping with key from_comp_path = iv_component_path.
+    if sy-subrc <> 0.
+      raise exception type /aif/cx_struct_pers_base
+        exporting
+          textid = /aif/cx_struct_pers_base=>mapping_incomplete.
+    endif.
+
+    " determine parent id
+    if mo_row_id_stack->size( ) >= 2.
+      lv_parent_id = mo_row_id_stack->get_second_top_element( ).
+    else.
+      lv_parent_id = 0.
+    endif.
+
+    " determine row id
+    lv_row_id = mo_row_id_stack->top( ).
+
+    " fetch/create record from buffer for the current row_id.
+    lr_record = mo_table_record_buffer->get_record_with_key( iv_tablename = ls_mapping-to_dbtab_name
+                                                             iv_keyname = 'COUNTER'
+                                                             iv_keyvalue = lv_row_id ).
+
+    if lr_record is initial.
+      lr_record = me->create_and_prepare_record( iv_row_id = lv_row_id
+                                                 iv_parent_id = lv_parent_id
+                                                 iv_dbtab_name = ls_mapping-to_dbtab_name ).
+    endif.
+
+
+
+    assign lr_record->* to <ls_target_record>.
+
+    " insert field into record
+    assign component ls_mapping-to_column_name of structure <ls_target_record> to <lv_target_value>.
+    assign ir_field->* to <lv_source_value>.
+    <lv_target_value> = <lv_source_value>.
+
+  endmethod.
+
+
+  method /aif/if_structure_visitor~visit_structure.
+    " do nothing
+  endmethod.
+
+
+  method /aif/if_structure_visitor~visit_table.
+    " do nothing
+  endmethod.
+
+
+  method /aif/if_structure_visitor~visit_tableline.
+
+    data: ls_mapping   type /aif/mapping_instruction,
+          lv_row_id    type i,
+          lv_parent_id type i.
+
+    " create a new row_id for the current row and push it on the row_id stack
+    lv_row_id = get_next_row_id( ).
+    mo_row_id_stack->push( lv_row_id ).
+
+    " retrieve mapping entry
+    read table mt_mapping into ls_mapping with key from_comp_path = iv_component_path.
+    if sy-subrc <> 0.
+      raise exception type /aif/cx_struct_pers_base
+        exporting
+          textid = /aif/cx_struct_pers_base=>mapping_incomplete.
+    endif.
+
+    " determine parent id
+    if mo_row_id_stack->size( ) >= 2.
+      lv_parent_id = mo_row_id_stack->get_second_top_element( ).
+    else.
+      lv_parent_id = 0.
+    endif.
+
+    " create new initial record
+    " -> it is too late to create the initial record in the visit_field method, because it
+    "    is possible that the subtable does not contain any fields. Then the visit_field-method
+    "    will not be called and there won't be a record created
+    me->create_and_prepare_record( iv_row_id = lv_row_id
+                                   iv_parent_id = lv_parent_id
+                                   iv_dbtab_name = ls_mapping-to_dbtab_name ).
+
+  endmethod.
+
+
+  method constructor.
+
+    data: lv_row_id type i,
+          lt_nonunique_keys type /aif/cl_table_record_buffer=>lty_key_tt.
+
+    mo_table_record_buffer = io_table_record_buffer.
+    if mo_table_record_buffer is initial.
+      append 'COUNTER' to lt_nonunique_keys.
+      create object mo_table_record_buffer type /aif/cl_table_record_buffer exporting it_nonunique_keys = lt_nonunique_keys.
+    endif.
+
+    create object mo_row_id_stack type /aif/cl_integer_stack.
+    mo_row_id_stack->clear( ).
+
+    lv_row_id = me->get_next_row_id( ).
+    mo_row_id_stack->push( lv_row_id ).
+
+  endmethod.
+
+
+  method create_and_prepare_record.
+
+    field-symbols: <ls_target_record> type any,
+                   <lv_row_id>        type data.
+
+    data: ls_key_value type /aif/if_table_record_buffer=>lty_key_value,
+          lt_key_value type /aif/if_table_record_buffer=>lty_key_value_tt,
+          lo_dbtab_not_found_exception type ref to /aif/cx_struct_pers_base.
+
+    " prepare values
+    ls_key_value-key_name = 'COUNTER'.
+    get reference of iv_row_id into ls_key_value-key_value.
+    append ls_key_value to lt_key_value.
+    clear ls_key_value.
+    ls_key_value-key_name = 'PARENT_ID'.
+    get reference of iv_parent_id into ls_key_value-key_value.
+    append ls_key_value to lt_key_value.
+    " create new record
+    try.
+        rs_record = mo_table_record_buffer->create_new_record( iv_tablename = iv_dbtab_name
+                                                               it_key_values = lt_key_value ).
+      catch /aif/cx_struct_pers_base into lo_dbtab_not_found_exception.
+        raise exception type /aif/cx_struct_pers_base
+          exporting
+            previous = lo_dbtab_not_found_exception
+            textid   = /aif/cx_struct_pers_base=>dbtab_not_found.
+    endtry.
+  endmethod.
+
+
+  method get_next_row_id.
+    add 1 to mv_last_row_id.
+    rv_row_id = mv_last_row_id.
+  endmethod.
+
+
+  method get_table_records.
+    ro_table_record_buffer = mo_table_record_buffer.
+  endmethod.
+
+
+  method set_mapping.
+    mt_mapping = it_mapping_table.
+  endmethod.
+ENDCLASS.

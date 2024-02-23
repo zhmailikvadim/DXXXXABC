@@ -1,0 +1,625 @@
+class ZCL_SD_MARKDOWN_VALIDATION definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_SADL_EXIT .
+  interfaces IF_SADL_EXIT_FILTER_TRANSFORM .
+
+  class-data GT_RETURN type TT_BAPIRET2 .
+
+  methods LOAD_PROMOTION
+    importing
+      !IV_AKTNR type WAKTION .
+  methods PROCESS_PROMOTION
+    importing
+      !IV_DEACTIVATE type FLAG .
+  methods PROCESS_ARTICLES
+    importing
+      !IV_DEACTIVATE type FLAG
+      !IT_ARTNR type ZSD_TT_MATNR .
+protected section.
+private section.
+
+  data MS_XWAKHD type WAKHD .
+  data MT_XWAGUD type WAGUD_TAB .
+  data MT_XWAKPD type WAKPD_TAB .
+  data MT_XWALED type WALED_TAB .
+  data MT_XWAKRD type WAKRD_TAB .
+  data MT_XWAKRWD type WAKRWD_TAB .
+
+  methods ACTIVATE_PRICES .
+  methods DEACTIVATE_PRICES .
+  methods ACTIVATE_DEACTIVATE_DISCOUNTS
+    importing
+      !IT_OFFER_DISCOUNT_WAKP type WPM_T_OFFER_DISCOUNT_WAKP_RFC
+      !IV_DEACTIVATE type FLAG .
+  methods VALIDATE_PROMOTION .
+  methods SAVE_PROMOTION .
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_MARKDOWN_VALIDATION IMPLEMENTATION.
+
+
+  METHOD activate_prices.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: activate article's prices         *
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+
+    DATA: lt_xwazbd    TYPE  wazbd_tab,
+          lt_dwazbd    TYPE  wazbd_tab,
+          lt_xwsohd    TYPE  wpm_t_wsohd,
+          lt_xwsopd    TYPE  wpm_t_wsopd,
+          lt_xwsotd    TYPE  wpm_t_wsotd,
+          lt_wakw      TYPE  wakw_tab,
+          lv_post_wakh TYPE c.
+
+
+    DATA(lo_price_activation) = NEW cl_wpm_re_price( ).
+
+
+    TRY.
+        lo_price_activation->check_listing(
+          EXPORTING
+            it_xwagud = mt_xwagud
+            it_xwazbd = lt_xwazbd
+            it_dwazbd = lt_dwazbd
+          CHANGING
+            ct_xwakpd = mt_xwakpd
+            cs_xwakhd = ms_xwakhd
+            ct_xwsohd = lt_xwsohd
+            ct_xwsopd = lt_xwsopd
+            ct_xwsotd = lt_xwsotd
+            ct_xwaled = mt_xwaled
+            ct_wakw   = lt_wakw ).
+
+      CATCH cx_wpm_re_process_messages.
+        ##NEEDED  MESSAGE e010(zsd_md_validation) WITH ms_xwakhd-aktnr INTO DATA(lv_dummy).
+
+        APPEND VALUE #( type   = 'E'
+                        id     = 'ZSD_MD_VALIDATION'
+                        number = '010' "Error while processing
+                        message_v1 = ms_xwakhd-aktnr
+                           )      TO gt_return.
+    ENDTRY.
+
+* sort wale for binary search
+    SORT mt_xwaled BY artnr mebme.
+
+* set header status
+    PERFORM setzen_status_wakh_akvst IN PROGRAM saplwak1 TABLES mt_xwaled
+                                                      mt_xwakpd
+                                               USING  ms_xwakhd
+                                                      lv_post_wakh.
+
+    CALL FUNCTION 'PROMOTION_PRICE_ACTIVATE_RFC'
+      EXPORTING
+        pi_wakhd   = ms_xwakhd
+        pi_testrun = ' '
+      TABLES
+        pi_t_wakpd = mt_xwakpd
+        pi_t_wagud = mt_xwagud
+        pi_t_waled = mt_xwaled
+                     EXCEPTIONS
+                     activation_terminated.
+
+    IF sy-subrc IS NOT INITIAL.
+      APPEND VALUE #( type   = 'E'
+                      id     = sy-msgid
+                      number = sy-msgno
+                         )      TO gt_return.
+      RETURN.
+    ELSE.
+* clear in case of discounts to prevent multiple updates
+      CLEAR mt_xwaled.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD deactivate_prices.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: deactivate article's prices       *
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+
+
+    CALL FUNCTION 'PROMOTION_PRICE_DEACTIVATE_RFC'
+      EXPORTING
+        pi_wakhd   = ms_xwakhd
+        pi_testrun = ''
+      TABLES
+        pi_t_wakpd = mt_xwakpd
+        pi_t_wagud = mt_xwagud
+        pi_t_waled = mt_xwaled.
+
+* Clear in case of further processing
+    CLEAR mt_xwaled.
+
+  ENDMETHOD.
+
+
+  METHOD load_promotion.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: load promotion details            *
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+    DATA: lo_promo_storage      TYPE REF TO cl_wpm_re_promo_storage,
+          lo_process_messages   TYPE REF TO cx_wpm_re_process_messages,
+##NEEDED  lv_act_item_discounts TYPE flag.
+
+* get reference from singleton class cl_wpm_re_promo_storage
+    cl_wpm_re_promo_storage=>get_instance(
+      IMPORTING
+        er_wpm_promo_storage = lo_promo_storage ).
+
+* load promotion data
+    TRY.
+        lo_promo_storage->if_wpm_re_promo_storage~load_promo_data(
+         EXPORTING
+           iv_no_enqueue_flag    = 'X'
+           iv_aktnr              = iv_aktnr
+         IMPORTING
+           es_wakhd              = ms_xwakhd
+           et_xwagud             = mt_xwagud
+           et_xwakpd             = mt_xwakpd
+           et_xwaled             = mt_xwaled
+           et_xwakrd             = mt_xwakrd
+           et_xwakrwd            = mt_xwakrwd
+           ##NEEDED ev_act_item_discounts = lv_act_item_discounts ).
+      CATCH cx_wpm_re_process_messages INTO lo_process_messages.
+        APPEND lo_process_messages->ms_message TO gt_return.
+    ENDTRY.
+
+* validate promotion
+    validate_promotion( ).
+  ENDMETHOD.
+
+
+  METHOD validate_promotion.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: validate promotion                *
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+
+
+    IF mt_xwagud[] IS INITIAL AND ( ms_xwakhd-kalke NE '3' AND ms_xwakhd-kalke NE '4' ).
+      ##NEEDED  MESSAGE e003(zsd_md_validation) WITH ms_xwakhd-aktnr INTO DATA(lv_dummy).
+
+      APPEND VALUE #( type   = 'E'
+                      id     = 'ZSD_MD_VALIDATION'
+                      number = '003'  "Price activation not possible - no plant group assigned
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+    ENDIF.
+    IF mt_xwagud[] IS INITIAL AND ms_xwakhd-vkdab IS INITIAL.
+      ##NEEDED  MESSAGE e004(zsd_md_validation) WITH ms_xwakhd-aktnr INTO lv_dummy.
+
+      APPEND VALUE #( type   = 'E'
+                      id     = 'ZSD_MD_VALIDATION'
+                      number = '004' "Price activation not possible - no promotion period assigned
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+
+    ENDIF.
+    IF  ms_xwakhd-vkdbi < sy-datum.
+      APPEND VALUE #( type   = 'E'
+                      id     = 'WU'
+                      number = '392'
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD process_promotion.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: Process promotion                 *
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+    DATA: lt_offer_discount_wakp  TYPE  wpm_t_offer_discount_wakp_rfc,
+          lv_processed_article(1) TYPE c.
+
+
+    LOOP AT mt_xwakpd ASSIGNING FIELD-SYMBOL(<ls_xwakpd>).
+      IF ( iv_deactivate IS NOT INITIAL AND <ls_xwakpd>-reb_status = 'B' )
+      OR ( iv_deactivate IS INITIAL AND <ls_xwakpd>-reb_status <> 'B' AND
+         ( <ls_xwakpd>-reb_value IS NOT INITIAL OR <ls_xwakpd>-reb_perc IS NOT INITIAL ) ).
+
+        lv_processed_article = 'X'.
+        <ls_xwakpd>-reb_selkz = 'X'.
+
+        APPEND INITIAL LINE TO lt_offer_discount_wakp ASSIGNING FIELD-SYMBOL(<ls_offer>).
+        <ls_offer>-aktnr = <ls_xwakpd>-aktnr.
+        <ls_offer>-status = <ls_xwakpd>-reb_status.
+        <ls_offer>-artnr = <ls_xwakpd>-artnr.
+        <ls_offer>-mebme = <ls_xwakpd>-mebme.
+      ENDIF.
+      IF ( iv_deactivate IS NOT INITIAL AND <ls_xwakpd>-vkkps = 'B' )
+      OR ( iv_deactivate IS INITIAL AND
+         ( <ls_xwakpd>-vkkps <> 'B' AND <ls_xwakpd>-plvkp IS NOT INITIAL ) ) .
+
+        lv_processed_article = 'X'.
+        <ls_xwakpd>-selkz = 'X'.
+        IF <ls_xwakpd>-attyp = '01'.
+          " Handle as '00 - Single Material' to avoid that variants are selected for it
+          <ls_xwakpd>-attyp = '00'.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_processed_article IS INITIAL.
+      ##NEEDED  MESSAGE e009(zsd_md_validation) WITH ms_xwakhd-aktnr INTO DATA(lv_dummy).
+
+      APPEND VALUE #( type   = 'E'
+                      id     = 'ZSD_MD_VALIDATION'
+                      number = '009'
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+      RETURN.
+    ENDIF.
+
+    READ TABLE mt_xwakpd ASSIGNING <ls_xwakpd> WITH KEY reb_selkz = 'X'. "#EC CI_STDSEQ
+    IF sy-subrc IS INITIAL.
+      activate_deactivate_discounts( iv_deactivate = iv_deactivate it_offer_discount_wakp = lt_offer_discount_wakp ).
+    ENDIF.
+
+    READ TABLE mt_xwakpd ASSIGNING <ls_xwakpd> WITH KEY selkz = 'X'. "#EC CI_STDSEQ
+    IF sy-subrc IS INITIAL.
+      IF iv_deactivate IS NOT INITIAL AND <ls_xwakpd>-vkkps = 'B'.
+        deactivate_prices( ).
+      ELSE.
+        activate_prices( ).
+      ENDIF.
+    ENDIF.
+
+    IF lv_processed_article IS NOT INITIAL.
+      save_promotion( ).
+    ENDIF.
+
+    IF gt_return IS INITIAL.
+      ##NEEDED  MESSAGE S000(zsd_md_validation) WITH ms_xwakhd-aktnr INTO lv_dummy.
+      ##NEEDED  MESSAGE S002(zsd_md_validation) WITH ms_xwakhd-aktnr INTO lv_dummy.
+
+      APPEND VALUE #( type   = 'S'
+                      id     = 'ZSD_MD_VALIDATION'
+                      number = COND #( WHEN iv_deactivate = 'X'
+                                         THEN '002'
+                                         ELSE '000' )
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD activate_deactivate_discounts.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: activate/ deactivate article's discounts*
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+* KHADDFAD     | 26.04.2023 | 20262: [Build-DEV] - [Consider price lists*
+*              |            | in Markdown Fiori apps - manage markdown]*
+*              |            | DS4K950143                               *
+*----------------------------------------------------------------------*
+
+    DATA: lt_offer_discount_wakr TYPE  wpm_t_offer_discount_wakr_rfc,
+          lt_xwazbd              TYPE  wazbd_tab,
+          lt_dwazbd              TYPE  wazbd_tab,
+          lt_xwsohd              TYPE  wpm_t_wsohd,
+          lt_xwsopd              TYPE  wpm_t_wsopd,
+          lt_xwsotd              TYPE  wpm_t_wsotd,
+          lt_wakw                TYPE  wakw_tab,
+          lt_xcalp_vb            TYPE calp_vb_tab,
+          ls_offer_discount      TYPE wpm_s_offer_discount,
+          lt_wakpd               TYPE TABLE OF wakpd.
+
+    DATA(lo_discount_activation) = NEW cl_wpm_re_discount( ).
+
+    LOOP AT mt_xwakpd ASSIGNING FIELD-SYMBOL(<ls_xwakpd>) WHERE reb_selkz = 'X'. "#EC CI_STDSEQ
+      APPEND INITIAL LINE TO lt_wakpd ASSIGNING FIELD-SYMBOL(<ls_wakpd>).
+      <ls_wakpd> = <ls_xwakpd>.
+      <ls_wakpd>-selkz = 'X'.
+    ENDLOOP.
+
+    lo_discount_activation->set_status_offer_disc_parallel(
+      it_offer_discount_wakp = it_offer_discount_wakp[]
+      it_offer_discount_wakr = lt_offer_discount_wakr[] ).
+
+* resolve plant groups
+    CALL FUNCTION 'PROMOTION_DISSOLVE_FILGR'
+      EXPORTING
+        i_aktnr             = ms_xwakhd-aktnr
+      TABLES
+        f_wagud             = mt_xwagud
+        f_wakw              = lt_wakw
+      EXCEPTIONS
+        wrong_filgr         = 01
+        werks_not_in_t001w  = 02
+        werks_is_vz         = 03
+        duplicate_werks     = 04
+        empty_filgr         = 05
+        werks_without_ekorg = 06
+        same_aktnr          = 07
+        werks_without_lfa1  = 08
+        werks_without_kna1  = 09
+        system_error        = 10
+        OTHERS              = 99.
+    IF sy-subrc IS NOT INITIAL.
+      ##NEEDED  MESSAGE e008(zsd_md_validation) WITH ms_xwakhd-aktnr INTO DATA(lv_dummy).
+
+      APPEND VALUE #( type   = 'E'
+                      id     = 'ZSD_MD_VALIDATION'
+                      number = '008' "Could not resolve plant groups
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+
+    ENDIF.
+
+    TRY.
+* do some listing checks and create wale entries if not already done
+        lo_discount_activation->check_listing(
+          EXPORTING
+            it_xwagud = mt_xwagud
+            it_xwazbd = lt_xwazbd
+            it_dwazbd = lt_dwazbd
+          CHANGING
+            ct_xwakpd = lt_wakpd
+            cs_xwakhd = ms_xwakhd
+            ct_xwsohd = lt_xwsohd
+            ct_xwsopd = lt_xwsopd
+            ct_xwsotd = lt_xwsotd
+            ct_xwaled = mt_xwaled
+            ct_wakw   = lt_wakw ).
+
+        lo_discount_activation->build_xcalp_vb_all(
+           EXPORTING
+             is_xwakhd             = ms_xwakhd
+             iv_deactivate_flag    = iv_deactivate
+             iv_act_item_discounts = 'X'
+             it_wakw               = lt_wakw
+             it_xwagud             = mt_xwagud
+           CHANGING
+             ct_xwakpd             = mt_xwakpd
+             ct_xwaled             = mt_xwaled
+             ct_xwakrd             = mt_xwakrd
+             ct_xwakrwd            = mt_xwakrwd
+             ct_xcalp_vb           = lt_xcalp_vb ).
+
+
+        IF lt_xcalp_vb[] IS NOT INITIAL.
+          LOOP AT lt_xcalp_vb ASSIGNING FIELD-SYMBOL(<ls_xcalp_vb>).
+            IF <ls_xcalp_vb>-vkkab < sy-datum.
+              <ls_xcalp_vb>-vkkab = sy-datum.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+* process discount conditions
+        lo_discount_activation->poste_sales_conditions(
+           EXPORTING
+             is_xwakhd         = ms_xwakhd
+             iv_testrun        = ''
+           CHANGING
+             cs_offer_discount = ls_offer_discount
+             ct_xcalp_vb       = lt_xcalp_vb
+             ct_xwakpd         = mt_xwakpd
+             ct_xwakrd         = mt_xwakrd ).
+
+      CATCH     cx_wpm_re_process_messages.
+        APPEND VALUE #( type   = 'E'
+                      id     = 'ZSD_MD_VALIDATION'
+                      number = '010' "Error while processing
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+    ENDTRY.
+
+
+
+  ENDMETHOD.
+
+
+  METHOD if_sadl_exit_filter_transform~map_atom.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: read child view via virtual fields*
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+        IF iv_element = 'MATERIALNUMBER'.
+          DATA(lif_materialnumber) = cl_sadl_cond_prov_factory_pub=>create_simple_cond_factory( )->element( '_Item.MATERIALNUMBER' ).
+          ro_condition = lif_materialnumber->equals( iv_value ).
+        ELSEIF iv_element = 'DISTRIBUTIONCHANNEL'.
+          DATA(lif_distributionchannel) = cl_sadl_cond_prov_factory_pub=>create_simple_cond_factory( )->element( '_Item.DISTRIBUTIONCHANNEL' ).
+          ro_condition = lif_distributionchannel->equals( iv_value ).
+        ELSEIF iv_element = 'SALESORG'.
+          DATA(lif_salesorg) = cl_sadl_cond_prov_factory_pub=>create_simple_cond_factory( )->element( '_Item.SALESORG' ).
+          ro_condition = lif_salesorg->equals( iv_value ).
+        ENDIF.
+      CATCH cx_sadl_exit_filter_not_supp cx_sadl_exit.
+        APPEND INITIAL LINE TO gt_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+      <ls_return>-type = 'E'.
+      <ls_return>-id = 'ZSD_MD_VALIDATION'.
+      <ls_return>-number = '010'. "Error while processing
+      <ls_return>-message_v1 = ms_xwakhd-aktnr.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD save_promotion.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: save promotion                    *
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+
+    DATA: lo_promo_storage       TYPE REF TO cl_wpm_re_promo_storage.
+    TRY.
+* get reference from singleton class cl_wpm_re_promo_storage
+        cl_wpm_re_promo_storage=>get_instance(
+          IMPORTING
+            er_wpm_promo_storage = lo_promo_storage ).
+
+*store the changed data in singleton class cl_wpm_re_promo_storage
+        lo_promo_storage->if_wpm_re_promo_storage~update_promo_data(
+            is_wakhd   = ms_xwakhd
+            it_xwagud  = mt_xwagud
+            it_xwakpd  = mt_xwakpd
+            it_xwaled  = mt_xwaled
+            it_xwakrd  = mt_xwakrd
+            it_xwakrwd = mt_xwakrwd
+            iv_aktnr   = ms_xwakhd-aktnr ).
+* call the promotion update module
+        lo_promo_storage->if_wpm_re_promo_storage~save_promo_data_to_db( ).
+
+      CATCH cx_wpm_re_process_messages.
+
+        APPEND VALUE #( type   = 'E'
+                      id     = 'ZSD_MD_VALIDATION'
+                      number = '010' "Error while processing
+                      message_v1 = ms_xwakhd-aktnr
+                         )      TO gt_return.
+
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD process_articles.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHADDFAD     | 08.12.2022 | 14094: process articles                  *
+*              |            | DS4K932127                               *
+*----------------------------------------------------------------------*
+    DATA: lt_offer_discount_wakp  TYPE  wpm_t_offer_discount_wakp_rfc,
+          lv_processed_article(1) TYPE c.
+
+    LOOP AT it_artnr ASSIGNING FIELD-SYMBOL(<ls_artnr>).
+      CLEAR: lv_processed_article.
+
+      READ TABLE mt_xwakpd ASSIGNING FIELD-SYMBOL(<ls_xwakpd>) WITH KEY artnr = <ls_artnr>-matnr. "#EC CI_STDSEQ
+      IF sy-subrc IS INITIAL.
+        IF ( iv_deactivate IS NOT INITIAL AND <ls_xwakpd>-reb_status = 'B' )
+        OR ( iv_deactivate IS INITIAL AND <ls_xwakpd>-reb_status <> 'B' AND
+           ( <ls_xwakpd>-reb_value IS NOT INITIAL OR <ls_xwakpd>-reb_perc IS NOT INITIAL ) ).
+
+          lv_processed_article = 'X'.
+          <ls_xwakpd>-reb_selkz = 'X'.
+
+          APPEND INITIAL LINE TO lt_offer_discount_wakp ASSIGNING FIELD-SYMBOL(<ls_offer>).
+          <ls_offer>-aktnr = <ls_xwakpd>-aktnr.
+          <ls_offer>-status = <ls_xwakpd>-reb_status.
+          <ls_offer>-artnr = <ls_xwakpd>-artnr.
+          <ls_offer>-mebme = <ls_xwakpd>-mebme.
+        ENDIF.
+
+        IF ( iv_deactivate IS NOT INITIAL AND <ls_xwakpd>-vkkps = 'B' )
+        OR ( iv_deactivate IS INITIAL AND
+           ( <ls_xwakpd>-vkkps <> 'B' AND <ls_xwakpd>-plvkp IS NOT INITIAL ) ) .
+
+          lv_processed_article = 'X'.
+          <ls_xwakpd>-selkz = 'X'.
+          IF <ls_xwakpd>-attyp = '01'.
+            " Handle as '00 - Single Material' to avoid that variants are selected for it
+            <ls_xwakpd>-attyp = '00'.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      IF lv_processed_article IS INITIAL.
+        APPEND VALUE #( type   = 'E'
+                        id     = 'ZSD_MD_VALIDATION'
+                        number = '009'
+                        message_v1 = <ls_artnr>-matnr
+                           )      TO gt_return.
+
+      ENDIF.
+    ENDLOOP.
+
+
+
+    READ TABLE mt_xwakpd ASSIGNING <ls_xwakpd> WITH KEY reb_selkz = 'X'. "#EC CI_STDSEQ
+    IF sy-subrc IS INITIAL.
+      activate_deactivate_discounts( iv_deactivate = iv_deactivate it_offer_discount_wakp = lt_offer_discount_wakp ).
+    ENDIF.
+
+    READ TABLE mt_xwakpd ASSIGNING <ls_xwakpd> WITH KEY selkz = 'X'. "#EC CI_STDSEQ
+    IF sy-subrc IS INITIAL.
+      IF iv_deactivate IS NOT INITIAL AND <ls_xwakpd>-vkkps = 'B'.
+        deactivate_prices( ).
+      ELSE.
+        activate_prices( ).
+      ENDIF.
+    ENDIF.
+
+    IF lv_processed_article IS NOT INITIAL.
+      save_promotion( ).
+    ENDIF.
+
+    LOOP AT it_artnr ASSIGNING <ls_artnr>.
+
+      READ TABLE gt_return ASSIGNING FIELD-SYMBOL(<ls_return>) WITH KEY message_v1 = <ls_artnr>-matnr. "#EC CI_STDSEQ
+      IF sy-subrc IS NOT INITIAL.
+        ##NEEDED  MESSAGE s005(zsd_md_validation) WITH <ls_artnr>-matnr INTO DATA(lv_dummy).
+        ##NEEDED  MESSAGE s007(zsd_md_validation) WITH <ls_artnr>-matnr INTO lv_dummy.
+
+        APPEND VALUE #( type   = 'S'
+                        id     = 'ZSD_MD_VALIDATION'
+                        number = COND #( WHEN iv_deactivate = 'X'
+                                           THEN '007'
+                                           ELSE '005' )
+                        message_v1 = <ls_artnr>-matnr
+                           )      TO gt_return.
+
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

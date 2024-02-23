@@ -1,0 +1,215 @@
+class CL_IM_PP_OM_PO_COMPONENTS definition
+  public
+  create public .
+
+*"* public components of class CL_IM_PP_OM_PO_COMPONENTS
+*"* do not include other source files here!!!
+public section.
+
+  interfaces IF_BADI_INTERFACE .
+  interfaces IF_EX_ME_PROCESS_PO_CUST .
+protected section.
+*"* protected components of class CL_IM_PP_OM_PO_COMPONENTS
+*"* do not include other source files here!!!
+private section.
+*"* private components of class CL_IM_PP_OM_PO_COMPONENTS
+*"* do not include other source files here!!!
+ENDCLASS.
+
+
+
+CLASS CL_IM_PP_OM_PO_COMPONENTS IMPLEMENTATION.
+
+
+METHOD if_ex_me_process_po_cust~check.                      "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~close.                      "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~fieldselection_header.      "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~fieldselection_header_refkeys. "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~fieldselection_item.        "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~fieldselection_item_refkeys. "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~initialize.                 "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~open.                       "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~post.                       "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~process_account.            "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~process_header.             "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~process_item.               "#EC NEEDED
+ENDMETHOD.
+
+
+METHOD if_ex_me_process_po_cust~process_schedule.
+
+  DATA: l_control_key   TYPE steus,
+        ls_data         TYPE meposchedule,
+        ls_t430         TYPE t430,
+        ls_caufv        TYPE caufv,
+        ls_afpo         TYPE afpo,
+        ls_bom          TYPE mdpm,
+        lt_bom          TYPE mmpur_t_mdpm,
+        lo_item         TYPE REF TO if_purchase_order_item_mm.
+
+  DATA: lt_acc      TYPE purchase_order_accountings,
+        ls_acc      TYPE mepoaccounting.
+  FIELD-SYMBOLS <acc> TYPE purchase_order_accounting.
+
+* Check if input data are sufficient
+  ls_data = im_schedule->get_data( ).
+  CHECK ls_data-ebelp IS NOT INITIAL AND
+        ls_data-banfn IS NOT INITIAL AND
+        ls_data-bnfpo IS NOT INITIAL.
+
+* Get accounting data
+  lo_item = im_schedule->get_item( ).
+  lt_acc = lo_item->get_accountings( ).
+  READ TABLE lt_acc ASSIGNING <acc> INDEX 1.
+  CHECK sy-subrc EQ 0 AND <acc> IS ASSIGNED.
+* Get key for Production Order Operation from Purchase order Position
+  ls_acc = <acc>-accounting->get_data( ).
+  CHECK ls_acc-loekz     IS INITIAL AND
+        ls_acc-aufnr     IS NOT INITIAL AND
+        ls_acc-aufpl_ord IS NOT INITIAL AND
+        ls_acc-aplzl_ord IS NOT INITIAL .
+
+* Get control key of operation for which the BANF was created
+  SELECT SINGLE steus FROM afvc INTO l_control_key
+                      WHERE aufpl = ls_acc-aufpl_ord
+                        AND aplzl = ls_acc-aplzl_ord.
+  IF sy-subrc <> 0.
+    MESSAGE e810(co).
+  ENDIF.
+
+* Get details of control key
+  CALL FUNCTION 'CO_TA_T430_READ'
+    EXPORTING
+      steus    = l_control_key
+    IMPORTING
+      struct   = ls_t430
+    EXCEPTIONS
+      no_entry = 1
+      OTHERS   = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE 'E' NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+* Operation must be external and WIP must be mandatory for this control key
+  CHECK ls_t430-lief IS NOT INITIAL AND
+        ls_t430-wip = '1'.
+
+* Get order details
+  SELECT SINGLE * FROM caufv INTO ls_caufv
+                  WHERE aufpl = ls_acc-aufpl_ord.           "#EC *
+  IF sy-subrc = 0.
+    SELECT SINGLE * FROM afpo INTO ls_afpo
+                    WHERE aufnr = ls_caufv-aufnr
+                      AND posnr = '0001'.
+  ENDIF.
+  IF sy-subrc <> 0.
+    MESSAGE e017(co) WITH ls_caufv-aufnr space space.
+  ENDIF.
+
+* Only PP and PI orders are allowed
+  CHECK ls_caufv-autyp = '10' OR
+        ls_caufv-autyp = '40'.
+
+* Get components
+  im_schedule->get_bom( IMPORTING et_bom = lt_bom ).
+
+* Create new component for purchase order
+* Use PP/PI-order header material (logic taken from include LCOBHIC1)
+  IF ls_caufv-flg_mltps IS INITIAL OR
+     ls_caufv-stlbez IS INITIAL.
+    ls_bom-matnr = ls_afpo-matnr.
+  ENDIF.
+  IF ls_bom-matnr IS INITIAL AND
+     ls_caufv-flg_mltps IS NOT INITIAL.
+    IF ls_caufv-stlbez IS NOT INITIAL.
+      ls_bom-matnr = ls_caufv-stlbez.
+    ELSE.
+      ls_bom-matnr = ls_caufv-plnbez.
+    ENDIF.
+  ENDIF.
+  ls_bom-werks = ls_caufv-werks.
+
+* Use reference material instead of header material, if maintained.
+  CALL FUNCTION 'CO_WIPB_GET_WIPB_MAT'
+    EXPORTING
+      xmatnr         = ls_bom-matnr
+      xwerks         = ls_bom-werks
+      xverid         = ls_afpo-verid
+    IMPORTING
+      ucmat          = ls_bom-matnr
+    EXCEPTIONS
+      marc_not_found = 1
+      ob_not_allowed = 2
+      OTHERS         = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE 'E' NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+  CASE ls_caufv-autyp.
+    WHEN '10'.
+*     Production order: Use amount of operation for which the BANF was created
+      SELECT SINGLE mgvrg meinh FROM afvv INTO (ls_bom-erfmg, ls_bom-erfme)
+             WHERE aufpl = ls_acc-aufpl_ord
+               AND aplzl = ls_acc-aplzl_ord.
+      IF sy-subrc <> 0.
+        MESSAGE e810(co).
+      ENDIF.
+    WHEN '40'.
+*     process order: Use amount of order header
+      ls_bom-erfmg = ls_caufv-gamng.
+      ls_bom-erfme = ls_caufv-gmein.
+  ENDCASE.
+
+* New component is not ATP relevant
+  ls_bom-nodsp = 'X'.
+
+* Append new component if not already done
+  READ TABLE lt_bom TRANSPORTING NO FIELDS
+       WITH KEY matnr = ls_bom-matnr
+                werks = ls_bom-werks
+                erfmg = ls_bom-erfmg
+                erfme = ls_bom-erfme
+                nodsp = ls_bom-nodsp.
+  IF sy-subrc <> 0.
+    APPEND ls_bom TO lt_bom.
+*   Set components
+    im_schedule->set_bom( EXPORTING it_bom = lt_bom ).
+  ENDIF.
+
+ENDMETHOD.
+ENDCLASS.

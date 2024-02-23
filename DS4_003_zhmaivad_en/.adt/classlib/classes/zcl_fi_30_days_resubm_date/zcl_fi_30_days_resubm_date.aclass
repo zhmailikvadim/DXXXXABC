@@ -1,0 +1,332 @@
+class ZCL_FI_30_DAYS_RESUBM_DATE definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_APJ_DT_EXEC_OBJECT .
+  interfaces IF_APJ_RT_EXEC_OBJECT .
+protected section.
+private section.
+
+  types:
+    gtyp_r_bu      TYPE RANGE OF bu_partner .
+  types:
+    gtyp_r_credseg TYPE RANGE OF ukm_credit_sgmnt .
+
+  constants:
+    BEGIN OF gc_sel_parameters,
+      bu      TYPE c LENGTH 8   VALUE 'S_BU',
+      credseg TYPE c LENGTH 8   VALUE 'S_CREDSEG',
+      days    TYPE c LENGTH 8   VALUE 'P_DAYS',
+    END OF gc_sel_parameters .
+  constants MC_MESSAGE_CLASS type SYMSGID value 'ZFI_FSCM' ##NO_TEXT.
+  constants MC_ERROR type BAPI_MTYPE value 'E' ##NO_TEXT.
+  constants MC_SUCCESS type BAPI_MTYPE value 'S' ##NO_TEXT.
+
+  methods SAVE_LOG
+    importing
+      !IT_MESSAGES type BAPIRET2_T .
+  methods EXECUTE
+    importing
+      !IT_BU type GTYP_R_BU
+      !IT_CREDSEG type GTYP_R_CREDSEG
+      !IV_DAYS type DATUM
+      !IV_REASON type SCMG_REASON_CODE
+      !IV_STAT type SCMGSTATUSONR
+      !IV_CASE type SCMGCASE_TYPE
+    returning
+      value(RT_MESSAGES) type BAPIRET2_T .
+  methods GET_CONFIGS
+    importing
+      !IT_PARAMETERS type IF_APJ_DT_EXEC_OBJECT=>TT_TEMPL_VAL
+    exporting
+      !ET_BU type GTYP_R_BU
+      !ET_CREDSEG type GTYP_R_CREDSEG
+      !EV_DAYS type DATUM
+      !EV_REASON type SCMG_REASON_CODE
+      !EV_STAT type SCMGSTATUSONR
+      !EV_CASE type SCMGCASE_TYPE .
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_30_DAYS_RESUBM_DATE IMPLEMENTATION.
+
+
+  METHOD execute.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 08.06.2023 | 20969_FI_Setting up 5 credit limi        *
+*              |            | DS4K951497                               *
+*----------------------------------------------------------------------*/
+
+    DATA: lt_ret       TYPE STANDARD TABLE OF bapiret2,
+          lv_case_type TYPE bapiscmgcase-case_type,
+          lv_case_guid TYPE bapiscmgcase-case_guid,
+          lt_attr      TYPE STANDARD TABLE OF bapiproptb.
+
+    SELECT cma~businesspartner AS partner,
+           cma~creditsegment AS credit_sgmnt,
+           cma~creditaccountresubmissiondate AS follow_up_dt,
+           case~case_guid
+      FROM i_creditmanagementaccount AS cma
+      LEFT JOIN ukmcaseattr00 AS case
+       ON  case~fcr_partner = cma~businesspartner
+       AND case~fcr_segment = cma~creditsegment
+       WHERE
+        cma~businesspartner IN @it_bu AND
+        cma~creditsegment   IN @it_credseg AND
+        cma~creditaccountresubmissiondate <= @iv_days
+       INTO TABLE @DATA(lt_cred_man_acc). "follow_up_dt <= today + days from sel screen
+
+    IF sy-subrc = 0.
+
+      lv_case_type = iv_case.
+      LOOP AT lt_cred_man_acc ASSIGNING FIELD-SYMBOL(<ls_man_acc>) WHERE case_guid = ''.
+        CLEAR: lv_case_guid, lt_attr[], lt_ret[].
+
+        TRY.
+            lv_case_guid = cl_system_uuid=>create_uuid_x16_static( ).
+
+
+            lt_attr = VALUE #( ( name = 'FCR_PARTNER'  value = <ls_man_acc>-partner )
+                               ( name = 'FCR_SEGMENT'  value = <ls_man_acc>-credit_sgmnt )
+                               ( name = 'STAT_ORDERNO' value = iv_stat  )
+                               ( name = 'REASON_CODE'  value = iv_reason ) ).
+
+            CALL FUNCTION 'BAPI_CASE_CREATE'
+              EXPORTING
+                case_type       = lv_case_type
+                case_guid       = lv_case_guid
+              TABLES
+                return          = lt_ret
+                case_attributes = lt_attr.
+
+            IF lt_ret[] IS NOT INITIAL.
+              MESSAGE e003(zfi_fscm) INTO DATA(lv_message1).
+              APPEND VALUE #( message = lv_message1
+                              id = mc_message_class
+                              type = mc_error
+                              number = '003' )
+                TO rt_messages.
+              APPEND LINES OF lt_ret TO rt_messages.
+            ELSE.
+              CLEAR: lt_attr.
+              CALL FUNCTION 'BAPI_CASE_GETATTRIBUTES'
+                EXPORTING
+                  guid            = lv_case_guid
+                TABLES
+                  case_attributes = lt_attr.
+
+              READ TABLE lt_attr ASSIGNING FIELD-SYMBOL(<ls_attr>) WITH KEY name = 'EXT_KEY'.
+              IF sy-subrc = 0.
+                MESSAGE s004(zfi_fscm) WITH lv_case_guid INTO DATA(lv_message2).
+                APPEND VALUE #( message = lv_message2
+                                id = mc_message_class
+                                type = mc_success
+                                number = '004'
+                                message_v1 = <ls_attr>-value )
+                TO rt_messages.
+              ENDIF.
+
+
+            ENDIF.
+          CATCH cx_uuid_error.
+            MESSAGE e002(zfi_fscm) INTO DATA(lv_message3).
+            APPEND VALUE #( message = lv_message3
+                            id = mc_message_class
+                            type = mc_error
+                            number = '002' )
+              TO rt_messages.
+        ENDTRY.
+      ENDLOOP.
+    ELSE.
+      MESSAGE e005(zfi_fscm) INTO DATA(lv_message4).
+      APPEND VALUE #( message = lv_message4
+                      id = mc_message_class
+                      type = mc_error
+                      number = '005' )
+        TO rt_messages.
+      APPEND LINES OF lt_ret TO rt_messages.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_configs.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 08.06.2023 | 20969_FI_Setting up 5 credit limi        *
+*              |            | DS4K951497                               *
+*----------------------------------------------------------------------*/
+    DATA: lv_days TYPE days.
+
+    TRY.
+        DATA(lt_cust) = zcl_pe_hm_basic=>get_table( '1670' ).
+      CATCH zcx_pe_hm.
+        MESSAGE w005(zfi_fscm).
+        RETURN.
+    ENDTRY.
+
+    LOOP AT  it_parameters ASSIGNING FIELD-SYMBOL(<ls_parameter>).
+      CASE <ls_parameter>-selname.
+        WHEN gc_sel_parameters-bu.
+          et_bu = VALUE #( BASE et_bu ( sign = <ls_parameter>-sign
+                                        option = <ls_parameter>-option
+                                        low    = <ls_parameter>-low
+                                        high   = <ls_parameter>-high  ) ).
+        WHEN gc_sel_parameters-credseg.
+          et_credseg = VALUE #( BASE et_credseg ( sign   = <ls_parameter>-sign
+                                                  option = <ls_parameter>-option
+                                                  low    = <ls_parameter>-low
+                                                  high   = <ls_parameter>-high  ) ).
+        WHEN gc_sel_parameters-days.
+          lv_days = <ls_parameter>-low.
+      ENDCASE.
+
+    ENDLOOP.
+
+    ev_case   = lt_cust[ 1 ]-field2.
+    ev_reason = lt_cust[ 1 ]-field3.
+    ev_stat   = lt_cust[ 1 ]-field4.
+
+    ev_days  = sy-datum + lv_days.
+  ENDMETHOD.
+
+
+  METHOD if_apj_dt_exec_object~get_parameters.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 12.05.2023 | 20969_FI_Setting up 5 credit limi        *
+*              |            | DS4K951497                               *
+*----------------------------------------------------------------------*/
+    et_parameter_def = VALUE #( ( selname        = gc_sel_parameters-bu
+                                  kind           = if_apj_dt_exec_object=>select_option
+                                  datatype       = 'C'
+                                  component_type = 'BU_PARTNER'
+                                  length         = 10
+                                  param_text     = text-001
+                                  mandatory_ind  = abap_false
+                                  changeable_ind = abap_true   )
+
+                                ( selname        = gc_sel_parameters-credseg
+                                  kind           = if_apj_dt_exec_object=>select_option
+                                  datatype       = 'C'
+                                  component_type = 'UKM_CREDIT_SGMNT'
+                                  length         = 10
+                                  param_text     = text-002
+                                  mandatory_ind  = abap_true
+                                  changeable_ind = abap_true  )
+
+                                ( selname        = gc_sel_parameters-days
+##TYPE                            kind           = if_apj_dt_exec_object=>parameter
+                                  datatype       = 'I'
+                                  component_type = 'DAYS'
+                                  param_text     = text-003
+                                  mandatory_ind  = abap_true
+                                  changeable_ind = abap_true  ) ).
+
+    TRY.
+        DATA(lt_cust) = zcl_pe_hm_basic=>get_table( '1672' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    et_parameter_val = VALUE #( ( selname = gc_sel_parameters-days
+                                  kind    = if_apj_dt_exec_object=>parameter
+                                  sign    = 'I'
+                                  option  = 'EQ'
+                                  low     = lt_cust[ 1 ]-field1 ) )   ##TYPE.
+  ENDMETHOD.
+
+
+  METHOD if_apj_rt_exec_object~execute.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 12.05.2023 | 20969_FI_Setting up 5 credit limi        *
+*              |            | DS4K951497                               *
+*----------------------------------------------------------------------*/
+
+    DATA: lr_sel_bu      TYPE gtyp_r_bu,
+          lr_sel_credseg TYPE gtyp_r_credseg,
+          lt_ret_all     TYPE bapiret2_t,
+          lv_datum       TYPE datum,
+          lv_reason      TYPE scmg_reason_code,
+          lv_stat        TYPE scmgstatusonr,
+          lv_case        TYPE scmgcase_type.
+
+
+    get_configs( EXPORTING it_parameters = it_parameters
+                 IMPORTING et_bu         = lr_sel_bu
+                           et_credseg    = lr_sel_credseg
+                           ev_days       = lv_datum
+                           ev_reason     = lv_reason
+                           ev_stat       = lv_stat
+                           ev_case       = lv_case ).
+
+    lt_ret_all = execute( it_bu      = lr_sel_bu
+                          it_credseg = lr_sel_credseg
+                          iv_days    = lv_datum
+                          iv_reason  = lv_reason
+                          iv_stat    = lv_stat
+                          iv_case    = lv_case ).
+
+    save_log( lt_ret_all ).
+
+  ENDMETHOD.
+
+
+  METHOD save_log.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 08.06.2023 | 20969_FI_Setting up 5 credit limi        *
+*              |            | DS4K951497                               *
+*----------------------------------------------------------------------*/
+    TRY.
+        DATA(lif_log) = cl_bali_log=>create_with_header( cl_bali_header_setter=>create( object = 'ZFI_30DAYSRESUBMDAT'
+                                                                                        subobject = 'ZJOB' ) ).
+        LOOP AT it_messages ASSIGNING FIELD-SYMBOL(<ls_message>).
+          DATA(lif_text) = cl_bali_message_setter=>create( severity   = <ls_message>-type
+                                                           id         = <ls_message>-id
+                                                           number     = <ls_message>-number
+                                                           variable_1 = <ls_message>-message_v1
+                                                           variable_2 = <ls_message>-message_v2
+                                                           variable_3 = <ls_message>-message_v3
+                                                           variable_4 = <ls_message>-message_v4 ).
+
+          lif_log->add_item( item = lif_text ).
+        ENDLOOP.
+        cl_bali_log_db=>get_instance( )->save_log( log = lif_log
+                                                   assign_to_current_appl_job = abap_true ).
+        COMMIT WORK.
+      CATCH cx_bali_runtime.
+        MESSAGE e006(zfi_fscm).
+    ENDTRY.
+  ENDMETHOD.
+ENDCLASS.

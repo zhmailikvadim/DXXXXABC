@@ -1,0 +1,671 @@
+class ZCL_FI_INVENTORY_ALLOWANCE_UTL definition
+  public
+  final
+  create public .
+
+public section.
+
+  class-methods GET_INSTANCE
+    returning
+      value(RO_UTL) type ref to ZCL_FI_INVENTORY_ALLOWANCE_UTL .
+  methods GET_FILTERS
+    importing
+      !IV_FILTERS type STRING
+    returning
+      value(RT_FILTERS) type IF_RAP_QUERY_FILTER=>TT_NAME_RANGE_PAIRS .
+  methods GET_MTART_GRADE
+    importing
+      !IT_MTARTA type ANY TABLE
+      !IT_MTARTB type ANY TABLE
+    exporting
+      !ET_MTART type ANY TABLE
+      !EV_MAT_GRADE type ZPD_INVENTORY_ALLOW_MAT_GRADE .
+  methods WRITE_APPL_LOG
+    importing
+      !IV_SUBOBJ type BALSUBOBJ
+      !IT_RETURN type BAPIRET2_T .
+  methods IS_BELNR_EXISTS
+    importing
+      !IV_BUKRS type BUKRS
+      !IV_GJAHR type GJAHR
+      !IV_MONAT type MONAT
+      !IV_BKTXT type BKTXT
+      !IV_BLART type BLART
+    returning
+      value(RV_EXISTS) type ABAP_BOOL .
+  methods CALC_SEASON_DIFF
+    importing
+      !IV_LAST_SEASON type FSH_SAISO
+      !IV_CURR_SEASON type FSH_SAISO
+    returning
+      value(RV_DIFF) type INT2 .
+  methods CALC_CURR_SEASON
+    importing
+      !IV_LFMON type LFMON
+      !IV_LFGJA type LFGJA
+    returning
+      value(RV_CURR_SEASON) type FSH_SAISO .
+  methods GET_BLART
+    returning
+      value(RV_BLART) type BLART .
+  methods CALC_ALLOWANCE
+    importing
+      !IV_MAT_GRADE type ZPD_INVENTORY_ALLOW_MAT_GRADE
+      !IV_LFMON type LFMON
+      !IV_CURR_SEASON type FSH_SAISO
+    changing
+      !CT_RESULT type ZIF_FI_INVENTORY_ALLOWANCE_CON=>GTYP_TT_INVENTORY_ALLOWANCE .
+  methods GET_SEASON_TYPE
+    importing
+      !IV_SEASON type FSH_SAISO
+    returning
+      value(RV_SEASON_TYPE) type ZPD_INVENTORY_ALLOW_SEAS_TYPE .
+  methods GET_ORDER_BY
+    importing
+      !IIF_REQUEST type ref to IF_RAP_QUERY_REQUEST
+    returning
+      value(RV_ORDER_BY) type STRING .
+  methods GET_BUKRS_CURRENCY
+    importing
+      !IV_BUKRS type BUKRS
+    returning
+      value(RV_WAERS) type WAERS .
+  methods INCREMENT_POST_COUNTER
+    importing
+      !IV_INITIAL type ABAP_BOOL
+    changing
+      !CV_BKTXT type BKTXT .
+  methods ADJUST_MESSAGES
+    importing
+      !IV_BELNR_CANCELLATION type BELNR_D optional
+      !IV_TXT_TAG type SYMSGV
+    changing
+      !CT_RETURN type BAPIRET2_T .
+  methods ADJUST_MESSAGES_FINAL
+    changing
+      !CT_RETURN type BAPIRET2_T .
+  methods GET_BELNR_CANCELLATION
+    importing
+      !IV_BUKRS type BUKRS
+      value(IV_GJAHR) type GJAHR
+      value(IV_MONAT) type MONAT
+      !IV_BKTXT_PREFIX type BKTXT
+      !IV_BKTXT_STATIC type BKTXT
+      !IV_BLART type BLART
+    returning
+      value(RT_BELNR_CANCELLATION) type ZFI_TT_INV_ALLOW_BELNR_CANC .
+protected section.
+private section.
+
+  class-data GO_UTL type ref to ZCL_FI_INVENTORY_ALLOWANCE_UTL .
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_INVENTORY_ALLOWANCE_UTL IMPLEMENTATION.
+
+
+  METHOD write_appl_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+
+    TRY.
+        DATA(lif_log) = cl_bali_log=>create( ).
+
+        lif_log->set_header( cl_bali_header_setter=>create(
+          object    = zif_fi_inventory_allowance_con=>mc_bal_obj
+          subobject = iv_subobj ) ).
+
+        LOOP AT it_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+          lif_log->add_item( cl_bali_message_setter=>create_from_bapiret2( <ls_return> ) ).
+        ENDLOOP.
+
+        cl_bali_log_db=>get_instance( )->save_log( lif_log ).
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD get_instance.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+
+    IF go_utl IS INITIAL.
+      go_utl = NEW #( ).
+    ENDIF.
+
+    ro_utl = go_utl.
+  ENDMETHOD.
+
+
+  METHOD calc_curr_season.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    CONSTANTS: lc_june   TYPE n VALUE '6',
+               lc_dec(2) TYPE n VALUE '12'.
+
+    TRY.
+        DATA(lv_season_separator) = CONV lfmon( zcl_pe_hm_basic=>get_value( '1161' ) ).
+      CATCH zcx_pe_hm.
+        lv_season_separator = lc_june.
+    ENDTRY.
+
+    IF iv_lfmon < lv_season_separator OR iv_lfmon = lc_dec.
+      rv_curr_season = zif_fi_inventory_allowance_con=>mc_season_springsummer.
+    ELSE.
+      rv_curr_season = zif_fi_inventory_allowance_con=>mc_season_fallwinter.
+    ENDIF.
+
+    rv_curr_season = |{ iv_lfgja }{ rv_curr_season }|.
+  ENDMETHOD.
+
+
+  METHOD get_blart.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+
+    TRY.
+        rv_blart = zcl_pe_hm_basic=>get_value( '1436' ).
+      CATCH zcx_pe_hm.
+        rv_blart = CONV char2( 'SA' ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD get_filters.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    DATA: BEGIN OF ls_filters,
+            companycode       TYPE  zpe_tt_selectall_fe_filter,
+            plant             TYPE  zpe_tt_selectall_fe_filter,
+            fiscalyear        TYPE  zpe_tt_selectall_fe_filter,
+            currentperiod     TYPE  zpe_tt_selectall_fe_filter,
+            producttypegradea TYPE  zpe_tt_selectall_fe_filter,
+            producttypegradeb TYPE  zpe_tt_selectall_fe_filter,
+            producttype       TYPE  zpe_tt_selectall_fe_filter,
+            product           TYPE  zpe_tt_selectall_fe_filter,
+          END OF ls_filters.
+
+    /ui2/cl_json=>deserialize(
+      EXPORTING
+        json = iv_filters
+      CHANGING
+        data = ls_filters ).
+
+    DATA(lo_conversor)  = zcl_pe_fe2be_conversor=>get_instance( ).
+    DATA(lt_components) = CAST cl_abap_structdescr( cl_abap_structdescr=>describe_by_data( ls_filters ) )->get_components( ).
+
+    DO.
+      ASSIGN COMPONENT sy-index OF STRUCTURE ls_filters TO FIELD-SYMBOL(<lt_filters>).
+
+      IF sy-subrc <> 0.
+        EXIT.
+      ENDIF.
+
+      TRY.
+          DATA(lt_filters) = lo_conversor->get_be_range( <lt_filters> ).
+        CATCH zcx_pe_fe2be_conversor.
+          CONTINUE.
+      ENDTRY.
+
+      DATA(lv_component) = lt_components[ sy-index ]-name.
+      INSERT VALUE #( name = lv_component ) INTO TABLE rt_filters.
+      rt_filters[ name = lv_component ]-range = lt_filters. "#EC CI_STDSEQ
+    ENDDO.
+  ENDMETHOD.
+
+
+  METHOD calc_allowance.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    DATA: lr_reserve   TYPE RANGE OF int2,
+
+          lv_option(2) TYPE c,
+          lv_reserve   TYPE int2.
+
+    SELECT season_type, reserve, percentage
+      FROM zfi_t_inv_all_pc
+      INTO TABLE @DATA(lt_percentage)
+      WHERE mat_grade   =  @iv_mat_grade
+      AND   season_type <> @space
+      AND   lfmon       =  @iv_lfmon.
+
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    LOOP AT ct_result ASSIGNING FIELD-SYMBOL(<ls_result>) WHERE lastseason <> space. "#EC CI_STDSEQ
+      DATA(lv_diff) = calc_season_diff(
+        iv_last_season = <ls_result>-lastseason
+        iv_curr_season = iv_curr_season ).
+
+      LOOP AT lt_percentage ASSIGNING FIELD-SYMBOL(<ls_percentage>) WHERE season_type = get_season_type( <ls_result>-lastseason ). "#EC CI_STDSEQ "#EC CI_NESTED
+        IF <ls_percentage>-reserve(2) = '<=' OR <ls_percentage>-reserve(2) = '>='.
+          lv_option  = <ls_percentage>-reserve(2).
+          lv_reserve = <ls_percentage>-reserve+2.
+        ELSEIF <ls_percentage>-reserve(1) = '<' OR <ls_percentage>-reserve(1) = '>' OR <ls_percentage>-reserve(1) = '='.
+          lv_option  = <ls_percentage>-reserve(1).
+          lv_reserve = <ls_percentage>-reserve+1.
+        ELSE.
+          CONTINUE.
+        ENDIF.
+
+        CASE lv_option.
+          WHEN '<='.
+            lv_option = 'LE'.
+          WHEN '>='.
+            lv_option = 'GE'.
+          WHEN '<'.
+            lv_option = 'LT'.
+          WHEN '>'.
+            lv_option = 'GT'.
+          WHEN '='.
+            lv_option = 'EQ'.
+        ENDCASE.
+
+        lr_reserve = VALUE #( ( sign = 'I' option = lv_option low = lv_reserve ) ).
+
+        IF lv_diff IN lr_reserve.
+          <ls_result>-allowancepercentage = <ls_percentage>-percentage.
+          <ls_result>-allowancevalue      = <ls_result>-totalvalue * ( <ls_result>-allowancepercentage / 100 ).
+          EXIT.                                         "#EC CI_NOORDER
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD calc_season_diff.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    DATA(lv_last_season_year) = iv_last_season(4).
+    DATA(lv_curr_season_year) = iv_curr_season(4).
+    DATA(lv_last_season)      = iv_last_season+4(1).
+
+    IF lv_last_season = zif_fi_inventory_allowance_con=>mc_season_fullyear.
+      rv_diff = lv_last_season_year - lv_curr_season_year.
+    ELSE.
+      DATA(lv_curr_season) = iv_curr_season+4(1).
+
+      rv_diff = ( ( lv_last_season_year - lv_curr_season_year ) * 2 ) + ( lv_last_season - lv_curr_season ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_bukrs_currency.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    SELECT SINGLE currency
+      FROM i_companycode
+      INTO @rv_waers
+      WHERE companycode = @iv_bukrs.                      "#EC CI_SUBRC
+  ENDMETHOD.
+
+
+  METHOD get_mtart_grade.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+
+    IF it_mtartb IS INITIAL.
+      et_mtart = it_mtarta.
+      ev_mat_grade = 'A'.
+    ELSE.
+      et_mtart = it_mtartb.
+      ev_mat_grade = 'B'.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_order_by.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    DATA lv_order_by_separator TYPE string VALUE `, `.
+
+    LOOP AT iif_request->get_sort_elements( ) ASSIGNING FIELD-SYMBOL(<ls_sort_element>).
+      AT LAST.
+        CLEAR lv_order_by_separator.
+      ENDAT.
+
+      IF <ls_sort_element>-descending = abap_true.
+        rv_order_by = |{ rv_order_by }{ <ls_sort_element>-element_name } DESCENDING{ lv_order_by_separator }|.
+      ELSE.
+        rv_order_by = |{ rv_order_by }{ <ls_sort_element>-element_name }{ lv_order_by_separator }|.
+      ENDIF.
+    ENDLOOP.
+
+    IF sy-subrc <> 0.
+      rv_order_by = `PRODUCT, PLANT, VALUATIONTYPE, FISCALYEAR, CURRENTPERIOD`.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_season_type.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    CASE iv_season+4(1).
+      WHEN zif_fi_inventory_allowance_con=>mc_season_fullyear.
+        rv_season_type = zif_fi_inventory_allowance_con=>mc_season_type_fullyear.
+      WHEN zif_fi_inventory_allowance_con=>mc_season_springsummer
+      OR   zif_fi_inventory_allowance_con=>mc_season_fallwinter.
+        rv_season_type = zif_fi_inventory_allowance_con=>mc_season_type_seasonal.
+      WHEN OTHERS.
+        rv_season_type = zif_fi_inventory_allowance_con=>mc_season_type_undefined.
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD is_belnr_exists.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    SELECT COUNT(*)
+      FROM i_accountingdocument
+      UP TO 1 ROWS
+      WHERE companycode                  =    @iv_bukrs
+      AND   fiscalyear                   =    @iv_gjahr
+      AND   fiscalperiod                 =    @iv_monat
+      AND   accountingdocumenttype       =    @iv_blart
+      AND   accountingdocumentheadertext LIKE @iv_bktxt
+      AND   isreversal                   =    @space
+      AND   isreversed                   =    @space.
+
+    IF sy-dbcnt = 1.
+      rv_exists = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD adjust_messages.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    DATA: lv_msgno      TYPE symsgno,
+          lv_result_txt TYPE natxt.
+
+    IF line_exists( ct_return[ id = 'RW' number = '614' ] ). "#EC CI_STDSEQ
+      DELETE ct_return WHERE id = 'RW' AND number = '614'. "#EC CI_STDSEQ
+
+      IF iv_belnr_cancellation <> space.
+        lv_msgno = '8'.
+        MESSAGE s008(zfi_inv_allowance) WITH iv_txt_tag iv_belnr_cancellation INTO lv_result_txt.
+      ELSE.
+        lv_msgno = '0'.
+        MESSAGE s000(zfi_inv_allowance) WITH iv_txt_tag INTO lv_result_txt.
+      ENDIF.
+
+      INSERT VALUE #(
+        type       = zif_fi_inventory_allowance_con=>mc_severity_success
+        id         = zif_fi_inventory_allowance_con=>mc_msg_class
+        number     = lv_msgno
+        message    = lv_result_txt
+        message_v1 = iv_txt_tag
+        message_v2 = iv_belnr_cancellation ) INTO ct_return INDEX 1.
+    ELSEIF line_exists( ct_return[ id = 'RW' number = '609' ] ). "#EC CI_STDSEQ
+      DELETE ct_return WHERE id = 'RW' AND number = '609'. "#EC CI_STDSEQ
+
+      IF iv_belnr_cancellation <> space.
+        lv_msgno = '10'.
+        MESSAGE e010(zfi_inv_allowance) WITH iv_txt_tag INTO lv_result_txt.
+      ELSE.
+        lv_msgno = '1'.
+        MESSAGE e001(zfi_inv_allowance) WITH iv_txt_tag INTO lv_result_txt.
+      ENDIF.
+
+      INSERT VALUE #(
+        type       = zif_fi_inventory_allowance_con=>mc_severity_error
+        id         = zif_fi_inventory_allowance_con=>mc_msg_class
+        number     = lv_msgno
+        message    = lv_result_txt
+        message_v1 = iv_txt_tag ) INTO ct_return INDEX 1.
+
+      IF line_exists( ct_return[ id = 'RW' number = '632' ] ). "#EC CI_STDSEQ
+        DELETE ct_return WHERE id = 'RW' AND number = '632'. "#EC CI_STDSEQ
+        MESSAGE e009(zfi_inv_allowance) WITH iv_txt_tag iv_belnr_cancellation INTO lv_result_txt.
+        INSERT VALUE #(
+          type       = zif_fi_inventory_allowance_con=>mc_severity_error
+          id         = zif_fi_inventory_allowance_con=>mc_msg_class
+          number     = '9'
+          message    = lv_result_txt
+          message_v1 = iv_txt_tag
+          message_v2 = iv_belnr_cancellation ) INTO ct_return INDEX 2.
+      ENDIF.
+    ELSEIF line_exists( ct_return[ id = 'RW' number = '605' ] ). "#EC CI_STDSEQ
+      DATA(lv_belnr) = CONV belnr_d( ct_return[ id = 'RW' number = '605' ]-message_v2(10) ). "#EC CI_STDSEQ
+      DELETE ct_return WHERE id = 'RW' AND number = '605'. "#EC CI_STDSEQ
+
+      IF iv_belnr_cancellation <> space.
+        MESSAGE e011(zfi_inv_allowance) WITH iv_txt_tag iv_belnr_cancellation lv_belnr INTO lv_result_txt.
+        INSERT VALUE #(
+          type       = zif_fi_inventory_allowance_con=>mc_severity_success
+          id         = zif_fi_inventory_allowance_con=>mc_msg_class
+          number     = '11'
+          message    = lv_result_txt
+          message_v1 = iv_txt_tag
+          message_v2 = iv_belnr_cancellation
+          message_v3 = lv_belnr ) INTO ct_return INDEX 1.
+      ELSE.
+        MESSAGE e007(zfi_inv_allowance) WITH iv_txt_tag lv_belnr INTO lv_result_txt.
+        INSERT VALUE #(
+          type       = zif_fi_inventory_allowance_con=>mc_severity_success
+          id         = zif_fi_inventory_allowance_con=>mc_msg_class
+          number     = '7'
+          message    = lv_result_txt
+          message_v1 = iv_txt_tag
+          message_v2 = lv_belnr ) INTO ct_return INDEX 1.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD increment_post_counter.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    IF iv_initial = abap_true.
+      cv_bktxt = replace( val = cv_bktxt sub = `%` with = `01` occ = -1 ).
+    ELSE.
+      DATA(lv_len) = strlen( cv_bktxt ) - 2.
+      DATA(lv_increment) = CONV int1( substring( val = cv_bktxt off = lv_len len = 2 ) ) + 1.
+      cv_bktxt = replace( val = cv_bktxt off = lv_len len = 2 with = CONV num2( lv_increment ) ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD adjust_messages_final.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    DATA: lv_type       TYPE symsgty,
+          lv_msgno      TYPE symsgno,
+          lv_result_txt TYPE natxt.
+
+    IF line_exists( ct_return[ type = zif_fi_inventory_allowance_con=>mc_severity_error ] ). "#EC CI_STDSEQ
+      lv_type = zif_fi_inventory_allowance_con=>mc_severity_error.
+      lv_msgno = '12'.
+      MESSAGE e012(zfi_inv_allowance) INTO lv_result_txt.
+    ELSE.
+      lv_type = zif_fi_inventory_allowance_con=>mc_severity_success.
+      lv_msgno = '13'.
+      MESSAGE s013(zfi_inv_allowance) INTO lv_result_txt.
+    ENDIF.
+
+    INSERT VALUE #(
+      type    = lv_type
+      id      = zif_fi_inventory_allowance_con=>mc_msg_class
+      number  = lv_msgno
+      message = lv_result_txt ) INTO TABLE ct_return.
+  ENDMETHOD.
+
+
+  METHOD get_belnr_cancellation.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+
+    SELECT accountingdocumentheadertext, referencedocumenttype,
+           originalreferencedocument,    referencedocumentlogicalsystem
+      FROM i_accountingdocument
+      INTO TABLE @rt_belnr_cancellation
+      WHERE companycode                  =    @iv_bukrs
+      AND   fiscalyear                   =    @iv_gjahr
+      AND   fiscalperiod                 =    @iv_monat
+      AND   accountingdocumenttype       =    @iv_blart
+      AND   accountingdocumentheadertext LIKE @iv_bktxt_prefix
+      AND   isreversal                   =    @space
+      AND   isreversed                   =    @space.
+
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    IF iv_monat = '12'.
+      iv_gjahr += 1.
+      iv_monat = '1'.
+    ELSE.
+      iv_monat += 1.
+    ENDIF.
+
+    SELECT accountingdocumentheadertext, referencedocumenttype,
+           originalreferencedocument,    referencedocumentlogicalsystem
+      FROM i_accountingdocument
+      APPENDING TABLE @rt_belnr_cancellation
+      WHERE companycode                  = @iv_bukrs
+      AND   fiscalyear                   = @iv_gjahr
+      AND   fiscalperiod                 = @iv_monat
+      AND   accountingdocumenttype       = @iv_blart
+      AND   accountingdocumentheadertext = @iv_bktxt_static
+      AND   isreversal                   = @space
+      AND   isreversed                   = @space.        "#EC CI_SUBRC
+  ENDMETHOD.
+ENDCLASS.

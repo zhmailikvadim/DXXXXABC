@@ -1,0 +1,360 @@
+class /IWNGW/CL_BEP_OUT_PR_RFC definition
+  public
+  final
+  create public .
+
+public section.
+
+  class-methods CREATE_NOTIFICATIONS
+    importing
+      !IV_DESTINATION type RFCDEST
+      !IV_PROVIDER_ID type /IWNGW/BEP_OUT_PROVIDER_ID
+      !IT_NOTIFICATION type /IWNGW/T_BEP_OUT_NOTIF
+    raising
+      /IWNGW/CX_BEP_OUT_PR_RFC .
+  class-methods DELETE_NOTIFICATIONS
+    importing
+      !IV_DESTINATION type RFCDEST
+      !IV_PROVIDER_ID type /IWNGW/BEP_OUT_PROVIDER_ID
+      !IT_NOTIFICATION_ID type /IWNGW/T_BEP_OUT_NOTIF_ID
+    raising
+      /IWNGW/CX_BEP_OUT_PR_RFC .
+  PROTECTED SECTION.
+private section.
+
+  constants GC_BGRFC_QUEUE_NAME type BGRFC_DEST_NAME_INBOUND value 'IWNGW_BEP_OUT_BGRFC' ##NO_TEXT.
+
+  class-methods PREPARE_BGRFC_QUEUE
+    importing
+      !IV_PROVIDER_ID type /IWNGW/BEP_OUT_PROVIDER_ID
+    exporting
+      !EO_UNIT type ref to IF_QRFC_UNIT_INBOUND
+      !EV_QUEUE_NAME type QRFC_QUEUE_NAME
+    raising
+      /IWNGW/CX_BEP_OUT_PR_RFC
+      CX_BGRFC_INVALID_DESTINATION .
+  class-methods CALL_CREATE_NOTIF_BGRFC
+    importing
+      !IV_DESTINATION type RFCDEST
+      !IV_PROVIDER_ID type /IWNGW/BEP_OUT_PROVIDER_ID
+      !IT_NOTIF type /IWNGW/T_BEP_OUT_NOTIF
+    raising
+      /IWNGW/CX_BEP_OUT_PR_RFC .
+  class-methods CALL_DELETE_NOTIF_BGRFC
+    importing
+      !IV_DESTINATION type RFCDEST
+      !IV_PROVIDER_ID type /IWNGW/BEP_OUT_PROVIDER_ID
+      !IT_NOTIF_ID type /IWNGW/T_BEP_OUT_NOTIF_ID
+    raising
+      /IWNGW/CX_BEP_OUT_PR_RFC .
+ENDCLASS.
+
+
+
+CLASS /IWNGW/CL_BEP_OUT_PR_RFC IMPLEMENTATION.
+
+
+  METHOD call_create_notif_bgrfc.
+
+    DATA lo_unit                TYPE REF TO if_qrfc_unit_inbound.
+    DATA lv_queue_name          TYPE qrfc_queue_name.
+    DATA lx_dup_queue           TYPE REF TO cx_qrfc_duplicate_queue_name.
+    DATA lx_invalid_destination TYPE REF TO cx_bgrfc_invalid_destination.
+    DATA lx_invalid_unit        TYPE REF TO cx_bgrfc_invalid_unit.
+    DATA lx_invalid_queue_name  TYPE REF TO cx_qrfc_invalid_queue_name.
+    DATA: lo_log TYPE REF TO /iwngw/cl_nc_logger.
+    lo_log = /iwngw/cl_nc_logger=>get_logger( ).
+
+    IF iv_destination <> 'NONE'.
+      TRY.
+          /iwngw/cl_bep_out_pr_rfc=>prepare_bgrfc_queue(
+            EXPORTING
+              iv_provider_id = iv_provider_id
+            IMPORTING
+              eo_unit = lo_unit
+              ev_queue_name = lv_queue_name ).
+
+        CATCH cx_bgrfc_invalid_destination INTO lx_invalid_destination.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>invalid_bgrfc
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_invalid_destination.
+      ENDTRY.
+
+      CALL FUNCTION '/IWNGW/FM_OUT_CREATE_NOTIF_BGR' IN BACKGROUND UNIT lo_unit
+        EXPORTING
+          iv_destination = iv_destination
+          it_notif       = it_notif.
+
+      TRY.
+          " Add to rfc queue
+          lo_unit->add_queue_name_inbound( lv_queue_name ).
+
+          lo_log->log_message(
+          iv_msg_type = 'I'
+          iv_msg_id = '/IWNGW/CM_BEP_OUT'
+          iv_msg_number = '017'
+          iv_msg_v1 = lv_queue_name ).
+
+        CATCH cx_qrfc_duplicate_queue_name INTO lx_dup_queue.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>grfc_duplicate_queue_name
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_dup_queue.
+        CATCH cx_bgrfc_invalid_unit INTO lx_invalid_unit.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>bgrfc_insert_error
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_invalid_unit.
+        CATCH cx_qrfc_invalid_queue_name INTO lx_invalid_queue_name.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>bgrfc_insert_error
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_invalid_queue_name.
+      ENDTRY.
+
+    ELSE.
+
+      CALL FUNCTION '/IWNGW/FM_OUT_CREATE_NOTIF_BGR'
+        EXPORTING
+          iv_destination  = iv_destination
+          it_notif        = it_notif
+        EXCEPTIONS
+          rfc_auth_fail   = 1
+          processor_error = 2
+          OTHERS          = 3.
+      CASE sy-subrc.
+        WHEN 0.
+          " Success
+        WHEN 1.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>rfc_missing_authorization
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-authorization.
+        WHEN 2.
+          RAISE EXCEPTION TYPE
+            /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid = /iwngw/cx_bep_out_pr_rfc=>processor_error.
+        WHEN OTHERS.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid = /iwngw/cx_bep_out_pr_rfc=>rfc_others_error.
+      ENDCASE.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD call_delete_notif_bgrfc.
+    DATA lo_unit                TYPE REF TO if_qrfc_unit_inbound.
+    DATA lv_queue_name          TYPE qrfc_queue_name.
+    DATA lx_dup_queue           TYPE REF TO cx_qrfc_duplicate_queue_name.
+    DATA lx_invalid_destination TYPE REF TO cx_bgrfc_invalid_destination.
+    DATA lx_invalid_unit        TYPE REF TO cx_bgrfc_invalid_unit.
+    DATA lx_invalid_queue_name  TYPE REF TO cx_qrfc_invalid_queue_name.
+    DATA lo_log                 TYPE REF TO /iwngw/cl_nc_logger.
+    DATA lt_notif_id_failed	    TYPE /iwngw/t_bep_out_notif_id.
+    lo_log = /iwngw/cl_nc_logger=>get_logger( ).
+
+    IF iv_destination <> 'NONE'.
+      TRY.
+          /iwngw/cl_bep_out_pr_rfc=>prepare_bgrfc_queue(
+            EXPORTING
+              iv_provider_id = iv_provider_id
+            IMPORTING
+              eo_unit = lo_unit
+              ev_queue_name = lv_queue_name ).
+        CATCH cx_bgrfc_invalid_destination INTO lx_invalid_destination.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>invalid_bgrfc
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_invalid_destination.
+      ENDTRY.
+
+      CALL FUNCTION '/IWNGW/FM_OUT_DELETE_NOTIF_BGR' IN BACKGROUND UNIT lo_unit
+        EXPORTING
+          iv_destination = iv_destination
+          it_notif_id    = it_notif_id.
+
+      TRY.
+          " Add to rfc queue
+          lo_unit->add_queue_name_inbound( lv_queue_name ).
+          lo_log->log_message(
+          iv_msg_type = 'I'
+          iv_msg_id = '/IWNGW/CM_BEP_OUT'
+          iv_msg_number = '017'
+          iv_msg_v1 = lv_queue_name ).
+
+        CATCH cx_qrfc_duplicate_queue_name INTO lx_dup_queue.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>grfc_duplicate_queue_name
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_dup_queue.
+        CATCH cx_bgrfc_invalid_unit INTO lx_invalid_unit.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>bgrfc_insert_error
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_invalid_unit.
+        CATCH cx_qrfc_invalid_queue_name INTO lx_invalid_queue_name.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>bgrfc_insert_error
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration
+              previous           = lx_invalid_queue_name.
+
+      ENDTRY.
+    ELSE.
+      CALL FUNCTION '/IWNGW/FM_OUT_DELETE_NOTIF_BGR'
+        EXPORTING
+          iv_destination     = iv_destination
+          it_notif_id        = it_notif_id
+        TABLES
+          et_notif_id_failed = lt_notif_id_failed
+        EXCEPTIONS
+          1                  = 1
+          invalid_input      = 2
+          delete_failed      = 3
+          OTHERS             = 5.
+
+      CASE sy-subrc.
+        WHEN 0.
+          "Success
+        WHEN 1.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid             = /iwngw/cx_bep_out_pr_rfc=>rfc_missing_authorization
+              exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-authorization.
+        WHEN 2.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid = /iwngw/cx_bep_out_pr_rfc=>invalid_input
+              invalid_source_id_list = lt_notif_id_failed .
+        WHEN 3.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid = /iwngw/cx_bep_out_pr_rfc=>delete_failed.
+        WHEN OTHERS.
+          RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+            EXPORTING
+              textid = /iwngw/cx_bep_out_pr_rfc=>rfc_others_error.
+      ENDCASE.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD create_notifications.
+    " Invoke the background RFC
+    /iwngw/cl_bep_out_pr_rfc=>call_create_notif_bgrfc(
+      EXPORTING
+        iv_destination = iv_destination
+        iv_provider_id = iv_provider_id
+        it_notif = it_notification ).
+
+  ENDMETHOD.
+
+
+  METHOD delete_notifications.
+    " Invoke the background RFC
+    /iwngw/cl_bep_out_pr_rfc=>call_delete_notif_bgrfc(
+      EXPORTING
+        iv_destination          = iv_destination
+        iv_provider_id          = iv_provider_id
+        it_notif_id             = it_notification_id ).
+
+  ENDMETHOD.
+
+
+  METHOD prepare_bgrfc_queue.
+
+    DATA lo_destination TYPE REF TO if_bgrfc_destination_inbound.
+
+    DATA lv_ts                     TYPE timestampl.  " UTC time stamp in long form (YYYYMMDDhhmmss,mmmuuun) - 21 characters
+    DATA lv_string_timestamp       TYPE string.
+    DATA lv_datetime(14)           TYPE c.
+    DATA lv_secfrac(7)             TYPE c.
+    DATA lv_provider_name_subs(18) TYPE c.
+    DATA lv_split_char             TYPE c VALUE '.'.
+    DATA lv_queue_prefix           TYPE qrfc_queue_name.
+    DATA lt_queue_prefix           TYPE qrfc_queue_table.
+    DATA lt_error_message          TYPE bgrfc_message_tab.
+    DATA: lo_log TYPE REF TO /iwngw/cl_nc_logger.
+    lo_log = /iwngw/cl_nc_logger=>get_logger( ).
+
+    CLEAR : ev_queue_name.
+    " Create/Call queued background rfc
+    " Default destination name constant no longer present, so give fixed destination name (previously was recommended).
+    lo_destination = cl_bgrfc_destination_inbound=>create( gc_bgrfc_queue_name ).
+    eo_unit = lo_destination->create_qrfc_unit( ).
+
+    " In order to allow a commit trigger by the external caller, the commit check of the bgRFC runtime must be disabled.
+    eo_unit->disable_commit_checks( ).
+
+    " construct queue name
+    """"""""""""""""""""""""""
+    " BEGIN QUEUE ID CREATION
+    """"""""""""""""""""""""""
+    " max for queue ID is 40
+    " convert timestamp to string (21 characters) + 18 more characters from the provider id + initial 'Q' char => 40 characters max for queue ID
+    GET TIME STAMP FIELD lv_ts.
+    lv_string_timestamp = lv_ts.
+
+    SPLIT lv_string_timestamp AT lv_split_char INTO lv_datetime lv_secfrac.
+    lv_provider_name_subs = iv_provider_id+0(18).
+
+    "Get the queue prefix
+    CALL FUNCTION 'BGRFC_CONF_READ_INB_DEST'
+      EXPORTING
+        dest_name     = gc_bgrfc_queue_name
+      IMPORTING
+        queue_prefix  = lt_queue_prefix
+        error_message = lt_error_message.
+
+    IF lines( lt_error_message ) > 0.
+      lo_log->log_message(
+      EXPORTING
+        iv_msg_type = 'E'
+        iv_msg_id = /iwngw/cx_bep_out_pr_rfc=>bgrfc_prefix_error-msgid
+        iv_msg_number = /iwngw/cx_bep_out_pr_rfc=>bgrfc_prefix_error-msgno ).
+      RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+        EXPORTING
+          textid             = /iwngw/cx_bep_out_pr_rfc=>bgrfc_prefix_error
+          exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration.
+    ELSEIF lines( lt_queue_prefix ) = 0.
+      lo_log->log_message(
+      EXPORTING
+        iv_msg_type = 'E'
+        iv_msg_id = /iwngw/cx_bep_out_pr_rfc=>bgrfc_no_prefix_error-msgid
+        iv_msg_number = /iwngw/cx_bep_out_pr_rfc=>bgrfc_no_prefix_error-msgno ).
+      RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+        EXPORTING
+          textid             = /iwngw/cx_bep_out_pr_rfc=>bgrfc_no_prefix_error
+          exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration.
+    ELSEIF lines( lt_queue_prefix ) > 1.
+      lo_log->log_message(
+      EXPORTING
+        iv_msg_type = 'E'
+        iv_msg_id = /iwngw/cx_bep_out_pr_rfc=>bgrfc_more_prefix_error-msgid
+        iv_msg_number = /iwngw/cx_bep_out_pr_rfc=>bgrfc_more_prefix_error-msgno ).
+      RAISE EXCEPTION TYPE /iwngw/cx_bep_out_pr_rfc
+        EXPORTING
+          textid             = /iwngw/cx_bep_out_pr_rfc=>bgrfc_more_prefix_error
+          exception_category = /iwngw/cx_bep_out_pr_rfc=>gcs_excep_categories-configuration.
+    ENDIF.
+    READ TABLE lt_queue_prefix INTO lv_queue_prefix INDEX 1.
+    IF sy-subrc = 0.
+      CONCATENATE lv_queue_prefix lv_datetime lv_secfrac lv_provider_name_subs INTO ev_queue_name.
+    ENDIF.
+
+    """"""""""""""""""""""""
+    " END QUEUE ID CREATION
+    """"""""""""""""""""""""
+
+  ENDMETHOD.
+ENDCLASS.

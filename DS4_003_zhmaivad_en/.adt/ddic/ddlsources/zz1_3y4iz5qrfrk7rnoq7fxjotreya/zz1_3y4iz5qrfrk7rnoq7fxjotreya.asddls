@@ -1,0 +1,8 @@
+@AbapCatalog.internal.setChange: 'FLDADD_NO_ASS_INFLUENCE'
+@AbapCatalog.sqlViewAppendName: 'ZZ1_1C8E1DE6E842'
+
+extend view E_PURCHASINGDOCUMENTITEM with ZZ1_3Y4IZ5QRFRK7RNOQ7FXJOTREYA
+  
+{ 
+  Persistence.ZZ1_ZFSH_MG_AT_1_PDI as ZZ1_ZFSH_MG_AT_1_PDI
+}

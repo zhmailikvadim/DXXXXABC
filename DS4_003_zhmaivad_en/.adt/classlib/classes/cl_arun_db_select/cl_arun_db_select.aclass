@@ -1,0 +1,1851 @@
+class CL_ARUN_DB_SELECT definition
+  public
+  create public .
+
+public section.
+
+  interfaces IF_ATP_PAC_SELECT_BDBS .
+
+  types TY_GRANULARITY type CHAR1 .
+  types:
+    BEGIN OF ty_batch_stock,
+        material         TYPE matnr,
+        plant            TYPE werks_d,
+        storage_location TYPE lgort_d,
+        batch            TYPE charg_d,
+        alloc_qty        TYPE arun_alloc_qty,
+      END OF ty_batch_stock .
+  types:
+    tt_batch_stock TYPE SORTED TABLE OF ty_batch_stock WITH UNIQUE KEY material plant storage_location batch .
+  types:
+    tt_sloc_stock TYPE SORTED TABLE OF ty_batch_stock WITH UNIQUE KEY material plant storage_location .
+  types:
+    BEGIN OF ty_bdbs_out,
+             salesdoc_num  TYPE arun_bdbs-salesdoc_num,
+             salesdoc_item TYPE arun_bdbs-salesdoc_item,
+             alloc_qty     TYPE arun_bdbs-alloc_qty,
+             req_ind       TYPE arun_bdbs-req_ind,
+           END OF ty_bdbs_out .
+  types:
+    tt_bdbs_out TYPE SORTED TABLE OF ty_bdbs_out WITH NON-UNIQUE KEY salesdoc_num salesdoc_item .
+  types:
+    BEGIN OF ty_bdbs_data.
+      INCLUDE TYPE arun_bdbs.
+  types: demand_lgort TYPE lgort_d,
+         demand_charg TYPE charg_d,
+    END OF ty_bdbs_data .
+  types:
+    tt_bdbs_data TYPE STANDARD TABLE OF ty_bdbs_data .
+  types:
+    tt_bdbs_afpo_data TYPE STANDARD TABLE OF ty_bdbs_data
+                      WITH NON-UNIQUE SORTED KEY mat COMPONENTS material plant stk_segment delivery_date_po
+                      WITH NON-UNIQUE SORTED KEY ord COMPONENTS prodord_num prodord_item delivery_date_po .
+  types:
+    BEGIN OF ty_bdbs_aggr,
+      material            TYPE matnr,
+      plant               TYPE werks_d,
+      storage_location    TYPE lgort_d,
+      batch               TYPE charg_d,
+      material_avail_date TYPE mbdat,
+      req_ind             TYPE arun_bdart,
+      req_segment         TYPE sgt_rcat,
+      alloc_qty           TYPE arun_alloc_qty,
+    END OF ty_bdbs_aggr .
+
+  constants C_GRANULARITY_ORDER type TY_GRANULARITY value 'O' ##NO_TEXT.
+  constants C_GRANULARITY_ATPCAT type TY_GRANULARITY value 'A' ##NO_TEXT.
+  constants C_GRANULARITY_TIMESERIES type TY_GRANULARITY value 'T' ##NO_TEXT.
+  class-data MV_ALLOC_EXISTS type ABAP_BOOL .
+  class-data MS_STOCK_TYPE type ARUN_ITA_STOCK_SELECTION .
+  class-data MV_PREV type XFELD .
+
+  class-methods GET_INSTANCE
+    returning
+      value(RO_BDBS) type ref to CL_ARUN_DB_SELECT .
+  methods READ_PREVIEW
+    importing
+      !IS_RANGE type IF_ATP_PAC_DB_SELECT=>TS_WERKS_MATNR_RANGE .
+protected section.
+
+  data MT_BDBS type TT_BDBS_DATA .
+  data MT_BDBS_STOCK type TT_SLOC_STOCK .
+  data MT_BDBS_VBBE type TT_BDBS_DATA .
+  data MT_BDBS_EKES type TT_BDBS_DATA .
+  data MT_BDBS_EKET type TT_BDBS_DATA .
+  data MT_BDBS_BATCH type TT_BATCH_STOCK .
+  data MT_BDBS_EKUB type TT_BDBS_DATA .
+  data MT_BDBS_AFPO type TT_BDBS_AFPO_DATA .
+  data MT_BDBS_RESB type TT_BDBS_DATA .
+private section.
+
+  class-data MO_BDBS type ref to CL_ARUN_DB_SELECT .
+  data MT_ARUN_MATERIALS type IF_ARUN_COMMON=>TT_ARUN_MATERIALS .
+  data MT_DEDUCTED_OBD type IF_ATP_PAC_DB_SELECT=>TT_NORM_VBBE .
+
+  methods READ_BDBS
+    importing
+      !IS_RANGE type IF_ATP_PAC_DB_SELECT=>TS_WERKS_MATNR_RANGE .
+  methods ADJUST_STOCK
+    changing
+      !CT_STOCK type IF_ATP_PAC_DB_SELECT=>TT_NORM_STOCK .
+ENDCLASS.
+
+
+
+CLASS CL_ARUN_DB_SELECT IMPLEMENTATION.
+
+
+  METHOD adjust_stock.
+
+    IF mt_bdbs IS NOT INITIAL.
+
+    TYPES:
+      BEGIN OF ts_stock_key,
+        material         TYPE matnr,
+        plant            TYPE werks_d,
+        stock_source     TYPE arun_bskz,
+        batch            TYPE charg_d,
+        storage_location TYPE lgort_d,
+      END OF ts_stock_key.
+
+    DATA: ls_stock_key  TYPE ts_stock_key.
+*          lt_bdbs       TYPE arun_tt_bdbstab,
+*          lv_reqqty     TYPE omeng,
+*          lv_alloc_qty  TYPE arun_alloc_qty,
+*          ls_bdbs_stock TYPE ty_batch_stock.
+
+*    FIELD-SYMBOLS: <lfs_bdbs_stock> LIKE LINE OF mt_bdbs_stock,
+*                   <lfs_bdbs_batch> LIKE LINE OF mt_bdbs_batch,
+*                   <ls_norm_stock>  LIKE LINE OF mt_bdbs_stock.
+
+    TYPES: BEGIN OF ty_sloc_stock,
+       material TYPE matnr,
+       plant    TYPE werks_d,
+       storage_location TYPE lgort_d,
+       batch    TYPE charg_d,
+       stk_segment TYPE sgt_scat,
+       alloc_qty TYPE arun_alloc_qty,
+     END OF ty_sloc_stock .
+
+     DATA: lt_bdbs_stock TYPE SORTED TABLE OF ty_sloc_stock WITH UNIQUE KEY material plant storage_location stk_segment,
+              lt_bdbs_batch TYPE SORTED TABLE OF ty_sloc_stock WITH UNIQUE KEY material plant storage_location batch,
+              ls_bdbs_stk   TYPE ty_sloc_stock.
+
+     FIELD-SYMBOLS: <fs_norm> TYPE ty_sloc_stock,
+                    <fs_bdbs_stock> TYPE ty_sloc_Stock.
+
+    "first aggregate bdbs records batch and stock separately
+    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>) WHERE stock_source = 'S' OR
+                                                          stock_source = 'C'.
+       CHECK <fs_bdbs>-delivery_date_po IS INITIAL.
+       MOVE-CORRESPONDING <fs_bdbs> TO ls_stock_key.
+       IF ls_stock_key-stock_source = 'S'.
+         READ TABLE lt_bdbs_stock WITH KEY material = <fs_bdbs>-material
+                                           plant    =  <fs_bdbs>-plant
+                                           storage_location = <fs_bdbs>-storage_location
+                                           stk_segment = <fs_bdbs>-req_segment
+                                           "presently only 1:1 as TBD - from req segment get stock segment value
+                                           ASSIGNING <fs_bdbs_stock> BINARY SEARCH.
+       ELSEIF ls_stock_key-stock_source = 'C'.
+         READ TABLE lt_bdbs_batch WITH KEY material = ls_stock_key-material
+                                           plant =  ls_stock_key-plant
+                                           storage_location = ls_stock_key-storage_location
+                                           batch = ls_Stock_key-batch
+                                           ASSIGNING <fs_bdbs_stock> BINARY SEARCH.
+       ENDIF.
+
+       IF sy-subrc EQ 0.
+         <fs_bdbs_stock>-alloc_qty = <fs_bdbs>-alloc_qty + <fs_bdbs_stock>-alloc_qty.
+       ELSE.
+         MOVE-CORRESPONDING <fs_bdbs> TO ls_bdbs_stk.
+         "presently only 1:1 as TBD - from req segment get stock segment value
+         ls_bdbs_stk-stk_segment = <fs_bdbs>-req_segment.
+         IF ls_stock_key-stock_source = 'S'.
+           INSERT ls_bdbs_stk INTO TABLE lt_bdbs_stock.
+         ELSEIF ls_stock_key-stock_source = 'C'.
+           INSERT ls_bdbs_Stk INTO TABLE lt_bdbs_batch.
+         ENDIF.
+         CLEAR ls_bdbs_stk.
+       ENDIF.
+     ENDLOOP.
+
+    "now append the inverted value to ct_stock
+    IF lt_bdbs_stock IS NOT INITIAL.
+      DATA: ls_stock_alloc TYPE if_atp_pac_db_select=>ts_atp_norm_stock,
+            lt_Stock_Alloc TYPE if_atp_pac_db_select=>tt_norm_stock.
+      LOOP AT lt_bdbs_stock ASSIGNING <fs_norm>.
+        ls_stock_alloc-matnr = <fs_norm>-material.
+        ls_stock_alloc-werks = <fs_norm>-plant.
+        ls_stock_alloc-lgort = <fs_norm>-storage_location.
+        ls_stock_alloc-sgt_catv = <fs_norm>-stk_segment.
+*        ls_stock_alloc-stock_type = '01'."no need to put stock type
+        ls_stock_alloc-atpdate = '19010101'."atp date set to this value
+        ls_stock_alloc-reqqty = -1 * <fs_norm>-alloc_qty.
+        APPEND ls_stock_alloc TO lt_stock_alloc.
+      ENDLOOP.
+    ENDIF.
+    IF lt_bdbs_batch IS NOT INITIAL.
+      LOOP AT lt_bdbs_batch ASSIGNING <fs_norm>.
+        ls_stock_alloc-matnr = <fs_norm>-material.
+        ls_stock_alloc-werks = <fs_norm>-plant.
+        ls_stock_alloc-lgort = <fs_norm>-storage_location.
+        ls_stock_alloc-charg = <fs_norm>-batch.
+*        ls_stock_alloc-stock_type = '01'."need to check on this
+        ls_stock_alloc-atpdate = '19010101'."need to check on this
+        ls_stock_alloc-reqqty = -1 * <fs_norm>-alloc_qty.
+        APPEND ls_stock_alloc TO lt_stock_alloc.
+      ENDLOOP.
+    ENDIF.
+   ENDIF.
+
+     IF mt_deducted_obd IS NOT INITIAL.
+*     Deducted OBDs should be removed from Stock as well
+      LOOP AT mt_deducted_obd ASSIGNING FIELD-SYMBOL(<lfs_deducted_obd>).
+        CLEAR: ls_stock_alloc.
+        ls_stock_alloc-matnr = <lfs_deducted_obd>-matnr.
+        ls_stock_alloc-werks = <lfs_deducted_obd>-werks.
+        ls_stock_alloc-lgort = <lfs_deducted_obd>-lgort.
+        ls_stock_alloc-charg = <lfs_deducted_obd>-charg.
+        ls_stock_alloc-sgt_catv = <lfs_deducted_obd>-sgt_catv.
+        ls_stock_alloc-sgt_scat = <lfs_deducted_obd>-sgt_rcat.
+        ls_stock_alloc-sgt_rcat = <lfs_deducted_obd>-sgt_rcat.
+        ls_stock_alloc-stock_type = '01'.
+        ls_stock_alloc-atpdate = '19010101'."need to check on this
+        ls_stock_alloc-reqqty = -1 * <lfs_deducted_obd>-reqqty.
+        APPEND ls_stock_alloc TO lt_stock_alloc.
+        ENDLOOP.
+     ENDIF.
+
+    APPEND LINES OF lt_stock_alloc TO ct_stock.
+
+
+**    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<lfs_bdbs>) WHERE stock_source = 'S' OR
+**                                                             stock_source = 'C'.
+**
+**      MOVE-CORRESPONDING <lfs_bdbs> TO ls_stock_key.
+**      IF ls_stock_key-stock_source = 'S'.
+**        READ TABLE mt_bdbs_stock WITH KEY material = ls_stock_key-material
+**                                          plant    =  ls_stock_key-plant
+**                                          storage_location = ls_stock_key-storage_location
+**                                          ASSIGNING <lfs_bdbs_stock> BINARY SEARCH.
+**      ELSEIF ls_stock_key-stock_source = 'C'.
+**        READ TABLE mt_bdbs_batch WITH KEY material = ls_stock_key-material
+**                                          plant =  ls_stock_key-plant
+**                                          storage_location = ls_stock_key-storage_location
+**                                          batch = ls_Stock_key-batch
+**                                          ASSIGNING <lfs_bdbs_stock> BINARY SEARCH.
+**      ENDIF.
+**      IF sy-subrc EQ 0.
+**        <lfs_bdbs_stock>-alloc_qty = <lfs_bdbs>-alloc_qty + <lfs_bdbs_stock>-alloc_qty.
+**      ELSE.
+**        MOVE-CORRESPONDING <lfs_bdbs> TO ls_bdbs_stock.
+**        IF ls_stock_key-stock_source = 'S'.
+**          INSERT ls_bdbs_stock INTO TABLE mt_bdbs_stock.
+**        ELSEIF ls_stock_key-stock_source = 'C'.
+**          INSERT ls_bdbs_Stock INTO TABLE mt_bdbs_batch.
+**        ENDIF.
+**        CLEAR ls_bdbs_stock.
+**      ENDIF.
+**    ENDLOOP.
+**    "poc for batch not fixed by arun
+***    IF sy-uname = 'GADRE'.
+***      IF mt_bdbs_stock IS NOT INITIAL.
+***         DATA: ls_stock_alloc TYPE if_atp_pac_db_select=>ts_atp_norm_stock,
+***               lt_Stock_Alloc TYPE if_atp_pac_db_select=>tt_norm_stock.
+***         LOOP AT mt_bdbs_stock ASSIGNING <ls_norm_stock>.
+***           ls_stock_alloc-matnr = <ls_norm_stock>-material.
+***           ls_stock_alloc-werks = <ls_norm_stock>-plant.
+***           ls_stock_alloc-lgort = <ls_norm_stock>-storage_location.
+****           ls_stock_alloc-stock_type = '01'."need to check on this
+***           ls_stock_alloc-atpdate = '19010101'."need to check on this
+***           ls_stock_alloc-reqqty = -1 * <ls_norm_stock>-alloc_qty.
+***           APPEND ls_stock_alloc TO lt_stock_alloc.
+***         ENDLOOP.
+***       ENDIF.
+***      IF mt_bdbs_batch IS NOT INITIAL.
+***        LOOP AT mt_bdbs_batch ASSIGNING <ls_norm_stock>.
+***          ls_stock_alloc-matnr = <ls_norm_stock>-material.
+***          ls_stock_alloc-werks = <ls_norm_stock>-plant.
+***          ls_stock_alloc-lgort = <ls_norm_stock>-storage_location.
+***          ls_stock_alloc-charg = <ls_norm_stock>-batch.
+****          ls_stock_alloc-stock_type = '01'."need to check on this
+***          ls_stock_alloc-atpdate = '19010101'."need to check on this
+***          ls_stock_alloc-reqqty = -1 * <ls_norm_stock>-alloc_qty.
+***          APPEND ls_stock_alloc TO lt_stock_alloc.
+***        ENDLOOP.
+***      ENDIF.
+***       APPEND LINES OF lt_stock_alloc TO ct_stock.
+***       EXIT.
+***     ENDIF.
+**     "end of poc coding
+**    SORT ct_stock BY matnr werks stock_type.
+**
+**    LOOP AT ct_stock ASSIGNING FIELD-SYMBOL(<lfs_stock>).
+**
+**      READ TABLE mt_bdbs_batch ASSIGNING <ls_norm_stock>
+**                                             WITH KEY material = <lfs_stock>-matnr
+**                                                      plant = <lfs_stock>-werks
+**                                                      storage_location = <lfs_stock>-lgort
+**                                                      batch = <lfs_stock>-charg
+**                                                      BINARY SEARCH.
+**      IF sy-subrc NE 0.
+**        READ TABLE mt_bdbs_stock ASSIGNING <ls_norm_stock>
+**                                            WITH KEY material = <lfs_stock>-matnr
+**                                                     plant    = <lfs_stock>-werks
+**                                                     storage_location = <lfs_stock>-lgort
+**                                                     BINARY SEARCH.
+**      ENDIF.
+**
+**      IF sy-subrc EQ 0
+**      AND <ls_norm_stock>-alloc_qty  > 0.
+**        lv_reqqty = <lfs_stock>-reqqty.
+**        lv_alloc_qty = <ls_norm_stock>-alloc_qty.
+**        IF lv_alloc_qty > lv_reqqty.
+**          <ls_norm_stock>-alloc_qty = lv_alloc_qty - lv_reqqty.
+**          <lfs_stock>-reqqty = 0.
+**        ELSE.
+**          <ls_norm_stock>-alloc_qty = 0.
+**          <lfs_stock>-reqqty =  lv_reqqty - lv_alloc_qty.
+**        ENDIF.
+**      ENDIF.
+**
+**    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get_instance.
+    IF mo_bdbs IS INITIAL.
+      CREATE OBJECT mo_bdbs TYPE cl_arun_db_select.
+    ENDIF.
+    ro_bdbs = mo_bdbs.
+    REFRESH mo_bdbs->mt_bdbs.
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_afpo_by_bdbs.
+
+    DATA(lo_arun_util) = NEW cl_arun_utilities( ).
+
+    TYPES:
+      BEGIN OF lty_afpo_key,
+        material         TYPE matnr,
+        plant            TYPE werks_d,
+        prodord_num      TYPE aufnr,
+        prodord_item     TYPE co_posnr,
+        delivery_date_po TYPE arun_edatp,
+        stk_segment      TYPE sgt_scat,
+      END OF lty_afpo_key.
+
+    DATA: ls_afpo_key        TYPE lty_afpo_key,
+          lt_bdbs            TYPE arun_tt_bdbstab,
+          lv_reqqty          TYPE omeng,
+          lv_cnfqty          TYPE vmeng,
+          lv_alloc_qty       TYPE arun_alloc_qty,
+          lt_norm_eket       TYPE if_atp_pac_db_select=>tt_norm_afpo,
+          lt_norm_eket_final TYPE if_atp_pac_db_select=>tt_norm_afpo.
+
+
+    CHECK mt_bdbs IS NOT INITIAL.
+
+    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<lfs_bdbs>) WHERE stock_source = 'F'.
+
+      MOVE-CORRESPONDING <lfs_bdbs> TO ls_afpo_key.
+
+      IF iv_granularity = c_granularity_atpcat
+      OR iv_granularity = c_granularity_timeseries.
+
+        READ TABLE mt_bdbs_afpo ASSIGNING FIELD-SYMBOL(<lfs_bdbs_afpo>)
+                                WITH KEY mat COMPONENTS material = ls_afpo_key-material
+                                         plant    = ls_afpo_key-plant
+                                         stk_segment = ls_afpo_key-stk_segment
+                                         delivery_date_po = ls_afpo_key-delivery_date_po.
+      ELSEIF iv_granularity = c_granularity_order.
+        READ TABLE mt_bdbs_afpo ASSIGNING <lfs_bdbs_afpo>
+                                WITH KEY ord COMPONENTS prodord_num  = ls_afpo_key-prodord_num
+                                         prodord_item = ls_afpo_key-prodord_item
+                                         delivery_date_po = ls_afpo_key-delivery_date_po.
+      ENDIF.
+
+      IF sy-subrc IS INITIAL.
+        <lfs_bdbs_afpo>-alloc_qty = <lfs_bdbs>-alloc_qty + <lfs_bdbs_afpo>-alloc_qty.
+      ELSE.
+        APPEND <lfs_bdbs> TO mt_bdbs_afpo.
+      ENDIF.
+    ENDLOOP.
+
+    IF mt_bdbs_afpo IS NOT INITIAL.
+      SELECT werks, fabkl
+             FROM t001w
+             INTO TABLE @DATA(lt_t001w)
+             FOR ALL ENTRIES IN @mt_bdbs_afpo
+             WHERE werks = @mt_bdbs_afpo-plant.
+      SORT lt_t001w BY werks.
+
+      LOOP AT ct_norm_afpo ASSIGNING FIELD-SYMBOL(<lfs_afpo>).
+
+        READ TABLE lt_t001w ASSIGNING FIELD-SYMBOL(<lfs_t001w>)
+                            WITH KEY werks = <lfs_bdbs>-plant
+                            BINARY SEARCH.
+
+        CALL METHOD lo_arun_util->add_working_days
+          EXPORTING
+            iv_date  = <lfs_afpo>-dgltp
+            iv_days  = <lfs_afpo>-webaz
+            iv_calid = <lfs_t001w>-fabkl
+          IMPORTING
+            ev_date  = DATA(lv_afpo_date).
+
+        IF iv_granularity = c_granularity_atpcat
+         OR iv_granularity = c_granularity_timeseries.
+          READ TABLE mt_bdbs_afpo ASSIGNING FIELD-SYMBOL(<ls_norm_afpo>)
+                                  WITH KEY mat COMPONENTS material = <lfs_afpo>-matnr
+                                           plant    = <lfs_afpo>-werks
+                                           stk_segment = <lfs_afpo>-sgt_scat
+                                           delivery_date_po =  lv_afpo_date.
+        ELSEIF iv_granularity = c_granularity_order.
+          READ TABLE mt_bdbs_afpo ASSIGNING <ls_norm_afpo>
+                                             WITH KEY ord COMPONENTS prodord_num = <lfs_afpo>-del12
+                                              prodord_item =  <lfs_afpo>-delps
+                                              delivery_date_po =  lv_afpo_date.
+        ENDIF.
+        IF sy-subrc EQ 0.
+          lv_reqqty = <lfs_afpo>-reqqty.
+          lv_cnfqty = <lfs_afpo>-cnfqty.
+          lv_alloc_qty = <ls_norm_afpo>-alloc_qty.
+
+          <lfs_afpo>-reqqty =  lv_reqqty - lv_alloc_qty.
+          <lfs_afpo>-cnfqty =  lv_cnfqty - lv_alloc_qty.
+
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_db_state_by_bdbs.
+    DATA: ls_reqmt             TYPE if_arun_common=>ty_dealloc_reqmt,
+          lv_allocated_qty     TYPE arun_alloc_qty,
+          lv_material_baseunit TYPE meins.
+    DATA(lo_arun_dealloc) = cl_arun_atp_controller=>get_instance( )->get_arun_dealloc( ).
+
+    LOOP AT ct_delta ASSIGNING FIELD-SYMBOL(<lfs_delta>).
+      IF <lfs_delta>-atpcat = 'VC' OR
+         <lfs_delta>-atpcat = if_arun_common=>order_wo_charge OR
+         <lfs_delta>-atpcat = if_arun_common=>contract.
+        ls_reqmt-vbeln = <lfs_delta>-delnr.
+        ls_reqmt-posnr = <lfs_delta>-delps.
+      ELSEIF <lfs_delta>-atpcat = 'U1'.
+        ls_reqmt-ebeln  = <lfs_delta>-delnr.
+        ls_reqmt-ebelp = <lfs_delta>-delps.
+*Note 3055321 S
+      ELSEIF <lfs_delta>-atpcat = if_arun_common=>prod_ord_component OR
+             <lfs_delta>-atpcat = if_arun_common=>sub_contract_po OR
+             <lfs_delta>-atpcat = 'WR'. " released prod ord component
+        ls_reqmt-rsnum  = <lfs_delta>-delnr.
+        ls_reqmt-rspos = <lfs_delta>-delps.
+*Note 3055321 E
+      ENDIF.
+      IF <lfs_delta>-reqqty > 0 OR <lfs_delta>-reqqty_original > 0.
+        CLEAR ls_reqmt-cnfdat.
+        ls_reqmt-edatu = <lfs_delta>-atpdate.
+        lo_arun_dealloc->read_allocated_quantity(
+          EXPORTING
+            is_reqmt = ls_reqmt
+            iv_dbstate = abap_true
+            lv_plant = <lfs_delta>-werks
+          IMPORTING
+            ev_alloc_qty = lv_allocated_qty
+            ev_material_baseunit = lv_material_baseunit
+         ).
+        IF sy-subrc EQ 0.
+          IF <lfs_delta>-meins  IS INITIAL
+             OR <lfs_delta>-meins = lv_material_baseunit.
+            IF <lfs_delta>-reqqty > 0.
+             <lfs_delta>-reqqty = <lfs_delta>-reqqty - lv_allocated_qty.
+            ENDIF.
+            IF <lfs_delta>-reqqty_original > 0.
+             <lfs_delta>-reqqty_original = <lfs_delta>-reqqty_original - lv_allocated_qty.
+            ENDIF.
+          ELSE.
+* If base UoM and Order UoM are not same - UoM conversion required.
+            lv_allocated_qty = lv_allocated_qty * <lfs_delta>-umren / <lfs_delta>-umrez.
+            IF <lfs_delta>-reqqty > 0.
+             <lfs_delta>-reqqty = <lfs_delta>-reqqty - lv_allocated_qty.
+            ENDIF.
+            IF <lfs_delta>-reqqty_original > 0.
+             <lfs_delta>-reqqty_original = <lfs_delta>-reqqty_original - lv_allocated_qty.
+            ENDIF.
+          ENDIF.
+
+        ENDIF.
+
+      ENDIF.
+      IF <lfs_delta>-cnfqty > 0.
+        CLEAR ls_reqmt-edatu.
+        ls_reqmt-cnfdat = <lfs_delta>-atpdate.
+        lo_arun_dealloc->read_allocated_quantity(
+          EXPORTING
+            is_reqmt = ls_reqmt
+            iv_dbstate = abap_true
+            lv_plant = <lfs_delta>-werks
+          IMPORTING
+            ev_alloc_qty = lv_allocated_qty
+            ev_material_baseunit = lv_material_baseunit
+         ).
+        IF sy-subrc EQ 0.
+          IF <lfs_delta>-meins  IS INITIAL
+             OR <lfs_delta>-meins = lv_material_baseunit.
+            <lfs_delta>-cnfqty = <lfs_delta>-cnfqty - lv_allocated_qty.
+          ELSE.
+* If base UoM and Order UoM are not same - UoM conversion required.
+            lv_allocated_qty = lv_allocated_qty * <lfs_delta>-umren / <lfs_delta>-umrez.
+            <lfs_delta>-cnfqty = <lfs_delta>-cnfqty - lv_allocated_qty.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_ekes_by_bdbs.
+
+    TYPES:
+      BEGIN OF ts_ekes_key,
+        material         TYPE matnr,
+        plant            TYPE werks_d,
+        purchord_num     TYPE ebeln,
+        purchord_item    TYPE ebelp,
+        confirmation_no  TYPE etens,
+        delivery_date_po TYPE arun_edatp,
+        stk_segment      TYPE sgt_scat,
+      END OF ts_ekes_key.
+
+    DATA:
+      ls_ekes_key  TYPE ts_ekes_key,
+*     lt_bdbs      TYPE arun_tt_bdbstab,
+      lv_reqqty    TYPE omeng,
+      lv_cnfqty    TYPE vmeng,
+      lv_alloc_qty TYPE arun_alloc_qty.
+*     lt_norm_ekes TYPE if_atp_pac_db_select=>tt_norm_ekes,
+*     lt_norm_ekes_final LIKE lt_norm_ekes.
+
+    FIELD-SYMBOLS: <lfs_bdbs_ekes> TYPE ty_bdbs_data,
+                   <ls_norm_ekes>  TYPE ty_bdbs_data.
+
+    DATA: lt_bdbs_ekes_mat TYPE SORTED TABLE OF ty_bdbs_data
+                       WITH UNIQUE KEY material plant stk_segment delivery_date_po,
+          lt_bdbs_ekes_stk TYPE SORTED TABLE OF ty_bdbs_data
+                       WITH UNIQUE KEY purchord_num purchord_item confirmation_no delivery_date_po.
+
+    CHECK mt_bdbs IS NOT INITIAL.
+
+    "  To fix performance issue ( Changed the standard internal table to sorted table )
+    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>) WHERE stock_source = 'L'.
+
+      MOVE-CORRESPONDING <fs_bdbs> TO ls_ekes_key.
+
+      IF iv_granularity = c_granularity_atpcat
+      OR iv_granularity = c_granularity_timeseries.
+
+        READ TABLE lt_bdbs_ekes_mat WITH TABLE KEY material = ls_ekes_key-material
+                                                   plant    =  ls_ekes_key-plant
+                                                   stk_segment =  ls_ekes_key-stk_segment
+                                                   delivery_date_po = ls_ekes_key-delivery_date_po
+                                                   ASSIGNING <lfs_bdbs_ekes>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_ekes>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_ekes>-alloc_qty.
+        ELSE.
+          INSERT  <fs_bdbs> INTO TABLE lt_bdbs_ekes_mat.
+        ENDIF.
+      ELSEIF iv_granularity = c_granularity_order.
+        READ TABLE lt_bdbs_ekes_stk WITH TABLE KEY purchord_num     = ls_ekes_key-purchord_num
+                                                   purchord_item    = ls_ekes_key-purchord_item
+                                                   confirmation_no  = ls_ekes_key-confirmation_no
+                                                   delivery_date_po = ls_ekes_key-delivery_date_po
+                                                   ASSIGNING <lfs_bdbs_ekes>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_ekes>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_ekes>-alloc_qty.
+        ELSE.
+          INSERT <fs_bdbs> INTO TABLE lt_bdbs_ekes_stk.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT ct_norm_ekes ASSIGNING FIELD-SYMBOL(<fs_norm_ekes>).
+
+
+      IF iv_granularity = c_granularity_atpcat
+       OR iv_granularity = c_granularity_timeseries.
+        READ TABLE lt_bdbs_ekes_mat ASSIGNING <ls_norm_ekes>
+                                               WITH TABLE KEY material = <fs_norm_ekes>-matnr
+                                                              plant = <fs_norm_ekes>-werks
+                                                              stk_segment = <fs_norm_ekes>-sgt_scat
+                                                              delivery_date_po =  <fs_norm_ekes>-atpdate.
+      ELSEIF iv_granularity = c_granularity_order.
+        READ TABLE lt_bdbs_ekes_stk ASSIGNING <ls_norm_ekes>
+                                           WITH TABLE KEY purchord_num     = <fs_norm_ekes>-delnr
+                                                          purchord_item    = <fs_norm_ekes>-delps
+                                                          confirmation_no  = <fs_norm_ekes>-delet
+                                                          delivery_date_po = <fs_norm_ekes>-atpdate.
+      ENDIF.
+      IF sy-subrc EQ 0.
+        lv_reqqty = <fs_norm_ekes>-reqqty.
+        lv_cnfqty = <fs_norm_ekes>-cnfqty.
+        lv_alloc_qty = <ls_norm_ekes>-alloc_qty.
+
+        <fs_norm_ekes>-reqqty =  lv_reqqty - lv_alloc_qty.
+        <fs_norm_ekes>-cnfqty =  lv_cnfqty - lv_alloc_qty.
+        <ls_norm_ekes>-alloc_qty = <ls_norm_ekes>-alloc_qty - lv_alloc_qty.
+
+      ENDIF.
+    ENDLOOP.
+
+*======================================================================================================
+
+*   LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<lfs_bdbs>) WHERE stock_source = 'L'.
+*
+*      MOVE-CORRESPONDING <lfs_bdbs> TO ls_ekes_key.
+*
+*      IF iv_granularity = c_granularity_atpcat
+*      OR iv_granularity = c_granularity_timeseries.
+*
+*        READ TABLE mt_bdbs_ekes WITH KEY material = ls_ekes_key-material
+*                                         plant =  ls_ekes_key-plant
+*                                         requested_date = ls_ekes_key-delivery_date_po
+*                                         ASSIGNING <lfs_bdbs_ekes>.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE mt_bdbs_ekes WITH KEY purchord_num     = ls_ekes_key-purchord_num
+*                                         purchord_item    = ls_ekes_key-purchord_item
+*                                         confirmation_no  = ls_ekes_key-confirmation_no
+*                                         delivery_date_po = ls_ekes_key-delivery_date_po
+*                                        ASSIGNING <lfs_bdbs_ekes>.
+*      ENDIF.
+*
+*      IF sy-subrc EQ 0.
+*        <lfs_bdbs_ekes>-alloc_qty = <lfs_bdbs>-alloc_qty + <lfs_bdbs_ekes>-alloc_qty.
+*      ELSE.
+*        APPEND <lfs_bdbs> TO mt_bdbs_ekes.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    LOOP AT ct_norm_ekes ASSIGNING FIELD-SYMBOL(<lfs_ekes>).
+*
+*      IF iv_granularity = c_granularity_atpcat
+*       OR iv_granularity = c_granularity_timeseries.
+*        READ TABLE mt_bdbs_ekes ASSIGNING <ls_norm_ekes>
+*                                               WITH KEY material = <lfs_ekes>-matnr
+*                                                plant = <lfs_ekes>-werks
+*                                                delivery_date_po =  <lfs_ekes>-atpdate.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE mt_bdbs_ekes ASSIGNING <ls_norm_ekes>
+*                                           WITH KEY purchord_num     = <lfs_ekes>-delnr
+*                                                    purchord_item    = <lfs_ekes>-delps
+*                                                    confirmation_no  = <lfs_ekes>-delet
+*                                                    delivery_date_po = <lfs_ekes>-atpdate.
+*      ENDIF.
+*      IF sy-subrc EQ 0.
+*        lv_reqqty = <lfs_ekes>-reqqty.
+*        lv_cnfqty = <lfs_ekes>-cnfqty.
+*        lv_alloc_qty = <ls_norm_ekes>-alloc_qty.
+*
+*        <lfs_ekes>-reqqty =  lv_reqqty - lv_alloc_qty.
+*        <lfs_ekes>-cnfqty =  lv_cnfqty - lv_alloc_qty.
+*        <ls_norm_ekes>-alloc_qty = <ls_norm_ekes>-alloc_qty - lv_alloc_qty.
+*
+*      ENDIF.
+*    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_eket_by_bdbs.
+
+    TYPES:
+      BEGIN OF ts_eket_key,
+        material         TYPE matnr,
+        plant            TYPE werks_d,
+        purchord_num     TYPE ebeln,
+        purchord_item    TYPE ebelp,
+        delivery_date_po TYPE arun_edatp,
+      END OF ts_eket_key.
+
+    DATA: ls_eket_key  TYPE ts_eket_key,
+*         lt_bdbs            TYPE arun_tt_bdbstab,
+          lv_reqqty    TYPE omeng,
+          lv_cnfqty    TYPE vmeng,
+          lv_alloc_qty TYPE arun_alloc_qty.
+*         lt_norm_eket       TYPE if_atp_pac_db_select=>tt_norm_eket,
+*         lt_norm_eket_final LIKE lt_norm_eket.
+
+    FIELD-SYMBOLS: <lfs_bdbs_eket> TYPE ty_bdbs_data,
+                   <ls_norm_eket>  TYPE ty_bdbs_data.
+    DATA: ls_norm_eket     TYPE if_atp_pac_db_select=>ts_atp_norm_eket,
+          lt_bdbs_eket_mat TYPE SORTED TABLE OF ty_bdbs_data
+                                WITH UNIQUE KEY material plant delivery_date_po,
+          lt_bdbs_eket_stk TYPE SORTED TABLE OF ty_bdbs_data
+                                WITH UNIQUE KEY purchord_num purchord_item delivery_date_po.
+
+    CHECK mt_bdbs IS NOT INITIAL.
+
+    IF iv_granularity = c_granularity_atpcat OR iv_granularity = c_granularity_timeseries.
+      "append to ct_norm_eket with inverted sign
+      LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>) WHERE stock_source = 'B'.
+        ls_norm_eket-bstyp = 'F'.
+        ls_norm_eket-matnr = <fs_bdbs>-material.
+        ls_norm_eket-werks = <fs_bdbs>-plant.
+*       ls_norm_eket-sgt_rcat = <fs_bdbs>-req_segment.
+        ls_norm_eket-sgt_scat = <fs_bdbs>-stk_segment.
+        ls_norm_eket-meins = <fs_bdbs>-material_baseunit.
+*       ls_norm_eket-umrez = '1'.
+*       ls_norm_eket-umren = '1'.
+        ls_norm_eket-lgort = <fs_bdbs>-storage_location.
+        ls_norm_eket-atpcat = 'BE'.
+
+        IF <fs_bdbs>-material_avail_date = <fs_bdbs>-requested_date.
+          "append only one record
+          ls_norm_eket-atpdate = <fs_bdbs>-delivery_date_po. " Blank ATP Date gives overconfirmation
+          ls_norm_eket-eldat  = <fs_bdbs>-delivery_date_po.
+          ls_norm_eket-eindt  = <fs_bdbs>-delivery_date_po.
+          ls_norm_eket-reqqty = -1 * <fs_bdbs>-alloc_qty.
+          ls_norm_eket-cnfqty = -1 * <fs_bdbs>-alloc_qty.
+          APPEND ls_norm_eket TO ct_norm_eket.
+        ELSE.
+          "append two records one for reqqty one for cnfqty
+          ls_norm_eket-atpdate = <fs_bdbs>-delivery_date_po. " Blank ATP Date gives overconfirmation
+          ls_norm_eket-eldat  = <fs_bdbs>-delivery_date_po.
+          ls_norm_eket-eindt  = <fs_bdbs>-delivery_date_po.
+          ls_norm_eket-reqqty = -1 * <fs_bdbs>-alloc_qty.
+          ls_norm_eket-cnfqty = 0.
+          APPEND ls_norm_eket TO ct_norm_eket.
+          ls_norm_eket-eldat  = <fs_bdbs>-delivery_date_po.
+          ls_norm_eket-eindt  = <fs_bdbs>-delivery_date_po.
+          ls_norm_eket-cnfqty = -1 * <fs_bdbs>-alloc_qty.
+          ls_norm_eket-reqqty = 0.
+          APPEND ls_norm_eket TO ct_norm_eket.
+        ENDIF.
+      ENDLOOP.
+
+    ELSEIF  iv_granularity = c_granularity_order.
+
+      LOOP AT mt_bdbs ASSIGNING <fs_bdbs> WHERE stock_source = 'B'.
+        MOVE-CORRESPONDING <fs_bdbs> TO ls_eket_key.
+        READ TABLE lt_bdbs_eket_stk WITH TABLE KEY purchord_num = ls_eket_key-purchord_num
+                                                   purchord_item =  ls_eket_key-purchord_item
+                                                   delivery_date_po = ls_eket_key-delivery_date_po
+                                                   ASSIGNING <lfs_bdbs_eket>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_eket>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_eket>-alloc_qty.
+        ELSE.
+          INSERT  <fs_bdbs> INTO TABLE lt_bdbs_eket_stk.
+        ENDIF.
+
+      ENDLOOP.
+
+      LOOP AT ct_norm_eket ASSIGNING FIELD-SYMBOL(<fs_norm_eket>).
+        READ TABLE lt_bdbs_eket_stk ASSIGNING <ls_norm_eket>
+                                           WITH TABLE KEY purchord_num = <fs_norm_eket>-delnr
+                                            purchord_item =  <fs_norm_eket>-delps
+                                            delivery_date_po =  <fs_norm_eket>-atpdate.
+                      "correction-> atpdate is filled when eldat is blank, atp also changed call of this method
+        IF sy-subrc EQ 0.
+          lv_reqqty = <fs_norm_eket>-reqqty.
+          lv_cnfqty = <fs_norm_eket>-cnfqty.
+          lv_alloc_qty = <ls_norm_eket>-alloc_qty.
+
+          <fs_norm_eket>-reqqty =  lv_reqqty - lv_alloc_qty.
+          <fs_norm_eket>-cnfqty =  lv_cnfqty - lv_alloc_qty.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+******************************************************************************************************
+******************************************************************************************************
+*    " To fix the preformance issue ( Changed the standard inernal table to sorted table )
+*    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>) WHERE stock_source = 'B'.
+*      MOVE-CORRESPONDING <fs_bdbs> TO ls_eket_key.
+*
+*      IF iv_granularity = c_granularity_atpcat
+*      OR iv_granularity = c_granularity_timeseries.
+*
+*        READ TABLE lt_bdbs_eket_mat WITH TABLE KEY material = ls_eket_key-material
+*                                                   plant    =  ls_eket_key-plant
+*                                                   delivery_date_po = ls_eket_key-delivery_date_po
+*                                                   ASSIGNING <lfs_bdbs_eket>.
+*        IF sy-subrc EQ 0.
+*          <lfs_bdbs_eket>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_eket>-alloc_qty.
+*        ELSE.
+*          INSERT <fs_bdbs> INTO TABLE lt_bdbs_eket_mat.
+*        ENDIF.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE lt_bdbs_eket_stk WITH TABLE KEY purchord_num = ls_eket_key-purchord_num
+*                                                   purchord_item =  ls_eket_key-purchord_item
+*                                                   delivery_date_po = ls_eket_key-delivery_date_po
+*                                                   ASSIGNING <lfs_bdbs_eket>.
+*        IF sy-subrc EQ 0.
+*          <lfs_bdbs_eket>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_eket>-alloc_qty.
+*        ELSE.
+*          INSERT  <fs_bdbs> INTO TABLE lt_bdbs_eket_stk.
+*        ENDIF.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    LOOP AT ct_norm_eket ASSIGNING FIELD-SYMBOL(<fs_norm_eket>).
+*      IF iv_granularity = c_granularity_atpcat
+*       OR iv_granularity = c_granularity_timeseries.
+*        READ TABLE lt_bdbs_eket_mat ASSIGNING <ls_norm_eket>
+*                                               WITH TABLE KEY material = <fs_norm_eket>-matnr
+*                                                plant = <fs_norm_eket>-werks
+*                                                delivery_date_po =  <fs_norm_eket>-eldat.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE lt_bdbs_eket_stk ASSIGNING <ls_norm_eket>
+*                                           WITH TABLE KEY purchord_num = <fs_norm_eket>-delnr
+*                                            purchord_item =  <fs_norm_eket>-delps
+*                                            delivery_date_po =  <fs_norm_eket>-eldat.
+*      ENDIF.
+*      IF sy-subrc EQ 0.
+*        lv_reqqty = <fs_norm_eket>-reqqty.
+*        lv_cnfqty = <fs_norm_eket>-cnfqty.
+*        lv_alloc_qty = <ls_norm_eket>-alloc_qty.
+*
+*        <fs_norm_eket>-reqqty =  lv_reqqty - lv_alloc_qty.
+*        <fs_norm_eket>-cnfqty =  lv_cnfqty - lv_alloc_qty.
+*      ENDIF.
+*    ENDLOOP.
+******************************************************************************************************
+******************************************************************************************************
+
+*=======================================================================================
+*    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<lfs_bdbs>) WHERE stock_source = 'B'.
+*
+*      MOVE-CORRESPONDING <lfs_bdbs> TO ls_eket_key.
+*
+*      IF iv_granularity = c_granularity_atpcat
+*      OR iv_granularity = c_granularity_timeseries.
+*
+*        READ TABLE mt_bdbs_eket WITH KEY material = ls_eket_key-material
+*                                          plant =  ls_eket_key-plant
+*                                          delivery_date_po = ls_eket_key-delivery_date_po
+*                                          ASSIGNING <lfs_bdbs_eket>.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE mt_bdbs_eket WITH KEY purchord_num = ls_eket_key-purchord_num
+*                                        purchord_item =  ls_eket_key-purchord_item
+*                                       delivery_date_po = ls_eket_key-delivery_date_po
+*                                        ASSIGNING <lfs_bdbs_eket>.
+*      ENDIF.
+*
+*      IF sy-subrc EQ 0.
+*        <lfs_bdbs_eket>-alloc_qty = <lfs_bdbs>-alloc_qty + <lfs_bdbs_eket>-alloc_qty.
+*      ELSE.
+*        APPEND <lfs_bdbs> TO mt_bdbs_eket.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    LOOP AT ct_norm_eket ASSIGNING FIELD-SYMBOL(<lfs_eket>).
+*
+*      IF iv_granularity = c_granularity_atpcat
+*       OR iv_granularity = c_granularity_timeseries.
+*        READ TABLE mt_bdbs_eket ASSIGNING <ls_norm_eket>
+*                                               WITH KEY material = <lfs_eket>-matnr
+*                                                plant = <lfs_eket>-werks
+*                                                delivery_date_po =  <lfs_eket>-eldat.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE mt_bdbs_eket ASSIGNING <ls_norm_eket>
+*                                           WITH KEY purchord_num = <lfs_eket>-delnr
+*                                            purchord_item =  <lfs_eket>-delps
+*                                            delivery_date_po =  <lfs_eket>-eldat.
+*      ENDIF.
+*      IF sy-subrc EQ 0.
+*        lv_reqqty = <lfs_eket>-reqqty.
+*        lv_cnfqty = <lfs_eket>-cnfqty.
+*        lv_alloc_qty = <ls_norm_eket>-alloc_qty.
+*
+*        <lfs_eket>-reqqty =  lv_reqqty - lv_alloc_qty.
+*        <lfs_eket>-cnfqty =  lv_cnfqty - lv_alloc_qty.
+**        <ls_norm_eket>-alloc_qty = <ls_norm_eket>-alloc_qty - lv_alloc_qty.
+*
+*      ENDIF.
+*    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_ekub_by_bdbs.
+    TYPES:
+      BEGIN OF ts_ekub_key,
+        material            TYPE matnr,
+        plant               TYPE werks_d,
+        purchdoc_num        TYPE vbeln,
+        purchdoc_item       TYPE posnr,
+        material_avail_date TYPE mbdat,
+      END OF ts_ekub_key.
+
+*    TYPES:
+*      BEGIN OF ts_req_qty,
+*        material      TYPE matnr,
+*        plant         TYPE werks_d,
+*        purchdoc_num  TYPE vbeln,
+*        purchdoc_item TYPE posnr,
+*        date          TYPE dats,
+*        qty           TYPE meng15,
+*      END OF ts_req_qty.
+
+    DATA: ls_ekub_key        TYPE ts_ekub_key.
+*         lt_bdbs            TYPE arun_tt_bdbstab,
+*         lv_reqqty          TYPE omeng,
+*         lv_cnfqty          TYPE vmeng,
+*         lt_norm_ekub       TYPE if_atp_pac_db_select=>tt_norm_ekub,
+*         lt_norm_ekub_final LIKE lt_norm_ekub.
+*         ls_req_qty         TYPE ts_req_qty.
+*         lt_req_qty         TYPE TABLE OF ts_req_qty.
+
+    DATA: ls_norm_ekub         TYPE if_atp_pac_db_select=>ts_atp_norm_ekub,
+          lt_bdbs_ekub_mat     TYPE SORTED TABLE OF arun_bdbs
+                               WITH UNIQUE KEY material plant material_avail_date,
+          lt_bdbs_ekub_doc     TYPE SORTED TABLE OF ty_bdbs_data
+                               WITH UNIQUE KEY purchdoc_num purchdoc_item material_avail_date,
+          lt_bdbs_ekub_doc_req TYPE SORTED TABLE OF ty_bdbs_data
+                               WITH UNIQUE KEY purchdoc_num purchdoc_item requested_date.
+
+    FIELD-SYMBOLS: <lfs_bdbs_ekub> TYPE ty_bdbs_data,
+                   <ls_norm_ekub>  TYPE ty_bdbs_data.
+*                  <ls_req_qty>    TYPE ts_req_qty.
+
+    CHECK mt_bdbs IS NOT INITIAL.
+
+    "Changes for batch not fixed arun
+
+    IF iv_granularity = c_granularity_atpcat OR iv_granularity = c_granularity_timeseries.
+
+      "Now append to ct_norm_ekub with positive value of allocated quantity
+      LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>)
+        WHERE  req_ind = 'U1'.
+        ls_norm_ekub-bstyp =  'F'.             "<fs_bdbs>-req_ind+1.
+        ls_norm_ekub-matnr = <fs_bdbs>-material.
+        ls_norm_ekub-werks = <fs_bdbs>-plant.
+        ls_norm_ekub-sgt_rcat = <fs_bdbs>-req_segment.
+        ls_norm_ekub-lgort = <fs_bdbs>-demand_lgort.
+        ls_norm_ekub-charg = <fs_bdbs>-demand_charg.
+        IF <fs_bdbs>-material_avail_date = <fs_bdbs>-requested_date.
+          "append only one record
+          ls_norm_ekub-atpdate = <fs_bdbs>-material_avail_date.
+          ls_norm_ekub-eindt = <fs_bdbs>-material_avail_date.
+          ls_norm_ekub-reqqty = <fs_bdbs>-alloc_qty.
+          ls_norm_ekub-cnfqty = <fs_bdbs>-alloc_qty.
+          ls_norm_ekub-meins = <fs_bdbs>-material_baseunit.
+
+          APPEND ls_norm_ekub TO ct_norm_ekub.
+        ELSE.
+          "append two records one for reqqty one for cnfqty
+          ls_norm_ekub-atpdate = <fs_bdbs>-requested_date.
+          ls_norm_ekub-eindt = <fs_bdbs>-material_avail_date.
+          ls_norm_ekub-reqqty = <fs_bdbs>-alloc_qty.
+          ls_norm_ekub-cnfqty = 0.
+          ls_norm_ekub-meins = <fs_bdbs>-material_baseunit.
+
+          APPEND ls_norm_ekub TO ct_norm_ekub.
+          ls_norm_ekub-atpdate = <fs_bdbs>-material_avail_date.
+          ls_norm_ekub-eindt = <fs_bdbs>-material_avail_date.
+          ls_norm_ekub-cnfqty =  <fs_bdbs>-alloc_qty.
+          ls_norm_ekub-reqqty = 0.
+          ls_norm_ekub-meins = <fs_bdbs>-material_baseunit.
+
+          APPEND ls_norm_ekub TO ct_norm_ekub.
+        ENDIF.
+      ENDLOOP.
+    ELSEIF  iv_granularity = c_granularity_order.
+      "when granularity is order level
+      LOOP AT mt_bdbs ASSIGNING <fs_bdbs>
+          WHERE  req_ind = 'U1'.
+        MOVE-CORRESPONDING <fs_bdbs> TO ls_ekub_key.
+        "aggregate for cnfqty
+        READ TABLE lt_bdbs_ekub_doc WITH TABLE KEY purchdoc_num        = ls_ekub_key-purchdoc_num
+                                                   purchdoc_item       =  ls_ekub_key-purchdoc_item
+                                                   material_avail_date = ls_ekub_key-material_avail_date
+                                                   ASSIGNING <lfs_bdbs_ekub>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_ekub>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_ekub>-alloc_qty.
+        ELSE.
+          INSERT <fs_bdbs> INTO TABLE lt_bdbs_ekub_doc.
+        ENDIF.
+        "aggregate for reqqty
+        READ TABLE lt_bdbs_ekub_doc_req WITH TABLE KEY purchdoc_num   = ls_ekub_key-purchdoc_num
+                                                       purchdoc_item  = ls_ekub_key-purchdoc_item
+                                                       requested_date = <fs_bdbs>-requested_date
+                                          ASSIGNING <lfs_bdbs_ekub>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_ekub>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_ekub>-alloc_qty.
+        ELSE.
+          INSERT <fs_bdbs> INTO TABLE lt_bdbs_ekub_doc_req.
+        ENDIF.
+      ENDLOOP.
+
+      LOOP AT ct_norm_ekub ASSIGNING FIELD-SYMBOL(<fs_norm_ekub>).
+*                                                         WHERE bstyp =  'F'.
+        IF <fs_norm_ekub>-reqqty IS NOT INITIAL.
+          READ TABLE lt_bdbs_ekub_doc_req WITH TABLE KEY purchdoc_num = <fs_norm_ekub>-delnr
+                                                         purchdoc_item =  <fs_norm_ekub>-delps
+                                                         requested_date = <fs_norm_ekub>-atpdate
+                                                         ASSIGNING <lfs_bdbs_ekub>.
+          IF sy-subrc = 0 AND <lfs_bdbs_ekub>-alloc_qty > 0.
+*            Requirement and Confirmation quantity are passed as negative values from selection"Note 3031078
+*             so use '+' instead of '-'"Note 3031078
+            <fs_norm_ekub>-reqqty = <fs_norm_ekub>-reqqty + <lfs_bdbs_ekub>-alloc_qty."Note 3031078
+          ENDIF.
+        ENDIF.
+        IF   <fs_norm_ekub>-cnfqty IS NOT INITIAL.
+          READ TABLE lt_bdbs_ekub_doc WITH TABLE KEY purchdoc_num = <fs_norm_ekub>-delnr
+                                                     purchdoc_item =  <fs_norm_ekub>-delps
+                                                     material_avail_date = <fs_norm_ekub>-atpdate
+                                                     ASSIGNING <lfs_bdbs_ekub>.
+          IF sy-subrc = 0 AND <lfs_bdbs_ekub>-alloc_qty > 0.
+*            Requirement and Confirmation quantity are passed as negative values from selection"Note 3031078
+*             so use '+' instead of '-'            "Note 3031078
+            <fs_norm_ekub>-cnfqty = <fs_norm_ekub>-cnfqty + <lfs_bdbs_ekub>-alloc_qty."Note 3031078
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+*============================================================================================================
+
+*    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<lfs_bdbs>) WHERE req_ind = 'U1'.
+*
+*      MOVE-CORRESPONDING <lfs_bdbs> TO ls_ekub_key.
+*
+*      IF iv_granularity = c_granularity_atpcat
+*      OR iv_granularity = c_granularity_timeseries.
+*
+*        READ TABLE mt_bdbs_ekub WITH KEY material = ls_ekub_key-material
+*                                          plant =  ls_ekub_key-plant
+*                                          material_avail_date = ls_ekub_key-material_avail_date
+*                                          ASSIGNING <lfs_bdbs_ekub>.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE mt_bdbs_ekub WITH KEY purchdoc_num = ls_ekub_key-purchdoc_num
+*                                        purchdoc_item =  ls_ekub_key-purchdoc_item
+*                                        material_avail_date = ls_ekub_key-material_avail_date
+*                                        ASSIGNING <lfs_bdbs_ekub>.
+*      ENDIF.
+*
+*      IF sy-subrc EQ 0.
+*        <lfs_bdbs_ekub>-alloc_qty = <lfs_bdbs>-alloc_qty + <lfs_bdbs_ekub>-alloc_qty.
+*        IF iv_granularity = c_granularity_atpcat
+*        OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE lt_req_qty WITH KEY material = ls_ekub_key-material
+*                                          plant =  ls_ekub_key-plant
+*                                         date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE lt_req_qty WITH KEY purchdoc_num = ls_ekub_key-purchdoc_num
+*                                        purchdoc_item =  ls_ekub_key-purchdoc_item
+*                                        date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ENDIF.
+*        IF sy-subrc EQ 0.
+*          <ls_req_qty>-qty  = <lfs_bdbs>-alloc_qty + <ls_req_qty>-qty.
+*        ELSE.
+**
+*        ENDIF.
+*      ELSE.
+*        APPEND <lfs_bdbs> TO mt_bdbs_ekub.
+*        IF iv_granularity = c_granularity_atpcat
+*        OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE lt_req_qty WITH KEY material = ls_ekub_key-material
+*                                          plant =  ls_ekub_key-plant
+*                                         date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE lt_req_qty WITH KEY purchdoc_num = ls_ekub_key-purchdoc_num
+*                                      purchdoc_item =  ls_ekub_key-purchdoc_item
+*                                      date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ENDIF.
+*        IF sy-subrc NE 0.
+*          MOVE-CORRESPONDING <lfs_bdbs> TO ls_req_qty.
+*          ls_req_qty-date = <lfs_bdbs>-requested_date.
+*          ls_req_qty-qty  = <lfs_bdbs>-alloc_qty.
+*          APPEND ls_req_qty TO lt_req_qty.
+*        ELSE.
+*          <ls_req_qty>-qty  = <lfs_bdbs>-alloc_qty + <ls_req_qty>-qty.
+*        ENDIF.
+*
+*      ENDIF.
+*    ENDLOOP.
+*
+*    CHECK mt_bdbs_ekub IS NOT INITIAL.
+*
+*    LOOP AT ct_norm_ekub ASSIGNING FIELD-SYMBOL(<lfs_ekub>).
+*      lv_reqqty = <lfs_ekub>-reqqty.
+*      lv_cnfqty = <lfs_ekub>-cnfqty.
+*
+*      IF lv_reqqty IS NOT INITIAL.
+*        IF iv_granularity = c_granularity_atpcat
+*        OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE lt_req_qty WITH KEY material = <lfs_ekub>-matnr
+*                                            plant = <lfs_ekub>-werks
+*                                             date = <lfs_ekub>-atpdate INTO ls_req_qty.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE lt_req_qty WITH KEY purchdoc_num = ls_ekub_key-purchdoc_num
+*                                        purchdoc_item = ls_ekub_key-purchdoc_item
+*                                                 date = <lfs_ekub>-atpdate INTO ls_req_qty.
+*        ENDIF.
+*        IF sy-subrc EQ 0 AND lv_reqqty < 0.
+*          <lfs_ekub>-reqqty =  lv_reqqty + ls_req_qty-qty.
+*        ELSEIF sy-subrc EQ 0 AND lv_reqqty > 0.
+*          <lfs_ekub>-reqqty =  lv_reqqty - ls_req_qty-qty.
+*        ENDIF.
+*      ENDIF.
+*
+*      IF lv_cnfqty IS NOT INITIAL.
+*        IF iv_granularity = c_granularity_atpcat
+*         OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE mt_bdbs_ekub ASSIGNING <ls_norm_ekub>
+*                                                 WITH KEY material = <lfs_ekub>-matnr
+*                                                  plant = <lfs_ekub>-werks
+*                                                  material_avail_date =  <lfs_ekub>-atpdate.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE mt_bdbs_ekub ASSIGNING <ls_norm_ekub>
+*                                             WITH KEY purchdoc_num = <lfs_ekub>-delnr
+*                                              purchdoc_item =  <lfs_ekub>-delps
+*                                              material_avail_date =  <lfs_ekub>-atpdate.
+*        ENDIF.
+*        CHECK <ls_norm_ekub> IS ASSIGNED
+*        AND sy-subrc EQ 0.
+*        IF lv_cnfqty < 0.
+*          <lfs_ekub>-cnfqty =  lv_cnfqty + <ls_norm_ekub>-alloc_qty.
+*        ELSEIF lv_reqqty > 0.
+*          <lfs_ekub>-cnfqty =  lv_cnfqty - <ls_norm_ekub>-alloc_qty.
+*        ENDIF.
+*      ENDIF.
+*    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_mdqm_by_bdbs.
+
+    CHECK mt_bdbs IS NOT INITIAL.
+
+    TYPES:
+      BEGIN OF ts_stock_key,
+        material         TYPE matnr,
+        plant            TYPE werks_d,
+        stock_source     TYPE arun_bskz,
+        batch            TYPE charg_d,
+        storage_location TYPE lgort_d,
+        delivery_date_po TYPE arun_edatp,
+      END OF ts_stock_key.
+
+    DATA: ls_stock_key  TYPE ts_stock_key.
+
+
+    TYPES: BEGIN OF ty_sloc_stock,
+       material TYPE matnr,
+       plant    TYPE werks_d,
+       storage_location TYPE lgort_d,
+       batch    TYPE charg_d,
+       stk_segment TYPE sgt_scat,
+       alloc_qty TYPE arun_alloc_qty,
+       delivery_date_po TYPE arun_edatp,
+     END OF ty_sloc_stock .
+
+     DATA: lt_bdbs_stock TYPE SORTED TABLE OF ty_sloc_stock WITH UNIQUE KEY material plant storage_location stk_segment delivery_date_po,
+              lt_bdbs_batch TYPE SORTED TABLE OF ty_sloc_stock WITH UNIQUE KEY material plant storage_location batch delivery_date_po,
+              ls_bdbs_stk   TYPE ty_sloc_stock.
+
+     FIELD-SYMBOLS: <fs_norm> TYPE ty_sloc_stock,
+                    <fs_bdbs_stock> TYPE ty_sloc_Stock.
+
+    "first aggregate bdbs records batch and stock separately
+    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>) WHERE stock_source = 'S' OR
+                                                          stock_source = 'C'.
+       CHECK <fs_bdbs>-delivery_date_po is not INITIAL.
+       MOVE-CORRESPONDING <fs_bdbs> TO ls_stock_key.
+       IF ls_stock_key-stock_source = 'S'.
+         READ TABLE lt_bdbs_stock WITH KEY material = <fs_bdbs>-material
+                                           plant    =  <fs_bdbs>-plant
+                                           storage_location = <fs_bdbs>-storage_location
+                                           stk_segment = <fs_bdbs>-req_segment
+                                           "presently only 1:1 as TBD - from req segment get stock segment value
+                                           delivery_date_po = <fs_bdbs>-delivery_date_po
+                                           ASSIGNING <fs_bdbs_stock> BINARY SEARCH.
+       ELSEIF ls_stock_key-stock_source = 'C'.
+         READ TABLE lt_bdbs_batch WITH KEY material = ls_stock_key-material
+                                           plant =  ls_stock_key-plant
+                                           storage_location = ls_stock_key-storage_location
+                                           batch = ls_Stock_key-batch
+                                           delivery_date_po = <fs_bdbs>-delivery_date_po
+                                           ASSIGNING <fs_bdbs_stock> BINARY SEARCH.
+       ENDIF.
+
+       IF sy-subrc EQ 0.
+         <fs_bdbs_stock>-alloc_qty = <fs_bdbs>-alloc_qty + <fs_bdbs_stock>-alloc_qty.
+       ELSE.
+         MOVE-CORRESPONDING <fs_bdbs> TO ls_bdbs_stk.
+         "presently only 1:1 as TBD - from req segment get stock segment value
+         ls_bdbs_stk-stk_segment = <fs_bdbs>-req_segment.
+         IF ls_stock_key-stock_source = 'S'.
+           INSERT ls_bdbs_stk INTO TABLE lt_bdbs_stock.
+         ELSEIF ls_stock_key-stock_source = 'C'.
+           INSERT ls_bdbs_Stk INTO TABLE lt_bdbs_batch.
+         ENDIF.
+         CLEAR ls_bdbs_stk.
+       ENDIF.
+     ENDLOOP.
+
+    "now append the inverted value to ct_stock
+    IF lt_bdbs_stock IS NOT INITIAL.
+      DATA: ls_stock_alloc TYPE if_atp_pac_db_select=>ts_atp_norm_stock,
+            lt_Stock_Alloc TYPE if_atp_pac_db_select=>tt_norm_stock.
+      LOOP AT lt_bdbs_stock ASSIGNING <fs_norm>.
+        ls_stock_alloc-matnr = <fs_norm>-material.
+        ls_stock_alloc-werks = <fs_norm>-plant.
+        ls_stock_alloc-lgort = <fs_norm>-storage_location.
+        ls_stock_alloc-sgt_catv = <fs_norm>-stk_segment.
+*        ls_stock_alloc-stock_type = '01'."no need to put stock type
+        ls_stock_alloc-atpdate = <fs_norm>-delivery_date_po."atp date set to this value
+        ls_stock_alloc-reqqty = -1 * <fs_norm>-alloc_qty.
+        APPEND ls_stock_alloc TO lt_stock_alloc.
+      ENDLOOP.
+    ENDIF.
+    IF lt_bdbs_batch IS NOT INITIAL.
+      LOOP AT lt_bdbs_batch ASSIGNING <fs_norm>.
+        ls_stock_alloc-matnr = <fs_norm>-material.
+        ls_stock_alloc-werks = <fs_norm>-plant.
+        ls_stock_alloc-lgort = <fs_norm>-storage_location.
+        ls_stock_alloc-charg = <fs_norm>-batch.
+*        ls_stock_alloc-stock_type = '01'."need to check on this
+        ls_stock_alloc-atpdate = <fs_norm>-delivery_date_po."need to check on this
+        ls_stock_alloc-reqqty = -1 * <fs_norm>-alloc_qty.
+        APPEND ls_stock_alloc TO lt_stock_alloc.
+      ENDLOOP.
+    ENDIF.
+
+    APPEND LINES OF lt_stock_alloc TO et_norm_stock .
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_resb_by_bdbs.
+
+    TYPES:
+      BEGIN OF ts_resb_key,
+        material            TYPE matnr,
+        plant               TYPE werks_d,
+        RESERV_NUM          TYPE RSNUM,
+        RESERV_ITEM         TYPE ARUN_RSPOS,
+        material_avail_date TYPE mbdat,
+      END OF ts_resb_key.
+
+    DATA: ls_resb_key        TYPE ts_resb_key,
+          ls_bdbs_aggr_key   TYPE ty_bdbs_aggr. "Note 3055321
+
+    DATA: ls_norm_resb         TYPE if_atp_pac_db_select=>ts_atp_norm_resb,
+          lt_bdbs_resb_mat     TYPE SORTED TABLE OF arun_bdbs
+                               WITH UNIQUE KEY material plant material_avail_date,
+          lt_bdbs_resb_doc     TYPE SORTED TABLE OF ty_bdbs_data
+                               WITH UNIQUE KEY reserv_num reserv_item material_avail_date,
+          lt_bdbs_resb_doc_req TYPE SORTED TABLE OF ty_bdbs_data
+                               WITH UNIQUE KEY reserv_num reserv_item requested_date,
+*Note 3055321 S
+          lt_bdbs_aggr         TYPE SORTED TABLE OF ty_bdbs_aggr
+                               WITH UNIQUE KEY material plant storage_location batch req_ind
+                               req_segment material_avail_date.
+*Note 3055321 E
+
+    FIELD-SYMBOLS: <lfs_bdbs_resb> TYPE ty_bdbs_data,
+                   <ls_norm_resb>  TYPE ty_bdbs_data.
+
+    CHECK mt_bdbs IS NOT INITIAL.
+
+    IF iv_granularity = c_granularity_atpcat OR iv_granularity = c_granularity_timeseries.
+
+      "Now append to ct_norm_resb with positive value of allocated quantity
+      LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>)
+                                                      WHERE  req_ind = 'AR' OR req_ind = 'BB'.
+*       ls_norm_resb-bstyp =  'F'.
+        ls_norm_resb-matnr    = <fs_bdbs>-material.
+        ls_norm_resb-werks    = <fs_bdbs>-plant.
+        ls_norm_resb-sgt_rcat = <fs_bdbs>-req_segment.
+        ls_norm_resb-atpcat   = <fs_bdbs>-req_ind.              " ATP not considering Subcontracting Assignments
+        ls_norm_resb-bdart    = <fs_bdbs>-req_ind.
+        IF <fs_bdbs>-req_ind NE 'BB'.
+         ls_norm_resb-sgt_scat = <fs_bdbs>-stk_segment.
+         ls_norm_resb-lgort    = <fs_bdbs>-storage_location.
+         ls_norm_resb-charg    = <fs_bdbs>-batch.
+        ENDIF.
+
+
+        IF <fs_bdbs>-material_avail_date = <fs_bdbs>-requested_date.
+          "append only one record
+          ls_norm_resb-atpdate = <fs_bdbs>-material_avail_date.
+          ls_norm_resb-reqqty  = <fs_bdbs>-alloc_qty.
+          ls_norm_resb-cnfqty  = <fs_bdbs>-alloc_qty.
+
+          APPEND ls_norm_resb TO ct_norm_resb.
+        ELSE.
+          "append two records one for reqqty one for cnfqty
+          ls_norm_resb-atpdate = <fs_bdbs>-requested_date.
+          ls_norm_resb-reqqty  = <fs_bdbs>-alloc_qty.        " <fs_bdbs>-alloc_qty.
+          ls_norm_resb-cnfqty  = 0.
+
+          APPEND ls_norm_resb TO ct_norm_resb.
+          ls_norm_resb-atpdate = <fs_bdbs>-material_avail_date.
+          ls_norm_resb-cnfqty  =  <fs_bdbs>-alloc_qty.       " <fs_bdbs>-alloc_qty.
+          ls_norm_resb-reqqty  = 0.
+
+          APPEND ls_norm_resb TO ct_norm_resb.
+        ENDIF.
+        MOVE-CORRESPONDING <fs_bdbs> TO ls_bdbs_aggr_key. "Note 3055321
+        COLLECT ls_bdbs_aggr_key INTO lt_bdbs_aggr.       "Note 3055321
+      ENDLOOP.
+*Note 3055321 S
+      LOOP AT ct_norm_resb ASSIGNING FIELD-SYMBOL(<fs_resb>) WHERE shkzg <> space AND "both conditions to identify entries
+                                                                   reqqty < 0.        "before BDBS loop.
+         READ TABLE lt_bdbs_aggr WITH TABLE KEY material = <fs_resb>-matnr
+                                                plant    = <fs_resb>-werks
+                                                storage_location = <fs_resb>-lgort
+                                                batch = <fs_resb>-charg
+                                                req_ind = <fs_resb>-bdart
+                                                req_segment = <fs_resb>-sgt_rcat
+                                                material_avail_date = <fs_resb>-atpdate
+                                                INTO DATA(ls_bdbs_aggr).
+         IF sy-subrc = 0.
+           " If confirmation < allocQty, then take allocQty
+           " because alloc can exists without confirmations for reservations
+           <fs_resb>-cnfqty = COND #( WHEN ( -1 * <fs_resb>-reqqty ) >=  ls_bdbs_aggr-alloc_qty
+                                      AND  ( -1 * <fs_resb>-cnfqty ) < ls_bdbs_aggr-alloc_qty
+                                      THEN ( -1 * ls_bdbs_aggr-alloc_qty )
+                                      ELSE <fs_resb>-cnfqty ).
+         ENDIF.
+      ENDLOOP.
+*Note 3055321 E
+    ELSEIF  iv_granularity = c_granularity_order.
+      "when granularity is order level
+      LOOP AT mt_bdbs ASSIGNING <fs_bdbs> WHERE  req_ind = 'AR' OR req_ind = 'BB'.
+        MOVE-CORRESPONDING <fs_bdbs> TO ls_resb_key.
+
+        "aggregate for cnfqty
+        READ TABLE lt_bdbs_resb_doc WITH TABLE KEY reserv_num         = ls_resb_key-reserv_num
+                                                   reserv_item       =  ls_resb_key-reserv_item
+                                                   material_avail_date = ls_resb_key-material_avail_date
+                                                   ASSIGNING <lfs_bdbs_resb>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_resb>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_resb>-alloc_qty.
+        ELSE.
+          INSERT <fs_bdbs> INTO TABLE lt_bdbs_resb_doc.
+        ENDIF.
+
+        "aggregate for reqqty
+        READ TABLE lt_bdbs_resb_doc_req WITH TABLE KEY reserv_num   = ls_resb_key-reserv_num
+                                                       reserv_item = ls_resb_key-reserv_item
+                                                       requested_date = <fs_bdbs>-requested_date
+                                                   ASSIGNING <lfs_bdbs_resb>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_resb>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_resb>-alloc_qty.
+        ELSE.
+          INSERT <fs_bdbs> INTO TABLE lt_bdbs_resb_doc_req.
+        ENDIF.
+      ENDLOOP.
+
+      LOOP AT ct_norm_resb ASSIGNING FIELD-SYMBOL(<fs_norm_resb>).
+*                                                         WHERE bstyp =  'F'.
+        IF <fs_norm_resb>-reqqty IS NOT INITIAL.
+          READ TABLE lt_bdbs_resb_doc_req WITH TABLE KEY reserv_num = <fs_norm_resb>-delnr
+                                                         reserv_item =  <fs_norm_resb>-delps
+                                                         requested_date = <fs_norm_resb>-atpdate
+                                                         ASSIGNING <lfs_bdbs_resb>.
+          IF sy-subrc = 0 AND <lfs_bdbs_resb>-alloc_qty > 0.
+***Reqqty is expected to be negative, hence alloc_qty is added
+            <fs_norm_resb>-reqqty = <fs_norm_resb>-reqqty + <lfs_bdbs_resb>-alloc_qty.
+          ENDIF.
+        ENDIF.
+        IF   <fs_norm_resb>-cnfqty IS NOT INITIAL.
+          READ TABLE lt_bdbs_resb_doc WITH TABLE KEY reserv_num = <fs_norm_resb>-delnr
+                                                     reserv_item =  <fs_norm_resb>-delps
+                                                     material_avail_date = <fs_norm_resb>-atpdate
+                                                     ASSIGNING <lfs_bdbs_resb>.
+          IF sy-subrc = 0 AND <lfs_bdbs_resb>-alloc_qty > 0.
+***Cnfqty is expected to be negative, hence alloc_qty is added
+            <fs_norm_resb>-cnfqty = <fs_norm_resb>-cnfqty + <lfs_bdbs_resb>-alloc_qty.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_stock_by_bdbs.
+    me->adjust_stock( CHANGING ct_stock = et_norm_stock ).
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~adjust_vbbe_by_bdbs.
+
+    TYPES:
+      BEGIN OF ts_vbbe_key,
+        material            TYPE matnr,
+        plant               TYPE werks_d,
+        salesdoc_num        TYPE vbeln,
+        salesdoc_item       TYPE posnr,
+        material_avail_date TYPE mbdat,
+      END OF ts_vbbe_key.
+
+    TYPES:
+      BEGIN OF ts_req_qty,
+        material      TYPE matnr,
+        plant         TYPE werks_d,
+        salesdoc_num  TYPE vbeln,
+        salesdoc_item TYPE posnr,
+        date          TYPE dats,
+        qty           TYPE meng15,
+      END OF ts_req_qty.
+
+    DATA: ls_vbbe_key        TYPE ts_vbbe_key,
+          lt_bdbs            TYPE arun_tt_bdbstab,
+          lv_reqqty          TYPE omeng,
+          lv_cnfqty          TYPE vmeng,
+          lt_norm_vbbe       TYPE if_atp_pac_db_select=>tt_norm_vbbe,
+          lt_norm_vbbe_final LIKE lt_norm_vbbe,
+          ls_req_qty         TYPE ts_req_qty,
+          lt_req_qty         TYPE TABLE OF ts_req_qty.
+
+    FIELD-SYMBOLS: <lfs_bdbs_vbbe> TYPE ty_bdbs_data,
+                   <ls_norm_vbbe>  LIKE LINE OF mt_bdbs_vbbe,
+                   <ls_req_qty>    TYPE ts_req_qty.
+
+*    CHECK mt_bdbs IS NOT INITIAL.
+
+
+    DATA: ls_norm_vbbe         TYPE if_atp_pac_db_select=>ts_atp_norm_vbbe,
+          lt_bdbs_vbbe_mat     TYPE SORTED TABLE OF ty_bdbs_data
+                               WITH UNIQUE KEY material plant material_avail_date,
+          lt_bdbs_vbbe_doc     TYPE SORTED TABLE OF ty_bdbs_data
+                               WITH UNIQUE KEY salesdoc_num salesdoc_item material_avail_date,
+          lt_bdbs_vbbe_doc_req TYPE SORTED TABLE OF ty_bdbs_data
+                           WITH UNIQUE KEY salesdoc_num salesdoc_item requested_date.
+
+    REFRESH: mt_deducted_obd.
+
+    IF iv_granularity = c_granularity_atpcat OR iv_granularity = c_granularity_timeseries.
+      "append to ct_norm_vbbe with inverted sign
+      LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<fs_bdbs>).
+        IF <fs_bdbs>-req_ind = 'VC' OR <fs_bdbs>-req_ind = 'VI' OR <fs_bdbs>-req_ind = 'VG' OR
+           <fs_bdbs>-req_ind = 'VJ'.
+          ls_norm_vbbe-vbtyp = <fs_bdbs>-req_ind+1.
+          ls_norm_vbbe-matnr = <fs_bdbs>-material.
+          ls_norm_vbbe-werks = <fs_bdbs>-plant.
+          ls_norm_vbbe-sgt_rcat = <fs_bdbs>-req_segment.
+          "changed for sloc adjustment
+*          ls_norm_vbbe-lgort = <fs_bdbs>-storage_location.
+          IF <fs_bdbs>-req_ind = 'VJ'.
+            ls_norm_vbbe-lgort = <fs_bdbs>-storage_location.
+            ls_norm_vbbe-charg = <fs_bdbs>-batch.
+          ELSE.
+            ls_norm_vbbe-lgort = <fs_bdbs>-demand_lgort.
+            ls_norm_vbbe-charg = <fs_bdbs>-demand_charg.
+          ENDIF.
+          IF <fs_bdbs>-material_avail_date = <fs_bdbs>-requested_date.
+            "append only one record
+            ls_norm_vbbe-atpdate = <fs_bdbs>-material_avail_date.
+            ls_norm_vbbe-reqqty = -1 * <fs_bdbs>-alloc_qty.
+            ls_norm_vbbe-cnfqty = -1 * <fs_bdbs>-alloc_qty.
+            APPEND ls_norm_vbbe TO ct_norm_vbbe.
+          ELSE.
+            "append two records one for reqqty one for cnfqty
+            ls_norm_vbbe-atpdate = <fs_bdbs>-requested_date.
+            ls_norm_vbbe-reqqty = -1 * <fs_bdbs>-alloc_qty.
+            ls_norm_vbbe-cnfqty = 0.
+            APPEND ls_norm_vbbe TO ct_norm_vbbe.
+            ls_norm_vbbe-atpdate = <fs_bdbs>-material_avail_date.
+            ls_norm_vbbe-cnfqty = -1 * <fs_bdbs>-alloc_qty.
+            ls_norm_vbbe-reqqty = 0.
+            APPEND ls_norm_vbbe TO ct_norm_vbbe.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+     IF cl_arun_execution=>mv_call_from_arun = space.
+      LOOP AT ct_norm_vbbe ASSIGNING FIELD-SYMBOL(<lfs_norm_vbbe>).
+        CHECK <lfs_norm_vbbe>-vbtyp = 'J'.
+        IF <lfs_norm_vbbe>-reqqty > 0.
+         READ TABLE mt_arun_materials TRANSPORTING NO FIELDS
+                    WITH KEY matnr = <lfs_norm_vbbe>-matnr
+                             werks = <lfs_norm_vbbe>-werks BINARY SEARCH.
+         IF sy-subrc IS INITIAL.
+*         For ARun relevant materials, deliveries should not go through ATP check
+          INSERT <lfs_norm_vbbe> INTO TABLE mt_deducted_obd.
+          CLEAR: <lfs_norm_vbbe>-reqqty, <lfs_norm_vbbe>-cnfqty.
+         ENDIF.
+        ENDIF.
+      ENDLOOP.
+     ENDIF.
+
+    ELSEIF  iv_granularity = c_granularity_order.
+      "when granularity is order level first aggregate and then subtract for
+      "order item the assigned qty
+      LOOP AT mt_bdbs ASSIGNING <fs_bdbs>
+          WHERE req_ind = 'VC' OR req_ind = 'VI' OR req_ind = 'VG' OR req_ind = 'VJ'.
+        MOVE-CORRESPONDING <fs_bdbs> TO ls_vbbe_key.
+        "aggregate for cnfqty
+        READ TABLE lt_bdbs_vbbe_doc WITH TABLE KEY salesdoc_num = ls_vbbe_key-salesdoc_num
+                                          salesdoc_item =  ls_vbbe_key-salesdoc_item
+                                          material_avail_date = ls_vbbe_key-material_avail_date
+                                          ASSIGNING <lfs_bdbs_vbbe>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_vbbe>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_vbbe>-alloc_qty.
+        ELSE.
+          INSERT <fs_bdbs> INTO TABLE lt_bdbs_vbbe_doc.
+        ENDIF.
+        "aggregate for reqqty
+        READ TABLE lt_bdbs_vbbe_doc_req WITH TABLE KEY salesdoc_num = ls_vbbe_key-salesdoc_num
+                                          salesdoc_item =  ls_vbbe_key-salesdoc_item
+                                          requested_date = <fs_bdbs>-requested_date
+                                          ASSIGNING <lfs_bdbs_vbbe>.
+        IF sy-subrc EQ 0.
+          <lfs_bdbs_vbbe>-alloc_qty = <fs_bdbs>-alloc_qty + <lfs_bdbs_vbbe>-alloc_qty.
+        ELSE.
+          INSERT <fs_bdbs> INTO TABLE lt_bdbs_vbbe_doc_req.
+        ENDIF.
+      ENDLOOP.
+
+      LOOP AT ct_norm_vbbe ASSIGNING FIELD-SYMBOL(<fs_norm_vbbe>).
+        IF <fs_norm_vbbe>-vbtyp = 'C' OR <fs_norm_vbbe>-vbtyp = 'I' OR
+           <fs_norm_vbbe>-vbtyp = 'G' OR <fs_norm_vbbe>-vbtyp = 'J'.
+        IF <fs_norm_vbbe>-reqqty IS NOT INITIAL.
+          READ TABLE lt_bdbs_vbbe_doc_req WITH TABLE KEY salesdoc_num = <fs_norm_vbbe>-delnr
+                                         salesdoc_item =  <fs_norm_vbbe>-delps
+                                         requested_date = <fs_norm_vbbe>-atpdate
+                                         ASSIGNING <lfs_bdbs_vbbe>.
+          IF sy-subrc = 0 AND <lfs_bdbs_vbbe>-alloc_qty > 0.
+            <fs_norm_vbbe>-reqqty = <fs_norm_vbbe>-reqqty - <lfs_bdbs_vbbe>-alloc_qty.
+          ELSEIF <fs_norm_vbbe>-vbtyp = 'J' AND
+                 cl_arun_execution=>mv_call_from_arun = space.
+            READ TABLE mt_arun_materials TRANSPORTING NO FIELDS
+                       WITH KEY matnr = <fs_norm_vbbe>-matnr
+                                werks = <fs_norm_vbbe>-werks BINARY SEARCH.
+            IF sy-subrc IS INITIAL.
+*               For ARun relevant materials, deliveries should not go through ATP check
+                INSERT <fs_norm_vbbe> INTO TABLE mt_deducted_obd.
+                CLEAR: <fs_norm_vbbe>-reqqty, <fs_norm_vbbe>-cnfqty.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+        IF   <fs_norm_vbbe>-cnfqty IS NOT INITIAL.
+          READ TABLE lt_bdbs_vbbe_doc WITH TABLE KEY salesdoc_num = <fs_norm_vbbe>-delnr
+                                         salesdoc_item =  <fs_norm_vbbe>-delps
+                                         material_avail_date = <fs_norm_vbbe>-atpdate
+                                         ASSIGNING <lfs_bdbs_vbbe>.
+          IF sy-subrc = 0 AND <lfs_bdbs_vbbe>-alloc_qty > 0.
+            <fs_norm_vbbe>-cnfqty = <fs_norm_vbbe>-cnfqty - <lfs_bdbs_vbbe>-alloc_qty.
+          ENDIF.
+        ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+
+*    LOOP AT mt_bdbs ASSIGNING FIELD-SYMBOL(<lfs_bdbs>) WHERE req_ind = 'VC' OR req_ind = 'VI' OR
+*                                                             req_ind = 'VG'.
+*
+*      MOVE-CORRESPONDING <lfs_bdbs> TO ls_vbbe_key.
+*
+*      IF iv_granularity = c_granularity_atpcat
+*      OR iv_granularity = c_granularity_timeseries.
+*
+*        READ TABLE mt_bdbs_vbbe WITH KEY material = ls_vbbe_key-material
+*                                          plant =  ls_vbbe_key-plant
+*                                          material_avail_date = ls_vbbe_key-material_avail_date
+*                                          ASSIGNING <lfs_bdbs_vbbe>.
+*      ELSEIF iv_granularity = c_granularity_order.
+*        READ TABLE mt_bdbs_vbbe WITH KEY salesdoc_num = ls_vbbe_key-salesdoc_num
+*                                        salesdoc_item =  ls_vbbe_key-salesdoc_item
+*                                        material_avail_date = ls_vbbe_key-material_avail_date
+*                                        ASSIGNING <lfs_bdbs_vbbe>.
+*      ENDIF.
+*
+*      IF sy-subrc EQ 0.
+*        <lfs_bdbs_vbbe>-alloc_qty = <lfs_bdbs>-alloc_qty + <lfs_bdbs_vbbe>-alloc_qty.
+*        IF iv_granularity = c_granularity_atpcat
+*        OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE lt_req_qty WITH KEY material = ls_vbbe_key-material
+*                                          plant =  ls_vbbe_key-plant
+*                                         date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE lt_req_qty WITH KEY salesdoc_num = ls_vbbe_key-salesdoc_num
+*                                        salesdoc_item =  ls_vbbe_key-salesdoc_item
+*                                        date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ENDIF.
+*        IF sy-subrc EQ 0.
+*          <ls_req_qty>-qty  = <lfs_bdbs>-alloc_qty + <ls_req_qty>-qty.
+*        ELSE.
+**
+*        ENDIF.
+*      ELSE.
+*        APPEND <lfs_bdbs> TO mt_bdbs_vbbe.
+*        IF iv_granularity = c_granularity_atpcat
+*        OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE lt_req_qty WITH KEY material = ls_vbbe_key-material
+*                                          plant =  ls_vbbe_key-plant
+*                                         date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE lt_req_qty WITH KEY salesdoc_num = ls_vbbe_key-salesdoc_num
+*                                      salesdoc_item =  ls_vbbe_key-salesdoc_item
+*                                      date = <lfs_bdbs>-requested_date ASSIGNING <ls_req_qty>.
+*        ENDIF.
+*        IF sy-subrc NE 0.
+*          MOVE-CORRESPONDING <lfs_bdbs> TO ls_req_qty.
+*          ls_req_qty-date = <lfs_bdbs>-requested_date.
+*          ls_req_qty-qty  = <lfs_bdbs>-alloc_qty.
+*          APPEND ls_req_qty TO lt_req_qty.
+*        ELSE.
+*          <ls_req_qty>-qty  = <lfs_bdbs>-alloc_qty + <ls_req_qty>-qty.
+*        ENDIF.
+*
+*      ENDIF.
+*    ENDLOOP.
+*
+*    CHECK mt_bdbs_vbbe IS NOT INITIAL.
+*
+*    LOOP AT ct_norm_vbbe ASSIGNING FIELD-SYMBOL(<lfs_vbbe>) WHERE vbtyp ='C' OR vbtyp = 'I' OR
+*                                                                  vbtyp = 'G'.
+*      lv_reqqty = <lfs_vbbe>-reqqty.
+*      lv_cnfqty = <lfs_vbbe>-cnfqty.
+*      IF lv_reqqty IS NOT INITIAL.
+*        IF iv_granularity = c_granularity_atpcat
+*        OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE lt_req_qty WITH KEY material = <lfs_vbbe>-matnr
+*                                            plant = <lfs_vbbe>-werks
+*                                             date = <lfs_vbbe>-atpdate INTO ls_req_qty.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE lt_req_qty WITH KEY salesdoc_num = ls_vbbe_key-salesdoc_num
+*                                        salesdoc_item = ls_vbbe_key-salesdoc_item
+*                                                 date = <lfs_vbbe>-atpdate INTO ls_req_qty.
+*        ENDIF.
+*        IF sy-subrc EQ 0  AND lv_reqqty < 0.
+*          <lfs_vbbe>-reqqty =  lv_reqqty + ls_req_qty-qty.
+*        ELSEIF lv_reqqty > 0.
+*          <lfs_vbbe>-reqqty =  lv_reqqty  - ls_req_qty-qty.
+*        ENDIF.
+*      ENDIF.
+*      IF lv_cnfqty IS NOT INITIAL.
+*        IF iv_granularity = c_granularity_atpcat
+*         OR iv_granularity = c_granularity_timeseries.
+*          READ TABLE mt_bdbs_vbbe ASSIGNING <ls_norm_vbbe>
+*                                                 WITH KEY material = <lfs_vbbe>-matnr
+*                                                             plant = <lfs_vbbe>-werks
+*                                               material_avail_date =  <lfs_vbbe>-atpdate.
+*        ELSEIF iv_granularity = c_granularity_order.
+*          READ TABLE mt_bdbs_vbbe ASSIGNING <ls_norm_vbbe>
+*                                             WITH KEY salesdoc_num = <lfs_vbbe>-delnr
+*                                                     salesdoc_item =  <lfs_vbbe>-delps
+*                                               material_avail_date =  <lfs_vbbe>-atpdate.
+*        ENDIF.
+*        CHECK <ls_norm_vbbe> IS ASSIGNED
+*        AND   sy-subrc EQ 0.
+*        IF lv_cnfqty < 0.
+*          <lfs_vbbe>-cnfqty =  lv_cnfqty + <ls_norm_vbbe>-alloc_qty.
+*        ELSEIF lv_cnfqty > 0.
+*          <lfs_vbbe>-cnfqty =  lv_cnfqty - <ls_norm_vbbe>-alloc_qty.
+*        ENDIF.
+*      ENDIF.
+*    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_atp_pac_select_bdbs~preread_bdbs.
+    DATA lo_arun_deallocation_bop TYPE REF TO cl_arun_deallocation_bop.
+
+    REFRESH : mt_bdbs_batch,
+              mt_bdbs_ekes,
+              mt_bdbs_eket,
+              mt_bdbs_stock,
+              mt_bdbs_vbbe,
+              mt_bdbs_afpo.
+
+    LOOP AT it_range ASSIGNING FIELD-SYMBOL(<lfs_range>).
+
+      me->read_bdbs( <lfs_range> ).
+
+      LOOP AT <lfs_range>-matnr_tab ASSIGNING FIELD-SYMBOL(<lfs_matnr>).
+         INSERT VALUE #( werks = <lfs_range>-werks matnr = <lfs_matnr>-low )
+                INTO TABLE mt_arun_materials.
+      ENDLOOP.
+
+    ENDLOOP.
+
+*  If order is deallocated then free up stock will be available for other order in same BOP run
+*    DATA(lv_bop_mode) = cl_atp_bop_db_controller=>get_instance( )->get_param( )-execution_method.
+*    IF  lv_bop_mode = 'ATP' OR lv_bop_mode = 'FULL'.
+    IF cl_arun_deallocation=>mv_order_dealoc = abap_true.
+      lo_arun_deallocation_bop ?= cl_arun_atp_controller=>get_instance(
+        )->get_arun_dealloc( ).
+
+      CALL METHOD lo_arun_deallocation_bop->get_buffered_bdbs_atp
+        IMPORTING
+          et_bdbs_atp = DATA(lt_bdbs_atp).
+
+      SORT mt_bdbs BY arunid.
+
+      LOOP AT lt_bdbs_atp ASSIGNING FIELD-SYMBOL(<fs_mt_atp_bdbs>).
+        IF <fs_mt_atp_bdbs>-req_ind = if_arun_common=>sales_order
+          OR <fs_mt_atp_bdbs>-req_ind = if_arun_common=>contract
+          OR <fs_mt_atp_bdbs>-req_ind = if_arun_common=>free_of_charge_order.
+          READ TABLE mt_bdbs TRANSPORTING NO FIELDS WITH KEY arunid = <fs_mt_atp_bdbs>-arunid
+                                                                       BINARY SEARCH.
+          IF sy-subrc = 0.
+*    Get the TABIX number
+*           data(lv_tabix)   = sy-tabix.
+            DELETE mt_bdbs INDEX  sy-tabix.
+          ENDIF.
+        ELSEIF <fs_mt_atp_bdbs>-req_ind = if_arun_common=>stock_transport_order.
+          READ TABLE mt_bdbs TRANSPORTING NO FIELDS WITH KEY arunid = <fs_mt_atp_bdbs>-arunid
+                                                               BINARY SEARCH.
+          IF sy-subrc = 0.
+            DELETE mt_bdbs INDEX sy-tabix.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+*      LOOP AT lt_bdbs_atp ASSIGNING FIELD-SYMBOL(<fs_mt_atp_bdbs>) WHERE vbukz = 'D'.
+**  Free up BDBS assignment
+*        DELETE mt_bdbs WHERE arunid = <fs_mt_atp_bdbs>-arunid.
+*      ENDLOOP.
+
+    ENDIF.
+*    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD read_bdbs.
+
+    DATA: lt_bdbs    TYPE tt_bdbs_data,
+          lt_bdbs_vj TYPE SORTED TABLE OF ty_bdbs_out WITH NON-UNIQUE KEY req_ind.
+    CHECK is_range-sobkz = space. " Do not read BDBS for Special scenarios
+*    SELECT  * FROM arun_bdbs
+*       WHERE material IN @is_range-matnr_tab AND
+*             plant =  @is_range-werks AND
+*             arun_mode = '1'
+*     INTO CORRESPONDING FIELDS OF TABLE @lt_bdbs.
+
+*    SELECT *
+*    FROM arun_bdbs_stock_sel
+*    WHERE material IN @is_range-matnr_tab AND
+*          plant = @is_range-werks
+*    INTO CORRESPONDING FIELDS OF TABLE @lt_bdbs.
+*
+    IF cl_arun_db_select=>mv_alloc_exists <> abap_true.
+       SELECT bdbs~arunid,
+                     bdbs~plant,
+                     bdbs~material,
+                     bdbs~arun_status,
+                     bdbs~salesdoc_num,
+                     bdbs~purchdoc_num,
+                     bdbs~reserv_num,
+                     bdbs~salesdoc_item,
+                     bdbs~purchdoc_item,
+                     bdbs~reserv_item,
+                     bdbs~req_ind,
+                     bdbs~stock_source,
+                     bdbs~batch,
+                     bdbs~storage_location,
+                     bdbs~purchord_num,
+                     bdbs~prodord_num,
+                     bdbs~purchord_item,
+                     bdbs~prodord_item,
+                     bdbs~purchord_sch,
+                     bdbs~confirmation_no,
+                     bdbs~consignment_num,
+                     bdbs~alloc_qty,
+                     bdbs~material_baseunit,
+                     bdbs~requested_date,
+                     bdbs~material_avail_date,
+                     bdbs~delivery_date_po,
+                     bdbs~arun_mode,
+                     bdbs~creation_time,
+                     bdbs~changed_by,
+                     bdbs~mat_avail_date_mrp,
+                     bdbs~req_segment,
+                     bdbs~stk_segment
+    FROM arun_bdbs AS bdbs
+    INTO CORRESPONDING FIELDS OF TABLE @lt_bdbs
+    WHERE material IN @is_range-matnr_tab AND
+          plant = @is_range-werks AND
+          arun_mode = '1'.
+
+      APPEND LINES OF lt_bdbs TO mt_bdbs.
+    ELSE.
+      CLEAR: cl_arun_db_select=>mv_alloc_exists.
+    ENDIF.
+
+    "presently commented for checking to handle in adjust vbbe - SG
+** Filter Delivery entries
+*    lt_bdbs_vj = CORRESPONDING #( mt_bdbs ).
+*    CHECK lt_bdbs_vj IS NOT INITIAL.
+*    READ TABLE lt_bdbs_vj WITH KEY req_ind = 'VJ'
+*                           TRANSPORTING NO FIELDS
+*                           BINARY SEARCH.
+*    IF sy-subrc IS INITIAL.
+**  Procees atleast if one Delivery entry is there
+*      LOOP AT lt_bdbs_vj ASSIGNING FIELD-SYMBOL(<lfs_bdbs_vj>) FROM sy-tabix.
+*        IF <lfs_bdbs_vj>-req_ind <> 'VJ'.
+*          EXIT.
+*        ENDIF.
+*        READ TABLE mt_bdbs_out ASSIGNING FIELD-SYMBOL(<lfs_bdbs_out>)
+*                               WITH KEY salesdoc_num = <lfs_bdbs_vj>-salesdoc_num
+*                                        salesdoc_item = <lfs_bdbs_vj>-salesdoc_item
+*                                        BINARY SEARCH.
+*        IF sy-subrc IS INITIAL.
+*          <lfs_bdbs_out>-alloc_qty = <lfs_bdbs_out>-alloc_qty + <lfs_bdbs_vj>-alloc_qty.
+*        ELSE.
+*          INSERT <lfs_bdbs_vj> INTO TABLE mt_bdbs_out.
+*        ENDIF.
+*      ENDLOOP.
+*    ELSE.
+*      REFRESH mt_bdbs_out.
+*    ENDIF.
+
+
+    "Only for preview mode
+    CHECK cl_arun_db_select=>mv_prev = 'X'.
+    CALL METHOD me->read_preview
+      EXPORTING
+        is_range = is_range.
+
+  ENDMETHOD.
+
+
+ METHOD read_preview.
+
+   DATA: lt_data TYPE arun_tt_bdbstab.
+   DATA: lr_stock_source  TYPE RANGE OF arun_preview-stock_source.
+   DATA: ls_stock_source LIKE LINE OF lr_stock_source.
+
+
+
+   IF ms_stock_type-batch = 'X'.
+     APPEND VALUE #( sign = 'I' option = 'EQ' low = 'C' ) TO lr_stock_source.
+   ENDIF.
+   IF ms_stock_type-storage_location = 'X'.
+     APPEND VALUE #( sign = 'I' option = 'EQ' low = 'S' ) TO lr_stock_source.
+   ENDIF.
+   IF ms_stock_type-bestp = 'X'.
+     APPEND VALUE #( sign = 'I' option = 'EQ' low = 'B' )  TO lr_stock_source.
+   ENDIF.
+   IF ms_stock_type-lavip = 'X'.
+     APPEND VALUE #( sign = 'I' option = 'EQ' low = 'L' )  TO lr_stock_source.
+   ENDIF.
+   IF ms_stock_type-fertp = 'X'.
+     APPEND VALUE #( sign = 'I' option = 'EQ' low = 'F' ) TO lr_stock_source.
+   ENDIF.
+   IF ms_stock_type-plafp = 'X'.
+     APPEND VALUE #( sign = 'I' option = 'EQ' low = 'P' ) TO lr_stock_source.
+   ENDIF.
+   IF ms_stock_type-banfp = 'X'.
+     APPEND VALUE #( sign = 'I' option = 'EQ' low = 'A' ) TO lr_stock_source.
+   ENDIF.
+
+   IF lr_stock_source IS NOT INITIAL.
+     SELECT  * FROM arun_preview
+             WHERE  material IN @is_range-matnr_tab AND
+                    plant =  @is_range-werks AND
+                    stock_source IN @lr_stock_source
+            APPENDING CORRESPONDING FIELDS OF TABLE @mt_bdbs.
+   ENDIF.
+
+ ENDMETHOD.
+ENDCLASS.

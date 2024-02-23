@@ -1,0 +1,185 @@
+ENHANCEMENT 1  .
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* BALUNYAN     | 23.07.2023 | 22541 & DESCRIPTION                      *
+*              |            | DS4K956136                               *
+************************************************************************
+* BALUNYAN     | 30.08.2023 | 22541 & [Build] [CR] [52584] update OM   *
+*              |            | DS4K956136                               *
+************************************************************************
+* BALUNYAN     | 14.09.2023 | 25084 & [Build] [CR] [52584] update OM   *
+*              |            | DS4K963656                               *
+*----------------------------------------------------------------------*
+DATA : lv_gi_type         TYPE pstyv_vl,
+       lv_gr_type         TYPE pstyv_vl,
+       lt_lips            TYPE TABLE OF lips,
+       lt_lines           TYPE TABLE OF  tline,
+       lv_shipment_advice TYPE char10,
+       lv_name            TYPE  tdobname,
+       lts_filter         TYPE SORTED TABLE OF lips-pstyv
+                 WITH UNIQUE KEY table_line,
+       lt_omni_shpcf      TYPE TABLE OF zsd_t_omni_shpcf.
+
+TRY.
+    lv_gi_type = zcl_pe_hm_basic=>get_value( iv_id = '0000002005' iv_sequence = '001' ).
+    lv_gr_type = zcl_pe_hm_basic=>get_value( iv_id = '0000002005' iv_sequence = '002' ).
+
+    DATA(lt_read_parameters) = zcl_pe_hm_basic=>get_table( iv_id = '0000002212' ).
+    READ TABLE lt_read_parameters WITH KEY  sequence = '001' INTO DATA(ls_read_parameters).
+
+    IF sy-subrc = 0.
+      DATA(lt_gigr_clasfr) = zcl_pe_hm_basic=>get_table( iv_id = '0000002215' ).
+      READ TABLE lt_gigr_clasfr WITH KEY  sequence = '001' INTO DATA(ls_gigr_clasfr).
+
+      IF sy-subrc = 0.
+
+        DATA(lt_gigr_document_categry) = zcl_pe_hm_basic=>get_table( iv_id = '0000002216' ).
+        READ TABLE lt_gigr_document_categry WITH KEY  sequence = '001' INTO DATA(ls_gi_document_categry).
+
+        IF sy-subrc = 0.
+
+          READ TABLE lt_gigr_document_categry WITH KEY  sequence = '002' INTO DATA(ls_gr_document_categry).
+
+          IF sy-subrc = 0.
+
+            lts_filter = VALUE #( ( lv_gi_type ) ( lv_gr_type ) ).
+
+            lt_lips = FILTER #( xlips[] IN lts_filter WHERE pstyv = table_line ).
+
+            IF lt_lips IS NOT INITIAL.
+
+              SELECT subsequentdocument, precedingdocument
+                FROM  i_sddocumentmultilevelprocflow WITH PRIVILEGED ACCESS
+                FOR ALL ENTRIES IN @lt_lips
+                WHERE  subsequentdocument = @lt_lips-vbeln
+                AND
+                ( ( subsequentdocumentcategory =  @ls_gi_document_categry-field2
+                AND precedingdocumentcategory =  @ls_gi_document_categry-field1 )
+                OR ( subsequentdocumentcategory =  @ls_gr_document_categry-field2
+                AND precedingdocumentcategory =  @ls_gr_document_categry-field1 ) )
+                INTO TABLE @DATA(lt_vbelv).
+
+              IF sy-subrc = 0.
+
+                LOOP AT xlips ASSIGNING FIELD-SYMBOL(<ls_xlips>) WHERE pstyv = lv_gi_type.
+
+                  IF line_exists( lt_vbelv[ subsequentdocument = <ls_xlips>-vbeln ] ).
+
+                    lv_name = lt_vbelv[ subsequentdocument = <ls_xlips>-vbeln ]-precedingdocument.
+
+                    CALL FUNCTION 'READ_TEXT'
+                      EXPORTING
+                        id                      = CONV tdid( ls_read_parameters-field1 )
+                        language                = CONV spras( ls_read_parameters-field2 )
+                        name                    = lv_name
+                        object                  = CONV tdobject( ls_read_parameters-field3 )
+                      TABLES
+                        lines                   = lt_lines
+                      EXCEPTIONS
+                        id                      = 1
+                        language                = 2
+                        name                    = 3
+                        not_found               = 4
+                        object                  = 5
+                        reference_check         = 6
+                        wrong_access_to_archive = 7.
+
+                    IF sy-subrc = 0 AND lt_lines IS NOT INITIAL.
+
+                      DATA(lv_line) = lt_lines[ 1 ]-tdline.
+
+                      lv_shipment_advice = substring( off = 0 len = 9 val = lv_line ).
+
+                      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+                        EXPORTING
+                          input         = lv_shipment_advice
+                       IMPORTING
+                         OUTPUT        = lv_shipment_advice.
+
+                      DATA(lv_tracking_number) = substring( off = 10 len = strlen( lv_line ) - 10 val = lv_line ).
+
+                      SELECT rec_id, wms_dt, wms_tm
+                      FROM zsd_t_omni_shpcf
+                      WHERE artc_nr = @<ls_xlips>-matnr
+                        AND lgort = @<ls_xlips>-lgort
+                        AND werks = @<ls_xlips>-werks
+                        AND clasfr = @ls_gigr_clasfr-field1
+                        AND track_num = @lv_tracking_number
+                        AND ord_id = @lv_shipment_advice
+                        INTO TABLE @DATA(lt_wms_data)
+                        UP TO 1 ROWS.                "#EC CI_SEL_NESTED
+
+                      IF sy-subrc = 0.
+                        <ls_xlips>-zz1_wmsdate_dli = lt_wms_data[ 1 ]-wms_dt.
+                        <ls_xlips>-zz1_wmstime_dli = lt_wms_data[ 1 ]-wms_tm.
+
+                        APPEND INITIAL LINE TO lt_omni_shpcf ASSIGNING FIELD-SYMBOL(<ls_omni_shpcf>).
+                        <ls_omni_shpcf>-rec_id = lt_wms_data[ 1 ]-rec_id.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDLOOP.
+
+                SELECT salesdocument, zz_purchaseorderbycustomer "#EC CI_NO_TRANSFORM
+                      FROM i_salesdocument
+                      FOR ALL ENTRIES IN @lt_vbelv
+                      WHERE salesdocument = @lt_vbelv-precedingdocument
+                      INTO TABLE @DATA(lt_bstnk).
+
+                IF sy-subrc = 0.
+
+                  LOOP AT xlips ASSIGNING <ls_xlips> WHERE pstyv = lv_gr_type.
+
+                    IF line_exists( lt_vbelv[ subsequentdocument = <ls_xlips>-vbeln ] ).
+
+                      DATA(lv_precedingdocument) = lt_vbelv[ subsequentdocument = <ls_xlips>-vbeln ]-precedingdocument.
+
+                      IF line_exists( lt_bstnk[ salesdocument = lv_precedingdocument ] ).
+
+                        DATA(lv_track_num) = lt_bstnk[ salesdocument = lv_precedingdocument ]-zz_purchaseorderbycustomer.
+
+                        SELECT rec_id, wms_dt, wms_tm
+                            FROM zsd_t_omni_shpcf
+                            WHERE artc_nr = @<ls_xlips>-matnr
+                              AND lgort = @<ls_xlips>-lgort
+                              AND werks = @<ls_xlips>-werks
+                              AND clasfr = @ls_gigr_clasfr-field2
+                              AND track_num = @lv_track_num
+                              INTO TABLE @lt_wms_data
+                              UP TO 1 ROWS.          "#EC CI_SEL_NESTED
+
+                        IF sy-subrc = 0.
+                          <ls_xlips>-zz1_wmsdate_dli = lt_wms_data[ 1 ]-wms_dt.
+                          <ls_xlips>-zz1_wmstime_dli = lt_wms_data[ 1 ]-wms_tm.
+
+                          APPEND INITIAL LINE TO lt_omni_shpcf ASSIGNING <ls_omni_shpcf>.
+                          <ls_omni_shpcf>-rec_id = lt_wms_data[ 1 ]-rec_id.
+                        ENDIF.
+                      ENDIF.
+                    ENDIF.
+                  ENDLOOP.
+
+                ENDIF.
+
+                IF lt_omni_shpcf IS NOT INITIAL.
+                  CALL FUNCTION 'ZSD_FM_OMNI_SHPCF_DELETE' IN UPDATE TASK
+                    TABLES
+                      it_omni_shpcf = lt_omni_shpcf.
+                ENDIF.
+
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  CATCH zcx_pe_hm.
+    CLEAR: lv_gi_type,
+           lv_gr_type.
+
+ENDTRY.
+ENDENHANCEMENT.

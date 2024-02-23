@@ -1,0 +1,1940 @@
+*&---------------------------------------------------------------------*
+*& Include          ZSP_R_ALLOCATE_CONTR_TO_PR_CI1
+*&---------------------------------------------------------------------*
+
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KASHTULA     | 03.08.2023 | 23967     : MTF Consumption logic        *
+*              |            | DS4K959970                               *
+*----------------------------------------------------------------------*
+* KASHTULA     | 23.08.2023 | 24518     : MTF Consumption logic        *
+*              |            | DS4K961680                               *
+*----------------------------------------------------------------------*
+* KASHTULA     | 29.09.2023 | 25577     :  Avoid multiple Planned dates*
+*              |            | in PRs, DS4K965510                       *
+*----------------------------------------------------------------------*
+
+
+CLASS lcl_main IMPLEMENTATION.
+
+*&---------------------------------------------------------------------*
+*& Clear variables
+*&---------------------------------------------------------------------*
+  METHOD clear_variables.
+
+    CLEAR: gv_prs, gv_prs_excluded, gv_prs_fully_assigned, gv_prs_partially_assigned,
+           gt_log, gt_log_to_display, gts_deleted, gts_vendor_country, gts_wyt3_pr,
+           gts_wyt3_contract, gts_vendor_country.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Get mapping data
+*&---------------------------------------------------------------------*
+  METHOD get_mapping_data.
+
+    CONSTANTS:
+      lc_supm TYPE zsp_supm VALUE 'STD'.
+
+    DATA:
+      lt_polit_restr_tmp TYPE STANDARD TABLE OF gtyp_s_political_restr_temp.
+
+    TRY.
+        CLEAR gts_political_restrictions.
+        zcl_pe_hm_complex=>get_table(
+          EXPORTING
+            iv_id           = '024F85009E261EEE8DEC37496F3F80D2'
+            iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-names
+          IMPORTING
+            et_table        = lt_polit_restr_tmp  ).
+        LOOP AT lt_polit_restr_tmp ASSIGNING FIELD-SYMBOL(<ls_polit>).
+          INSERT VALUE #( mat_division = <ls_polit>-mat_division  land_c = <ls_polit>-land_c
+                          kunnr        = <ls_polit>-kunnr         land_v = <ls_polit>-land_v
+                          lifnr        = <ls_polit>-lifnr         datab  = <ls_polit>-datab-date
+                          datbi        = <ls_polit>-datbi-date ) INTO TABLE gts_political_restrictions.
+        ENDLOOP.
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '0239FC3B8D041EDE8CBBAE161026DF59' TEXT-001 INTO DATA(lv_message).
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '0239FC3B8D041EDE8CBBAE161026DF59'
+                        msgv2   = TEXT-001
+                        message = lv_message ) TO gt_log.
+        CLEAR gts_political_restrictions.
+    ENDTRY.
+
+    TRY.
+        CLEAR gts_lo_office_groupping.
+        zcl_pe_hm_complex=>get_table(
+          EXPORTING
+            iv_id           = '0239FC3B8D041EDE8CBF9080765D3F59'
+            iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-data_elements
+          IMPORTING
+            et_table        = gts_lo_office_groupping  ).
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '0239FC3B8D041EDE8CBF9080765D3F59' TEXT-002 INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '0239FC3B8D041EDE8CBF9080765D3F59'
+                        msgv2   = TEXT-002
+                        message = lv_message ) TO gt_log.
+        CLEAR gts_lo_office_groupping.
+    ENDTRY.
+
+    TRY.
+        CLEAR gr_pr_type .
+        gr_pr_type = zcl_pe_hm_basic=>get_range( iv_id = '2044' ).
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '2044' TEXT-003 INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '2044'
+                        msgv2   = TEXT-003
+                        message = lv_message ) TO gt_log.
+        CLEAR gr_pr_type.
+    ENDTRY.
+
+    TRY.
+        CLEAR gs_lo_office_data.
+        DATA(lt_result) = zcl_pe_hm_basic=>get_table( iv_id = '2135' ).
+        IF lt_result IS NOT INITIAL.
+          gs_lo_office_data = VALUE #( parvw = CONV parvw( lt_result[ 1 ]-field1 ) ekorg = CONV ekorg( lt_result[ 1 ]-field2 ) ).
+        ELSE.
+          MESSAGE w002(zsp_mtf_contr_pr) WITH '2135' TEXT-017 INTO lv_message.
+          APPEND VALUE #( msgty   = 'W'
+                          msgid   = gc_mess_class
+                          msgno   = '002'
+                          msgv1   = '2135'
+                          msgv2   = TEXT-017
+                          message = lv_message ) TO gt_log.
+        ENDIF.
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '2135' TEXT-017 INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '2135'
+                        msgv2   = TEXT-017
+                        message = lv_message ) TO gt_log.
+        CLEAR gr_pr_type.
+    ENDTRY.
+
+    TRY.
+        CLEAR gr_contract_type.
+        gr_contract_type = zcl_pe_hm_basic=>get_range( iv_id = '2046' ).
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '2046' TEXT-004 INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '2046'
+                        msgv2   = TEXT-004
+                        message = lv_message ) TO gt_log.
+        CLEAR gr_contract_type.
+    ENDTRY.
+
+    TRY.
+        CLEAR gr_distribution_channel.
+        gr_distribution_channel = zcl_pe_hm_basic=>get_range( iv_id = '2048' ).
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '2048' TEXT-005 INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '2048'
+                        msgv2   = TEXT-005
+                        message = lv_message ) TO gt_log.
+        CLEAR gr_distribution_channel.
+    ENDTRY.
+
+    TRY.
+        CLEAR gv_dliname.
+        DATA(lt_distribution_list) = zcl_pe_hm_basic=>get_table( iv_id = '2050' ).
+        IF lt_distribution_list IS NOT INITIAL.
+          gv_dliname = lt_distribution_list[ 1 ]-field1.
+        ENDIF.
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '2050' TEXT-006 INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '2050'
+                        msgv2   = TEXT-006
+                        message = lv_message ) TO gt_log.
+        CLEAR gv_dliname.
+    ENDTRY.
+
+    TRY.
+        CLEAR gr_order_classification.
+        DATA(lt_order_classification) = zcl_pe_hm_basic=>get_table( iv_id = '1932' ).
+        gr_order_classification = VALUE #( FOR ls_wa IN lt_order_classification
+                                          ( sign = 'I' option = 'EQ' low = CONV zz1_oc0_prq( ls_wa-field1 ) ) ).
+      CATCH zcx_pe_hm.
+        MESSAGE w002(zsp_mtf_contr_pr) WITH '1932' TEXT-007 INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '002'
+                        msgv1   = '1932'
+                        msgv2   = TEXT-007
+                        message = lv_message ) TO gt_log.
+        CLEAR gr_order_classification.
+    ENDTRY.
+
+    SELECT fsh_mg_at1, brand_id, chk_level, pominchk, po_minimum, min_unit
+      FROM zsp_t_minprfl
+      WHERE supm = @lc_supm
+      INTO TABLE @gts_min_check.
+    IF sy-subrc <> 0.
+      MESSAGE w003(zsp_mtf_contr_pr) WITH 'ZSP_T_MINPRFL' TEXT-008 INTO lv_message.
+      APPEND VALUE #( msgty   = 'W'
+                      msgid   = gc_mess_class
+                      msgno   = '003'
+                      msgv1   = 'ZSP_T_MINPRFL'
+                      msgv2   = TEXT-008
+                      message = lv_message ) TO gt_log.
+      CLEAR gts_min_check.
+    ENDIF.
+
+    SELECT mtf_variant, fsh_mg_at1, mtf_cust_gr, kunnr, exclusion, valid_fr, valid_to
+      FROM zsp_t_cont_var
+      WHERE inactive  = @abap_false OR inactive = 'N' OR inactive = 'n'
+      INTO CORRESPONDING FIELDS OF TABLE @gts_contract_variants.
+    IF sy-subrc <> 0.
+      MESSAGE w003(zsp_mtf_contr_pr) WITH 'ZSP_T_CONT_VAR' TEXT-009 INTO lv_message.
+      APPEND VALUE #( msgty   = 'W'
+                      msgid   = gc_mess_class
+                      msgno   = '003'
+                      msgv1   = 'ZSP_T_CONT_VAR'
+                      msgv2   = TEXT-009
+                      message = lv_message ) TO gt_log.
+      CLEAR gts_contract_variants.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Allocate contracts to Purchasing Requisition
+*&---------------------------------------------------------------------*
+  METHOD allocate_contracts_to_pr.
+
+    DATA:
+      lv_error          TYPE abap_boolean,
+      lt_contract_items TYPE gtyp_t_contract,
+      lt_pr_items       TYPE gtyp_t_eban.
+
+    MESSAGE s001(zsp_mtf_contr_pr) INTO DATA(lv_message).
+    APPEND VALUE #( msgty   = 'S'
+                    msgid   = gc_mess_class
+                    msgno   = '001'
+                    message = lv_message ) TO gt_log.
+
+    " Fetch PRs, Contracts and material data for further processing
+    fetch_prs_and_contracts(
+      IMPORTING
+        et_pr_items       = lt_pr_items
+        et_contract_items = lt_contract_items  ).
+
+    IF lt_pr_items IS INITIAL
+    OR lt_contract_items IS INITIAL
+    OR gth_mara IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    fetch_data_for_pr_sorting(
+      EXPORTING
+        it_contracts = lt_contract_items
+      CHANGING
+        ct_eban      = lt_pr_items ).
+
+    fetch_vendor_data(
+      it_eban      = lt_pr_items
+      it_contracts = lt_contract_items ).
+
+    " PR can have multiple items. Collect all items of PR into one object
+    condense_pr(
+      EXPORTING
+        it_eban    = lt_pr_items
+     IMPORTING
+        et_pr_list = DATA(lt_pr_list) ).
+
+    LOOP AT lt_pr_list ASSIGNING FIELD-SYMBOL(<ls_pr>).
+
+      " Exclude PRs that have quantity less than expected
+      check_pr_minimum(
+        EXPORTING
+         is_pr = <ls_pr>
+      IMPORTING
+         ev_error = lv_error ).
+
+      IF lv_error = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      " Process PR (try to find the best contract and create a link)
+      process_pr(
+       EXPORTING
+         it_contract_items = lt_contract_items
+       CHANGING
+         cs_pr             = <ls_pr> ).
+
+    ENDLOOP.
+
+    " Set final message about the whole process result
+    IF line_exists( gt_log[ msgty = 'E' ] ).
+      MESSAGE e027(zsp_mtf_contr_pr) INTO lv_message.
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '027'
+                      message = lv_message ) TO gt_log.
+    ELSE.
+      MESSAGE s028(zsp_mtf_contr_pr) INTO lv_message.
+      APPEND VALUE #( msgty   = 'S'
+                      msgid   = gc_mess_class
+                      msgno   = '028'
+                      message = lv_message ) TO gt_log.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Fetch PRs and contracts
+*&---------------------------------------------------------------------*
+  METHOD fetch_prs_and_contracts.
+
+    DATA:
+      lv_tabix    TYPE sy-tabix,
+      lts_matnr   TYPE gtyp_ts_materials,
+      lt_pr_items TYPE gtyp_t_eban.
+
+    FIELD-SYMBOLS:
+      <ls_eban>      TYPE gtyp_s_eban.
+
+    CLEAR: et_pr_items, et_contract_items.
+
+    " Select PR's that should be checked for linking
+    SELECT  purchaserequisition     AS banfn,
+            purchaserequisitionitem AS bnfpo,
+            material                AS matnr,
+            requestedquantity       AS menge,
+            fixedsupplier           AS flief,
+            purchasingorganization  AS ekorg,
+            deliverydate            AS lfdat,
+            creationdate,
+            zz1_adi_m_planned_pri,
+            purchasecontract
+      FROM i_purchaserequisitionitemapi01
+       WHERE purchaserequisition     IN @s_banfn
+         AND purchaserequisitiontype IN @gr_pr_type
+         AND creationdate            IN @s_badat
+         AND zz1_oc0_prq_pri         IN @gr_order_classification
+         AND ispurreqnblocked        = @space
+         AND purchasingorganization  IN @s_ekorg
+      INTO TABLE @DATA(lt_pr_items_temp).
+
+    IF sy-subrc = 0.
+      " Delete PRs that were already partially assigned to contracts (some items have 'purchasecontract' not initial)
+      SORT lt_pr_items_temp BY banfn.
+      LOOP AT lt_pr_items_temp ASSIGNING FIELD-SYMBOL(<ls_item>).
+        IF <ls_item>-purchasecontract IS NOT INITIAL.
+          DELETE lt_pr_items_temp WHERE banfn = <ls_item>-banfn.
+        ENDIF.
+      ENDLOOP.
+
+      lt_pr_items = CORRESPONDING #( lt_pr_items_temp ).
+
+      " Statistics data
+      SORT lt_pr_items_temp BY banfn.
+      DELETE ADJACENT DUPLICATES FROM lt_pr_items_temp COMPARING banfn.
+      gv_prs = lines( lt_pr_items_temp ).
+
+      get_material_data(
+        IMPORTING
+          ets_materials = lts_matnr
+          eth_mara      = gth_mara
+        CHANGING
+          ct_eban       = lt_pr_items  ).
+
+      IF lts_matnr IS INITIAL
+      OR gth_mara IS INITIAL.
+        RETURN.
+      ENDIF.
+    ELSE.
+      MESSAGE e004(zsp_mtf_contr_pr) INTO DATA(lv_message).
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '004'
+                      message = lv_message ) TO gt_log.
+    ENDIF.
+
+    " Fetch the contracts which could be used for linking
+    " The select cannot be replaced with select from CDS.
+    " Corresponding CDSs with the proper contract state do not contain:
+    " field BSTYP for EKKO, field KTMNG for EKPO
+    " CDS for MARA do not contain ATTYP
+    SELECT ekko~ebeln,
+           ekpo~ebelp,
+           ekko~ekorg,
+           ekko~ekgrp,
+           ekko~bstyp,
+           ekko~bsart,
+           ekko~lifnr,
+           ekko~kdatb,
+           ekko~kdate,
+           ekpo~matnr,
+           ekpo~werks,
+           ekpo~ktmng,
+           ekko~zz1_variant_conh_pdh,
+           ekpo~zz1_adi_m_planned_pdi,
+           mara~attyp
+    FROM ekpo
+      INNER JOIN ekko ON ekko~ebeln = ekpo~ebeln
+      INNER JOIN mara ON mara~matnr = ekpo~matnr
+    FOR ALL ENTRIES IN @lts_matnr
+    WHERE ekko~bstyp                  = 'K'
+      AND ekko~bsart                  IN @gr_contract_type
+      AND ekko~loekz                  = @space
+      AND ekko~kdate                  >= @sy-datlo
+      AND ekpo~matnr                  = @lts_matnr-table_line
+      AND ekpo~loekz                  = @space
+      AND ekpo~elikz                  = @space
+      AND ekpo~zz1_postat_pdi         = '10'
+      AND ekpo~zz1_clearance_flag_pdi = @space
+      INTO CORRESPONDING FIELDS OF TABLE @et_contract_items.
+
+    IF sy-subrc = 0.
+      SORT et_contract_items BY matnr.
+
+      " Remove PR if its article is absent in contracts
+      LOOP AT lt_pr_items ASSIGNING <ls_eban>.
+        lv_tabix = sy-tabix.
+        READ TABLE et_contract_items TRANSPORTING NO FIELDS WITH KEY matnr = <ls_eban>-matnr BINARY SEARCH.
+        IF sy-subrc = 0.
+          CONTINUE.
+        ELSEIF <ls_eban>-attyp = gc_attyp-variant.
+          READ TABLE et_contract_items TRANSPORTING NO FIELDS WITH KEY matnr = <ls_eban>-general_article BINARY SEARCH.
+          IF sy-subrc = 0.
+            CONTINUE.
+          ENDIF.
+        ELSE.
+          MESSAGE e008(zsp_mtf_contr_pr) WITH <ls_eban>-banfn <ls_eban>-bnfpo <ls_eban>-matnr INTO lv_message.
+          APPEND VALUE #( msgty   = 'E'
+                          msgid   = gc_mess_class
+                          msgno   = '008'
+                          msgv1   = <ls_eban>-banfn msgv2 = <ls_eban>-bnfpo
+                          msgv3   = <ls_eban>-matnr
+                          message = lv_message
+                          banfn = <ls_eban>-banfn ) TO gt_log.
+
+          INSERT VALUE #( banfn = <ls_eban>-banfn ) INTO TABLE gts_deleted.
+          DELETE lt_pr_items INDEX lv_tabix.
+        ENDIF.
+      ENDLOOP.
+    ELSE.
+      MESSAGE e005(zsp_mtf_contr_pr) INTO lv_message.
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '005'
+                      message = lv_message ) TO gt_log.
+      RETURN.
+    ENDIF.
+
+    et_pr_items = lt_pr_items.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Get material data
+*&---------------------------------------------------------------------*
+  METHOD get_material_data.
+
+    TYPES:
+      BEGIN OF ltyp_s_mara_temp,
+        matnr      TYPE matnr,
+        fsh_mg_at1 TYPE fsh_mg_attribute1,
+        brand_id   TYPE wrf_brand_id,
+        spart      TYPE spart,
+        attyp      TYPE attyp,
+        satnr      TYPE satnr,
+      END OF ltyp_s_mara_temp,
+      ltyp_t_mara_temp TYPE STANDARD TABLE OF ltyp_s_mara_temp.
+
+    DATA:
+      lt_mara TYPE ltyp_t_mara_temp.
+
+    CLEAR: ets_materials, eth_mara.
+
+    DATA(lt_eban) = ct_eban.
+    SORT lt_eban BY matnr.
+    DELETE ADJACENT DUPLICATES FROM lt_eban COMPARING matnr.
+
+    IF lt_eban IS NOT INITIAL.
+      SELECT product                       AS matnr,
+             fashioninformationfield1      AS fsh_mg_at1,
+             brand                         AS brand_id,
+             division                      AS spart,
+             productcategory               AS attyp,
+             crossplantconfigurableproduct AS satnr
+      FROM zfi_i_productd_ex
+      FOR ALL ENTRIES IN @lt_eban
+      WHERE product = @lt_eban-matnr
+      INTO TABLE @lt_mara.
+
+      IF sy-subrc = 0.
+        SORT lt_mara BY matnr.
+
+        " Set up PR's general articles
+        LOOP AT ct_eban ASSIGNING FIELD-SYMBOL(<ls_eban>).
+          READ TABLE lt_mara ASSIGNING FIELD-SYMBOL(<ls_mara>) WITH KEY matnr = <ls_eban>-matnr BINARY SEARCH.
+          IF sy-subrc = 0.
+            <ls_eban>-general_article = <ls_mara>-satnr.
+            <ls_eban>-attyp           = <ls_mara>-attyp.
+            <ls_eban>-spart           = <ls_mara>-spart.
+            <ls_eban>-fsh_mg_at1      = <ls_mara>-fsh_mg_at1.
+          ENDIF.
+        ENDLOOP.
+
+        eth_mara = CORRESPONDING #( lt_mara ).
+        LOOP AT lt_mara ASSIGNING <ls_mara>.
+          INSERT <ls_mara>-matnr INTO TABLE ets_materials.
+          " Exclude General Articles from further processing
+          IF <ls_mara>-attyp = gc_attyp-generic.
+            DELETE lt_mara INDEX sy-tabix.
+          ENDIF.
+        ENDLOOP.
+
+        " Define and process General Articles related to Variant Articles from the previous step
+        IF lt_mara IS NOT INITIAL.
+          SORT lt_mara BY satnr.
+          DELETE ADJACENT DUPLICATES FROM lt_mara COMPARING satnr.
+
+          SELECT product                        AS matnr,
+                 fashioninformationfield1       AS fsh_mg_at1,
+                 brand                          AS brand_id,
+                 productcategory                AS attyp,
+                 crossplantconfigurableproduct  AS satnr
+          FROM zfi_i_productd_ex
+          FOR ALL ENTRIES IN @lt_mara
+          WHERE product = @lt_mara-satnr
+          INTO TABLE @DATA(lt_mara_general).
+
+          IF sy-subrc = 0.
+            LOOP AT lt_mara_general ASSIGNING FIELD-SYMBOL(<ls_mara_general>).
+              INSERT <ls_mara_general>-matnr INTO TABLE ets_materials.
+              INSERT VALUE #( matnr      = <ls_mara_general>-matnr
+                              fsh_mg_at1 = <ls_mara_general>-fsh_mg_at1
+                              brand_id   = <ls_mara_general>-brand_id ) INTO TABLE eth_mara.
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Vendor check
+*&---------------------------------------------------------------------*
+  METHOD check_vendor.
+
+    cs_contract-check_fail = abap_true.
+
+    DO 1 TIMES.
+      IF cs_pr-flief IS INITIAL
+      OR cs_pr-flief = cs_contract-lifnr.
+        " Check passed
+        cs_contract-check_fail = abap_false.
+        RETURN.
+      ELSE.
+        READ TABLE gts_wyt3_pr ASSIGNING FIELD-SYMBOL(<ls_wyt3_pr>)
+                   WITH KEY lifnr = cs_pr-flief.
+        IF sy-subrc = 0.
+          READ TABLE gts_lo_office_groupping ASSIGNING FIELD-SYMBOL(<ls_gr_pr>)
+                   WITH KEY lo_office = <ls_wyt3_pr>-lifn2.
+          IF sy-subrc <> 0.
+            EXIT.
+          ENDIF.
+        ELSE.
+          EXIT.
+        ENDIF.
+
+        READ TABLE gts_wyt3_contract ASSIGNING FIELD-SYMBOL(<ls_wyt3_contract>)
+                     WITH KEY lifnr = cs_contract-lifnr.
+        IF  sy-subrc = 0.
+          READ TABLE gts_lo_office_groupping ASSIGNING FIELD-SYMBOL(<ls_gr_contract>)
+                     WITH KEY lo_office = <ls_wyt3_contract>-lifn2.
+          IF sy-subrc <> 0.
+            EXIT.
+          ENDIF.
+        ELSE.
+          EXIT.
+        ENDIF.
+
+        IF <ls_gr_pr>-lo_office_group = <ls_gr_contract>-lo_office_group.
+          " Check passed
+          cs_contract-old_vendor = cs_pr-flief.
+          cs_contract-new_vendor = cs_contract-lifnr.
+          cs_pr-flief            = cs_contract-lifnr.
+          cs_contract-check_fail = abap_false.
+          RETURN.
+        ENDIF.
+      ENDIF.
+    ENDDO.
+
+    IF cs_contract-check_fail = abap_true.
+      MESSAGE e009(zsp_mtf_contr_pr) WITH cs_pr-banfn cs_contract-ebeln INTO DATA(lv_message).
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '009'
+                      msgv1   = cs_pr-banfn msgv2 = cs_contract-ebeln
+                      message = lv_message
+                      banfn   = cs_pr-banfn ) TO cs_contract-log_temp.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Fetch data for PR sorting
+*&---------------------------------------------------------------------*
+  METHOD  fetch_data_for_pr_sorting.
+
+    DATA:
+      lts_ebkn     TYPE gtyp_ts_ebkn.
+
+    CHECK ct_eban IS NOT INITIAL.
+
+    SELECT tab1~purchaserequisition       AS banfn,
+           tab1~purchaserequisitionitem   AS bnfpo,
+           tab1~salesorder                AS vbeln,
+           tab1~salesorderitem            AS vbelp,
+           vbpa~customer                  AS kunnr,
+           sd1~distributionchannel        AS vtweg,
+           cust1~country                  AS land1,
+           ksa1~additionalcustomergroup3  AS kvgr3
+        FROM i_purreqnacctassgmtapi01 AS tab1
+        INNER JOIN i_salesdocument AS sd1
+          ON sd1~salesdocument = tab1~salesorder
+        INNER JOIN i_salesdocumentpartner AS vbpa
+          ON  vbpa~salesdocument = tab1~salesorder
+          AND vbpa~partnerfunction = 'WE'
+        INNER JOIN i_customer AS cust1
+          ON cust1~customer = vbpa~customer "kunnr
+        INNER JOIN i_customersalesarea AS ksa1
+          ON  ksa1~customer            = sd1~soldtoparty          "kunnr
+          AND ksa1~salesorganization   = sd1~salesorganization    "vkorg
+          AND ksa1~distributionchannel = sd1~distributionchannel  "vtweg
+          AND ksa1~division            = sd1~organizationdivision "spart
+        FOR ALL ENTRIES IN @ct_eban
+        WHERE purchaserequisition     = @ct_eban-banfn
+          AND purchaserequisitionitem = @ct_eban-bnfpo
+        INTO TABLE @DATA(lt_ship_to).
+
+    IF sy-subrc = 0.
+      SORT lt_ship_to BY banfn bnfpo.
+    ENDIF.
+
+    " VBAP cannot be replaced with CDS (no fields for FSH_TRANSACTION, etc )
+    SELECT tab1~purchaserequisition     AS banfn,
+           tab1~purchaserequisitionitem AS bnfpo,
+           tab1~salesorder              AS vbeln,
+           tab1~salesorderitem          AS vbelp,
+           vbap~fsh_transaction
+        FROM i_purreqnacctassgmtapi01 AS tab1
+        INNER JOIN vbap
+          ON  vbap~vbeln = tab1~salesorder
+          AND vbap~posnr = tab1~salesorderitem
+        INNER JOIN fsh_vass_tl
+          ON  fsh_vass_tl~fsh_transaction = vbap~fsh_transaction
+        FOR ALL ENTRIES IN @ct_eban
+        WHERE purchaserequisition     = @ct_eban-banfn
+          AND purchaserequisitionitem = @ct_eban-bnfpo
+              INTO TABLE @lts_ebkn.
+
+    IF sy-subrc <> 0.
+      CLEAR lts_ebkn.
+    ENDIF.
+
+    LOOP AT ct_eban ASSIGNING FIELD-SYMBOL(<ls_eban>).
+      " Set SHIP_TO party
+      READ TABLE lt_ship_to ASSIGNING FIELD-SYMBOL(<ls_ship_to>)
+                   WITH KEY banfn = <ls_eban>-banfn   bnfpo = <ls_eban>-bnfpo BINARY SEARCH.
+      IF sy-subrc = 0.
+        <ls_eban>-ship_to_party         = <ls_ship_to>-kunnr.
+        <ls_eban>-ship_to_party_country = <ls_ship_to>-land1.
+        <ls_eban>-kvgr3                 = <ls_ship_to>-kvgr3.
+        <ls_eban>-vtweg                 = <ls_ship_to>-vtweg.
+      ENDIF.
+
+      " Check VAS\SHAS data
+      READ TABLE lts_ebkn ASSIGNING FIELD-SYMBOL(<ls_ebkn>) WITH TABLE KEY banfn = <ls_eban>-banfn bnfpo = <ls_eban>-bnfpo.
+      IF  sy-subrc = 0
+      AND <ls_ebkn>-fsh_transaction IS NOT INITIAL.
+        <ls_eban>-vas_shas_data = abap_true.
+      ENDIF.
+
+      <ls_eban>-volume = <ls_eban>-menge.
+      " Check Vendor match
+      <ls_eban>-vendor_match = boolc( <ls_eban>-flief IS INITIAL
+                                      OR line_exists( it_contracts[ KEY sk1 COMPONENTS matnr = <ls_eban>-matnr
+                                                                                       lifnr = <ls_eban>-flief ] ) ).
+
+      " Check Material Size fit
+      LOOP AT it_contracts ASSIGNING FIELD-SYMBOL(<ls_contract>) WHERE matnr = <ls_eban>-matnr. "#EC CI_NESTED
+        IF  <ls_eban>-size_fit_match = abap_false
+        AND <ls_eban>-menge         >= <ls_contract>-ktmng.
+          <ls_eban>-size_fit_match = abap_true.
+        ENDIF.
+      ENDLOOP.
+
+      IF <ls_eban>-size_fit_match = abap_false.
+        " Check fo Contract with General article
+        READ TABLE it_contracts TRANSPORTING NO FIELDS WITH KEY matnr = <ls_eban>-general_article.
+        IF sy-subrc = 0.
+          <ls_eban>-size_fit_match = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Process PR (link with contracts if possible)
+*&---------------------------------------------------------------------*
+  METHOD process_pr.
+
+    DATA:
+      ls_best_contract TYPE gtyp_s_contract_list,
+      lt_contract_list TYPE gtyp_t_contract_list.
+
+    " Get contracts for the current PR
+    get_proper_contracts(
+      EXPORTING
+        is_pr            = cs_pr
+        it_contracts     = it_contract_items
+      IMPORTING
+        et_contract_list = lt_contract_list ).
+
+    IF lt_contract_list IS INITIAL.
+      MESSAGE e014(zsp_mtf_contr_pr) WITH cs_pr-banfn INTO DATA(lv_message).
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '014'
+                      msgv1   = cs_pr-banfn
+                      banfn   = cs_pr-banfn
+                      message = lv_message ) TO gt_log.
+      RETURN.
+    ENDIF.
+
+    " Check if it is possible to find a contract that cover the whole PR
+    " or find the best contract (by date)
+    LOOP AT lt_contract_list ASSIGNING FIELD-SYMBOL(<ls_contract>).
+      <ls_contract>-pr = cs_pr.
+
+      check_vendor(
+        CHANGING
+          cs_pr       = <ls_contract>-pr
+          cs_contract = <ls_contract> ).
+
+      IF <ls_contract>-check_fail = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      check_polit_restrictions(
+        CHANGING
+          cs_contract = <ls_contract>
+          cs_pr       = <ls_contract>-pr  ).
+
+      IF <ls_contract>-pr-items IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      check_pr_contract_assignment(
+        CHANGING
+          cs_pr       = <ls_contract>-pr
+          cs_contract = <ls_contract> ).
+
+      READ TABLE gts_deleted TRANSPORTING NO FIELDS WITH TABLE KEY banfn = <ls_contract>-pr-banfn.
+      IF sy-subrc = 0.
+        <ls_contract>-fully_covered = abap_false.
+      ENDIF.
+    ENDLOOP.
+
+    DATA(lt_contract_list_temp) = lt_contract_list.
+
+    SORT lt_contract_list BY check_fail      DESCENDING
+                             fully_covered   DESCENDING
+                             best_date       ASCENDING
+                             covered_variant DESCENDING
+                             covered_generic DESCENDING.
+    DELETE lt_contract_list WHERE check_fail = abap_true.
+
+    IF lt_contract_list IS NOT INITIAL.
+      ls_best_contract = lt_contract_list[ 1 ].
+
+      IF ls_best_contract-old_vendor IS NOT INITIAL.
+        MESSAGE w010(zsp_mtf_contr_pr) WITH ls_best_contract-pr-banfn
+                                            ls_best_contract-old_vendor
+                                            ls_best_contract-new_vendor INTO lv_message.
+        APPEND VALUE #( msgty   = 'W'
+                        msgid   = gc_mess_class
+                        msgno   = '010'
+                        msgv1   = ls_best_contract-pr-banfn
+                        msgv2   = ls_best_contract-old_vendor
+                        msgv3   = ls_best_contract-new_vendor
+                        message = lv_message
+                        banfn   = ls_best_contract-pr-banfn ) TO ls_best_contract-log_temp.
+      ENDIF.
+      APPEND LINES OF ls_best_contract-log_temp TO gt_log.
+
+      update_pr(
+        EXPORTING
+             is_pr               = ls_best_contract-pr
+             iv_ebeln            = ls_best_contract-ebeln
+             iv_pr_fully_covered = ls_best_contract-fully_covered
+        IMPORTING
+             ev_error_happened   = DATA(lv_error) ).
+
+      " Update Open qty data for contract. It important for processing of next contracts
+      IF lv_error = abap_false.
+        MODIFY TABLE gts_contract_open_qty FROM ls_best_contract-open_qty.
+      ENDIF.
+
+    ELSEIF lt_contract_list_temp IS NOT INITIAL.
+      " No acceptable contract found. Save log from all contracts about errors
+      LOOP AT lt_contract_list_temp ASSIGNING FIELD-SYMBOL(<ls_list>).
+        " We do not sort the table before deletion of duplicates
+        DELETE ADJACENT DUPLICATES FROM <ls_list>-log_temp COMPARING msgty msgid msgno msgv1 msgv2 msgv3 msgv4.
+        APPEND LINES OF <ls_list>-log_temp TO gt_log.
+      ENDLOOP.
+
+      MESSAGE e019(zsp_mtf_contr_pr) WITH lt_contract_list_temp[ 1 ]-pr-banfn INTO lv_message.
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '019'
+                      msgv1   = lt_contract_list_temp[ 1 ]-pr-banfn
+                      message = lv_message
+                      banfn   = lt_contract_list_temp[ 1 ]-pr-banfn ) TO gt_log.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Check PR minimum
+*&---------------------------------------------------------------------*
+  METHOD check_pr_minimum.
+
+    ev_error = abap_true.
+    CHECK is_pr-items IS NOT INITIAL.
+
+    READ TABLE gth_mara INTO DATA(ls_mara) WITH TABLE KEY matnr = is_pr-items[ 1 ]-general_article.
+    IF sy-subrc = 0.
+      READ TABLE gts_min_check INTO DATA(ls_min_check) WITH TABLE KEY fsh_mg_at1 = ls_mara-fsh_mg_at1
+                                                                      brand_id   = ls_mara-brand_id.
+      IF  ( sy-subrc = 0
+         AND ls_min_check-pominchk = abap_true
+         AND is_pr-volume          < ls_min_check-po_minimum )
+      OR sy-subrc <> 0.
+        INSERT VALUE #( banfn = is_pr-banfn ) INTO TABLE gts_deleted.
+        MESSAGE e007(zsp_mtf_contr_pr) WITH is_pr-banfn INTO DATA(lv_message).
+        APPEND VALUE #( msgty   = 'E'
+                        msgid   = gc_mess_class
+                        msgno   = '007'
+                        msgv1   = is_pr-banfn
+                        message = lv_message
+                        banfn   = is_pr-banfn ) TO gt_log.
+      ELSE.
+        ev_error = abap_false.
+      ENDIF.
+    ELSE.
+      MESSAGE e006(zsp_mtf_contr_pr) WITH is_pr-banfn is_pr-items[ 1 ]-general_article INTO lv_message.
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '006'
+                      msgv1   = is_pr-banfn
+                      msgv2   = is_pr-items[ 1 ]-general_article
+                      message = lv_message
+                      banfn   = is_pr-banfn ) TO gt_log.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Check political restictions
+*&---------------------------------------------------------------------*
+  METHOD check_polit_restrictions.
+
+    DATA:
+     lv_index TYPE sy-tabix.
+
+    cs_contract-items_excluded = abap_false.
+
+    READ TABLE gts_vendor_country INTO DATA(ls_vendor) WITH KEY lifnr = cs_contract-lifnr BINARY SEARCH.
+    IF sy-subrc <> 0.
+      CLEAR ls_vendor.
+    ENDIF.
+
+    LOOP AT cs_pr-items ASSIGNING FIELD-SYMBOL(<ls_pr_item>).
+      lv_index = sy-tabix.
+      IF is_political_restr_active(  is_pr           = cs_pr
+                                     iv_mat_division = <ls_pr_item>-fsh_mg_at1
+                                     iv_vendor_land  = ls_vendor-land1 ) = abap_true.
+        MESSAGE e011(zsp_mtf_contr_pr) WITH cs_pr-banfn <ls_pr_item>-bnfpo INTO DATA(lv_message).
+        APPEND VALUE #( msgty   = 'E'
+                        msgid   = gc_mess_class
+                        msgno   = '011'
+                        msgv1   = cs_pr-banfn
+                        msgv2   = <ls_pr_item>-bnfpo
+                        message = lv_message
+                        banfn   = cs_pr-banfn ) TO cs_contract-log_temp.
+
+        INSERT VALUE #( banfn = cs_pr-banfn ) INTO TABLE gts_deleted.
+        DELETE cs_pr-items INDEX lv_index.
+        cs_contract-items_excluded = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+    IF cs_pr-items IS INITIAL.
+      cs_contract-check_fail = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Check one PR for political restictions
+*&---------------------------------------------------------------------*
+  METHOD is_political_restr_active.
+
+    rv_restriction_exist = abap_false.
+    LOOP AT gts_political_restrictions ASSIGNING FIELD-SYMBOL(<ls_restriction>) USING KEY primary_key
+                                              WHERE mat_division = iv_mat_division
+                                                AND datab        <= is_pr-creationdate
+                                                AND datbi        >= is_pr-creationdate.
+      IF (      <ls_restriction>-land_c = is_pr-ship_to_party_country
+            AND <ls_restriction>-kunnr  = is_pr-ship_to_party
+            AND <ls_restriction>-land_v = iv_vendor_land
+            AND <ls_restriction>-lifnr  = is_pr-flief )
+      OR (      <ls_restriction>-land_c = is_pr-ship_to_party_country
+            AND <ls_restriction>-kunnr  = is_pr-ship_to_party
+            AND <ls_restriction>-land_v = iv_vendor_land
+            AND <ls_restriction>-lifnr  = '')
+      OR (      <ls_restriction>-land_c = is_pr-ship_to_party_country
+            AND <ls_restriction>-kunnr  = is_pr-ship_to_party
+            AND <ls_restriction>-land_v = ''
+            AND <ls_restriction>-lifnr  = '')
+      OR (      <ls_restriction>-land_c = is_pr-ship_to_party_country
+            AND <ls_restriction>-kunnr  = ''
+            AND <ls_restriction>-land_v = ''
+            AND <ls_restriction>-lifnr  = '' )
+      OR (      <ls_restriction>-land_c = ''
+            AND <ls_restriction>-kunnr  = ''
+            AND <ls_restriction>-land_v = iv_vendor_land
+            AND <ls_restriction>-lifnr  = is_pr-flief )
+      OR (      <ls_restriction>-land_c = is_pr-ship_to_party_country
+            AND <ls_restriction>-kunnr  = ''
+            AND <ls_restriction>-land_v = iv_vendor_land
+            AND <ls_restriction>-lifnr  = '' )
+      OR (      <ls_restriction>-land_c = ''
+            AND <ls_restriction>-kunnr  = ''
+            AND <ls_restriction>-land_v = iv_vendor_land
+            AND <ls_restriction>-lifnr  = '' ).
+        rv_restriction_exist = abap_true.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Fetch Vendor data
+*&---------------------------------------------------------------------*
+  METHOD fetch_vendor_data.
+
+    DATA:
+      lts_vendors TYPE gtyp_ts_vendor_country.
+
+    DATA(lt_eban) = it_eban.
+    SORT lt_eban BY flief.
+    DELETE ADJACENT DUPLICATES FROM lt_eban COMPARING flief.
+
+    " PR's Vendor data
+    IF lt_eban IS NOT INITIAL.
+      SELECT lifnr, lifn2
+        FROM wyt3
+        FOR ALL ENTRIES IN @lt_eban
+        WHERE lifnr = @lt_eban-flief
+          AND parvw = @gs_lo_office_data-parvw
+          AND ekorg = @gs_lo_office_data-ekorg
+        INTO TABLE @gts_wyt3_pr.
+
+      IF sy-subrc <> 0.
+        CLEAR gts_wyt3_pr.
+      ENDIF.
+
+      LOOP AT it_eban INTO DATA(ls_eban).
+        READ TABLE gts_wyt3_pr TRANSPORTING NO FIELDS WITH KEY lifnr = ls_eban-flief.
+        IF sy-subrc <> 0.
+          MESSAGE w029(zsp_mtf_contr_pr) WITH ls_eban-banfn ls_eban-flief INTO DATA(lv_message).
+          APPEND VALUE #( msgty   = 'W'
+                          msgid   = gc_mess_class
+                          msgno   = '029'
+                          msgv1   = ls_eban-banfn
+                          msgv2   = ls_eban-flief
+                          message = lv_message ) TO gt_log.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    DATA(lt_contracts) = it_contracts.
+    SORT lt_contracts BY lifnr.
+    DELETE ADJACENT DUPLICATES FROM lt_contracts COMPARING lifnr.
+
+    " Contract's Vendor data
+    IF lt_contracts IS NOT INITIAL.
+      SELECT lifnr, lifn2
+       FROM wyt3
+       FOR ALL ENTRIES IN @lt_contracts
+       WHERE lifnr = @lt_contracts-lifnr
+         AND parvw = @gs_lo_office_data-parvw
+         AND ekorg = @gs_lo_office_data-ekorg
+      INTO TABLE @gts_wyt3_contract.
+
+      IF sy-subrc <> 0.
+        CLEAR gts_wyt3_contract.
+      ENDIF.
+
+      LOOP AT it_contracts INTO DATA(ls_contract).
+        READ TABLE gts_wyt3_contract TRANSPORTING NO FIELDS WITH KEY lifnr = ls_contract-lifnr.
+        IF sy-subrc <> 0.
+          MESSAGE w030(zsp_mtf_contr_pr) WITH ls_contract-ebeln ls_contract-lifnr INTO lv_message.
+          APPEND VALUE #( msgty   = 'W'
+                          msgid   = gc_mess_class
+                          msgno   = '030'
+                          msgv1   = ls_contract-ebeln
+                          msgv2   = ls_contract-lifnr
+                          message = lv_message ) TO gt_log.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    " Fetch Vendors' country data
+    LOOP AT lt_eban ASSIGNING FIELD-SYMBOL(<ls_eban>).
+      INSERT VALUE #( lifnr = <ls_eban>-flief ) INTO TABLE lts_vendors.
+    ENDLOOP.
+    LOOP AT lt_contracts ASSIGNING FIELD-SYMBOL(<ls_contract>).
+      INSERT VALUE #( lifnr = <ls_contract>-lifnr ) INTO TABLE lts_vendors.
+    ENDLOOP.
+
+    IF lts_vendors IS NOT INITIAL.
+      SELECT supplier AS lifnr, country AS land1
+        FROM i_supplier
+        FOR ALL ENTRIES IN @lts_vendors
+        WHERE supplier = @lts_vendors-lifnr
+        INTO TABLE @gts_vendor_country.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Check Variant
+*&---------------------------------------------------------------------*
+  METHOD check_variant_fail.
+
+    DATA:
+       lt_variants TYPE STANDARD TABLE OF gtyp_s_contract_variants.
+
+    rv_check_fail = abap_true.
+    CHECK ( is_pr-vtweg IN gr_distribution_channel ).
+
+    LOOP AT gts_contract_variants ASSIGNING FIELD-SYMBOL(<ls_variant>) WHERE mtf_variant  = is_contract-zz1_variant_conh_pdh "#EC CI_SORTSEQ
+                                                                         AND ( fsh_mg_at1 IS INITIAL
+                                                                            OR fsh_mg_at1 = is_item-fsh_mg_at1 )
+                                                                         AND valid_fr     <= is_pr-creationdate
+                                                                         AND valid_to     >= is_pr-creationdate.
+      APPEND <ls_variant> TO lt_variants.
+    ENDLOOP.
+
+    SORT lt_variants BY mtf_cust_gr kunnr exclusion.
+
+    " Check by Customer group
+    READ TABLE lt_variants TRANSPORTING NO FIELDS WITH KEY mtf_cust_gr = is_pr-kvgr3 BINARY SEARCH.
+    IF sy-subrc = 0.
+      rv_check_fail = abap_false.
+    ENDIF.
+
+    " Check exclusions (specific customer is prohibited)
+    LOOP AT lt_variants ASSIGNING <ls_variant> WHERE mtf_cust_gr IS INITIAL
+                                                 AND kunnr       = is_pr-ship_to_party
+                                                 AND exclusion   IS NOT INITIAL.
+      rv_check_fail = abap_true.
+      RETURN.
+    ENDLOOP.
+
+    IF rv_check_fail = abap_false.
+      RETURN.
+    ELSE.
+      " Check exclusions (specific customer is allowed)
+      READ TABLE lt_variants TRANSPORTING NO FIELDS WITH KEY mtf_cust_gr = space
+                                                             kunnr       = is_pr-ship_to_party
+                                                             exclusion   = space BINARY SEARCH.
+      IF sy-subrc = 0.
+        rv_check_fail = abap_false.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Get Open quantity
+*&---------------------------------------------------------------------*
+  METHOD fetch_open_quantity.
+
+    DATA:
+      lv_total_qty TYPE bamng,
+      lt_open_qty  TYPE zsp_tt_contract_qty.
+
+    CLEAR: es_open_qty.
+
+    READ TABLE gts_contract_open_qty ASSIGNING FIELD-SYMBOL(<ls_open_qty>) WITH KEY ebeln = iv_ebeln.
+
+    IF sy-subrc = 0.
+      es_open_qty = <ls_open_qty>.
+    ELSE.
+      TRY.
+
+          CALL FUNCTION 'ZSP_FM_CONTRACT_OPEN_QTY'
+            EXPORTING
+              iv_ebeln          = iv_ebeln
+            IMPORTING
+              ev_total_open_qty = lv_total_qty
+              et_items_open_qty = lt_open_qty.
+
+        CATCH zcx_sp_contract_open_qty.
+          MESSAGE w015(zsp_mtf_contr_pr) WITH iv_ebeln INTO DATA(lv_message).
+          APPEND VALUE #( msgty   = 'W'
+                          msgid   = gc_mess_class
+                          msgno   = '015'
+                          msgv1   = iv_ebeln
+                          message = lv_message ) TO ct_log.
+          RETURN.
+      ENDTRY.
+
+      SORT lt_open_qty BY ebelp.
+      INSERT VALUE #( ebeln = iv_ebeln total_qty = lv_total_qty items = lt_open_qty ) INTO TABLE gts_contract_open_qty.
+      es_open_qty = VALUE #( ebeln = iv_ebeln total_qty = lv_total_qty items = lt_open_qty ).
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Update PR
+*&---------------------------------------------------------------------*
+  METHOD update_pr.
+
+    DATA:
+      ls_failed        TYPE RESPONSE FOR FAILED i_purchaserequisitiontp,
+      ls_reported      TYPE RESPONSE FOR REPORTED i_purchaserequisitiontp,
+      ls_failed_late   TYPE RESPONSE FOR FAILED LATE i_purchaserequisitiontp,
+      ls_reported_late TYPE RESPONSE FOR REPORTED LATE i_purchaserequisitiontp,
+      lt_return        TYPE bapiret2_tab.
+
+    ev_error_happened = abap_false.
+
+    MODIFY ENTITIES OF i_purchaserequisitiontp
+      ENTITY purchaserequisitionitem
+      UPDATE FROM VALUE #( FOR ls_wa IN is_pr-items
+                                ( purchaserequisition     = is_pr-banfn
+                                  purchaserequisitionitem = ls_wa-bnfpo
+                                  purchasecontract        = ls_wa-konnr
+                                  purchasecontractitem    = ls_wa-ktpnr
+                                  fixedsupplier           = is_pr-flief
+                                  zz1_adi_m_planned_pri   = ls_wa-zz1_adi_m_planned_pri
+                                  %control-purchasecontract  = cl_abap_behv=>flag_changed
+                                  %control-purchasecontractitem = cl_abap_behv=>flag_changed
+                                  %control-fixedsupplier = cl_abap_behv=>flag_changed
+                                  %control-zz1_adi_m_planned_pri = cl_abap_behv=>flag_changed ) )
+             FAILED ls_failed
+             REPORTED ls_reported.
+
+    IF ls_failed IS NOT INITIAL.
+      extract_messages(
+        EXPORTING
+          is_reported = ls_reported
+        IMPORTING
+          et_return   = lt_return ).
+
+      READ TABLE lt_return ASSIGNING FIELD-SYMBOL(<ls_return>) WITH KEY type = 'E'.
+      IF sy-subrc = 0.
+        IF <ls_return>-id = '8J' AND <ls_return>-number = '037'.
+          READ TABLE lt_return TRANSPORTING NO FIELDS WITH KEY id = '06' number = '403'.
+          IF sy-subrc <> 0.
+            ev_error_happened = abap_true.
+          ENDIF.
+        ELSE.
+          ev_error_happened = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF ev_error_happened = abap_false.
+      " Do DB save
+      CASE cb_sim.
+        WHEN abap_true.
+          " Simulation
+          COMMIT ENTITIES IN SIMULATION MODE
+            RESPONSE OF i_purchaserequisitiontp
+             FAILED ls_failed_late
+             REPORTED ls_reported_late.
+        WHEN abap_false.
+          " Real DB commit
+          COMMIT ENTITIES
+            RESPONSE OF i_purchaserequisitiontp
+             FAILED ls_failed_late
+             REPORTED ls_reported_late.
+      ENDCASE.
+    ELSE.
+      " Error happened
+      ROLLBACK ENTITIES.
+
+      MESSAGE e022(zsp_mtf_contr_pr) WITH is_pr-banfn iv_ebeln INTO DATA(lv_message).
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '022'
+                      msgv1   = is_pr-banfn
+                      msgv2   = iv_ebeln
+                      message = lv_message
+                      banfn   = is_pr-banfn ) TO gt_log.
+      gv_prs_excluded = gv_prs_excluded + 1.
+
+      save_errors_to_log(
+        EXPORTING
+          iv_banfn  = is_pr-banfn
+        CHANGING
+          ct_return = lt_return ).
+
+      RETURN.
+    ENDIF.
+
+    " DB update successful
+    IF ls_failed_late IS INITIAL.
+
+      IF  cb_sim              = abap_false
+      AND iv_pr_fully_covered = abap_true.
+        " DB Update was successful (full PR)
+        MESSAGE s017(zsp_mtf_contr_pr) WITH is_pr-banfn iv_ebeln INTO lv_message.
+        APPEND VALUE #( msgty   = 'S'
+                        msgid   = gc_mess_class
+                        msgno   = '017'
+                        msgv1   = is_pr-banfn
+                        msgv2   = iv_ebeln
+                        message = lv_message
+                        banfn   = is_pr-banfn ) TO  gt_log.
+        gv_prs_fully_assigned = gv_prs_fully_assigned + 1.
+      ELSEIF cb_sim              = abap_false
+         AND iv_pr_fully_covered = abap_false.
+        " DB Update was successful (part of PR)
+        MESSAGE s018(zsp_mtf_contr_pr) WITH is_pr-banfn iv_ebeln INTO lv_message.
+        APPEND VALUE #( msgty   = 'S'
+                        msgid   = gc_mess_class
+                        msgno   = '018'
+                        msgv1   = is_pr-banfn
+                        msgv2   = iv_ebeln
+                        message = lv_message
+                        banfn   = is_pr-banfn ) TO gt_log.
+        gv_prs_partially_assigned = gv_prs_partially_assigned + 1.
+      ELSEIF cb_sim              = abap_true
+         AND iv_pr_fully_covered = abap_true.
+        " Simulation run - no DB update (PR fully covered)
+        MESSAGE s020(zsp_mtf_contr_pr) WITH is_pr-banfn iv_ebeln INTO lv_message.
+        APPEND VALUE #( msgty   = 'S'
+                        msgid   = gc_mess_class
+                        msgno   = '020'
+                        msgv1   = is_pr-banfn
+                        msgv2   = iv_ebeln
+                        message = lv_message
+                        banfn   = is_pr-banfn ) TO  gt_log.
+        gv_prs_fully_assigned = gv_prs_fully_assigned + 1.
+      ELSEIF cb_sim              = abap_true
+         AND iv_pr_fully_covered = abap_false.
+        " Simulation run - no DB update (PR partially covered)
+        MESSAGE s021(zsp_mtf_contr_pr) WITH is_pr-banfn iv_ebeln INTO lv_message.
+        APPEND VALUE #( msgty   = 'S'
+                        msgid   = gc_mess_class
+                        msgno   = '021'
+                        msgv1   = is_pr-banfn
+                        msgv2   = iv_ebeln
+                        message = lv_message
+                        banfn   = is_pr-banfn ) TO gt_log.
+        gv_prs_partially_assigned = gv_prs_partially_assigned + 1.
+      ENDIF.
+
+    ELSE.
+
+      " DB Update was not successful
+      ev_error_happened = abap_true.
+      IF cb_sim = abap_true.
+        ROLLBACK ENTITIES.
+      ENDIF.
+
+      MESSAGE e022(zsp_mtf_contr_pr) WITH is_pr-banfn iv_ebeln INTO lv_message.
+      APPEND VALUE #( msgty   = 'E'
+                      msgid   = gc_mess_class
+                      msgno   = '022'
+                      msgv1   = is_pr-banfn
+                      msgv2   = iv_ebeln
+                      message = lv_message
+                      banfn   = is_pr-banfn ) TO gt_log.
+      gv_prs_excluded = gv_prs_excluded + 1.
+
+      extract_messages(
+        EXPORTING
+          is_reported_late = ls_reported_late
+        IMPORTING
+          et_return        = lt_return ).
+
+      save_errors_to_log(
+        EXPORTING
+          iv_banfn  = is_pr-banfn
+        CHANGING
+          ct_return = lt_return ).
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Extract messages
+*&---------------------------------------------------------------------*
+  METHOD extract_messages.
+
+    CLEAR et_return.
+
+    IF is_reported IS SUPPLIED.
+      LOOP AT is_reported-purchaserequisition ASSIGNING FIELD-SYMBOL(<ls_pur_req>).
+        APPEND VALUE #( id      = <ls_pur_req>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_pur_req>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_pur_req>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_pur_req>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported-purchaserequisitionitem ASSIGNING FIELD-SYMBOL(<ls_pur_it>).
+        APPEND VALUE #( id      = <ls_pur_it>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_pur_it>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_pur_it>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_pur_it>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported-purchaserequisitionitemtext ASSIGNING FIELD-SYMBOL(<ls_pur_t>).
+        APPEND VALUE #( id      = <ls_pur_t>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_pur_t>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_pur_t>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_pur_t>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported-purreqnitmaccountassignment ASSIGNING FIELD-SYMBOL(<ls_pur_ac>).
+        APPEND VALUE #( id      = <ls_pur_ac>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_pur_ac>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_pur_ac>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_pur_ac>-%msg->if_message~get_longtext( )  ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported-purreqnitmdeliveryaddress ASSIGNING FIELD-SYMBOL(<ls_pur_ad>).
+        APPEND VALUE #( id      = <ls_pur_ad>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_pur_ad>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_pur_ad>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_pur_ad>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+    ENDIF.
+
+    IF is_reported_late IS SUPPLIED.
+      LOOP AT is_reported_late-purchaserequisition ASSIGNING FIELD-SYMBOL(<ls_purl_req>).
+        APPEND VALUE #( id      = <ls_purl_req>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_purl_req>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_purl_req>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_purl_req>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported_late-purchaserequisitionitem ASSIGNING FIELD-SYMBOL(<ls_purl_it>).
+        APPEND VALUE #( id      = <ls_purl_it>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_purl_it>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_purl_it>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_purl_it>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported_late-purchaserequisitionitemtext ASSIGNING FIELD-SYMBOL(<ls_purl_t>).
+        APPEND VALUE #( id      = <ls_purl_t>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_purl_t>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_purl_t>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_purl_t>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported_late-purreqnitmaccountassignment ASSIGNING FIELD-SYMBOL(<ls_purl_ac>).
+        APPEND VALUE #( id      = <ls_purl_ac>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_purl_ac>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_purl_ac>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_purl_ac>-%msg->if_message~get_longtext( )  ) TO et_return.
+      ENDLOOP.
+      LOOP AT is_reported_late-purreqnitmdeliveryaddress ASSIGNING FIELD-SYMBOL(<ls_purl_ad>).
+        APPEND VALUE #( id      = <ls_purl_ad>-%msg->if_t100_message~default_textid-msgid
+                        type    = <ls_purl_ad>-%msg->if_t100_dyn_msg~msgty
+                        number  = <ls_purl_ad>-%msg->if_t100_message~default_textid-msgno
+                        message = <ls_purl_ad>-%msg->if_message~get_longtext( ) ) TO et_return.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+*&---------------------------------------------------------------------*
+*& Get proper contracts
+*&---------------------------------------------------------------------*
+  METHOD get_proper_contracts.
+
+    DATA:
+      ls_item           TYPE gtyp_s_contract_item,
+      ls_contract_list  TYPE gtyp_s_contract_list,
+      lr_matnr          TYPE RANGE OF matnr,
+      lt_contracts_temp TYPE gtyp_t_contract.
+
+    CLEAR et_contract_list.
+
+    LOOP AT is_pr-items ASSIGNING FIELD-SYMBOL(<ls_item>).
+      APPEND VALUE #( sign = 'I' option = 'EQ' low = <ls_item>-matnr ) TO lr_matnr.
+      IF <ls_item>-attyp = gc_attyp-variant.
+        APPEND VALUE #( sign = 'I' option = 'EQ' low = <ls_item>-general_article ) TO lr_matnr.
+      ENDIF.
+    ENDLOOP.
+
+    SORT lr_matnr BY low.
+    DELETE ADJACENT DUPLICATES FROM lr_matnr COMPARING low.
+
+    LOOP AT it_contracts ASSIGNING FIELD-SYMBOL(<ls_contract>) WHERE matnr IN lr_matnr
+                                                                 AND kdatb <= is_pr-lfdat
+                                                                 AND kdate >= is_pr-lfdat.
+      APPEND <ls_contract> TO lt_contracts_temp.
+    ENDLOOP.
+
+    IF lt_contracts_temp IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SORT lt_contracts_temp BY ebeln DESCENDING.
+
+    LOOP AT lt_contracts_temp ASSIGNING <ls_contract>.
+      AT NEW ebeln.
+        CLEAR ls_contract_list.
+        ls_contract_list = CORRESPONDING #( <ls_contract> ).
+      ENDAT.
+      ls_item = CORRESPONDING #( <ls_contract> ).
+      APPEND ls_item TO ls_contract_list-items.
+      AT END OF ebeln.
+        IF ls_contract_list IS NOT INITIAL.
+          APPEND ls_contract_list TO et_contract_list.
+        ENDIF.
+      ENDAT.
+    ENDLOOP.
+
+    SORT et_contract_list BY ebeln.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Log results
+*&---------------------------------------------------------------------*
+  METHOD log_results.
+
+    DATA:
+      ls_log_display TYPE gtyp_s_log_display.
+
+    gv_prs_excluded = gv_prs - gv_prs_partially_assigned - gv_prs_fully_assigned.
+
+    IF  cb_sim = abap_false
+    AND go_log->create_log( ) <> abap_true.
+      RETURN.
+    ENDIF.
+
+    LOOP AT gt_log ASSIGNING FIELD-SYMBOL(<ls_log>).
+      IF cb_statu = abap_true AND <ls_log>-msgty = 'S'.
+        " Log only Warnings and Errors
+        CONTINUE.
+      ENDIF.
+
+      IF cb_auto = abap_false.
+        ls_log_display = CORRESPONDING #( <ls_log> ).
+        CASE <ls_log>-msgty.
+          WHEN 'E'.
+            ls_log_display-icon = icon_red_light.
+          WHEN 'W'.
+            ls_log_display-icon = icon_yellow_light.
+          WHEN 'S'.
+            ls_log_display-icon = icon_green_light.
+        ENDCASE.
+        APPEND ls_log_display TO gt_log_to_display.
+      ENDIF.
+
+      go_log->add_message(
+        iv_type     = <ls_log>-msgty
+        iv_message  = <ls_log>-message ).
+    ENDLOOP.
+
+    go_log->save_log( ).
+    display_results( ).
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Send e-mail
+*&---------------------------------------------------------------------*
+  METHOD send_email.
+
+    CONSTANTS:
+      lc_doc_typ_raw TYPE char3 VALUE 'RAW',
+      lc_doc_size    TYPE so_doc_siz VALUE 255.
+
+    DATA:
+      lv_subject   TYPE char100,
+      lv_date      TYPE char10,
+      lv_time      TYPE char8,
+      lt_entries   TYPE TABLE OF sodlienti1,
+      lt_reclist   TYPE TABLE OF somlreci1,
+      ls_doc_chng  TYPE sodocchgi1,
+      lt_objpack   TYPE TABLE OF sopcklsti1,
+      lt_emailbody TYPE TABLE OF solisti1.
+
+    " Send notification only if errors happened and it is not a Simulation
+    CHECK ( cb_sim = abap_false AND line_exists( gt_log[ msgty = 'E' ] ) ).
+
+    CALL FUNCTION 'SO_DLI_READ_API1'
+      EXPORTING
+        dli_name                   = gv_dliname
+        shared_dli                 = 'X'
+      TABLES
+        dli_entries                = lt_entries
+      EXCEPTIONS
+        dli_not_exist              = 1
+        operation_no_authorization = 2
+        parameter_error            = 3
+        x_error                    = 4
+        OTHERS                     = 5.
+
+    IF sy-subrc EQ 0.
+      " Processing the reciever email id from the distribution list
+      LOOP AT lt_entries ASSIGNING FIELD-SYMBOL(<ls_entry>).
+        APPEND VALUE #( receiver  = <ls_entry>-member_adr
+                        rec_type  = 'U'         com_type   = 'INT'
+                        notif_del = abap_true   notif_ndel = abap_true ) TO lt_reclist.
+      ENDLOOP.
+    ELSE.
+      MESSAGE e026(zsp_mtf_contr_pr) INTO DATA(lv_message).
+      APPEND VALUE #( msgty = 'E' msgid = gc_mess_class msgno = '026' message = lv_message ) TO gt_log.
+      RETURN.
+    ENDIF.
+
+    " Body of the email.
+    lt_emailbody = VALUE #( ( line = TEXT-t02 )
+                            ( line = TEXT-t05 )
+                            ( line = ''       )
+                            ( line = TEXT-t03 )  ).
+
+    " Subject of the email.
+    lv_subject = TEXT-t04.
+    WRITE sy-datum TO lv_date DD/MM/YYYY.
+    REPLACE ALL OCCURRENCES OF '/' IN lv_date WITH '.'.
+    REPLACE 'dd.mm.yyyy' IN lv_subject WITH lv_date.
+    WRITE sy-uzeit TO lv_time.
+    REPLACE 'hh:mm:ss' IN lv_subject WITH lv_time.
+
+    " Subject line
+    ls_doc_chng = VALUE #( obj_name   = 'SAPRPT' obj_descr = lv_subject
+                           sensitivty = 'F'      doc_size  = lc_doc_size  ).
+
+    " Main Text
+    APPEND VALUE #( transf_bin = space   head_start = 1
+                    head_num   = 0       body_start = 1
+                    doc_type   = lc_doc_typ_raw
+                    body_num   = lines( lt_emailbody ) ) TO lt_objpack.
+
+    CALL FUNCTION 'SO_NEW_DOCUMENT_ATT_SEND_API1'
+      EXPORTING
+        document_data              = ls_doc_chng
+        put_in_outbox              = abap_true
+        commit_work                = abap_true
+      TABLES
+        packing_list               = lt_objpack[]
+        contents_txt               = lt_emailbody[]
+        receivers                  = lt_reclist[]
+      EXCEPTIONS
+        too_many_receivers         = 1
+        document_not_sent          = 2
+        document_type_not_exist    = 3
+        operation_no_authorization = 4
+        parameter_error            = 5
+        x_error                    = 6
+        enqueue_error              = 7
+        OTHERS                     = 8.
+
+    IF sy-subrc = 0.
+      MESSAGE s025(zsp_mtf_contr_pr) INTO lv_message.
+      APPEND VALUE #( msgty = 'S' msgid = gc_mess_class msgno = '025' message = lv_message ) TO gt_log.
+    ELSE.
+      MESSAGE e024(zsp_mtf_contr_pr) INTO lv_message.
+      APPEND VALUE #( msgty = 'E' msgid = gc_mess_class msgno = '024' message = lv_message ) TO gt_log.
+    ENDIF.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Condense PR
+*&---------------------------------------------------------------------*
+  METHOD condense_pr.
+
+    DATA:
+      lv_pr_volume TYPE bamng,
+      ls_item      TYPE gtyp_s_pr_item,
+      ls_pr_list   TYPE gtyp_s_pr_list,
+      lt_pr_temp   TYPE gtyp_t_eban.
+
+    CLEAR et_pr_list.
+    lt_pr_temp = it_eban.
+    SORT lt_pr_temp BY banfn.
+
+    LOOP AT lt_pr_temp ASSIGNING FIELD-SYMBOL(<ls_pr>).
+      AT NEW banfn.
+        CLEAR: lv_pr_volume, ls_pr_list.
+        ls_pr_list = CORRESPONDING #( <ls_pr> ).
+      ENDAT.
+      ls_item      = CORRESPONDING #( <ls_pr> ).
+      lv_pr_volume = lv_pr_volume + <ls_pr>-volume.
+      APPEND ls_item TO ls_pr_list-items.
+      AT END OF banfn.
+        IF ls_pr_list IS NOT INITIAL.
+          ls_pr_list-volume = lv_pr_volume.
+          APPEND ls_pr_list TO et_pr_list.
+        ENDIF.
+      ENDAT.
+    ENDLOOP.
+
+    SORT et_pr_list BY vendor_match   DESCENDING
+                       vas_shas_data  ASCENDING
+                       size_fit_match DESCENDING
+                       lfdat          ASCENDING
+                       volume         ASCENDING
+                       banfn          ASCENDING.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Check if PR can be assigned to Contract
+*&---------------------------------------------------------------------*
+  METHOD check_pr_contract_assignment.
+
+    DATA:
+      lv_item_processed         TYPE abap_boolean VALUE abap_false,
+      lv_pr_covered             TYPE abap_boolean,
+      lv_item_qty_fully_covered TYPE abap_boolean,
+      lv_best_planned_date      TYPE dats VALUE '99991231'.
+
+    cs_contract-fully_covered = abap_true.
+
+    fetch_open_quantity(
+      EXPORTING
+        iv_ebeln    = cs_contract-ebeln
+      IMPORTING
+        es_open_qty = DATA(ls_open_qty)
+      CHANGING
+        ct_log      = cs_contract-log_temp   ).
+
+    IF ls_open_qty IS INITIAL
+    OR ls_open_qty-total_qty <= 0.
+      MESSAGE e016(zsp_mtf_contr_pr) WITH cs_pr-banfn cs_contract-ebeln INTO DATA(lv_message).
+      APPEND VALUE #( msgty = 'E' msgid = gc_mess_class msgno = '016'
+                      msgv1 = cs_pr-banfn msgv2 = cs_contract-ebeln
+                      message = lv_message  banfn = cs_pr-banfn ) TO cs_contract-log_temp.
+      cs_contract-check_fail = abap_true.
+      RETURN.
+    ENDIF.
+
+    lv_pr_covered = abap_false.
+
+    LOOP AT cs_pr-items ASSIGNING FIELD-SYMBOL(<ls_pr_item>).
+      lv_item_qty_fully_covered = abap_false.
+
+      IF check_variant_fail(
+           is_item       = <ls_pr_item>
+           is_contract   = cs_contract
+           is_pr         = cs_pr ) = abap_true.
+
+        MESSAGE e012(zsp_mtf_contr_pr) WITH cs_pr-banfn <ls_pr_item>-bnfpo cs_contract-ebeln INTO lv_message.
+        APPEND VALUE #( msgty = 'E' msgid = gc_mess_class msgno = '012'
+                        msgv1 = cs_pr-banfn msgv2 = <ls_pr_item>-bnfpo msgv3 = cs_contract-ebeln
+                        message = lv_message banfn = cs_pr-banfn ) TO cs_contract-log_temp.
+        cs_contract-fully_covered = abap_false.
+        CONTINUE.
+      ELSE.
+        lv_item_processed = abap_true.
+      ENDIF.
+
+      READ TABLE cs_contract-items INTO DATA(ls_contract_item) WITH KEY matnr = <ls_pr_item>-matnr.
+      IF sy-subrc = 0.
+        READ TABLE ls_open_qty-items ASSIGNING FIELD-SYMBOL(<ls_con_item_qty>) WITH KEY ebelp = ls_contract_item-ebelp.
+        IF sy-subrc = 0.
+          " PR item qty is fully covered by Contract item qty
+          IF <ls_con_item_qty>-menge >= <ls_pr_item>-menge.
+            lv_item_qty_fully_covered = abap_true.
+            lv_pr_covered             = abap_true.
+            IF ls_contract_item-attyp = gc_attyp-variant.
+              cs_contract-covered_variant = cs_contract-covered_variant + <ls_pr_item>-menge.
+            ELSE.
+              cs_contract-covered_generic = cs_contract-covered_generic + <ls_pr_item>-menge.
+            ENDIF.
+            ls_open_qty-total_qty     = ls_open_qty-total_qty - <ls_pr_item>-menge.
+            <ls_con_item_qty>-menge   = <ls_con_item_qty>-menge - <ls_pr_item>-menge.
+            <ls_pr_item>-menge        = 0.
+            " Change data for further PR update
+            <ls_pr_item>-konnr                 = cs_contract-ebeln.
+            <ls_pr_item>-ktpnr                 = ls_contract_item-ebelp.
+            <ls_pr_item>-zz1_adi_m_planned_pri = ls_contract_item-zz1_adi_m_planned_pdi.
+          ELSEIF <ls_con_item_qty>-menge > 0 AND <ls_pr_item>-menge > 0.
+            lv_pr_covered = abap_true.
+            IF ls_contract_item-attyp = gc_attyp-variant.
+              cs_contract-covered_variant = cs_contract-covered_variant + <ls_con_item_qty>-menge.
+            ELSE.
+              cs_contract-covered_generic = cs_contract-covered_generic + <ls_con_item_qty>-menge.
+            ENDIF.
+            ls_open_qty-total_qty     = ls_open_qty-total_qty - <ls_con_item_qty>-menge.
+            <ls_pr_item>-menge        = <ls_pr_item>-menge - <ls_con_item_qty>-menge.
+            <ls_con_item_qty>-menge   = 0.
+          ENDIF.
+          IF lv_best_planned_date > ls_contract_item-zz1_adi_m_planned_pdi.
+            lv_best_planned_date  = ls_contract_item-zz1_adi_m_planned_pdi.
+            cs_contract-best_date = ls_contract_item-zz1_adi_m_planned_pdi.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      " Check generic material
+      IF  lv_item_qty_fully_covered = abap_false
+      AND <ls_pr_item>-attyp        = gc_attyp-variant.
+        READ TABLE cs_contract-items INTO ls_contract_item WITH KEY matnr = <ls_pr_item>-general_article.
+        IF sy-subrc = 0.
+          READ TABLE ls_open_qty-items ASSIGNING <ls_con_item_qty> WITH KEY ebelp = ls_contract_item-ebelp.
+          IF sy-subrc = 0.
+            " PR item qty is fully covered by Contract item qty
+            IF <ls_con_item_qty>-menge >= <ls_pr_item>-menge.
+              lv_pr_covered                      = abap_true.
+              cs_contract-covered_generic        = cs_contract-covered_generic + <ls_pr_item>-menge.
+              ls_open_qty-total_qty              = ls_open_qty-total_qty - <ls_pr_item>-menge.
+              lv_item_qty_fully_covered          = abap_true.
+              <ls_con_item_qty>-menge            = <ls_con_item_qty>-menge - <ls_pr_item>-menge.
+              <ls_pr_item>-menge                 = 0.
+              " Change data for further PR update
+              <ls_pr_item>-konnr                 = cs_contract-ebeln.
+              <ls_pr_item>-ktpnr                 = ls_contract_item-ebelp.
+              <ls_pr_item>-zz1_adi_m_planned_pri = ls_contract_item-zz1_adi_m_planned_pdi.
+            ELSEIF <ls_con_item_qty>-menge > 0 AND <ls_pr_item>-menge > 0.
+              lv_pr_covered               = abap_true.
+              cs_contract-covered_generic = cs_contract-covered_generic + <ls_con_item_qty>-menge.
+              ls_open_qty-total_qty       = ls_open_qty-total_qty - <ls_con_item_qty>-menge.
+
+              <ls_pr_item>-menge          = <ls_pr_item>-menge - <ls_con_item_qty>-menge.
+              <ls_con_item_qty>-menge     = 0.
+            ENDIF.
+            IF lv_best_planned_date >= ls_contract_item-zz1_adi_m_planned_pdi.
+              lv_best_planned_date  = ls_contract_item-zz1_adi_m_planned_pdi.
+              cs_contract-best_date = ls_contract_item-zz1_adi_m_planned_pdi.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+      " If at least one item was not fully covered -> PR is not fully covered
+      IF lv_item_qty_fully_covered = abap_false.
+        cs_contract-fully_covered = abap_false.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_item_processed = abap_false.
+      cs_contract-check_fail = abap_true.
+      RETURN.
+    ENDIF.
+
+    " Some items were excluded earlier (political restrictions, etc.)
+    IF cs_contract-items_excluded = abap_true.
+      cs_contract-fully_covered = abap_false.
+    ENDIF.
+
+    " If PR was partially covered it is necessary to set Planned date to the rest of PR items
+    " the same as in the first Contract's item
+    IF  lv_pr_covered = abap_true
+    AND cs_contract-items IS NOT INITIAL.
+      LOOP AT cs_pr-items ASSIGNING <ls_pr_item>.
+        IF <ls_pr_item>-zz1_adi_m_planned_pri <> cs_contract-items[ 1 ]-zz1_adi_m_planned_pdi.
+          <ls_pr_item>-zz1_adi_m_planned_pri = cs_contract-items[ 1 ]-zz1_adi_m_planned_pdi.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    cs_pr-flief           = cs_contract-lifnr.
+    ls_open_qty-total_qty =  COND #( WHEN ls_open_qty-total_qty < 0 THEN 0 ELSE ls_open_qty-total_qty ).
+    cs_contract-open_qty  = ls_open_qty.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Save errors to log (save full texts of errors returned by the system during PR update)
+*&---------------------------------------------------------------------*
+  METHOD save_errors_to_log.
+
+    CONSTANTS:
+      lc_50 TYPE int1 VALUE 50.
+
+    DATA:
+      lv_offset       TYPE int2,
+      lv_length       TYPE int2,
+      lv_param_length TYPE int2,
+      lv_iteration    TYPE int1 VALUE 1,
+      ls_log          TYPE gtyp_s_log.
+
+    FIELD-SYMBOLS:
+      <lv_attr> TYPE symsgv.
+
+    SORT ct_return BY type id number.
+    DELETE ct_return WHERE type <> 'E'.
+    DELETE ADJACENT DUPLICATES FROM ct_return COMPARING id number.
+
+    MESSAGE e000(zsp_mtf_contr_pr) INTO ls_log-message.
+    ls_log = VALUE #( banfn = iv_banfn msgid = 'ZSP_MTF_CONTR_PR' msgno = '000' msgty = 'E' ).
+
+    " Extract\save full system message text
+    LOOP AT ct_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+      ls_log-message = <ls_return>-message.
+      lv_length      = strlen( <ls_return>-message ).
+      lv_iteration   = 1.
+      IF lv_length > lc_50.
+        WHILE lv_length > 0 AND lv_iteration <= 4.
+          UNASSIGN <lv_attr>.
+          ASSIGN COMPONENT |{ 'MSGV' }{ lv_iteration }| OF STRUCTURE ls_log TO <lv_attr>.
+          IF sy-subrc = 0 AND <lv_attr> IS ASSIGNED.
+            lv_offset       = lc_50 * ( lv_iteration - 1 ).
+            IF lv_length > lc_50 .
+              lv_param_length = lc_50.
+              lv_length       = lv_length - lc_50.
+            ELSE.
+              lv_param_length = lv_length.
+              lv_length       = 0.
+            ENDIF.
+            <lv_attr> = substring( val = <ls_return>-message off = lv_offset len = lv_param_length ).
+          ENDIF.
+          lv_iteration = lv_iteration + 1.
+        ENDWHILE.
+      ENDIF.
+      APPEND ls_log TO gt_log.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Display results in ALV
+*&---------------------------------------------------------------------*
+  METHOD display_results.
+
+    DATA:
+      lo_gr_alv  TYPE REF TO cl_salv_table,
+      lo_columns TYPE REF TO cl_salv_columns,
+      lo_header  TYPE REF TO cl_salv_form_layout_grid,
+      lo_h_label TYPE REF TO cl_salv_form_label,
+      lo_h_flow  TYPE REF TO cl_salv_form_layout_flow.
+
+    CHECK cb_auto = abap_false.
+
+    " Create the ALV object
+    TRY.
+        cl_salv_table=>factory(
+          IMPORTING
+            r_salv_table = lo_gr_alv
+          CHANGING
+            t_table      = gt_log_to_display ).
+      CATCH cx_salv_msg.
+        RETURN.
+    ENDTRY.
+
+    " PF status
+    lo_gr_alv->set_screen_status(
+       pfstatus      = 'MTF_PR_CONTRACT'
+       report        = sy-repid
+       set_functions = lo_gr_alv->c_functions_all ).
+
+    lo_columns = lo_gr_alv->get_columns( ).
+    lo_columns->set_optimize( abap_true ).
+
+    " Set ALV header
+    lo_header = NEW #( ).
+    lo_h_label = lo_header->create_label( row = 1 column = 1 ).
+    lo_h_label->set_text( TEXT-011 ).
+
+    lo_h_flow = lo_header->create_flow( row = 2  column = 1 ).
+    lo_h_flow->create_text( text = | { TEXT-012 } { gv_prs }| ).
+    lo_h_flow = lo_header->create_flow( row = 3  column = 1 ).
+    lo_h_flow->create_text( text = | { TEXT-014 } { gv_prs_excluded }| ).
+    lo_h_flow = lo_header->create_flow( row = 4  column = 1 ).
+    lo_h_flow->create_text( text = | { TEXT-015 } { gv_prs_partially_assigned }| ).
+    lo_h_flow = lo_header->create_flow( row = 5  column = 1 ).
+    lo_h_flow->create_text( text = | { TEXT-016 } { gv_prs_fully_assigned }| ).
+
+    lo_gr_alv->set_top_of_list( lo_header ).
+
+    lo_gr_alv->display( ).
+
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS lcl_log IMPLEMENTATION.
+
+*&---------------------------------------------------------------------*
+*& Create log
+*&---------------------------------------------------------------------*
+  METHOD create_log.
+
+    CONSTANTS:
+      lc_obj_name TYPE balobj_d VALUE 'ZSP_MTF_PR'.
+
+    rv_success = abap_true.
+    TRY.
+        gif_bal_log = cl_bali_log=>create_with_header( header = cl_bali_header_setter=>create( object = lc_obj_name subobject = ' ' ) ).
+
+      CATCH cx_bali_runtime.
+        rv_success = abap_false.
+        FREE gif_bal_log.
+    ENDTRY.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Add message
+*&---------------------------------------------------------------------*
+  METHOD add_message.
+
+    CHECK gif_bal_log IS BOUND.
+    TRY.
+        gif_bal_log->add_item( item = cl_bali_free_text_setter=>create( severity = iv_type text = iv_message ) ).
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+*&---------------------------------------------------------------------*
+*& Save log
+*&---------------------------------------------------------------------*
+  METHOD save_log.
+
+    CHECK gif_bal_log IS BOUND.
+    TRY.
+        cl_bali_log_db=>get_instance( )->save_log( log = gif_bal_log ).
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+ENDCLASS.

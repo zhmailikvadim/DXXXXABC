@@ -1,0 +1,253 @@
+*&---------------------------------------------------------------------*
+*& Report ZPB_TEST1
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT zpb_test1.
+
+TYPES: BEGIN OF lty_sales_order,
+         sales_order_id       TYPE sdesr_sales_order_gfn,
+         sales_order_item_id  TYPE sdesr_sales_order_item_gfn,
+         msgguid              TYPE sxmsguid,
+         Article              TYPE sdesr_material_gfn,
+         plant                TYPE sdesr_plant_id,
+         storage_location     TYPE sdesr_storage_location_interna,
+         shipping_type        TYPE sdesr_shipping_type_gfn,
+         zzreference_document TYPE char10,
+         error_message        TYPE char100,
+         external_document_id TYPE sdesr_external_ref_key_id,
+         content              TYPE sdesr_quantity_v2_gfn_content,
+         Unit_code            TYPE sdesr_measure_unit_code,
+         sales_order_date     TYPE  sdesr_date,
+
+       END OF lty_sales_order.
+
+CONSTANTS:
+  lc_NS             TYPE  /aif/ns VALUE '/SDSLS',
+  lc_ifname         TYPE /aif/ifname VALUE 'SO_BULK_I',
+  lc_ifver          TYPE  /aif/ifversion VALUE '1',
+  lc_msgguid        TYPE sxmsguid VALUE
+*  '0239FC3B8D041EDCAAA9215EACDADF59',
+  '0B9BC4CB2E0944F8A2BC6670143AE11E',
+  lc_msgguid_char32 TYPE guid_32 VALUE '0B9BC4CB2E0944F8A2BC6670143AE11E'.
+
+DATA:
+  lr_appl_engine      TYPE REF TO /aif/if_application_engine,
+  lv_msgguid          TYPE sxmsguid,
+  lv_msgguid2         TYPE guid_32,
+  ls_sales_order      TYPE sdsls_esr_sales_order_bulk_req,
+  lref_data           TYPE REF TO data,
+  ls_interface_keys   TYPE /aif/ifkeys,
+  lt_logs             TYPE /aif/tt_msg_log,
+  lv_count            TYPE int4,
+  lref_typedescr      TYPE REF TO cl_abap_typedescr,
+  ls_xmlparse_paramts TYPE /aif/xmlparse_data,
+  lt_return           TYPE bapirettab,
+  lt_sales_order      TYPE TABLE OF lty_sales_order.
+
+
+FIELD-SYMBOLS: <lt_data> TYPE ANY TABLE.
+DATA(lt_Date) = sy-datum.
+CONCATENATE sy-datum+6(2) '-' sy-datum+4(2) '-' sy-datum+0(4) INTO DATA(lv_DATE).
+SELECT msgguid, create_date
+  FROM sdsls_bussys_idx
+  WHERE ns = @lc_NS
+  AND ifname = @lc_ifname
+  AND ifver = @lc_ifver
+*  AND create_date = @lv_date
+  INTO TABLE @DATA(lt_msgguid).
+
+DATA(lo_log) = NEW /aif/cl_logging_engine_app_log( ).
+lr_appl_engine = /aif/cl_aif_engine_factory=>get_engine(
+                     iv_ns            = lc_NS
+                     iv_ifname        = lc_ifname
+                     iv_ifversion     = lc_ifver
+                        ).
+
+ls_interface_keys-ns = lc_NS.
+ls_interface_keys-ifname = lc_ifname.
+ls_interface_keys-ifver = lc_ifver.
+
+DATA(ttest) = 0.
+LOOP AT lt_msgguid ASSIGNING FIELD-SYMBOL(<lfs_msgguid>)
+*   WHERE msgguid = '0B9BC4CB2E0944F8A2BC6670143AE11E'
+  .
+  DATA(lo_ws)     = cl_wsm_access_factory=>create_monitor( iv_no_auth_check  = abap_true ).
+  DATA(lvr_id)    = NEW srt_persistency_access_id_t( ( message_id = <lfs_msgguid>-msgguid location = 'C' )
+                                                     ( message_id = <lfs_msgguid>-msgguid location = 'P' ) ).
+  DATA(lr_filter) = NEW srt_mselect_filter( ).
+  lr_filter->access_id_list = lvr_id->*.
+  DATA(ltr_result) = NEW srt_mselect_result_t( ).
+  ltr_result->* = lo_ws->select_messages( filter = lr_filter->* ).
+*INSERT LINES OF ltr_result->* INTO TABLE gr_ws_result->*.
+  IF lines( ltr_result->* ) EQ 0.
+    DATA(asd) = abap_false.
+  ELSE.
+
+    CLEAR : lref_data,
+    ls_xmlparse_paramts.
+    cl_system_uuid=>convert_uuid_c32_static( EXPORTING uuid     = <lfs_msgguid>-msgguid
+                                             IMPORTING uuid_x16 = lv_msgguid ).
+*        IF <lfs_msgguid> = '0B9BC4CB2E0944F8A2BC6670143AE11E'.
+    TRY.
+
+        lr_appl_engine->read_msg_from_persistency(
+                           EXPORTING
+                             iv_msgguid    = lv_msgguid
+                             iv_ns         = lc_NS
+                             iv_ifname     = lc_ifname
+                             iv_ifver      = lc_ifver
+*                             iv_read_access_logging = abap_true
+                           IMPORTING
+                             et_return     = lt_return
+                           CHANGING
+                             cref_data     = lref_data
+                             cs_xmlparse   = ls_xmlparse_paramts ).
+      CATCH /aif/cx_error_handling_general INTO DATA(lr_err).
+        CONTINUE.
+*      RETRY.
+    ENDTRY.
+
+    ls_sales_order = lref_data->*.
+
+    LOOP AT ls_sales_order-sales_order_bulk_request-sales_order ASSIGNING FIELD-SYMBOL(<lsf_sales_order>).
+
+      lo_log->/aif/if_logging_engine~retrieve_log( EXPORTING is_interface_key = ls_interface_keys
+                                                             iv_msgguid =
+*                                                         lc_msgguid_char32
+                                                               <lfs_msgguid>-msgguid
+                                                   IMPORTING et_msg_log = lt_logs ).
+
+      LOOP AT <lsf_sales_order>-item ASSIGNING FIELD-SYMBOL(<lfs_sales_order_item>).
+        LOOP AT lt_logs ASSIGNING FIELD-SYMBOL(<lfs_log>).
+
+          APPEND INITIAL LINE TO lt_sales_order ASSIGNING FIELD-SYMBOL(<lfs_sales_order_result>).
+
+          <lfs_sales_order_result>-sales_order_id = <lsf_sales_order>-sales_order_id.
+          <lfs_sales_order_result>-sales_order_item_id = <lfs_sales_order_item>-sales_order_item_id.
+          <lfs_sales_order_result>-msgguid = lc_msgguid.
+          <lfs_sales_order_result>-plant = <lfs_sales_order_item>-plant.
+          <lfs_sales_order_result>-storage_location = <lfs_sales_order_item>-storage_location.
+          <lfs_sales_order_result>-article = <lfs_sales_order_item>-material.
+          <lfs_sales_order_result>-content = <lfs_sales_order_item>-requested_quantity-content.
+          <lfs_sales_order_result>-unit_code = <lfs_sales_order_item>-requested_quantity-unit_code.
+          <lfs_sales_order_result>-external_document_id = <lsf_sales_order>-external_document_id.
+          <lfs_sales_order_result>-zzreference_document = <lfs_sales_order_item>-zzreference_document.
+          <lfs_sales_order_result>-sales_order_date = <lsf_sales_order>-sales_order_date.
+
+          MESSAGE ID <lfs_log>-msgid TYPE <lfs_log>-msgty NUMBER <lfs_log>-msgno WITH <lfs_log>-msgv1
+                                                                                <lfs_log>-msgv2
+                                                                                 <lfs_log>-msgv2
+                                                                                 <lfs_log>-msgv2
+                                                                                 INTO <lfs_sales_order_result>-error_message.
+
+
+        ENDLOOP.
+      ENDLOOP.
+
+    ENDLOOP.
+    ttest = ttest + 1.
+*    ENDIF.
+  ENDIF.
+
+ENDLOOP.
+
+DELETE lt_sales_order WHERE article <> 'A15112001'.
+ttest = ttest + 1.
+*LOOP AT lt_msgguid ASSIGNING FIELD-SYMBOL(<lfs_msgguid>).
+
+*cl_system_uuid=>convert_uuid_c32_static( EXPORTING uuid     =
+*  '0239FC3B8D041EDCAAA9215EACDADF59'
+*    <lfs_msgguid>-msgguid
+*                                         IMPORTING uuid_x16 = lv_msgguid ).
+*  lv_msgguid = '544A42EE50154376904C584DEE0C6851'.
+*  CALL FUNCTION 'CMS_API_BAPI_GUID_CONV_C32_R16' "Convert GUID: RAW16 to CHAR32
+*  EXPORTING
+*    i_guid32 =         <lfs_msgguid>-msgguid
+**    " sysuuid-x     UUID in X form (binary)
+*  IMPORTING
+*    e_guid16 =    lv_msgguid    .
+*" sysuuid-c     UUID in character form
+**  lv_msgguid = '0B9BC4CB2E0944F8A2BC6670143AE11E'.
+**  CONV #( <lfs_msgguid>-msgguid ).
+*
+*DATA:
+*      lr_outbound_badi TYPE REF TO /aif/error_outbound_badi,
+*      lx_transformation_error TYPE REF TO cx_transformation_error.
+*
+* GET BADI lr_outbound_badi.
+**          DATA(lt_return) = VALUE bapiret2_t( ).
+*          DATA lv_got_struct_by_badi TYPE abap_bool VALUE abap_false.
+*          CALL BADI lr_outbound_badi->get_sap_struct_from_msg
+*            EXPORTING
+*              iv_pid        = 'RECEIVER'
+*              iv_ns         = lc_ns
+*              iv_ifname     = lc_ifname
+*              iv_ifver      = lc_ifver
+*              iv_msgguid    = lv_msgguid
+*            CHANGING
+*              cs_xmlparse   = ls_xmlparse_paramts
+**              cs_xmlparse
+*              cref_data     = lref_data
+*              ct_return_tab = lt_return
+*              cv_got_struct = lv_got_struct_by_badi.
+*
+*          ENDLOOP.
+*TRY.
+*    lr_appl_engine->read_msg_from_persistency(
+*                       EXPORTING
+*                         iv_msgguid    = lc_msgguid
+*                         iv_ns         = lc_NS
+*                         iv_ifname     = lc_ifname
+*                         iv_ifver      = lc_ifver
+*                         iv_read_access_logging = abap_true
+*                       IMPORTING
+*                         et_return     = lt_return
+*                       CHANGING
+*                         cref_data     = lref_data
+*                         cs_xmlparse   = ls_xmlparse_paramts ).
+*  CATCH /aif/cx_error_handling_general INTO lr_err.
+**      CONTINUE.
+**      RETRY.
+*ENDTRY.
+*
+*ls_sales_order = lref_data->*.
+*
+*LOOP AT ls_sales_order-sales_order_bulk_request-sales_order ASSIGNING FIELD-SYMBOL(<lsf_sales_order>).
+*
+*  lo_log->/aif/if_logging_engine~retrieve_log( EXPORTING is_interface_key = ls_interface_keys
+*                                                         iv_msgguid = lc_msgguid_char32
+**                                                           <lfs_msgguid>-msgguid
+*                                               IMPORTING et_msg_log = lt_logs ).
+*
+*  LOOP AT <lsf_sales_order>-item ASSIGNING FIELD-SYMBOL(<lfs_sales_order_item>).
+*    LOOP AT lt_logs ASSIGNING FIELD-SYMBOL(<lfs_log>).
+*
+*      APPEND INITIAL LINE TO lt_sales_order ASSIGNING FIELD-SYMBOL(<lfs_sales_order_result>).
+*
+*      <lfs_sales_order_result>-sales_order_id = <lsf_sales_order>-sales_order_id.
+*      <lfs_sales_order_result>-sales_order_item_id = <lfs_sales_order_item>-sales_order_item_id.
+*      <lfs_sales_order_result>-msgguid = lc_msgguid.
+*      <lfs_sales_order_result>-plant = <lfs_sales_order_item>-plant.
+*      <lfs_sales_order_result>-storage_location = <lfs_sales_order_item>-storage_location.
+*      <lfs_sales_order_result>-article = <lfs_sales_order_item>-material.
+*      <lfs_sales_order_result>-content = <lfs_sales_order_item>-requested_quantity-content.
+*      <lfs_sales_order_result>-unit_code = <lfs_sales_order_item>-requested_quantity-unit_code.
+*      <lfs_sales_order_result>-external_document_id = <lsf_sales_order>-external_document_id.
+*      <lfs_sales_order_result>-zzreference_document = <lfs_sales_order_item>-zzreference_document.
+*      <lfs_sales_order_result>-sales_order_date = <lsf_sales_order>-sales_order_date.
+*
+*      MESSAGE ID <lfs_log>-msgid TYPE <lfs_log>-msgty NUMBER <lfs_log>-msgno WITH <lfs_log>-msgv1
+*                                                                            <lfs_log>-msgv2
+*                                                                             <lfs_log>-msgv2
+*                                                                             <lfs_log>-msgv2
+*                                                                             INTO <lfs_sales_order_result>-error_message.
+*
+*
+*    ENDLOOP.
+*  ENDLOOP.
+*
+*ENDLOOP.
+*ttest = ttest + 1.
+
+*ENDLOOP.

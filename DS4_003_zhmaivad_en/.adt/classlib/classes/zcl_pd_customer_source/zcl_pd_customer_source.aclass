@@ -1,0 +1,534 @@
+class ZCL_PD_CUSTOMER_SOURCE definition
+  public
+  final
+  create public .
+
+public section.
+
+  types GTYP_IBP_CUSTRSRC type ZPD_T_IBP_CUSTSR .
+
+  constants GC_AUTH_OBJECT type XUOBJECT value 'ZIS_REPO' ##NO_TEXT.
+
+  methods CHECK_AUTHORITY
+    returning
+      value(RV_SUCCESS) type BOOLEAN .
+  methods ADD_NEW_VALUES .
+  methods UPDATE_VALUES .
+protected section.
+private section.
+
+  constants GC_OBJECT type BALOBJ_D value 'ZPD_FPS' ##NO_TEXT.
+  constants GC_SUBOBJECT type BALSUBOBJ value 'CUSTOMER SOURCE' ##NO_TEXT.
+  constants GC_EXTNUMBER type BALNREXT value 'KUNNR MATNR WERKS' ##NO_TEXT.
+  data GV_HANDLE type BALLOGHNDL .
+  constants GC_MESSAGE_CLASS type MSGID value 'ZPD_CUST_SOURCE' ##NO_TEXT.
+
+  methods CREATE_LOG
+    returning
+      value(RV_SUCCESS) type BOOLEAN .
+  methods ADD_MESSAGE_TO_THE_LOG
+    importing
+      !IS_MESSAGE type BAL_S_MSG .
+  methods CREATE_LOG_MESSAGE
+    importing
+      !IV_MSGTY type SYMSGTY
+      !IV_MSGID type SYMSGID
+      !IV_MSGNO type SYMSGNO
+      !IV_MSGV1 type SYMSGV optional
+      !IV_MSGV2 type SYMSGV optional
+      !IV_MSGV3 type SYMSGV optional
+      !IV_MSGV4 type SYMSGV optional
+    returning
+      value(RS_MESSAGE) type BAL_S_MSG .
+  methods SAVE_LOG .
+  methods DELETE_OLD_VALUES .
+ENDCLASS.
+
+
+
+CLASS ZCL_PD_CUSTOMER_SOURCE IMPLEMENTATION.
+
+
+  METHOD add_message_to_the_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+
+
+    CHECK is_message IS NOT INITIAL.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = gv_handle
+        i_s_msg          = is_message
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+
+    IF sy-subrc IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+   METHOD add_new_values.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+     DATA: lth_custsrc TYPE HASHED TABLE OF zpd_t_ibp_custsr WITH UNIQUE KEY kunnr matnr werks,
+           ls_custsrc TYPE zpd_t_ibp_custsr.
+
+     DATA(lv_success) = create_log( ).
+
+     IF lv_success = abap_false.
+       RETURN.
+     ENDIF.
+
+     TRY.
+         DATA(lv_c_loctype) = zcl_pe_hm_basic=>get_value( iv_id = '556' iv_sequence = 3 ).
+         DATA(lv_p_loctype) = zcl_pe_hm_basic=>get_value( iv_id = '556' iv_sequence = 1 ).
+         DATA(lv_ka_yes)    = zcl_pe_hm_basic=>get_value( iv_id = '590' iv_sequence = 1 ).
+         DATA(lv_days_nonkey_customer) = zcl_pe_hm_basic=>get_value( iv_id = '988' iv_sequence = 1 ).
+         DATA(lv_days_key_customer) = zcl_pe_hm_basic=>get_value( iv_id = '988' iv_sequence = 2 ).
+       CATCH zcx_pe_hm.
+         DATA(ls_message) = create_log_message( iv_msgid = gc_message_class
+                                                iv_msgno = 002
+                                                iv_msgty = if_xo_const_message=>error ).
+         add_message_to_the_log( is_message = ls_message ).
+         save_log( ).
+         RETURN.
+     ENDTRY.
+
+     SELECT custprod~kunnr AS kunnr, " location
+            custprod~matnr AS matnr, " product
+            custprod~satnr AS satnr, " generic article
+            custprod~vkorg AS vkorg, " Sales Org.
+            custprod~vtweg AS vtweg, " Distr. Channel
+            custprod~zdeletionind AS deletionindicator,
+            custprod~change_date AS change_date,
+            tvkwz~werks AS werks
+     FROM zpd_i_ibp_custprod AS custprod
+     JOIN tvkwz ON custprod~vkorg = tvkwz~vkorg AND
+                   custprod~vtweg = tvkwz~vtweg
+     JOIN /ibp/loc_ext AS loc ON tvkwz~werks = loc~locno AND
+                                 loc~loctype = @lv_p_loctype
+     INTO TABLE @DATA(lt_custprod).
+     IF sy-subrc <> 0.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 003
+                                        iv_msgty = if_xo_const_message=>error ).
+       add_message_to_the_log( is_message = ls_message ).
+       save_log( ).
+       RETURN.
+     ELSE.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 004
+                                        iv_msgty = if_xo_const_message=>info
+                                        iv_msgv1 = CONV symsgv( CONV string( lines( lt_custprod ) ) ) ).
+
+       add_message_to_the_log( is_message = ls_message ).
+
+     ENDIF.
+
+     SELECT custprod~kunnr,
+            custprod~matnr,
+            custprod~vtweg,
+            loc~zzkeyaacount_tc,
+            tvro~traztd
+       FROM zpd_i_ibp_custprod AS custprod
+       JOIN /ibp/loc_ext AS loc ON custprod~kunnr = loc~locno AND
+                                   loc~loctype = @lv_c_loctype
+       JOIN trolz ON loc~zztzone_tc = trolz~lzone
+       JOIN tvro ON trolz~route = tvro~route
+       INTO TABLE @DATA(lt_transit_duration).
+
+     IF sy-subrc <> 0.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 005
+                                        iv_msgty = if_xo_const_message=>error ).
+       add_message_to_the_log( is_message = ls_message ).
+       save_log( ).
+       RETURN.
+     ENDIF.
+
+     SORT lt_transit_duration BY kunnr matnr vtweg.
+
+     SELECT custprod~kunnr AS kunnr, " location
+            custprod~matnr AS matnr, " product
+            custprod~satnr AS satnr, " generic article
+            custprod~vkorg AS vkorg, " Sales Org.
+            custprod~vtweg AS vtweg, " Distr. Channel
+            custprod~deletionindicator,
+            custprod~change_date AS change_date,
+            custprod~werks AS werks
+       FROM @lt_custprod AS custprod
+       LEFT JOIN zpd_t_ibp_custsr AS custsr ON custprod~kunnr = custsr~kunnr AND
+                                               custprod~matnr = custsr~matnr AND
+                                               custprod~werks = custsr~werks
+      WHERE custsr~kunnr IS NULL AND
+            custsr~matnr IS NULL AND
+            custsr~werks IS NULL
+       INTO TABLE @DATA(lt_custprod_new).
+
+     IF sy-subrc <> 0.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 006
+                                        iv_msgty = if_xo_const_message=>info ).
+       add_message_to_the_log( is_message = ls_message ).
+     ENDIF.
+
+     ls_message = create_log_message( iv_msgid = gc_message_class
+                                      iv_msgno = 007
+                                      iv_msgty = if_xo_const_message=>info
+                                      iv_msgv1 = CONV symsgv( CONV string( lines( lt_custprod_new ) ) ) ).
+
+     add_message_to_the_log( is_message = ls_message ).
+
+
+     IF lt_custprod_new IS NOT INITIAL.
+       LOOP AT lt_custprod_new ASSIGNING FIELD-SYMBOL(<ls_custprod_new>).
+
+         ls_custsrc = CORRESPONDING #( <ls_custprod_new> ) ##ENH_OK.
+
+         READ TABLE lt_transit_duration WITH KEY kunnr = ls_custsrc-kunnr
+                                                 matnr = ls_custsrc-matnr
+                                                 vtweg = <ls_custprod_new>-vtweg
+                                                 ASSIGNING  FIELD-SYMBOL(<ls_transit_duration>) BINARY SEARCH.
+         IF sy-subrc <> 0.
+           RETURN.
+         ENDIF.
+
+         IF <ls_transit_duration>-zzkeyaacount_tc = lv_ka_yes.
+           ls_custsrc-cleadtime = <ls_transit_duration>-traztd + lv_days_key_customer.
+         ELSE.
+           ls_custsrc-cleadtime = <ls_transit_duration>-traztd + lv_days_nonkey_customer.
+         ENDIF.
+
+         ls_custsrc-cvalidfr = sy-datum.
+         ls_custsrc-cvalidto = |{ ( sy-datum+0(4) + 5 ) }| && |{ sy-datum+4(4) }|.
+
+         ls_custsrc-deletionindicator = <ls_custprod_new>-deletionindicator.
+
+         GET TIME STAMP FIELD DATA(lv_ts).
+         ls_custsrc-change_date = lv_ts.
+
+         INSERT ls_custsrc INTO TABLE lth_custsrc.
+
+         CLEAR ls_custsrc.
+
+       ENDLOOP.
+
+       MODIFY zpd_t_ibp_custsr FROM TABLE lth_custsrc.
+
+       IF sy-subrc = 0.
+         ls_message = create_log_message( iv_msgid = gc_message_class
+                                          iv_msgno = 008
+                                          iv_msgty = if_xo_const_message=>success ).
+
+         add_message_to_the_log( is_message = ls_message ).
+         COMMIT WORK .
+       ELSE.
+         ls_message = create_log_message( iv_msgid = gc_message_class
+                                          iv_msgno = 009
+                                          iv_msgty = if_xo_const_message=>error ).
+
+         add_message_to_the_log( is_message = ls_message ).
+         ROLLBACK WORK.
+       ENDIF.
+     ENDIF.
+
+     update_values( ).
+
+     delete_old_values( ).
+
+
+     save_log( ).
+
+   ENDMETHOD.
+
+
+  METHOD check_authority.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+
+
+    AUTHORITY-CHECK OBJECT gc_auth_object ID 'PROGRAM' FIELD sy-repid.
+
+    rv_success = COND #( WHEN sy-subrc IS INITIAL THEN abap_true ELSE abap_false ).
+
+  ENDMETHOD.
+
+
+ METHOD create_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+
+
+   DATA(ls_log) = VALUE bal_s_log( object    = gc_object
+                                   subobject = gc_subobject
+                                   extnumber = gc_extnumber
+                                   aldate    = sy-datum
+                                   altime    = sy-uzeit
+                                   aluser    = sy-uname
+                                   alprog    = sy-repid
+                                   altcode   = sy-tcode ).
+
+   " Creating log header
+   CALL FUNCTION 'BAL_LOG_CREATE'
+     EXPORTING
+       i_s_log                 = ls_log
+     IMPORTING
+       e_log_handle            = gv_handle
+     EXCEPTIONS
+       log_header_inconsistent = 1
+       OTHERS                  = 2.
+
+   IF sy-subrc IS INITIAL.
+     rv_success = abap_true.
+   ELSE.
+     rv_success = abap_false.
+     MESSAGE e000.
+   ENDIF.
+
+ ENDMETHOD.
+
+
+  METHOD create_log_message.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+
+
+    rs_message = VALUE #( msgty = iv_msgty
+                          msgid = iv_msgid
+                          msgno = iv_msgno
+                          msgv1 = iv_msgv1
+                          msgv2 = iv_msgv2
+                          msgv3 = iv_msgv3
+                          msgv4 = iv_msgv4 ).
+
+  ENDMETHOD.
+
+
+  METHOD delete_old_values.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+
+    DELETE FROM zpd_t_ibp_custsr WHERE deletionindicator = 'X'
+                                    OR cvalidto < sy-datum.
+
+    IF sy-subrc = 0.
+      MESSAGE i010(zpd_cust_source) INTO DATA(lv_message) ##NEEDED.
+      DATA(ls_message) = create_log_message( iv_msgid = gc_message_class
+                                             iv_msgno = 010
+                                             iv_msgty = if_xo_const_message=>success ).
+
+      add_message_to_the_log( is_message = ls_message ).
+      COMMIT WORK .
+    ELSE.
+      MESSAGE i011(zpd_cust_source) INTO lv_message ##NEEDED.
+      ls_message = create_log_message( iv_msgid = gc_message_class
+                                       iv_msgno = 011
+                                       iv_msgty = if_xo_const_message=>error ).
+
+      add_message_to_the_log( is_message = ls_message ).
+      ROLLBACK WORK.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD save_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+
+    CHECK gv_handle IS NOT INITIAL.
+
+    CALL FUNCTION 'BAL_DB_SAVE'
+      EXPORTING
+        i_t_log_handle   = VALUE bal_t_logh( ( gv_handle ) )
+      EXCEPTIONS
+        log_not_found    = 1
+        save_not_allowed = 2
+        numbering_error  = 3
+        OTHERS           = 4.
+
+    IF sy-subrc IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+   METHOD update_values.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RAZMYEGO     | 29.12.2022 | 16546     : [Feature] [BUILD] - FPS-WRIC *
+*              |            | DS4K939046                               *
+*----------------------------------------------------------------------*
+     DATA: lth_custsrc TYPE HASHED TABLE OF zpd_t_ibp_custsr WITH UNIQUE KEY kunnr matnr werks,
+           ls_custsrc TYPE zpd_t_ibp_custsr.
+
+     TRY.
+         DATA(lv_p_loctype) = zcl_pe_hm_basic=>get_value( iv_id = '556' iv_sequence = 1 ) .
+       CATCH zcx_pe_hm.
+         DATA(ls_message) = create_log_message( iv_msgid = gc_message_class
+                                                iv_msgno = 002
+                                                iv_msgty = if_xo_const_message=>error ).
+         add_message_to_the_log( is_message = ls_message ).
+         RETURN.
+     ENDTRY.
+
+     SELECT custprod~kunnr AS kunnr, " location
+            custprod~matnr AS matnr, " product
+            custprod~satnr AS satnr, " generic article
+            custprod~vkorg AS vkorg, " Sales Org.
+            custprod~vtweg AS vtweg, " Distr. Channel
+            custprod~zdeletionind AS deletionindicator,
+            custprod~change_date AS change_date,
+            tvkwz~werks AS werks
+     FROM zpd_i_ibp_custprod AS custprod
+     JOIN tvkwz ON custprod~vkorg = tvkwz~vkorg AND
+                   custprod~vtweg = tvkwz~vtweg
+     JOIN /ibp/loc_ext AS loc ON tvkwz~werks = loc~locno AND
+                                 loc~loctype = @lv_p_loctype
+     INTO TABLE @DATA(lt_custprod).
+
+     IF sy-subrc <> 0.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 003
+                                        iv_msgty = if_xo_const_message=>error ).
+       add_message_to_the_log( is_message = ls_message ).
+       save_log( ).
+       RETURN.
+     ELSE.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 004
+                                        iv_msgty = if_xo_const_message=>info
+                                        iv_msgv1 = CONV symsgv( CONV string( lines( lt_custprod ) ) ) ).
+
+       add_message_to_the_log( is_message = ls_message ).
+
+     ENDIF.
+
+     SELECT custsr~kunnr,
+            custsr~matnr,
+            custsr~werks,
+            custsr~cleadtime,
+            custsr~cvalidfr,
+            custsr~cvalidto,
+            custsr~deletionindicator,
+            custsr~change_date
+       FROM @lt_custprod AS custprod
+       JOIN zpd_t_ibp_custsr AS custsr ON custprod~kunnr = custsr~kunnr AND
+                                          custprod~matnr = custsr~matnr AND
+                                          custprod~werks = custsr~werks
+      WHERE custprod~deletionindicator <> custsr~deletionindicator
+      INTO TABLE @DATA(lt_custprod_update).
+
+     IF sy-subrc <> 0.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 012
+                                        iv_msgty = if_xo_const_message=>info ).
+       add_message_to_the_log( is_message = ls_message ).
+       RETURN.
+     ELSE.
+       ls_message = create_log_message( iv_msgid = gc_message_class
+                                        iv_msgno = 013
+                                        iv_msgty = if_xo_const_message=>info
+                                        iv_msgv1 = CONV symsgv( CONV string( lines( lt_custprod_update ) ) ) ).
+
+       add_message_to_the_log( is_message = ls_message ).
+
+     ENDIF.
+
+     IF lt_custprod_update IS NOT INITIAL.
+       LOOP AT lt_custprod_update ASSIGNING FIELD-SYMBOL(<ls_custprod_delete>).
+
+         ls_custsrc = CORRESPONDING #( <ls_custprod_delete> ).
+
+         ls_custsrc-deletionindicator = <ls_custprod_delete>-deletionindicator.
+
+         GET TIME STAMP FIELD DATA(lv_ts).
+         ls_custsrc-change_date = lv_ts.
+
+         INSERT ls_custsrc INTO TABLE lth_custsrc.
+
+         CLEAR ls_custsrc.
+
+       ENDLOOP.
+
+       MODIFY zpd_t_ibp_custsr FROM TABLE lth_custsrc.
+       IF sy-subrc = 0.
+         ls_message = create_log_message( iv_msgid = gc_message_class
+                                          iv_msgno = 008
+                                          iv_msgty = if_xo_const_message=>success ).
+
+         add_message_to_the_log( is_message = ls_message ).
+         COMMIT WORK .
+       ELSE.
+         ls_message = create_log_message( iv_msgid = gc_message_class
+                                          iv_msgno = 009
+                                          iv_msgty = if_xo_const_message=>error ).
+
+         add_message_to_the_log( is_message = ls_message ).
+         ROLLBACK WORK.
+       ENDIF.
+
+     ENDIF.
+
+   ENDMETHOD.
+ENDCLASS.

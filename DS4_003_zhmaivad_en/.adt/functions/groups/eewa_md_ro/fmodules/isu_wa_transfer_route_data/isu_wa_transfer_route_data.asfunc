@@ -1,0 +1,748 @@
+function ISU_WA_TRANSFER_ROUTE_DATA
+  importing
+    X_ROUTE type EROUTE
+    X_ROUTE_SERVFREQ type ISUWA_ROBJ_TAB optional
+    X_CRM type KENNZX optional
+  exporting
+    ET_ROUTE_SERVICES type ISUWA_T_ROUTE_SERVICES
+  changing
+    XY_OBJ type ISUWA_OBJ optional
+    XY_EWAOBJD type EWAOBJD optional
+    XY_TIMESLC type ISU_ROBJ_TSL optional
+  exceptions
+    FAILED.
+
+
+
+  data: W_ROBJ          type ISUWA_ROBJ,
+        T_ROUTE_EWAOBJH type ISUWA_EWAOBJH occurs 0,
+        ROUTE_EWAOBJH   type ISUWA_EWAOBJH,
+        DUMMY           type ISUWA_EWAOBJH,
+        ROUTE_SF        type EWAOBJH_GENERIC_FREQUENCY,
+        MATCH_FOUND     type REGEN-KENNZX,
+        SAVE_TSL        type ISU_ROBJ_TSL occurs 0,
+        NEWDATE         type SY-DATUM,
+        L_ROUTE         type SY-TFILL,
+        L_INDEX         type SY-STEPL,
+        LT_ROUTE        type ISUWA_T_ROUTE_SERVICES,
+        FAILED(1),
+        L_FREQUENCY_RC  type EWADRETURNCODE,
+        LEWAOBJH        type EWAOBJH,
+        LSERVICEDATES   type EWAPSERVICEDATES,
+        LEWAROUTES      type table of EWAROUTE.
+  field-symbols:
+    <ROUTE> type ISU_ROUTE_SERVICES,
+    <H_TSL> type ISU_ROBJ_TSL.
+
+**** Vorbereiten:
+* jetzt haben wir den Servicerhythmus der Route!
+  clear W_ROBJ.
+  SAVE_TSL[] = XY_OBJ-IROBJ_TSL[].
+  read table X_ROUTE_SERVFREQ
+  with key EWAOBJ-ROUTE_MAIN = X_ROUTE
+             into W_ROBJ.
+
+*  Ressourcen für CRM schonen "=> nicht neu laden, nicht erneut nachlesen
+  if SY-SUBRC is not initial
+* and W_ROBJ-EWAOBJH is initial "<=> W_ROBJ is initial.
+  and X_CRM is not initial.
+*  "=> wird als White-List an-/hingenommen ...
+      L_FREQUENCY_RC = CL_EEWA_RFC_SERVICE_FREQUENCY=>CO_FREQUENCY_RETURNCODES-NO_SERVICEFREQUENCYS.
+    else.
+**** Prüfung:
+* (historisch evtl. verlässt sich eine BAdI-Impl. hierrauf, aber eigentlich sollte das in einem Check...( )
+* oder GET_VALID...( ) stattfinden und nur wenn die Routen-Servicerhythmen auch tatsächlich geprüft werden sollen
+* => TODO: es sollte ein Verfahren bestimmt werden wie Servicerhythmen von Routen ohne Prüfung übernommen werden (könn(t)en)
+
+*   die gültigen Servicerhythmen der Route auslesen (s.o. Prüfungen:)
+      try.
+          CL_EEWA_RFC_SERVICE_FREQUENCY=>GET_VALID_FREQUENCYS(
+            exporting
+              PAR_ROUTE      = X_ROUTE
+              PAR_TSL        = XY_TIMESLC
+              PAR_ROUTE_SF   = X_ROUTE_SERVFREQ
+            importing
+              PAR_RETURNCODE = L_FREQUENCY_RC
+            receiving
+              PAR_EWAOBJHS   = T_ROUTE_EWAOBJH
+          ).
+        catch CX_EEWA_MD into LEX.
+          MAC_MSG_PUTX CO_MSG_ERROR LEX->T100_MSGNO LEX->T100_MSGID
+              LEX->T100_MSGV1 LEX->T100_MSGV2 LEX->T100_MSGV3 LEX->T100_MSGV4 FAILED.
+      endtry.
+*   check if service of route has the same weekday only for CRM
+*   "=> in CRM the day is not transported to data or GUI, even so XY_TIMESLC and EWAOBJD is adjusted here
+    if X_CRM is not initial
+    and XY_TIMESLC-DAY_FLAG is initial "tägliche sind jeden Tag, zu unterschiedlichen Tagen oder nur 1malig (COMPUTE_DAY_OF_DATE)
+*      "=> dürfen nicht geprüft werden oder müssen mit besonderem Verfahren geprüft werden, da diese default mit FLAG1 = 'X' erzeugt werden
+    and ( XY_TIMESLC-WEEK_FLAG is not initial
+       or XY_TIMESLC-MNTH_FLAG is not initial ).
+*     no check if no weekday was flagged (i.e. route proposal)
+        if not ( XY_TIMESLC-FLAG1 is initial and
+          XY_TIMESLC-FLAG2 is initial and
+          XY_TIMESLC-FLAG3 is initial and
+          XY_TIMESLC-FLAG4 is initial and
+          XY_TIMESLC-FLAG5 is initial and
+          XY_TIMESLC-FLAG6 is initial and
+          XY_TIMESLC-FLAG7 is initial ).
+
+* aus CL_EEWA_RFC_SERVICE_FREQUENCY=>CHECK_FREQUENCY( )
+          delete T_ROUTE_EWAOBJH
+            where EWAOBJH-DAY_FLAG is initial
+              and ( EWAOBJH-FLAG1 ne XY_TIMESLC-FLAG1
+                 or EWAOBJH-FLAG2 ne XY_TIMESLC-FLAG2
+                 or EWAOBJH-FLAG3 ne XY_TIMESLC-FLAG3
+                 or EWAOBJH-FLAG4 ne XY_TIMESLC-FLAG4
+                 or EWAOBJH-FLAG5 ne XY_TIMESLC-FLAG5
+                 or EWAOBJH-FLAG6 ne XY_TIMESLC-FLAG6
+                 or EWAOBJH-FLAG7 ne XY_TIMESLC-FLAG7 ).
+
+          if T_ROUTE_EWAOBJH is initial.
+            MAC_MSG_PUTX CO_MSG_WARNING '771' 'EWA'
+                         EWAOBJD-ROUTE SPACE SPACE SPACE FAILED .
+            if 1 = 2. message S771(EWA) with X_ROUTE. endif. "EWAOBJD-ROUTE kann <initial> bzw. <> X_ROUTE sein
+          endif.
+        endif.
+      endif.
+*  u.a.  DAY_PERD aber DAY_FREQUENCY > 1
+*  oder  DAY_FREQ aber DAY_FREQUENCY <= 1
+*  => wird nach Reparatur nicht mehr benötigt, bis dahin aber schon
+    if X_CRM is not initial
+    and XY_TIMESLC-DAY_FLAG is not initial
+    and XY_TIMESLC-DAY_TYPE <> CO_DAY_ONCE. "einmalige SFs sind taggenau ausgerechnet
+*    ...GET_VALID... lässt DAY_FREQUENCY = 0 immer zu und = 1 passt immer...
+*    ...GET_VALID... mit CO_DAY_PERD prüfen
+*        => lässt CO_DAY_FREQ zu da die Daten übernommen werden sollen
+*        => das CMR übernimmt aber die DAY_FREQUENCY nicht
+      if XY_TIMESLC-DAY_FREQUENCY <= 1. "0 und 1 sind für das CRM identisch (eigentlich DAY_PERD)
+*                                       "! in der ELOC ist 0 -> DAY_PERD und 1 eine DAY_FREQ!
+*      !ACHTUNG!: DAY_TYPE kann mit DAY_PERD oder DAY_FREQ bestimmt sein!
+        delete T_ROUTE_EWAOBJH where EWAOBJH-DAY_FREQUENCY > 1.
+      endif.
+*    ...GET_VALID... mit CO_DAY_FREQ prüfen
+*        => lässt -DAY_FREQUENCY = <initial> (0) zu! / setzt nicht FAILED = 'X'.
+*         => der -DAY_TYPE ob PERD oder FREQ ist hierbei egal!
+*      !!!ACHTUNG!!! dieses Feature würde auch 1malige Servicerhythmen aus Routen zulassen!!!
+*      => GET_VALID... prüft auch bei DAY_PERD die DAY_FREQUENCY, um zu ermitteln ob die Übernahme möglich wäre (Negativprüfung) => daher i.o.
+*      TODO. "=> Erzeugt Fehler wenn am Routen-Servicerhythmus der -DAY_TYPE nicht richtig gesetzt ist. (z.B. Route hat DAY_PERD mit 004)
+    endif.
+  endif.
+  if L_FREQUENCY_RC is not initial.
+    clear EWAOBJD-SFREPLACE.
+    clear XY_TIMESLC-SFREPLACE.
+    case L_FREQUENCY_RC.
+      when CL_EEWA_RFC_SERVICE_FREQUENCY=>CO_FREQUENCY_RETURNCODES-NO_SERVICEFREQUENCYS.
+*      "-> auch wenn White-Lists erlaubt sind ist es hier falsch
+*        Servicerhythmus-Daten von einer Route ohne Servicerhythmen übernehmen zu wollen
+        if X_CRM is initial.
+          MAC_MSG_PUTX CO_MSG_WARNING '004' 'EEWA' XY_TIMESLC-ROUTE SPACE SPACE SPACE FAILED.
+        else. "X_CRM is not initial.
+*        "White-List-Dummy der Routen-Liste / Routen-Serviceliste hinzufügen
+**** => Dummy aus angefordertet TSL ableiten: (da die Route selber keine Services besitzt)
+*        if -DAY_FALG is not initial   " nur 1 Route wird übernommen
+*        or -MNTH_FALG is not initial.
+*          append initial line to LT_ROUTE reference into data(LL_ROUTE_REF).
+**          move-corresponding XY_TIMESLC to LL_ROUTE_REF->*.
+**          if XY_TIMESLC-WEEK_FLAG = CO_FLAG_MARKED.
+**            if XY_TIMESLC-WEEKLY is not initial.
+**              MAC_DOMTEXT_GET 'RYTHMUS' XY_TIMESLC-WEEKLY LL_ROUTE_REF->INTERVALL.
+**            else.
+**              LL_ROUTE_REF->INTERVALL = text-S23.
+**            endif.
+**          elseif XY_TIMESLC-MNTH_FLAG = CO_FLAG_MARKED.
+**            if XY_TIMESLC-MONTH_COUNT is not initial.
+**              MAC_DOMTEXT_GET 'MONTH_COUNT' XY_TIMESLC-MONTH_COUNT LL_ROUTE_REF->INTERVALL.
+**            else.
+**              LL_ROUTE_REF->INTERVALL = text-S24.
+**            endif.
+**          elseif XY_TIMESLC-DAY_FLAG = CO_FLAG_MARKED.
+**            if XY_TIMESLC-DAY_TYPE is not initial.
+**              MAC_DOMTEXT_GET 'DAY_TYPE' XY_TIMESLC-DAY_TYPE LL_ROUTE_REF->INTERVALL.
+**            else.
+**              LL_ROUTE_REF->INTERVALL = text-S25.
+**            endif.
+**          endif.
+**          if XY_TIMESLC-EWEEKDAY is initial.
+**            MAC_GET_WEEKDAY XY_TIMESLC-FLAG1
+**                            XY_TIMESLC-FLAG2
+**                            XY_TIMESLC-FLAG3
+**                            XY_TIMESLC-FLAG4
+**                            XY_TIMESLC-FLAG5
+**                            XY_TIMESLC-FLAG6
+**                            XY_TIMESLC-FLAG7
+**                            XY_TIMESLC-EWEEKDAY.
+**          endif.
+**          case XY_TIMESLC-EWEEKDAY.
+**            when '1'. LL_ROUTE_REF->WEEKDAY = text-S11.
+**            when '2'. LL_ROUTE_REF->WEEKDAY = text-S12.
+**            when '3'. LL_ROUTE_REF->WEEKDAY = text-S13.
+**            when '4'. LL_ROUTE_REF->WEEKDAY = text-S14.
+**            when '5'. LL_ROUTE_REF->WEEKDAY = text-S15.
+**            when '6'. LL_ROUTE_REF->WEEKDAY = text-S16.
+**            when '7'. LL_ROUTE_REF->WEEKDAY = text-S17.
+**          endcase.
+*          LL_ROUTE_REF->ROUTE = X_ROUTE.
+*          append lines of LT_ROUTE to ET_ROUTE_SERVICES.
+          return.
+*         else. "-WEEK_FALG is not initial. "(Multiple-Choice-Checkboxen für Wochentag)
+**         "=> kein Dummy da dieser nicht Übernommen werden kann, da kein Wochentag bestimmt ist.
+        endif.
+      when CL_EEWA_RFC_SERVICE_FREQUENCY=>CO_FREQUENCY_RETURNCODES-SERVICE_TYPE_MISSMATCH.
+        MAC_MSG_PUTX CO_MSG_ERROR '003' 'EEWA' XY_TIMESLC-ROUTE XY_TIMESLC-SERVICE_TYPE SPACE SPACE FAILED .
+      when CL_EEWA_RFC_SERVICE_FREQUENCY=>CO_FREQUENCY_RETURNCODES-INTERVAL_MISSMATCH.
+        MAC_MSG_PUTX CO_MSG_ERROR '247' 'EWA' XY_TIMESLC-ROUTE SPACE SPACE SPACE FAILED .
+      when CL_EEWA_RFC_SERVICE_FREQUENCY=>CO_FREQUENCY_RETURNCODES-STARTDATE_MISSMATCH.
+        MAC_MSG_PUTX CO_MSG_ERROR '366' 'EWA' XY_TIMESLC-ROUTE XY_TIMESLC-STARTDATE SPACE SPACE FAILED .
+      when others.
+        MAC_MSG_PUTX CO_MSG_ERROR '866' 'EWA' SPACE SPACE SPACE SPACE FAILED.
+    endcase.
+    set extended check off.
+    if 1 = 2. message S004(EEWA) with X_ROUTE. endif.
+    if 1 = 2. message S003(EEWA) with X_ROUTE EWAOBJD-SERVICE_TYPE. endif.
+    if 1 = 2. message S247(EWA) with EWAOBJD-ROUTE. endif.
+    if 1 = 2. message S366(EWA) with X_ROUTE EWAOBJD-STARTDATE. endif.
+    if 1 = 2. message S866(EWA). endif.
+    set extended check on.
+  endif.
+
+**** Auswahl:
+* falls die Route keinen Servicerhythmus mit dem gewünschten Intervall
+* besitzt, muss eine Warnmeldung kommen
+* <= oder besser ein Fehler wenn man schon den Verusch gestartet hat "ungültige/nicht vorhandene" Daten zu übertragen
+  clear: ROUTE_EWAOBJH.
+  describe table T_ROUTE_EWAOBJH lines L_ROUTE.
+  if L_ROUTE is initial
+  and L_FREQUENCY_RC is initial.
+*   "-> oben behandeln -> Warum initial?
+    clear EWAOBJD-SFREPLACE .
+    MAC_MSG_PUTX CO_MSG_WARNING '247' 'EWA'
+                 EWAOBJD-ROUTE SPACE SPACE SPACE FAILED .
+    if 1 = 2. message S247(EWA) with X_ROUTE. endif. "EWAOBJD-ROUTE kann <initial> bzw. <> X_ROUTE sein
+  elseif L_ROUTE > 1
+  and XY_EWAOBJD is requested. "<- unzureichend wird im Standard immer 'supplied' aber u.U. <initial>
+*   zur Route existieren mehrere Services -> Auswahlpopup
+*    clear ROUTE_EWAOBJH. (s.o.)
+    if X_CRM is initial.
+*     ->Dialog geht davon aus, das EWAOBJD-ROUTE gefüllt ist =>
+      if EWAOBJD-ROUTE is initial.
+        data(LROUTEINITIAL) = 'X'.
+        EWAOBJD-ROUTE = X_ROUTE. "um welche Route geht es?
+      endif.
+      perform POPUP_CHOOSE_ROUTE_SERVICE using T_ROUTE_EWAOBJH
+                                         changing ROUTE_EWAOBJH.
+      if LROUTEINITIAL = 'X'. "wenn die Route leer war, wieder bereinigen
+        clear EWAOBJD-ROUTE. "-> die XY_TIMESLICE wird später behandelt (s.u.)
+      endif.
+      if ROUTE_EWAOBJH is initial.
+        raise FAILED.
+      endif.
+    endif.
+  elseif L_ROUTE = 1.
+*  ? wenn nur 1 gültiger Servicerhythmus an der Route existiert diesen für die ERONEW und das CRM übernehmen? (s.u. ->INSERT_TIMESLICE( ))
+*   ? if X_CRM is initial.
+    read table T_ROUTE_EWAOBJH index 1 into ROUTE_EWAOBJH.
+*   endif. ? "=> vgl.u. klingt nach einer "zufälligen Übernahme" eines Servicerhythmus fürs CRM
+  endif.
+
+  if X_CRM is not initial.
+    perform FILL_SERVICE_OUTPUT_TABLE using T_ROUTE_EWAOBJH
+                                      changing  LT_ROUTE.
+    loop at LT_ROUTE assigning <ROUTE>.
+      <ROUTE>-ROUTE = X_ROUTE.
+    endloop.
+    append lines of LT_ROUTE to ET_ROUTE_SERVICES.
+  endif.
+
+**** Übertragung:
+* => Prüfungen wären hier zu spät ... (s.o.)
+* bei einem einmaligen Sevice muss nur überprüft werden, ob ein Termin
+* der Route dem Auftragsdatum entspricht
+  if not XY_TIMESLC-DAY_TYPE = CO_DAY_ONCE.
+*   Servicerhythmus zur Route vorhanden
+*   jetzt überprüfen, ob Servicerhythmus des Behälters davon abweicht
+    clear: MATCH_FOUND.
+    sort T_ROUTE_EWAOBJH by EWAOBJH-LAUFNR EWAOBJH-BIS EWAOBJH-AB.
+    loop at T_ROUTE_EWAOBJH into DUMMY
+    where EWAOBJH-LAUFNR = ROUTE_EWAOBJH-EWAOBJH-LAUFNR
+    and EWAOBJH-AB = ROUTE_EWAOBJH-EWAOBJH-AB
+    and EWAOBJH-BIS = ROUTE_EWAOBJH-EWAOBJH-BIS.
+      move-corresponding ROUTE_EWAOBJH-EWAOBJH to ROUTE_SF. "#EC ENHOK
+*--- zuerst überprüfen, ob die Zeitscheibe in der die Route geändert wurde,
+*--- bereits abgerechnet ist, dann darf das Intervall nämlich nicht mehr
+*--- geändert werden
+      if  not XY_OBJ-WA_TAB-BILLDATE is initial
+      and XY_OBJ-WA_TAB-BILLDATE ge XY_TIMESLC-AB.
+        if not XY_TIMESLC-WEEK_FLAG is initial.
+          if XY_TIMESLC-WEEKLY <> ROUTE_SF-WEEKLY
+          and not XY_TIMESLC-WEEKLY is initial.
+            MAC_MSG_PUTX CO_MSG_ERROR '017' 'EWA'
+                         EWAOBJD-ROUTE SPACE SPACE SPACE FAILED .
+            if 1 = 2. message S017(EWA) with X_ROUTE. endif.
+          endif.
+        elseif not XY_TIMESLC-MNTH_FLAG is initial.
+          if XY_TIMESLC-MONTHLY <> ROUTE_SF-MONTHLY
+          and not XY_TIMESLC-MONTHLY is initial.
+            MAC_MSG_PUTX CO_MSG_ERROR '017' 'EWA'
+                         EWAOBJD-ROUTE SPACE SPACE SPACE FAILED .
+            if 1 = 2. message S017(EWA) with X_ROUTE. endif.
+          endif.
+        elseif not XY_TIMESLC-DAY_FLAG is initial.
+          if XY_TIMESLC-DAY_TYPE <> ROUTE_SF-DAY_TYPE
+          and not XY_TIMESLC-DAY_TYPE is initial.
+            MAC_MSG_PUTX CO_MSG_ERROR '017' 'EWA'
+                         EWAOBJD-ROUTE SPACE SPACE SPACE FAILED .
+            if 1 = 2. message S017(EWA) with X_ROUTE. endif.
+          endif.
+        endif.
+      endif.
+      if XY_TIMESLC-STARTDATE is initial.
+        if not ROUTE_EWAOBJH-EWAOBJH-STARTDATE is initial and
+          ROUTE_EWAOBJH-EWAOBJH-STARTDATE > XY_TIMESLC-AB. "Routen haben kein Startdatum
+          ROUTE_SF-STARTDATE = ROUTE_EWAOBJH-EWAOBJH-STARTDATE.
+        else.
+          if ROUTE_EWAOBJH-EWAOBJH-AB > XY_TIMESLC-AB.
+            ROUTE_SF-STARTDATE = ROUTE_EWAOBJH-EWAOBJH-AB.
+          else.
+**** neues Startdatum berechnen
+*            the case that the start date and route are entered at the same time
+*            and in this case, they doesn't exist in variables
+            if EWAOBJD-STARTDATE is initial.
+              ROUTE_SF-STARTDATE = XY_TIMESLC-AB.
+            else.
+              ROUTE_SF-STARTDATE = EWAOBJD-STARTDATE.
+            endif.
+          endif.
+        endif.
+      else.
+        if not ROUTE_EWAOBJH-EWAOBJH-STARTDATE is initial.
+          if ROUTE_EWAOBJH-EWAOBJH-STARTDATE > XY_TIMESLC-STARTDATE
+          and ROUTE_EWAOBJH-EWAOBJH-STARTDATE < XY_TIMESLC-BIS.
+            ROUTE_SF-STARTDATE = ROUTE_EWAOBJH-EWAOBJH-STARTDATE.
+          endif.
+        else.
+          if ROUTE_EWAOBJH-EWAOBJH-AB > XY_TIMESLC-STARTDATE
+          and ROUTE_EWAOBJH-EWAOBJH-AB < XY_TIMESLC-BIS.
+            ROUTE_SF-STARTDATE = ROUTE_EWAOBJH-EWAOBJH-AB.
+          else.
+**** neues Startdatum berechnen
+*            route_sf-startdate = xy_timeslc-ab.
+            ROUTE_SF-STARTDATE = XY_TIMESLC-STARTDATE.
+          endif.
+        endif.
+      endif.
+      if not XY_EWAOBJD is initial.
+        move-corresponding XY_EWAOBJD to XY_TIMESLC.        "#EC ENHOK
+      endif.
+      if XY_TIMESLC-WEEKLY is initial
+        and ( XY_TIMESLC-MONTH_COUNT is initial
+           and XY_TIMESLC-MONTHLY is initial )
+        and XY_TIMESLC-DAY_FREQUENCY is initial
+*      vollständig übernehmen: "!=> verlässt sich auf "Typgleichheit" zwischen ROUTE_SF und XY_TIMESLC
+*      (DAY_FLAG, DAY_TYPE, WEEK_FLAG, MNTH_FLAG, etc.... dürfen nicht verändert werden (s.o.))
+        and ROUTE_SF-DAY_FLAG = XY_TIMESLC-DAY_FLAG
+        and ROUTE_SF-WEEK_FLAG = XY_TIMESLC-WEEK_FLAG
+        and ROUTE_SF-MNTH_FLAG = XY_TIMESLC-MNTH_FLAG.
+
+        move-corresponding ROUTE_SF to XY_TIMESLC.          "#EC ENHOK
+        clear XY_TIMESLC-FLGDLY. "nicht in ROUTE_SF enthalten
+      else. "ausgewählte Felder übernehmen
+        XY_TIMESLC-STARTDATE = ROUTE_SF-STARTDATE.
+*     ? sollten defaults für wöchentliche und monatliche gesetzt werden?
+*       "=> JA, da Unvollständigkeitsprüfung:
+*         "-> gegf. Customizing abfragen MAC_GET_ACTIVE_PITS ...
+        if XY_TIMESLC-MNTH_FLAG is not initial.
+          if ROUTE_SF-MNTH_FLAG is not initial.
+*            "fillup monthly interval
+            if XY_TIMESLC-MONTHLY is initial.
+              XY_TIMESLC-MONTHLY = ROUTE_SF-MONTHLY.
+            endif.
+            if XY_TIMESLC-MONTH_COUNT is initial.
+              XY_TIMESLC-MONTH_COUNT = ROUTE_SF-MONTH_COUNT.
+            endif.
+          else. "set defaults
+            if XY_TIMESLC-MONTH_COUNT is initial.
+              XY_TIMESLC-MONTH_COUNT = '01'.
+            endif.
+            if XY_TIMESLC-MONTHLY is initial.
+              XY_TIMESLC-MONTHLY = '01'.
+            endif.
+          endif.
+        elseif XY_TIMESLC-WEEK_FLAG is not initial.
+*          "set defaults
+          if ROUTE_SF-DAY_FLAG is not initial.
+            if XY_TIMESLC-WEEKLY is initial.
+              XY_TIMESLC-WEEKLY = '01'.
+            endif.
+          endif.
+*        else. "if XY_TIMESLC-DAY_FLAG is not initial.
+*          "nothing special !
+        elseif XY_TIMESLC-DAY_FREQUENCY is not initial.
+*          "DAY_FREQUENCY is not replaced!
+          XY_TIMESLC-FLGDLY = 'X'.
+        endif.
+*        "täglichen SF zu wöchentlich oder monatlichen übertragen
+*        "!=> der Wochentag wird wie vorbefüllt stehen gelassen!
+*          => sonst Auswahlverfahren schaffen, ACHTUNG im CRM kein POPUP / Dialog
+*          -> da SF-Replace keine Änderung des Wochentags auf der EWAOBJD via ERONEW zulässt
+*           ist MO default anschließend festgesetzt!
+*           => vorher Wochentag aussuchen, dann Route festlegen
+        if XY_TIMESLC-DAY_FLAG is initial
+        and ROUTE_SF-DAY_FLAG is initial.
+          XY_TIMESLC-STARTDATE = ROUTE_SF-STARTDATE.
+          XY_TIMESLC-EWEEKDAY = ROUTE_SF-EWEEKDAY.
+          XY_TIMESLC-FLAG1 = ROUTE_SF-FLAG1.
+          XY_TIMESLC-FLAG2 = ROUTE_SF-FLAG2.
+          XY_TIMESLC-FLAG3 = ROUTE_SF-FLAG3.
+          XY_TIMESLC-FLAG4 = ROUTE_SF-FLAG4.
+          XY_TIMESLC-FLAG5 = ROUTE_SF-FLAG5.
+          XY_TIMESLC-FLAG6 = ROUTE_SF-FLAG6.
+          XY_TIMESLC-FLAG7 = ROUTE_SF-FLAG7.
+        endif.
+      endif.
+      XY_TIMESLC-ROUTE_LFNR = ROUTE_EWAOBJH-EWAOBJH-LAUFNR.
+      XY_TIMESLC-ROUTE_BIS  = ROUTE_EWAOBJH-EWAOBJH-BIS.
+*     falls die Route komplett als Vorlage übernommen werden soll
+*     (Leistungsart ist noch leer), muss die Leistungsart auch noch
+*     gefüllt werden
+      if XY_TIMESLC-SERVICE_TYPE is initial.
+        XY_TIMESLC-SERVICE_TYPE = ROUTE_EWAOBJH-EWAOBJH-SERVICE_TYPE.
+      endif.
+      XY_TIMESLC-ROUTE = X_ROUTE.
+      L_INDEX = SY-TABIX. "vor dem nächsten Loop speichern (s.u.)
+**** neues Startdatum berechnen
+*      if XY_TIMESLC-STARTDATE is not initial. "impliziert
+*    Stimmt das Startdatum?
+      call function 'ISU_FIND_ROUTE_OF_DAY'
+        exporting
+          X_DATE           = XY_TIMESLC-STARTDATE
+          XMAXRECORDS      = 1
+          X_ROUTE          = X_ROUTE
+*          X_NO_CALID       = 'X' " Fabrik Kalender nicht berücksichtigen
+        tables
+*          XT_PRDSERVICE    =
+          YT_EWAROUTE      = LEWAROUTES
+          XT_ISUWA_EWAOBJH = T_ROUTE_EWAOBJH
+        exceptions
+          not_qualified    = 1
+          not_found        = 2
+          others           = 3
+        .
+      if SY-SUBRC <> 0 or LEWAROUTES is initial.
+        data(LSTARTDATE) = XY_TIMESLC-STARTDATE.
+        clear XY_TIMESLC-STARTDATE.
+      endif.
+*      endif. "impliziert
+      "OBJ-WA_TSL-STARTDATE = XY_TSL-Startdate; sonst -AB
+      if XY_TIMESLC-STARTDATE is initial
+      and XY_TIMESLC-AB <= ROUTE_EWAOBJH-EWAOBJH-AB.
+        XY_TIMESLC-STARTDATE = ROUTE_EWAOBJH-EWAOBJH-AB.
+      endif.
+*      CL_EEWA_RFC_SERVICE_FREQUENCY=>ADJUST_STARTDATE( ... ).
+*        ? XY_TIMESLC = OBJ-WA_TSL ?
+      move-corresponding XY_TIMESLC to LEWAOBJH.
+      LEWAOBJH = ROUTE_EWAOBJH-EWAOBJH.
+      if LSTARTDATE is initial.
+        LSTARTDATE = XY_TIMESLC-STARTDATE.
+      endif.
+*    Customizing überprüfen
+      select single CHECKSTARTDATE from EWATSERVICECHECK into @data(LCHECKSTARTDATE).
+      if LCHECKSTARTDATE is initial
+      and LSTARTDATE < XY_TIMESLC-AB.
+        LSTARTDATE = XY_TIMESLC-AB.
+      endif.
+      if LSTARTDATE is not initial.
+        LEWAOBJH-BIS = LSTARTDATE + 366. "loop at ... <- LSTEP if LSERVDATES initial next step else exit.
+      else.
+        LEWAOBJH-BIS = XY_TIMESLC-AB + 366.
+      endif.
+      "!wenn die Route links anfängt ...vs. wenn die Route rechts anfängt!
+*    "!=> eigentlich bei GET_VALID_FREQUENCYS( ) berücksichtigen, wenn es keinen Servicetermin mehr gibt
+*      if LEWAOBJH-BIS > DUMMY-EWAOBJH-BIS.
+*        LEWAOBJH-BIS = DUMMY-EWAOBJH-BIS.
+*      endif.
+      LEWAOBJH-AB = DUMMY-EWAOBJH-AB. "= C_DATE
+      include EEWA_EL_MACRO_TRANSACTION.
+      TA_BEGIN_NAMED_VAR TA CL_EEWA_TA_SERVFREQDATES=>CNT_EWASERVFREQDATES.
+      TA_SET_PARAM TA SERVFREQ  LEWAOBJH.
+      TA_SET_PARAM TA DATEFROM  LEWAOBJH-AB.
+      TA_SET_PARAM TA DATETO    LEWAOBJH-BIS.
+      TA_EXECUTE   TA BOOK_CALCULATESERVICEDATES.
+      TA_GET_PARAM TA SERVDATES LSERVICEDATES.
+      TA_END TA.
+      " Check if Servicedates returns and than check if the servicedate is higher than timeslicesbegin.
+      if LSERVICEDATES is initial.
+        clear:
+          XY_TIMESLC-STARTDATE,
+          XY_EWAOBJD-STARTDATE,
+          XY_OBJ-EWAOBJD-STARTDATE.
+      else.
+        if LSTARTDATE is not initial.
+          LEWAOBJH-AB = LSTARTDATE.
+        endif.
+        sort LSERVICEDATES by SERVICE_DATE. "ASCENDING
+        loop at LSERVICEDATES into data(LSERVICEDATE)
+          where SERVICE_DATE >= LEWAOBJH-AB
+            and SERVICE_DATE <= XY_TIMESLC-BIS.
+              ROUTE_SF-STARTDATE  = LSERVICEDATE-SERVICE_DATE.
+              exit.
+        endloop.
+        if SY-SUBRC is not initial.
+          clear ROUTE_SF-STARTDATE.
+        endif.
+        XY_TIMESLC-STARTDATE = ROUTE_SF-STARTDATE.
+        if XY_TIMESLC-STARTDATE > XY_TIMESLC-BIS.
+          clear XY_TIMESLC-STARTDATE.
+        endif.
+      endif.
+
+*     Kennzeichen setzen, dass der Servicerhythmus der Route
+*     gezogen wird
+      XY_TIMESLC-SFREPLACE = CO_FLAG_MARKED.
+      MATCH_FOUND = CO_FLAG_MARKED.
+*      L_INDEX = SY-TABIX.
+    endloop.
+
+    check XY_EWAOBJD is requested. "unzureichend... wird im Standard immer übergeben
+*    "-> ? not initial -Prüfung ? X_CRM is initial ?
+*   den geänderten Eintrag in die interne Tabelle der historischen Daten
+*   übertragen
+    if MATCH_FOUND = CO_FLAG_MARKED.
+      read table XY_OBJ-IROBJ_TSL assigning <H_TSL>
+      with key LAUFNR = XY_TIMESLC-LAUFNR
+               AB     = XY_TIMESLC-AB
+               BIS    = XY_TIMESLC-BIS.
+      if SY-SUBRC = 0.
+        move-corresponding XY_TIMESLC to <H_TSL>.           "#EC ENHOK
+*       neuen Daten in die Anzeige schieben
+        move-corresponding XY_TIMESLC to XY_EWAOBJD.        "#EC ENHOK
+*       DAY_PERD und FLGDLY nachziehen
+        if X_CRM is initial.
+*         -> dieser Radiobutton wird nicht in der tsl gespeichert sondern in der ewaobjd
+*         => xy_timeslc hat diese Radiobutton nicht, xy_ewaobjd hat keinen -day_type
+*        -DAY_TYPE und -DAY_FREQUENCY sind bereits von ROUTE_EWAOBJH-EWAOBJH auf ROUTE_SF übertragen (s.o.)
+*         if ROUTE_EWAOBJH-EWAOBJH-DAY_TYPE = CO_DAY_FREQ. "sollte meistens so sein
+         if ROUTE_EWAOBJH-EWAOBJH-DAY_FREQUENCY is not initial
+         and ROUTE_EWAOBJH-EWAOBJH-DAY_FLAG is not initial. "impliziert
+           XY_EWAOBJD-FLGDLY = 'X'.
+           clear XY_EWAOBJD-DAY_PERD.
+           <H_TSL>-FLGDLY = 'X'.
+*          and ROUTE_EWAOBJH-EWAOBJH-DAY_TYPE = CO_DAY_PERD. "sollte meistens so sein
+         elseif ROUTE_EWAOBJH-EWAOBJH-DAY_FREQUENCY is initial
+            and ROUTE_EWAOBJH-EWAOBJH-DAY_FLAG is not initial.
+           if XY_EWAOBJD is not initial.
+             clear XY_EWAOBJD-FLGDLY.
+             XY_EWAOBJD-DAY_PERD = 'X'.
+           endif.
+           clear <H_TSL>-FLGDLY.
+         endif.
+       endif.
+*      => unzureichend da der DAY_TYPE vom CRM derzeit nicht eingehalten wird
+        if X_CRM is not initial
+        and XY_TIMESLC-DAY_FLAG is not initial.
+*        " ich weiß nicht ob sich das CRM überhaupt dafür interessiert aber die EWAOBJD wird schonmal mit angegeben
+*          aber z.B. Frequenz aus der OBJ-WA_TSL nicht übernommen ...
+*          => Daten werden auch nur "zufällig" übernommen wenn es nur 1 passenden Servicerhythmus an der Route gibt ...
+          if XY_TIMESLC-DAY_FREQUENCY < 1.
+*          XY_TIMESLC-DAY_TYPE = CO_DAY_PERD. bei DAY_FREQUENCY = 0, 000, <initial> ... UND im CRM auch bei '001'! (s.u.)
+            XY_EWAOBJD-DAY_PERD = 'X'.
+            clear <H_TSL>-FLGDLY.
+          elseif XY_TIMESLC-DAY_FREQUENCY > 1.
+*          XY_TIMESLC-DAY_TYPE = CO_DAY_FREQ. bei DAY_FREQUENCY = 1..365, ...
+            clear XY_EWAOBJD-DAY_PERD.
+            <H_TSL>-FLGDLY = 'X'.
+*          else." if XY_TIMESLC-DAY_FREQUENCY = 1.
+*            "sein lassen wie's ist und nichts tun
+          endif.
+        endif.
+      endif.
+
+**  "=> Zeitscheibenübernahme für verschiedene Intervalle deaktiviert
+**  TODO. => Verfahren überprüfen
+*      if ROUTE_SF-DAY_FLAG = XY_TIMESLC-DAY_FLAG
+*      and ROUTE_SF-WEEK_FLAG = XY_TIMESLC-WEEK_FLAG
+*      and ROUTE_SF-MNTH_FLAG = XY_TIMESLC-MNTH_FLAG.
+*     überprüfen, ob die Route noch eine spätere Zeitscheibe hat und
+*     diese gegebenenfalls übernehmen und am Behälter neu anlegen
+*     Tabelle der Servicerhythmen zur Route ist sortiert, so dass hinter
+*     l_index aufgesetzt werden kann. ...
+* !!! Achtung: man kann auf diese Weise nicht 1 einzelne Zeitscheibe des Routenservices auswählen
+* => evtl. wählbar schalten: >nur diese EWAOBJH übernehmen vs. >diese und alle zukünftigen EWAOBJH übernehmen
+** ACHTUNG: hier werden abgerechnete Zeiträume nicht berücksichtigt -> s.o. Zeitscheibe als INVALID aussortieren
+*    oder sonst -AB-Datum festlegen
+      while L_INDEX < L_ROUTE.
+        clear: DUMMY, ROUTE_SF.
+        add 1 to L_INDEX.
+        read table T_ROUTE_EWAOBJH index L_INDEX into DUMMY.
+        if SY-SUBRC = 0
+        and DUMMY-EWAOBJH-LAUFNR = ROUTE_EWAOBJH-EWAOBJH-LAUFNR.
+*          es wird(/darf) nur das Intervall geändert (werden)
+*        "=> s.u. !!! -> vgl.o.
+          move-corresponding DUMMY-EWAOBJH to ROUTE_SF.     "#EC ENHOK
+          XY_TIMESLC-SFREPLACE = CO_FLAG_MARKED.
+          NEWDATE = DUMMY-EWAOBJH-AB.
+          XY_OBJ-WA_TSL = XY_TIMESLC.
+          try.
+              call method CL_EEWA_RFC_SERVICE_FREQUENCY=>PREPARE_NEW_TIMESLICE
+                exporting
+                  I_DATE    = NEWDATE
+                changing
+                  C_TSL_TAB = XY_OBJ-IROBJ_TSL
+                  C_TSL     = XY_OBJ-WA_TSL.
+            catch CX_EEWA_MD into LEX.
+              MAC_MSG_PUTX CO_MSG_ERROR LEX->T100_MSGNO LEX->T100_MSGID
+                  LEX->T100_MSGV1 LEX->T100_MSGV2 LEX->T100_MSGV3 LEX->T100_MSGV4 FAILED.
+          endtry.
+*         Den generischen Rhythmus übertragen
+          read table XY_OBJ-IROBJ_TSL assigning <H_TSL>
+          with key LAUFNR = XY_TIMESLC-LAUFNR
+                   AB     = NEWDATE.
+          if SY-SUBRC = 0.
+* !!!    "=> ACHTUNG der Intervalltyp darf sich nicht ändern
+*          => s.o. Sonderbehanldung wenn tgl. für wöchentl./monatl.,
+*             bzw. wöchentl. für monatl. übernommen wird
+            if ROUTE_SF-DAY_FLAG = XY_TIMESLC-DAY_FLAG
+            and ROUTE_SF-WEEK_FLAG = XY_TIMESLC-WEEK_FLAG
+            and ROUTE_SF-MNTH_FLAG = XY_TIMESLC-MNTH_FLAG.
+* BG 2008-03-28 - changed with note 1155833
+              move-corresponding ROUTE_SF to <H_TSL>.         "#EC ENHOK
+*            else. "XY_TIMESLC wie oben nicht aus ROUTE_SF
+*              nur -AB und -BIS anpassen und wie oben mit defaults übernehmen
+            endif.
+            <H_TSL>-ROUTE_BIS  = DUMMY-EWAOBJH-BIS.
+            move-corresponding <H_TSL> to XY_TIMESLC.       "#EC ENHOK
+* BG 2008-03-28 - changed with note 1155833
+*           neuen Daten in die Anzeige schieben
+            move-corresponding XY_TIMESLC to XY_EWAOBJD.    "#EC ENHOK
+          endif.
+*         neu eingefügte Zeitscheibe in den Zwischenspeicher schieben
+          try.
+              call method CL_EEWA_RFC_SERVICE_FREQUENCY=>INSERT_TIMESLC
+                exporting
+                  I_LAUFNR      = XY_TIMESLC-LAUFNR
+                  I_DATE        = XY_TIMESLC-BIS
+                  I_SET_ENDDATE = SPACE
+                changing
+                  C_OBJ         = XY_OBJ.   " Objektdaten des Servicerhythmus
+            catch CX_EEWA_MD into LEX.
+              MAC_MSG_PUTX CO_MSG_ERROR LEX->T100_MSGNO LEX->T100_MSGID
+                  LEX->T100_MSGV1 LEX->T100_MSGV2 LEX->T100_MSGV3 LEX->T100_MSGV4 FAILED.
+          endtry.
+        endif.
+      endwhile.
+    endif.
+*    else. "-> nichts
+*    endif.
+  else.
+** => die Auswahl gültiger Intervalle berücksichtigt die Kalender nicht
+*  TODO: CL_EEWA_TA_SERVFREQDATES=>+BOOK_CALCULATESERVICEDATES(...)
+*    => mit allen Ausnahmen =>+BOOK_CALCULATESERVFREQEXCPT(...) + BAdI [CL_EEWA_RFC_SERVICE_FREQUENCY=>+ADJUST_SERVFREQDATES(...)]
+*    (siehe CL_ISU_WA_ORDER_OVERVIEW->-ALV_GET_SERVICE_DATA( ... ))
+*  ! Es sind die Servicetermine an der Route zu ermitteln auf Basis des Kalenders an der Route
+*    und des jeweiligen ausgewählten Servicerythmus (ROUTE_EWAOBJH)
+* vs. Die Servicetermine für den Servicerhythmus am Behälter mit dem ausgewählten Kalender.
+*    Die Servicetermine müssen übereinstimmen.
+*  Anmerkung: - betrifft auch alle regelmäßigen Intervalle (<> CO_DAY_ONCE),
+*             - die einfache Prüfung auf Kalender-ID kann aufgrund individueller Ausnahmen
+*               am Kalender und an der Route evtl. insuffizient sein
+*  wenn die Route am Tag keinen Servicetermin hat -> Fehler
+    perform GET_ROUTE_ORDER_DATES using W_ROBJ-EWAOBJH
+                                          XY_EWAOBJD-SERV_DATE
+                                          X_ROUTE.
+
+**** => what ever this was supposed to do (I didn't figure its purpose yet...)
+*    it's leading up to strange behaviour => i will just commend it, do my stuff
+*    and someone smarter than me can fix it later ...
+*    LOOP AT t_route_ewaobjh INTO route_ewaobjh.
+**     Überprüfung ob Intervall nutzbar ist.
+*      CLEAR failed.
+*      mac_check_interval xy_timeslc route_ewaobjh-ewaobjh failed.
+*      IF failed IS INITIAL.
+**** <= this works verry wrong
+
+* Servicerhythmus vorhanden:
+*    one-time services shall not be overwritten from ewaobjh
+*    except they are one-time services
+    if ROUTE_EWAOBJH-EWAOBJH-DAY_TYPE = CO_DAY_ONCE.
+*        and route_ewaobjh-ewaobjh-day_flag is not initial. "<- is implied by the above condition
+      move-corresponding ROUTE_EWAOBJH-EWAOBJH to ROUTE_SF.
+      move-corresponding ROUTE_SF to XY_TIMESLC.
+    endif.
+    if not XY_EWAOBJD is initial.
+      move-corresponding XY_EWAOBJD to XY_TIMESLC.
+    endif.
+** => i figure just taking over the route-Service makes no sense at all
+*     -> a one-time Service can only pickup the SERVICE_TYPE
+*        due to routes don't have one-time services! (for now)
+*        MOVE-CORRESPONDING route_sf TO xy_timeslc. "moved up
+    XY_TIMESLC-ROUTE_LFNR = ROUTE_EWAOBJH-EWAOBJH-LAUFNR.
+    XY_TIMESLC-ROUTE_BIS  = ROUTE_EWAOBJH-EWAOBJH-BIS.
+*       falls die Route komplett als Vorlage übernommen werden soll
+*       (Leistungsart ist noch leer), muss die Leistungsart auch noch
+*       gefüllt werden
+    if XY_TIMESLC-SERVICE_TYPE is initial.
+      XY_TIMESLC-SERVICE_TYPE = ROUTE_EWAOBJH-EWAOBJH-SERVICE_TYPE.
+    endif.
+*      hoffentlich wird das tatsächliche Auftragsdatum anhand des nächsten
+*      gültigen Datums bestimmt und nicht direkt so vom Startdatum übernommen
+*   "=> für einmalige Services sollte -STARTDATE immer mit -SERV_DATE gesetzt sein!
+    if XY_TIMESLC-STARTDATE is initial.
+      if XY_EWAOBJD-SERV_DATE is not initial.
+        XY_TIMESLC-STARTDATE = XY_EWAOBJD-SERV_DATE.
+      else.
+        XY_TIMESLC-STARTDATE = ROUTE_EWAOBJH-EWAOBJH-AB.
+      endif.
+    endif.
+    XY_TIMESLC-ROUTE = X_ROUTE.
+*       Kennzeichen setzen, dass der Servicerhythmus der Route
+*       gezogen wird
+    XY_TIMESLC-SFREPLACE = CO_FLAG_MARKED.
+
+    if XY_EWAOBJD is requested. "selbes Problem wie oben
+*       den geänderten Eintrag in die interne Tabelle der historischen Daten
+*       übertragen
+      read table XY_OBJ-IROBJ_TSL assigning <H_TSL>
+      with key LAUFNR = XY_TIMESLC-LAUFNR
+               AB     = XY_TIMESLC-AB
+               BIS    = XY_TIMESLC-BIS.
+      if SY-SUBRC = 0.
+        move-corresponding XY_TIMESLC to <H_TSL>.
+*      neuen Daten in die Anzeige schieben
+        move-corresponding XY_TIMESLC to XY_EWAOBJD.
+      endif.
+    endif.
+**** auskommentierter Loop-Frame
+*      ENDIF.
+*    ENDLOOP.
+** => this "error"-handling seems to be the right thing to begin with (s.o.)
+*  using: Can this particular ROUTE handle this particular one-time service?
+*    IF sy-subrc <> 0.
+*      PERFORM get_route_order_dates USING w_robj-ewaobjh
+*                                          xy_ewaobjd-serv_date
+*                                          x_route.
+*    ENDIF.
+****
+  endif.
+
+*   falls sich obj-wa_tsl geändert hat muss der Tree aufgefrischt werden
+  if SAVE_TSL <> XY_OBJ-IROBJ_TSL.
+*  neu eingefügte Zeitscheibe in den Zwischenspeicher schieben
+    try.
+        call method CL_EEWA_RFC_SERVICE_FREQUENCY=>INSERT_TIMESLC
+          exporting
+            I_LAUFNR      = XY_TIMESLC-LAUFNR
+            I_DATE        = XY_TIMESLC-BIS
+            I_SET_ENDDATE = SPACE
+          changing
+            C_OBJ         = XY_OBJ.   " Objektdaten des Servicerhythmus
+      catch CX_EEWA_MD into LEX.
+        MAC_MSG_PUTX CO_MSG_ERROR LEX->T100_MSGNO LEX->T100_MSGID
+            LEX->T100_MSGV1 LEX->T100_MSGV2 LEX->T100_MSGV3 LEX->T100_MSGV4 FAILED.
+    endtry.
+    if X_CRM is initial.
+*   den aktuellen Knoten ausfindig machen
+      perform REFRESH_TREE using G_NODE_KEY
+                           changing XY_OBJ.
+    endif.
+  endif.
+
+endfunction.

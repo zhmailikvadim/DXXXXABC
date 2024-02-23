@@ -1,0 +1,1281 @@
+CLASS cl_oo_clif_source DEFINITION
+  PUBLIC
+  CREATE PRIVATE .
+
+  PUBLIC SECTION.
+    TYPE-POOLS sedi .
+    TYPE-POOLS seoc .
+    TYPE-POOLS seoe .
+    TYPE-POOLS seop .
+
+    INTERFACES if_oo_clif_source .
+
+    ALIASES get_source
+      FOR if_oo_clif_source~get_source .
+    ALIASES get_type
+      FOR if_oo_clif_source~get_type .
+    ALIASES lock
+      FOR if_oo_clif_source~lock .
+    ALIASES save
+      FOR if_oo_clif_source~save .
+    ALIASES set_source
+      FOR if_oo_clif_source~set_source .
+    ALIASES unlock
+      FOR if_oo_clif_source~unlock .
+
+    TYPES:
+      BEGIN OF ty_check_result,
+        errors             TYPE STANDARD TABLE OF rslinlmsg WITH DEFAULT KEY,
+        warnings           TYPE STANDARD TABLE OF rslinlmsg WITH DEFAULT KEY,
+        error_descriptions TYPE rslinltab,
+      END OF ty_check_result .
+
+    CLASS-METHODS create_instance
+      IMPORTING
+        !clif_name             TYPE csequence
+        !version               TYPE r3state DEFAULT if_oo_clif_source=>co_version_inactive
+        !lifecycle_manager     TYPE REF TO if_adt_lifecycle_manager DEFAULT cl_adt_lifecycle_mngr_enum=>corr_manager_classic
+        !settings              TYPE REF TO if_oo_clif_source_settings
+        !source_persistence    TYPE REF TO if_oo_clif_persistence_source OPTIONAL
+        !metadata_persistence  TYPE REF TO if_oo_clif_persist_meta_data OPTIONAL
+        !suppress_index_update TYPE abap_bool DEFAULT abap_false
+      RETURNING
+        VALUE(result)          TYPE REF TO cl_oo_clif_source
+      RAISING
+        cx_oo_clif_not_exists .
+    METHODS check
+      RETURNING
+        VALUE(check_result) TYPE ty_check_result .
+    METHODS get_cp_implementation_start
+      RETURNING
+        VALUE(start_row) TYPE i .
+    METHODS get_old_source
+      RETURNING
+        VALUE(old_source) TYPE seop_source_string .
+    METHODS get_scanner
+      RETURNING
+        VALUE(scanner) TYPE REF TO cl_oo_source_scanner
+      RAISING
+        cx_oo_clif_scan_error .
+    METHODS get_source_name
+      RETURNING
+        VALUE(name) TYPE program .
+    METHODS get_syntax_check_includes
+      RETURNING
+        VALUE(inc_table) TYPE sreptab
+      RAISING
+        cx_oo_clif_scan_error .
+    METHODS create_lineindex
+      RETURNING
+        VALUE(lineindex) TYPE sedi_lindex .
+    METHODS is_locked
+      RETURNING
+        VALUE(locked) TYPE seox_boolean .
+    METHODS is_completely_locked
+      RETURNING
+        VALUE(locked) TYPE seox_boolean .
+    METHODS is_source_part_locked
+      IMPORTING
+        !source_position TYPE cl_source_scanner=>type_source_position
+      RETURNING
+        VALUE(locked)    TYPE seox_boolean
+      RAISING
+        cx_oo_invalid_source_position.
+    METHODS lock_source_part
+      IMPORTING
+        !source_position TYPE cl_source_scanner=>type_source_position
+      RAISING
+        cx_oo_access_permission .
+    METHODS unlock_source_part
+      IMPORTING
+        !source_position TYPE cl_source_scanner=>type_source_position
+      RAISING
+        cx_oo_access_permission .
+    METHODS access_permission
+      IMPORTING
+        !access_mode TYPE seok_access_mode DEFAULT seok_access_show
+        !lock_handle TYPE REF TO if_adt_lock_handle OPTIONAL
+        !authority_check type seox_boolean default seox_true
+          PREFERRED PARAMETER access_mode
+      RAISING
+        cx_oo_access_permission .
+    METHODS toggle_breakpoint
+      IMPORTING
+        !line            TYPE i
+        !breakpoint_type TYPE seoe_breakpoint_type
+      RETURNING
+        VALUE(result)    TYPE i
+      RAISING
+        cx_oo_message .
+    METHODS pretty_print_source_part
+      IMPORTING
+        !source_position TYPE cl_source_scanner=>type_source_position
+      RAISING
+        cx_oo_clif_scan_error .
+    METHODS activate_cs_include
+      IMPORTING
+        !timestamp_before_activation TYPE xsddatetime_z
+        !method_no_before_activation TYPE i .
+    METHODS get_settings
+      RETURNING
+        VALUE(result) TYPE REF TO if_oo_clif_source_settings .
+    METHODS set_version
+      IMPORTING
+        !version TYPE r3state .
+    METHODS get_version
+      RETURNING
+        VALUE(result) TYPE r3state .
+    METHODS get_lifecycle_manager
+      RETURNING
+        VALUE(result) TYPE REF TO if_adt_lifecycle_manager .
+    METHODS pretty_print .
+    METHODS set_clif_properties_changed .
+    METHODS is_dirty
+      RETURNING
+        VALUE(result) TYPE abap_bool .
+    METHODS check_for_unknown_comments
+      RETURNING
+        VALUE(result) TYPE REF TO cl_wb_checklist .
+    METHODS get_includes
+      RETURNING
+        VALUE(result) TYPE sreptab.
+    METHODS import
+      RAISING
+        cx_oo_source_save_failure.
+protected section.
+  PRIVATE SECTION.
+
+    DATA scanner TYPE REF TO cl_oo_source_scanner .
+    DATA clif_source_part TYPE REF TO lcl_clif_source_part_list .
+    DATA clskey TYPE seoclskey .
+    DATA cp_imp_strt_line TYPE i .
+    DATA old_source TYPE seop_source_string .
+    DATA pool_include_name TYPE program .
+    DATA pool_source TYPE seop_source_string .
+    DATA version TYPE r3state VALUE if_oo_clif_source=>co_version_inactive. "#EC NOTEXT
+    DATA persistence TYPE REF TO lif_persistence_facade .
+    DATA settings TYPE REF TO if_oo_clif_source_settings .
+    DATA source TYPE seop_source_string .
+    DATA clif_type TYPE seoclstype .
+    DATA source_read TYPE seox_boolean VALUE seox_false.    "#EC NOTEXT
+    DATA is_dirty_data TYPE abap_bool VALUE abap_false.     "#EC NOTEXT
+    DATA suppress_index_update TYPE abap_bool VALUE abap_false.
+    DATA pretty_printer_settings TYPE REF TO if_pretty_printer_settings.
+
+    METHODS constructor
+      IMPORTING
+        clif_name               TYPE csequence
+        version                 TYPE r3state DEFAULT if_oo_clif_source=>co_version_inactive
+        persistence             TYPE REF TO lif_persistence_facade
+        settings                TYPE REF TO if_oo_clif_source_settings
+        signature_provider      TYPE REF TO lif_signature_provider
+        pretty_printer_settings TYPE REF TO if_pretty_printer_settings
+        pos_index_helper        TYPE REF TO if_oo_source_pos_index_helper
+      RAISING
+        cx_oo_clif_not_exists .
+    METHODS read .
+    METHODS get_breakpoints
+      RETURNING
+        VALUE(bp_list) TYPE seoe_breakpoints .
+    METHODS get_src_4_syntax_check
+      RETURNING
+        VALUE(sc_source) TYPE seop_source_string
+      RAISING
+        cx_oo_clif_scan_error .
+    METHODS read_clif_pool
+      IMPORTING
+        !version TYPE r3state .
+    METHODS refresh_source_parts
+      RAISING
+        cx_oo_clif_scan_error
+        cx_oo_canceled .
+    METHODS eliminate_signature_comments
+      CHANGING
+        !tab_source TYPE rswsourcet
+      RAISING
+        cx_oo_clif_scan_error .
+    METHODS is_breakpoint_set
+      IMPORTING
+        !include_name    TYPE program
+        !line            TYPE i
+        !breakpoint_type TYPE seoe_breakpoint_type
+      RETURNING
+        VALUE(result)    TYPE seox_boolean .
+    METHODS add_method_includes
+      IMPORTING
+        class_scanner TYPE REF TO cl_oo_source_scanner_class
+      CHANGING
+        includes      TYPE sreptab.
+    METHODS add_class_section_includes
+      IMPORTING
+        class_scanner TYPE REF TO cl_oo_source_scanner_class
+      CHANGING
+        includes      TYPE sreptab.
+    METHODS add_interface_section_include
+      CHANGING
+        includes TYPE sreptab.
+
+ENDCLASS.
+
+
+
+CLASS CL_OO_CLIF_SOURCE IMPLEMENTATION.
+
+
+  method if_oo_clif_source~get_source.
+    if ( me->source_read = seox_false ).
+      me->read( ).
+    endif.
+    source = me->source.
+  endmethod.
+
+
+  method if_oo_clif_source~get_type.
+    if ( me->clif_type = seoc_clstype_class ).
+      result = seoc_clstype_class.
+    else.
+      result = seoc_clstype_interface.
+    endif.
+  endmethod.
+
+
+  method if_oo_clif_source~lock.
+    me->access_permission( access_mode     = seok_access_modify
+                           lock_handle     = lock_handle
+                           authority_check = authority_check ).
+  endmethod.
+
+
+  method if_oo_clif_source~save.
+    data exception type ref to cx_oo_canceled.
+    data pool_include type program.
+
+    try.
+        me->refresh_source_parts( ).
+        if ( me->check_for_unknown_comments( ) is not initial ).
+          raise resumable exception type cx_oo_source_save_failure
+            exporting
+              textid = cx_oo_source_save_failure=>unknown_comment.
+        endif.
+        me->clif_source_part->lif_editable_source_part~save( ).
+        me->source = me->clif_source_part->lif_source_part~get_source( ).
+*       Refresh program index
+        if me->clif_type = seoc_clstype_class.
+          pool_include = cl_oo_classname_service=>get_classpool_name( clskey-clsname ).
+        else.
+          pool_include = cl_oo_classname_service=>get_interfacepool_name( clskey-clsname ).
+        endif.
+        if ( suppress_index_update = abap_false ).
+          cl_where_used_list_utilities=>update_index_in_background( p_name               = pool_include
+                                                                    p_with_user_workarea = abap_true    ).
+        endif.
+*       Set the old source
+        me->old_source = source.
+
+      catch cx_oo_canceled into exception.
+        call function 'DB_ROLLBACK'.
+        raise exception type cx_oo_source_save_failure
+          exporting
+            textid    = cx_oo_source_save_failure=>create_textid_from_msg_params( msgid = exception->if_t100_message~t100key-msgid
+                                                                                  msgno = exception->if_t100_message~t100key-msgno )
+            previous  = exception
+            clif_name = me->clskey-clsname
+            message_variable_1 = exception->message_variable_1
+            message_variable_2 = exception->message_variable_2
+            message_variable_3 = exception->message_variable_3
+            message_variable_4 = exception->message_variable_4.
+      cleanup.
+        call function 'DB_ROLLBACK'.
+    endtry.
+  endmethod.
+
+
+  method if_oo_clif_source~set_source.
+    if ( me->source_read = seox_false ).
+      me->read( ).
+    endif.
+    if ( source <> me->source ).
+      " set internal dirty flag to detect when current source comes not from database
+      if lines( me->source ) > 0.
+        " it seems that source was already read --> new source != source on database --> dirty
+        me->is_dirty_data = abap_true.
+      endif.
+      me->source = source.
+      clear me->scanner.
+
+    endif.
+    if ( me->pool_source is initial ).
+      me->read_clif_pool( me->version ).
+    endif.
+  endmethod.
+
+
+  method if_oo_clif_source~unlock.
+    try.
+        me->access_permission( seok_access_free ).
+      catch cx_oo_access_permission.
+        assert id seo condition 1 = 0.
+    endtry.
+  endmethod.
+
+
+  method import.
+    data exception type ref to cx_oo_canceled.
+    data pool_include type program.
+
+    try.
+        me->refresh_source_parts( ).
+        if ( me->check_for_unknown_comments( ) is not initial ).
+          raise resumable exception type cx_oo_source_save_failure
+            exporting
+              textid = cx_oo_source_save_failure=>unknown_comment.
+        endif.
+        me->clif_source_part->lif_importable_source_part~import( ).
+        me->source = me->clif_source_part->lif_source_part~get_source( ).
+*       Refresh program index
+        if ( suppress_index_update = abap_false ).
+          if me->clif_type = seoc_clstype_class.
+            pool_include = cl_oo_classname_service=>get_classpool_name( clskey-clsname ).
+          else.
+            pool_include = cl_oo_classname_service=>get_interfacepool_name( clskey-clsname ).
+          endif.
+          cl_where_used_list_utilities=>update_index_in_background( p_name = pool_include ).
+        endif.
+*       Set the old source
+        me->old_source = source.
+        " create index for source positions to get faster access later
+*        if ( me->clif_type = seoc_clstype_class ).
+*          data scanner type ref to cl_oo_source_scanner_class.
+*          data lpos_index_helper type ref to if_oo_source_pos_index_helper.
+*
+*          scanner ?= me->get_scanner( ).
+*          lpos_index_helper = get_pos_index_helper( ).
+*
+*          lpos_index_helper->create_index_with_scanner( class_name = clskey-clsname
+*                             version = me->version  scanner = scanner ).
+*        endif.
+      catch cx_oo_canceled into exception.
+        call function 'DB_ROLLBACK'.
+        raise exception type cx_oo_source_save_failure
+          exporting
+            textid    = cx_oo_source_save_failure=>create_textid_from_msg_params( msgid = exception->if_t100_message~t100key-msgid
+                                                                                  msgno = exception->if_t100_message~t100key-msgno )
+            previous  = exception
+            clif_name = me->clskey-clsname
+            message_variable_1 = exception->message_variable_1
+            message_variable_2 = exception->message_variable_2
+            message_variable_3 = exception->message_variable_3
+            message_variable_4 = exception->message_variable_4.
+      cleanup.
+        call function 'DB_ROLLBACK'.
+    endtry.
+  endmethod.
+
+
+  method is_breakpoint_set.
+    data: breakpoint_list type breakpoints,
+          bkpoint         type breakpoint,
+          http_debug      type char1 value ' '.
+
+    result = ' '.
+
+    if breakpoint_type = seoe_breakpoint_type_external.
+      http_debug = 'X'.
+    endif.
+
+    "Find if there exists Session Breakpoint
+    call function 'RS_GET_BREAKPOINTS'
+      exporting
+        program         = include_name
+        http_debugging  = http_debug
+      tables
+        showbreakpoints = breakpoint_list.
+
+    if breakpoint_list is not initial.
+      loop at breakpoint_list into bkpoint.
+        if bkpoint-line = line.
+          result = 'X'.
+          return.
+        endif.
+      endloop.
+    endif.
+
+  endmethod.
+
+
+  method is_completely_locked.
+    data:
+      class_source_part type ref to lcl_class_source_part_list.
+
+    try.
+        class_source_part ?= me->clif_source_part.
+        locked = class_source_part->is_completely_locked( ).
+      catch cx_sy_move_cast_error.
+        locked = me->clif_source_part->lif_editable_source_part~is_locked( ).
+    endtry.
+  endmethod.                    "is_completely_locked
+
+
+  method is_dirty.
+
+    result = me->is_dirty_data.
+  endmethod.
+
+
+  method is_locked.
+    locked = me->clif_source_part->lif_editable_source_part~is_locked( ).
+  endmethod.                    "is_locked
+
+
+  method is_source_part_locked.
+    data:
+      exception type ref to cx_root.
+
+    try.
+        me->refresh_source_parts( ).
+        locked = me->clif_source_part->is_locked_by_position( source_position ).
+      catch cx_oo_clif_scan_error cx_oo_canceled into exception.
+        message exception type 'S'.
+      catch lcx_source_part_unknown into exception.
+        raise exception type cx_oo_invalid_source_position
+          exporting
+            previous = exception
+            line     = source_position-line
+            column   = source_position-column.
+    endtry.
+  endmethod.                    "is_source_part_locked
+
+
+  method lock_source_part.
+    data:
+      exception type ref to cx_root.
+
+    try.
+        me->refresh_source_parts( ).
+        me->clif_source_part->lock_by_position( source_position ).
+      catch cx_oo_clif_scan_error cx_oo_canceled into exception.
+        raise exception type cx_oo_access_permission
+          exporting
+            previous = exception.
+    endtry.
+  endmethod.                    "lock_source_part
+
+
+  method pretty_print.
+    data:
+      source type rswsourcet.
+
+    me->if_oo_clif_source~get_source( importing source = source ).
+
+    if source is not initial.
+      call function 'PRETTY_PRINTER'
+        exporting
+          inctoo   = abap_false
+          settings = pretty_printer_settings
+        tables
+          ntext    = source
+          otext    = source
+        exceptions
+          others   = 0.
+    endif.
+    me->if_oo_clif_source~set_source( source ).
+
+  endmethod.
+
+
+  method pretty_print_source_part.
+    data:
+      exception type ref to cx_root.
+
+    try.
+        " build/refresh source part list on current source
+        me->refresh_source_parts( ).
+
+        " delegate pretty print request to clif source part list
+        me->clif_source_part->pretty_print_by_position( source_position = source_position pretty_printer_settings = me->pretty_printer_settings ).
+
+        " invalidate source attribute from all source parts
+        me->if_oo_clif_source~set_source( me->clif_source_part->lif_source_part~get_source( ) ).
+      catch cx_oo_canceled into exception.
+        message exception type 'S'.
+    endtry.
+  endmethod.
+
+
+  method read.
+    data:
+      exception type ref to cx_root.
+
+    me->clif_source_part->lif_source_part~read( version = me->version ).
+    me->source_read = seox_true.
+    me->if_oo_clif_source~set_source( me->clif_source_part->lif_source_part~get_source( ) ).
+    me->old_source = me->source.
+    if ( me->clif_source_part->lif_editable_source_part~is_locked( ) = seox_true ).
+      try.
+          clif_source_part->lif_scannable_source_part~set_scanner( scanner = me->get_scanner( ) ).
+          clif_source_part->lif_editable_source_part~refresh_original_source( ).
+        catch cx_oo_clif_scan_error cx_oo_canceled into exception.
+          message exception type 'S'.
+      endtry.
+    endif.
+  endmethod.                    "read
+
+
+  method read_clif_pool.
+    if ( me->clif_type = seoc_clstype_class ).
+      me->pool_include_name = cl_oo_classname_service=>get_classpool_name( me->clskey-clsname ).
+    else.
+      me->pool_include_name = cl_oo_classname_service=>get_interfacepool_name( me->clskey-clsname ).
+    endif.
+    try.
+        me->persistence->if_oo_clif_persistence_source~read_report(
+          exporting
+            include_name = me->pool_include_name
+            state        = version
+          importing
+            source       = me->pool_source
+        ).
+      catch cx_include_does_not_exist.
+        try.
+            if ( version <> lif_source_part=>c_version_active ).
+              me->persistence->if_oo_clif_persistence_source~read_report(
+                exporting
+                  include_name = me->pool_include_name
+                  state        = lif_source_part=>c_version_active
+                importing
+                  source       = me->pool_source
+              ).
+            endif.
+          catch cx_include_does_not_exist.              "#EC NO_HANDLER
+        endtry.
+    endtry.
+  endmethod.                    "read_clif_pool
+
+
+  method refresh_source_parts.
+    data:
+      clif_scanner type ref to cl_oo_source_scanner.
+
+    clif_scanner = me->get_scanner(  ).
+    me->clif_source_part->lif_scannable_source_part~set_scanner( clif_scanner ).
+    me->clif_source_part->lif_scannable_source_part~refresh( ).
+  endmethod.                    "refresh_source_parts
+
+
+  method set_clif_properties_changed.
+    me->clif_source_part->set_properties_changed( ).
+  endmethod.
+
+
+  method set_version.
+    if ( me->version <> version ).
+      me->version = version.
+      me->source_read = seox_false.
+      clear me->source.
+    endif.
+  endmethod.
+
+
+  method toggle_breakpoint.
+    data:
+      lineindex            type edlineindx,
+      index                type sedi_lindex,
+      mainprogram          type program,
+      breakpoint_exist     type boolean value space,
+      actual_linenum       type i,
+      http_debug           type char1 value ' ',
+      include_position     type cl_oo_source_pos_converter=>type_include_position,
+      source_position      type cl_source_scanner=>type_source_position,
+      source_pos_converter type ref to cl_oo_source_pos_converter.
+
+    if ( me->clif_type = seoc_clstype_interface ).
+      cx_oo_message=>raise_message_exception( msgid = 'OO_SOURCE_BASED' msgno = 021 ).     " Message Number
+    endif.
+    if breakpoint_type = seoe_breakpoint_type_external.
+      http_debug = 'X'.
+    endif.
+    "Get Main Program Name
+    mainprogram = cl_oo_classname_service=>get_classpool_name( me->clskey-clsname ).
+    "Get Include name & the include line number
+    source_position-line = line.
+    source_pos_converter = cl_oo_source_pos_converter=>create( clif_key = me->clskey source = me ).
+    try.
+        include_position = source_pos_converter->get_include_position( source_position ).
+        "decide whether to set/delete breakpoint
+        breakpoint_exist = is_breakpoint_set( include_name = include_position-include line = include_position-source_position-line breakpoint_type = breakpoint_type ).
+        if ( breakpoint_exist = seox_false ).
+          "set breakpoint
+          call function 'RS_SET_BREAKPOINT'
+            exporting
+              index          = include_position-source_position-line
+              program        = include_position-include
+              mainprogram    = mainprogram
+              http_debugging = http_debug
+              bp_type        = breakpoint_type
+            importing
+              o_index        = actual_linenum
+            exceptions
+              not_executed   = 1
+              others         = 2.
+          if sy-subrc <> 0.
+            cx_oo_message=>raise_message_exception( msgid = sy-msgid msgno = sy-msgno msgv1 = sy-msgv1 msgv2 = sy-msgv2 msgv3 = sy-msgv3 msgv4 = sy-msgv4 ).
+            message id sy-msgid type sy-msgty number sy-msgno
+                    with sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+            exit.
+          endif.
+          result = line + ( actual_linenum - include_position-source_position-line ).
+        else.
+          "delete breakpoint
+          call function 'RS_DELETE_BREAKPOINT'
+            exporting
+              index          = include_position-source_position-line
+              program        = include_position-include
+              mainprog       = mainprogram
+              http_debugging = http_debug
+              bp_type        = breakpoint_type.
+          result = -1.
+        endif.
+      catch cx_oo_clif_scan_error cx_oo_invalid_source_position.
+        cx_oo_message=>raise_message_exception( msgid = 'OO' msgno = '667' ).
+    endtry.
+  endmethod.
+
+
+  method unlock_source_part.
+    data:
+      exception type ref to cx_root.
+
+    try.
+        me->refresh_source_parts( ).
+        me->clif_source_part->unlock_by_position( source_position ).
+      catch cx_oo_clif_scan_error cx_oo_canceled into exception.
+        raise exception type cx_oo_access_permission
+          exporting
+            previous = exception.
+    endtry.
+  endmethod.                    "unlock_source_part
+
+
+  method access_permission.
+    data registered_mainprograms type standard table of abap_callstack_line-mainprogram with default key.
+    data obj_oo_utilty           type ref to cl_oo_clif_utility.
+    data l_authority_check       type seox_boolean.
+
+    l_authority_check = authority_check.
+
+    if authority_check = abap_false.  " trying to bypass WB-authorization -> check against a white list
+      create object obj_oo_utilty.
+      registered_mainprograms = obj_oo_utilty->fill_white_list( ).
+      if ( obj_oo_utilty->are_mainprograms_registered( registered_mainprograms = registered_mainprograms ) = seox_false ).
+        l_authority_check = seox_true.  " no valid registration in white list, check as usual
+      endif.
+    endif.
+
+    case access_mode.
+      when seok_access_modify.
+        me->clif_source_part->lif_editable_source_part~lock( lock_handle = lock_handle authority_check = l_authority_check ).
+        " reread the source after locking it, because it might have changed
+        me->source_read = seox_false.
+      when seok_access_modify_relock.
+        me->clif_source_part->lif_editable_source_part~relock( lock_handle = lock_handle authority_check = l_authority_check ).
+        " reread the source after locking it, because it might have changed
+        me->source_read = seox_false.
+      when seok_access_free.
+        me->clif_source_part->lif_editable_source_part~unlock( allow_relock = seox_false ).
+      when seok_access_free_relock.
+        me->clif_source_part->lif_editable_source_part~unlock( allow_relock = seox_true ).
+      when others.
+        me->clif_source_part->lif_editable_source_part~access_permission( access_mode     = access_mode
+                                                                          lock_handle     = lock_handle
+                                                                          authority_check = l_authority_check ).
+    endcase.
+  endmethod.                    "access_permission
+
+
+  method activate_cs_include.
+    data:
+      class_source_part type ref to lcl_class_source_part_list.
+
+    if ( me->clif_type = seoc_clstype_class ).
+      class_source_part ?= me->clif_source_part.
+      class_source_part->activate( timestamp_before_activation = timestamp_before_activation method_no_before_activation = method_no_before_activation ).
+    endif.
+  endmethod.
+
+
+  method add_class_section_includes.
+
+    data pub_src type ref to seop_source_string.
+    data pro_src type ref to seop_source_string.
+    data pri_src type ref to seop_source_string.
+    data inc_substitution_line type sreptabln.
+    data cu_incname type program.
+    data co_incname type program.
+    data ci_incname type program.
+    field-symbols <source_public> type seop_source_string.
+    field-symbols <source_protected> type seop_source_string.
+    field-symbols <source_private> type seop_source_string.
+
+    create data pub_src.
+    assign pub_src->* to <source_public>.
+    <source_public>    = class_scanner->get_public_section_source( ).
+    cu_incname = cl_oo_classname_service=>get_pubsec_name( clskey-clsname ).
+    inc_substitution_line = cl_abap_syntax_check_aux=>get_srepline( name = cu_incname source = <source_public> ).
+    append inc_substitution_line to includes.
+
+    create data pro_src.
+    assign pro_src->* to <source_protected>.
+    <source_protected> = class_scanner->get_protected_section_source( ).
+    co_incname = cl_oo_classname_service=>get_prosec_name( clskey-clsname ).
+    inc_substitution_line = cl_abap_syntax_check_aux=>get_srepline( name = co_incname source = <source_protected> ).
+    append inc_substitution_line to includes.
+
+    create data pri_src.
+    assign pri_src->* to <source_private>.
+    <source_private>   = class_scanner->get_private_section_source( ).
+    ci_incname = cl_oo_classname_service=>get_prisec_name( clskey-clsname ).
+    inc_substitution_line = cl_abap_syntax_check_aux=>get_srepline( name = ci_incname source = <source_private> ).
+    append inc_substitution_line to includes.
+
+  endmethod.
+
+
+  method add_interface_section_include.
+
+    data src_interface type ref to seop_source_string.
+    data inc_substitution_line type sreptabln.
+    data iu_incname type progname.
+    field-symbols <source_interface> type seop_source_string.
+
+    create data src_interface.
+    assign src_interface->* to <source_interface>.
+    me->if_oo_clif_source~get_source( importing source = <source_interface> ).
+    iu_incname = cl_oo_classname_service=>get_intfsec_name( me->clskey-clsname ).
+    inc_substitution_line = cl_abap_syntax_check_aux=>get_srepline( name = iu_incname source = <source_interface> ).
+    append inc_substitution_line to includes.
+
+  endmethod.
+
+
+  method add_method_includes.
+
+    data src type ref to seop_source_string.
+    data inc_substitution_line type sreptabln.
+    data method_implementations type cl_oo_source_scanner_class=>type_method_implementations.
+    data method_key type seomtdkey.
+    data include_name type program.
+
+    field-symbols <source_method> type seop_source_string.
+    field-symbols <method_implementation> type seocpdname.
+
+    method_implementations = class_scanner->get_method_implementations( ).
+    loop at method_implementations assigning <method_implementation>.
+      create data src.
+      assign src->* to <source_method>.
+      try.
+          <source_method> = class_scanner->get_method_impl_source( method_name = <method_implementation> ).
+          method_key-clsname = me->clskey-clsname.
+          method_key-mtdname = <method_implementation>.
+          cl_oo_classname_service=>get_method_include(
+                exporting
+                  mtdkey              = method_key
+                receiving
+                  result = include_name
+                exceptions
+                  others = 1
+          ).
+          if ( sy-subrc <> 0 ).
+            clear include_name.
+          endif.
+          inc_substitution_line = cl_abap_syntax_check_aux=>get_srepline( name = include_name source = <source_method> ).
+          append inc_substitution_line to includes.
+        catch cx_oo_clif_component.
+          assert 'Should never' = 'happen' ##no_text.
+      endtry.
+    endloop.
+
+  endmethod.
+
+
+  method check.
+    data progdir type progdir.
+    data dir type trdir.
+    data error type rslinlmsg.
+
+    try.
+        progdir = me->persistence->if_oo_clif_persistence_source~read_progdir( include_name = pool_include_name state = lif_source_part=>c_version_active ).
+      catch cx_include_does_not_exist.                  "#EC NO_HANDLER
+    endtry.
+    move-corresponding progdir to dir.
+    syntax-check for source
+          message error-message
+          line error-line
+          offset error-col
+          word error-keyword
+          directory entry dir
+          include error-incname
+          id 'MSG' table check_result-warnings
+          id 'ERR' table check_result-errors
+          id 'LTXT' table check_result-error_descriptions.
+  endmethod.                    "check
+
+
+  method check_for_unknown_comments.
+    data:
+      class_scanner         type ref to cl_oo_source_scanner_class,
+      source_code_positions type cl_oo_source_scanner_class=>type_source_positions,
+      message               type symsg,
+      source_state          type ref to cl_wb_cleditor_object_state,
+      object_name           type seu_objkey,
+      wb_request_edit       type ref to cl_wb_request,
+      wb_request_show       type ref to cl_wb_request.
+    field-symbols:
+      <source_code_position> like line of source_code_positions.
+
+    if ( me->clif_type = seoc_clstype_interface ).
+      return.
+    endif.
+    class_scanner ?= me->get_scanner( ).
+    source_code_positions = class_scanner->get_unknown_comments( ).
+    if ( source_code_positions is not initial ).
+      create object result.
+      message-msgid = 'OO_SOURCE_BASED'.
+      message-msgno = '012'.
+      message-msgty = 'W'.
+      object_name = cl_oo_classname_service=>get_cs_name( clsname = me->clskey-clsname ).
+      loop at source_code_positions assigning <source_code_position>.
+
+        create object source_state.
+        source_state->first_line    = <source_code_position>-line.
+        source_state->cursor_line   = <source_code_position>-line.
+        source_state->cursor_offset = <source_code_position>-column.
+        source_state->if_wb_source_state~topline = <source_code_position>-line.
+        source_state->if_wb_source_state~line    = <source_code_position>-line.
+        source_state->if_wb_source_state~offset  = <source_code_position>-column.
+
+        create object wb_request_show
+          exporting
+            p_object_type  = swbm_c_type_prg_include
+            p_object_name  = object_name
+            p_operation    = swbm_c_op_display
+            p_object_state = source_state.
+
+        create object wb_request_edit
+          exporting
+            p_object_type  = swbm_c_type_prg_include
+            p_object_name  = object_name
+            p_operation    = swbm_c_op_edit
+            p_object_state = source_state.
+
+        result->add_t100_error_message(
+            p_tool_request_edit  = wb_request_edit
+            p_tool_request_show  = wb_request_show
+            p_message            = message
+            p_object_text        = |{ me->clskey-clsname }|
+        ).
+      endloop.
+    endif.
+  endmethod.                    "check_for_unknown_comments
+
+
+  method constructor .
+    me->persistence = persistence.
+    me->settings    = settings.
+    me->clskey-clsname = clif_name.
+    me->version = version.
+    me->clif_type = me->persistence->if_oo_clif_persist_meta_data~get_clif_type( clskey ).
+    me->pretty_printer_settings = pretty_printer_settings.
+    if ( me->clif_type = seoc_clstype_class ).
+      me->clif_source_part = lcl_class_source_part_list=>create_class( class_key = clskey persistence = me->persistence
+                             settings = me->settings signature_provider = signature_provider pos_index_helper = pos_index_helper ).
+    else.
+      me->clif_source_part = lcl_interface_source_part_list=>create_interface( class_key = clskey persistence = me->persistence settings = me->settings ).
+    endif.
+  endmethod.                    "constructor
+
+
+  method create_instance.
+    data:
+      signature_provider         type ref to lif_signature_provider,
+      persistence                type ref to lif_persistence_facade,
+      clif_provider_map          type ref to lcl_clif_data_provider_map,
+      l_source_persistence       type ref to if_oo_clif_persistence_source,
+      l_metadata_persistence     type ref to if_oo_clif_persist_meta_data,
+      pretty_printer_wb_settings type ref to if_pretty_printer_settings,
+      pos_index_helper           type ref to if_oo_source_pos_index_helper.
+
+    if ( settings->is_signature_enabled( ) = seox_true ).
+      clif_provider_map = lcl_clif_data_provider_map=>create( ).
+      signature_provider = lcl_signature_provider=>create_signature_provider( clif_name = clif_name clif_provider_map = clif_provider_map ).
+    endif.
+    if source_persistence is not initial.
+      l_source_persistence ?= source_persistence.
+    endif.
+    if metadata_persistence is not initial.
+      l_metadata_persistence ?= metadata_persistence.
+    endif.
+
+    persistence = lcl_persistence_facade=>get_instance(
+      lifecycle_manager    = lifecycle_manager
+      settings             = settings
+      source_persistence   = l_source_persistence
+      metadata_persistence = l_metadata_persistence ).
+
+    create object pos_index_helper type cl_oo_source_pos_index_helper.
+
+    create object pretty_printer_wb_settings type ('CL_PRETTY_PRINTER_SETTINGS_NEW').
+    create object result
+      exporting
+        clif_name               = clif_name
+        version                 = version
+        persistence             = persistence
+        settings                = settings
+        signature_provider      = signature_provider
+        pretty_printer_settings = pretty_printer_wb_settings
+        pos_index_helper        = pos_index_helper.
+    result->suppress_index_update = suppress_index_update.
+  endmethod.
+
+
+  method create_lineindex.
+    data:
+      breakpoint_list      type seoe_breakpoints,
+      include_position     type cl_oo_source_pos_converter=>type_include_position,
+      line                 type i,
+      lineindex_entry      type edlineindx,
+      source_lines         type i,
+      source_position      type cl_source_scanner=>type_source_position,
+      source_pos_converter type ref to cl_oo_source_pos_converter.
+    field-symbols:
+      <breakpoint>      type seoe_breakpoint,
+      <lineindex_entry> type edlineindx.
+
+    lineindex = me->clif_source_part->lif_source_part~get_line_index( ).
+
+    breakpoint_list = me->get_breakpoints( ).
+    source_pos_converter = cl_oo_source_pos_converter=>create( clif_key = me->clskey source = me ).
+    loop at breakpoint_list
+        assigning <breakpoint>.
+      include_position-include              = <breakpoint>-program.
+      include_position-source_position-line = <breakpoint>-line.
+      try.
+          source_position = source_pos_converter->get_position_by_include( include_position ).
+          read table lineindex
+              index source_position-line
+              assigning <lineindex_entry>.
+          if ( sy-subrc = 0 ).
+            case <breakpoint>-breakpoint_type.
+              when 'S'.  "Session Breakpoint
+                <lineindex_entry>-break_flag = 'X'.
+              when 'E'.  "External Breakpoint
+                <lineindex_entry>-break_flag = 'E'.
+              when 'I'.  "External Breakpoint (deactivated)
+                <lineindex_entry>-break_flag = 'I'.
+            endcase.
+          endif.
+        catch cx_oo_clif_scan_error cx_oo_clif_component.
+          continue.
+        catch cx_oo_invalid_source_position.
+          continue.
+      endtry.
+    endloop.
+  endmethod.                    "create_lineindex
+
+
+  method eliminate_signature_comments.
+    types:  begin of lty_keywords,
+              line(30),
+            end of lty_keywords.
+
+    data lt_save_source type rswsourcet.
+
+    data lt_keywords type table of  lty_keywords.
+
+    data: lt_tok      type table of stokesx,
+          lt_stmnt    type table of sstmnt,
+          lt_struc    type table of sstruc,
+          lt_struc_i  type table of sstruc,
+          l_mess(200) type c.
+    data l_row type int4.
+    data l_meths type int4.
+
+    field-symbols <stmnt> type  sstmnt.
+    field-symbols <l_line_source> type string.
+
+    lt_save_source = tab_source.
+    append 'METHOD'  to lt_keywords.                        "#EC NOTEXT
+    scan abap-source lt_save_source tokens     into lt_tok
+                                    statements into lt_stmnt
+                                    keywords   from lt_keywords
+                                    message    into l_mess
+                                    with analysis
+                                    without trmac.
+    if sy-subrc <> 0.
+      raise exception type cx_oo_clif_scan_error.
+    endif.
+
+    if lines( lt_tok ) > 0.
+*     There are METHOD-statements delete the comments and the empty lines
+*     in front of them.
+
+      l_meths = lines( lt_stmnt ).
+
+      do l_meths times.
+        read table lt_stmnt assigning <stmnt> index sy-index.
+        l_row = <stmnt>-trow.
+        l_row = l_row - 1.
+        read table lt_save_source assigning <l_line_source> index l_row.
+        while <l_line_source> is initial or <l_line_source>(1) = '*'.
+          delete lt_save_source index l_row.
+          l_row = l_row - 1.
+          read table lt_save_source assigning <l_line_source> index l_row.
+        endwhile.
+        clear: lt_tok, lt_stmnt, l_mess.
+        scan abap-source lt_save_source tokens     into lt_tok
+                                        statements into lt_stmnt
+                                        keywords   from lt_keywords
+                                        message    into l_mess
+                                        with analysis
+                                        without trmac.
+        if sy-subrc <> 0.
+          raise exception type cx_oo_clif_scan_error.
+        endif.
+      enddo.
+      tab_source = lt_save_source.
+    endif.
+  endmethod.                    "refresh_source_parts
+
+
+  method get_breakpoints.
+    data: breakpoint_list  type breakpoints,
+          new_bkpoint      type seoe_breakpoint,
+          inclname         type program,
+          inclname_list    like table of inclname,
+          inclname_filter  type string,
+          method_includes  type seop_methods_w_include,
+          external_bkpoint type char1 value 'E'.
+    field-symbols:
+      <method_include> type seop_method_w_include,
+      <bkpoint>        type breakpoint.
+
+    "Check the activeness of external breakpoints
+    call function 'ICF_CHECK_EXT_DEBUGGING'
+      exporting
+        username                   = sy-uname
+      exceptions
+        icf_ext_debugging_disabled = 1
+        others                     = 2.
+    if sy-subrc = 1.
+      "External Breakpoints are inactive for the user
+      external_bkpoint = 'I'.
+    endif.
+
+    "Get the method includes list if the object is a class
+    if ( me->clif_type = seoc_clstype_interface ).
+*     ******************************************* R E T U R N.
+      return.
+    endif.
+    cl_oo_classname_service=>get_all_method_includes(
+      exporting
+        clsname = me->clskey-clsname
+      receiving
+        result = method_includes
+      exceptions
+        class_not_existing = 1
+        others             = 2
+    ).
+    if ( sy-subrc <> 0 ).
+      return.
+    endif.
+    call function 'RS_GET_ALL_BREAKPOINTS'
+*     EXPORTING
+*       HTTP_DEBUGGING       = ' '
+      tables
+        breakpointtab = breakpoint_list.
+    loop at breakpoint_list assigning <bkpoint>.
+      read table method_includes
+          with key incname = <bkpoint>-program
+          transporting no fields.
+      if ( sy-subrc = 0 ).
+        move-corresponding <bkpoint> to new_bkpoint.
+        new_bkpoint-breakpoint_type = 'S'.
+        append new_bkpoint to bp_list..
+      endif.
+    endloop.
+    call function 'RS_GET_ALL_BREAKPOINTS'
+      exporting
+        http_debugging = seox_true
+      tables
+        breakpointtab  = breakpoint_list.
+    loop at breakpoint_list assigning <bkpoint>.
+      read table method_includes
+          with key incname = <bkpoint>-program
+          transporting no fields.
+      if ( sy-subrc = 0 ).
+        move-corresponding <bkpoint> to new_bkpoint.
+        new_bkpoint-breakpoint_type = external_bkpoint.
+        append new_bkpoint to bp_list.
+      endif.
+    endloop.
+  endmethod.                    "get_breakpoints
+
+
+  method get_cp_implementation_start.
+    field-symbols: <source_line> type string.
+    if me->pool_source is initial.
+      me->read_clif_pool( me->version ).
+    endif.
+    loop at me->pool_source assigning <source_line>.
+      condense <source_line>.
+      if <source_line> cp 'class * implementation.' .
+        me->cp_imp_strt_line = sy-tabix.
+        start_row = me->cp_imp_strt_line.
+        return.
+      endif.
+    endloop.
+  endmethod.                    "get_cp_implementation_start
+
+
+  method get_includes.
+    data:
+      class_scanner          type ref to cl_oo_source_scanner_class.
+
+    if ( me->clif_type = seoc_clstype_class ).
+*     Get the sources of the class
+      class_scanner ?= me->get_scanner( ).
+      me->add_class_section_includes( exporting class_scanner = class_scanner changing includes = result ).
+      me->add_method_includes( exporting class_scanner = class_scanner changing includes = result ).
+    else.
+*     Get the source of the interface.
+      me->add_interface_section_include( changing includes = result ).
+    endif.
+  endmethod.
+
+
+  method get_lifecycle_manager.
+    data:
+      my_persistence type ref to lcl_persistence_facade.
+
+    my_persistence ?= me->persistence.
+    result = my_persistence->get_lifecycle_manager( ).
+  endmethod.
+
+
+  method get_old_source.
+    old_source = me->old_source.
+  endmethod.                    "get_old_source
+
+
+  method get_scanner.
+    data:
+      scan_error type ref to cx_oo_clif_scan_error,
+      source     type rswsourcet.
+
+    if ( ( me->scanner is initial ) ).
+      try.
+          me->get_source( importing source = source ).
+          if ( me->clif_type = seoc_clstype_class ).
+            me->scanner = cl_oo_source_representation=>create_source_representation( clif_name = me->clskey-clsname source = source ).
+          else.
+            me->scanner = cl_oo_source_scanner_interface=>create_interface_scanner( clif_name = me->clskey-clsname source = source ).
+          endif.
+          me->scanner->scan( ).
+        catch cx_oo_clif_scan_error into scan_error.
+          clear me->scanner.
+          raise exception scan_error.
+      endtry.
+    endif.
+    scanner = me->scanner.
+  endmethod.                    "get_scanner
+
+
+  method get_settings.
+    result = me->settings.
+  endmethod.
+
+
+  method get_source_name.
+    name = pool_include_name.
+  endmethod.                    "get_source_name
+
+
+  method get_src_4_syntax_check.
+    data: strt_row      type i,
+          end_row       type i,
+          class_scanner type ref to cl_oo_source_scanner_class,
+          interval      type cl_source_scanner=>type_source_interval,
+          imp_src       type seop_source_string,
+          l_class       type vseoclass.
+
+    class_scanner ?= me->get_scanner( ).
+    interval = class_scanner->get_class_impl_interval( ).
+    strt_row = interval-end-line + 1.
+    interval = class_scanner->get_endclass_impl_interval( ).
+    end_row = interval-begin-line.
+*   reread class pool
+    me->read_clif_pool( version = 'I' ).
+    if me->cp_imp_strt_line is initial.
+      me->get_cp_implementation_start( ).
+    endif.
+    append lines of me->pool_source from 1 to cp_imp_strt_line to sc_source.
+
+*   ec: special need for persistenet classes otherwise syntax-errors will be detected
+    if me->clif_type = seoc_clstype_class.
+      call function 'SEO_CLASS_GET'
+        exporting
+          clskey = me->clskey
+        importing
+          class  = l_class
+        exceptions
+          others = 0.
+      if l_class-category = seoc_category_persistent.
+        append 'include if_os_state_macros.' to sc_source  ##no_text.
+      endif.
+    endif.
+
+    append lines of me->source from strt_row to end_row to  sc_source.
+  endmethod.                    "get_src_4_syntax_check
+
+
+  method get_syntax_check_includes.
+    data:
+      src                   type ref to seop_source_string,
+      inc_substitution_line type sreptabln,
+      cp_incname            type program,
+      ip_incname            type progname,
+      class_scanner         type ref to cl_oo_source_scanner_class.
+    field-symbols:
+      <source>           type seop_source_string.
+
+    if ( me->clif_type = seoc_clstype_class ).
+      create data src.
+      assign src->* to <source>.
+
+      <source>  = me->get_src_4_syntax_check( ).
+      cp_incname = cl_oo_classname_service=>get_classpool_name( clskey-clsname ).
+      inc_substitution_line = cl_abap_syntax_check_aux=>get_srepline( name = cp_incname source = <source> ).
+      append inc_substitution_line to inc_table.
+
+      class_scanner ?= me->get_scanner( ).
+
+      add_class_section_includes( exporting class_scanner = class_scanner changing includes = inc_table ).
+    else.
+*     Add source of the interface pool
+*     This is needed, because it might happen during activation that the inactive version has already been
+*     deleted and a check has been started in parallel. => Then, syntax-check might try to retrieve the
+*     inactive version which has already been deleted during activation (0120061532 0002966812 2013)
+      if ( me->pool_source is initial ).
+        me->read_clif_pool( me->version ).
+      endif.
+      ip_incname = cl_oo_classname_service=>get_interfacepool_name( me->clskey-clsname ).
+      inc_substitution_line = cl_abap_syntax_check_aux=>get_srepline( name = ip_incname source = me->pool_source ).
+      append inc_substitution_line to inc_table.
+      add_interface_section_include( changing includes = inc_table ).
+    endif.
+  endmethod.                    "get_syntax_check_includes
+
+
+  method get_version.
+    result = me->version.
+  endmethod.
+ENDCLASS.

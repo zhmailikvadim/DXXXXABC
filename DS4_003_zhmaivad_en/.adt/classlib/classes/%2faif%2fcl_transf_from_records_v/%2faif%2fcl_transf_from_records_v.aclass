@@ -1,0 +1,191 @@
+CLASS /aif/cl_transf_from_records_v DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES /aif/if_structure_visitor.
+
+    METHODS:
+      "! Creates an instance of ZGEN_CL_STRUCTURE_VISITOR
+      "! @parameter it_mapping_table       | Optionally provide an itab containing the mappings assigning every field to a dbtab and column (or use the set-method)
+      "! @parameter io_table_record_buffer | Instance containing the buffered table records
+      constructor IMPORTING io_table_record_buffer TYPE REF TO /aif/if_table_record_buffer
+                            it_mapping_table       TYPE /aif/mapping_instruction_tt OPTIONAL,
+
+      "! Set the mapping table
+      set_mapping IMPORTING it_mapping_table TYPE /aif/mapping_instruction_tt.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA:
+      "! buffers all table records/rows, which results from the visited structure
+      mo_table_record_buffer TYPE REF TO /aif/if_table_record_buffer,
+
+      "! contains the mapping entries to assign each structure component a dbtab and column
+      mt_mapping             TYPE /aif/mapping_instruction_tt,
+
+      "! represents the last used row id. The row id is unique across one data message (for one version), but unique across all used dbtabs.
+      mv_last_row_id         TYPE i,
+
+      "! stack that contains the current row ids
+      mo_row_id_stack        TYPE REF TO /aif/cl_integer_stack.
+
+    METHODS:
+      "! return the next available row id and increments mv_last_row_id.
+      "! @parameter rv_row_id    | contains the next row id
+      get_next_row_id RETURNING VALUE(rv_row_id) TYPE i.
+
+ENDCLASS.
+
+
+
+CLASS /AIF/CL_TRANSF_FROM_RECORDS_V IMPLEMENTATION.
+
+
+  METHOD /aif/if_structure_visitor~finished_structure.
+    " do nothing
+  ENDMETHOD.
+
+
+  METHOD /aif/if_structure_visitor~finished_table.
+    " do nothing
+  ENDMETHOD.
+
+
+  METHOD /aif/if_structure_visitor~finished_tableline.
+    " remove current row_id from stack
+    mo_row_id_stack->pop( ).
+  ENDMETHOD.
+
+
+  METHOD /aif/if_structure_visitor~init.
+    " do nothing
+  ENDMETHOD.
+
+
+  METHOD /aif/if_structure_visitor~visit_field.
+
+    FIELD-SYMBOLS: <ls_source_record> TYPE any,
+                   <lv_source_value>  TYPE any,
+                   <lv_target_value>  TYPE any.
+
+    DATA: ls_mapping    TYPE /aif/mapping_instruction,
+          lr_record     TYPE REF TO data,
+          lv_counter_id TYPE i.
+
+    " retrieve mapping entry
+    READ TABLE mt_mapping INTO ls_mapping WITH KEY from_comp_path = iv_component_path.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE /aif/cx_struct_pers_base
+        EXPORTING
+          textid = /aif/cx_struct_pers_base=>transformation_error.
+    ENDIF.
+
+    " fetch record from buffer for the current row_id.
+    lv_counter_id = mo_row_id_stack->top( ).
+    lr_record = mo_table_record_buffer->get_record_with_key( iv_tablename = ls_mapping-to_dbtab_name
+                                                             iv_keyname = 'COUNTER'
+                                                             iv_keyvalue = lv_counter_id ).
+    IF lr_record IS INITIAL.
+      RAISE EXCEPTION TYPE /aif/cx_struct_pers_base EXPORTING textid = /aif/cx_struct_pers_base=>transformation_error.
+    ELSE.
+      ASSIGN lr_record->* TO <ls_source_record>.
+
+      " copy field from record to structure
+      ASSIGN COMPONENT ls_mapping-to_column_name OF STRUCTURE <ls_source_record> TO <lv_source_value>.
+      ASSIGN ir_field->* TO <lv_target_value>.
+      <lv_target_value> = <lv_source_value>.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD /aif/if_structure_visitor~visit_structure.
+    " do nothing
+  ENDMETHOD.
+
+
+  METHOD /aif/if_structure_visitor~visit_table.
+
+    FIELD-SYMBOLS: <lt_table>   TYPE ANY TABLE,
+                   <lt_records> TYPE ANY TABLE.
+
+    DATA: ls_mapping        TYPE /aif/mapping_instruction,
+          lv_parent_id      TYPE i,
+          lv_stack_size     TYPE i,
+          lr_records        TYPE REF TO data,
+          lv_num_of_records TYPE i.
+
+    " retrieve mapping entry, to get table name
+    READ TABLE mt_mapping INTO ls_mapping WITH KEY from_comp_path = iv_component_path.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE /aif/cx_struct_pers_base
+        EXPORTING
+          textid = /aif/cx_struct_pers_base=>mapping_incomplete.
+    ENDIF.
+
+    lv_stack_size = mo_row_id_stack->size( ).
+    IF lv_stack_size >= 2.
+      lv_parent_id = mo_row_id_stack->top( ). " the current element (-> current row_id) is the parent_id of all table elements
+    ELSE.
+      lv_parent_id = 1.
+    ENDIF.
+
+    lr_records = mo_table_record_buffer->get_records_with_key( iv_tablename = ls_mapping-to_dbtab_name
+                                                               iv_keyname = 'PARENT_ID'
+                                                               iv_keyvalue = lv_parent_id ).
+
+    IF lr_records IS NOT INITIAL.
+      ASSIGN lr_records->* TO <lt_records>.
+
+      " append empty lines to subtable
+      lv_num_of_records = lines( <lt_records> ).
+      ASSIGN ir_table->* TO <lt_table>.
+      DO lv_num_of_records TIMES.
+        INSERT INITIAL LINE INTO TABLE <lt_table>.
+      ENDDO.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /aif/if_structure_visitor~visit_tableline.
+
+    DATA: lv_row_id TYPE i.
+
+    " create a new row_id for the current row and push it on the row_id stack
+    lv_row_id = get_next_row_id( ).
+    mo_row_id_stack->push( lv_row_id ).
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    DATA: lv_row_id TYPE i.
+
+    mo_table_record_buffer = io_table_record_buffer .
+
+    me->set_mapping( it_mapping_table ) .
+
+    CREATE OBJECT mo_row_id_stack TYPE /aif/cl_integer_stack.
+    mo_row_id_stack->clear( ).
+
+    lv_row_id = me->get_next_row_id( ).
+    mo_row_id_stack->push( lv_row_id ).
+
+  ENDMETHOD.
+
+
+  METHOD get_next_row_id.
+    ADD 1 TO mv_last_row_id.
+    rv_row_id = mv_last_row_id.
+  ENDMETHOD.
+
+
+  METHOD set_mapping.
+    mt_mapping = it_mapping_table.
+  ENDMETHOD.
+ENDCLASS.

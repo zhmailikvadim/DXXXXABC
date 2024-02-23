@@ -1,0 +1,484 @@
+class CL_ATP_FIELD_CATALOG definition
+  public
+  create public .
+
+public section.
+
+  types:
+    BEGIN OF ts_characteristic,
+        characteristicuuid            TYPE prodalloccharcctlgpathuuid,
+        abapdataelement               TYPE rollname,
+        prodalloccharcvaluehelp       TYPE prodalloccharcvaluehelp,
+        prodalloccharcvalhelptblfield TYPE prodalloccharcvalhelptblfield,
+        prodalloccharcvalblockfield   TYPE prodalloccharcvalhelptblfield,
+        arecharcvaluessdpprelevant    TYPE abap_bool,
+      END OF ts_characteristic .
+  types:
+    tt_characteristic TYPE HASHED TABLE OF ts_characteristic WITH UNIQUE KEY characteristicuuid .
+  types:
+    BEGIN OF ts_characteristic_value,
+        key            TYPE sysuuid_x,
+        characteristic TYPE prodalloccharcctlgpathuuid,
+        value          TYPE atp_bop_sort_attribute_value,
+      END OF ts_characteristic_value .
+  types:
+    tt_characteristic_value TYPE STANDARD TABLE OF ts_characteristic_value WITH KEY key .
+  types:
+    BEGIN OF ts_charc_value_w_existence.
+        INCLUDE TYPE ts_characteristic_value. TYPES:
+    value_exists TYPE abap_bool,
+    value_blocked TYPE abap_bool,
+    END OF ts_charc_value_w_existence .
+  types:
+    tt_charc_value_w_existence TYPE STANDARD TABLE OF ts_charc_value_w_existence WITH KEY key .
+
+  methods CHECK_DATA_EXISTENCE
+    importing
+      !IT_CHARACTERISTIC_VALUE type TT_CHARACTERISTIC_VALUE
+    exporting
+      !ET_CHARC_VALUE_W_EXISTENCE type TT_CHARC_VALUE_W_EXISTENCE .
+  methods CONSTRUCTOR
+    importing
+      !IT_CHARACTERISTIC type TT_CHARACTERISTIC .
+protected section.
+
+  data MT_CHARACTERISTIC type TT_CHARACTERISTIC .
+
+  methods BUILD_TYPED_CHARC_VALUE_TABLE
+    importing
+      !IV_CHARACTERISTIC_UUID type PRODALLOCCHARCCTLGPATHUUID
+    exporting
+      !ER_TYPED_CHARC_VALUE type ref to DATA
+      !ER_MAPPING_TYPED_TO_ORIGINAL type ref to DATA .
+  methods CONVERT_UNTYPED_VALUE_TO_TYPED
+    importing
+      !IV_CHARACTERISTIC_UUID type PRODALLOCCHARCCTLGPATHUUID
+      !IV_UNTYPED_CHARC_VALUE type ATP_BOP_SORT_ATTRIBUTE_VALUE
+    exporting
+      !EV_TYPED_CHARC_VALUE type ANY
+    raising
+      CX_SY_CONVERSION_ERROR .
+  methods SELECT_BLOCKING_INFORMATION
+    importing
+      !IV_CHARACTERISTIC_UUID type PRODALLOCCHARCCTLGPATHUUID
+      !IT_TYPED_CHARC_VALUE type STANDARD TABLE
+    exporting
+      !ER_BLOCKING_INFORMATION type ref to DATA .
+ENDCLASS.
+
+
+
+CLASS CL_ATP_FIELD_CATALOG IMPLEMENTATION.
+
+
+  METHOD build_typed_charc_value_table.
+
+    DATA: lo_charc_value_type        TYPE REF TO cl_abap_elemdescr,
+          lt_typed_table_component   TYPE abap_component_tab,
+          lt_mapping_table_component TYPE abap_component_tab.
+
+    FIELD-SYMBOLS: <lt_typed_charc_value> TYPE STANDARD TABLE.
+
+
+    READ TABLE mt_characteristic WITH TABLE KEY characteristicuuid = iv_characteristic_uuid
+                                 ASSIGNING FIELD-SYMBOL(<ls_characteristic>).
+    ASSERT sy-subrc = 0.
+
+
+    lo_charc_value_type ?= cl_abap_datadescr=>describe_by_name( <ls_characteristic>-abapdataelement ).
+
+*    lt_typed_table_component = VALUE #( (
+*      name = 'KEY'
+*      type = CAST #( cl_abap_datadescr=>describe_by_name( 'SYSUUID_X' ) )
+*    ) (
+*      name = 'VALUE'
+*      type = CAST #( lo_charc_value_type  )
+*    ) (
+*      name = 'ORIGINAL_VALUE'
+*      type = CAST #( cl_abap_datadescr=>describe_by_name( 'ATP_BOP_SORT_ATTRIBUTE_VALUE' )  )
+*    ) ).
+
+    lt_typed_table_component = VALUE #( (
+      name = 'SIGN'
+      type = CAST #( cl_abap_datadescr=>describe_by_name( 'CHAR1' ) )
+    ) (
+      name = 'OPTION'
+      type = CAST #( cl_abap_datadescr=>describe_by_name( 'CHAR2' ) )
+    ) (
+      name = 'LOW'
+      type = CAST #( lo_charc_value_type  )
+    ) (
+      name = 'HIGH'
+      type = CAST #( lo_charc_value_type  )
+    ) ).
+
+
+    DATA(lo_structure_description) = cl_abap_structdescr=>get( p_components = lt_typed_table_component ).
+
+    DATA(lo_table_type_description) = cl_abap_tabledescr=>get(
+      EXPORTING
+        p_line_type  = lo_structure_description
+        p_key        = CORRESPONDING #( lt_typed_table_component )
+        p_table_kind = cl_abap_tabledescr=>tablekind_std
+    ).
+
+    CREATE DATA er_typed_charc_value TYPE HANDLE lo_table_type_description.
+
+    " create mapping table
+    lt_mapping_table_component = VALUE #( (
+      name = 'KEY'
+      type = CAST #( cl_abap_datadescr=>describe_by_name( 'SYSUUID_X' ) )
+    ) (
+      name = 'VALUE'
+      type = CAST #( lo_charc_value_type  )
+    ) (
+      name = 'ORIGINAL_VALUE'
+      type = CAST #( cl_abap_datadescr=>describe_by_name( 'ATP_BOP_SORT_ATTRIBUTE_VALUE' )  )
+    ) ).
+
+
+    DATA(lo_mapping_struc_desc) = cl_abap_structdescr=>get( p_components = lt_mapping_table_component ).
+
+    DATA(lo_mapping_tab_desc) = cl_abap_tabledescr=>get(
+      EXPORTING
+        p_line_type  = lo_mapping_struc_desc
+        p_key        = CORRESPONDING #( lt_mapping_table_component )
+        p_table_kind = cl_abap_tabledescr=>tablekind_std
+    ).
+
+
+    CREATE DATA er_mapping_typed_to_original TYPE HANDLE lo_mapping_tab_desc.
+
+  ENDMETHOD.
+
+
+  METHOD check_data_existence.
+
+* =================================================================================================================
+* = SUMMARY
+*   Check if the given characteristic values exist and, if so, check if they are blocked.
+*   The check uses metadata from the field catalog to determine the data type and against
+*   which table the existence and blocking status should be checked.
+*
+*
+* = ASSUMPTIONS
+*   - Callers don't need to pass unique keys, this implementation also works for duplicate keys.
+*     This allows the caller to use the same key for all values of a logical combination of characteristic values
+*     that don't have one key per characteristic value.
+
+* = ALGORITHM IDEA:
+*   1. Convert the "generically" C256 typed characteristic values to "specifcally" typed values, such as KUNNR (C10).
+*      Otherwise SELECT from corresponding database might not work or return wrong results.
+*   2. SELECT the blocking status from the matching database table for all characteristic values. Each value that
+*      is not contained in the SELECT result is considered to be non-existent.
+*   3. Merge the existence/blocking information back into "generically" C256 typed characteristic values.
+*
+* =================================================================================================================
+
+    DATA: lr_typed_charc_value         TYPE REF TO data,
+          lr_mapping_typed_to_original TYPE REF TO data,
+          lr_blocking_information      TYPE REF TO data.
+
+    FIELD-SYMBOLS: <lt_typed_charc_value>         TYPE STANDARD TABLE,
+                   <lt_mapping_typed_to_original> TYPE STANDARD TABLE,
+                   <ls_typed_charc_value>         TYPE any,
+                   <ls_mapping_typed_to_original> TYPE any,
+                   <lt_blocking_information>      TYPE ANY TABLE,
+                   <lv_key>                       TYPE sysuuid_x,
+                   <lv_value>                     TYPE any,
+                   <lv_original_value>            TYPE atp_bop_sort_attribute_value,
+                   <lv_sign>                      TYPE char1,
+                   <lv_option>                    TYPE char2,
+                   <lv_low>                       TYPE any.
+
+
+
+
+
+    et_charc_value_w_existence = CORRESPONDING #( it_characteristic_value ).
+
+
+    LOOP AT it_characteristic_value ASSIGNING FIELD-SYMBOL(<ls_group>)
+                                    GROUP BY <ls_group>-characteristic ASSIGNING FIELD-SYMBOL(<lv_characteristic>).
+
+
+      READ TABLE mt_characteristic WITH KEY characteristicuuid = <lv_characteristic>
+                                   ASSIGNING FIELD-SYMBOL(<ls_characteristic>).
+
+      DATA(lv_characteristic_exists) = xsdbool( sy-subrc = 0 ).
+
+      DATA(lv_check_required_but_cant_do) = xsdbool(
+             lv_characteristic_exists                      =  abap_true
+        AND <ls_characteristic>-arecharcvaluessdpprelevant =  abap_true
+        AND <ls_characteristic>-prodalloccharcvaluehelp    IS INITIAL
+      ).
+
+      IF lv_check_required_but_cant_do = abap_true.
+        " REMARK: At this point of the method, all values are considered to be non-existing.
+        "         In this case where we would require to check the value existence but can't due to missing data,
+        "         we can skip further processing and thus will consider all affected values as non-existing.
+        CONTINUE.
+      ENDIF.
+
+      IF lv_characteristic_exists = abap_false OR <ls_characteristic>-arecharcvaluessdpprelevant = abap_false.
+        MODIFY et_charc_value_w_existence FROM VALUE #( value_exists = abap_true )
+                                          TRANSPORTING value_exists
+                                          WHERE characteristic = <lv_characteristic> AND value_exists = abap_false.
+        CONTINUE.
+      ENDIF.
+
+
+
+* ===================================================================================================================
+      me->build_typed_charc_value_table(
+        EXPORTING
+          iv_characteristic_uuid = <ls_characteristic>-characteristicuuid
+        IMPORTING
+          er_typed_charc_value   = lr_typed_charc_value
+          er_mapping_typed_to_original = lr_mapping_typed_to_original
+      ).
+
+      ASSIGN lr_typed_charc_value->* TO <lt_typed_charc_value>.
+      ASSIGN lr_mapping_typed_to_original->* TO <lt_mapping_typed_to_original>.
+
+
+* = Move the values from the untyped table to the typed table. ======================================================
+      LOOP AT GROUP <lv_characteristic> ASSIGNING FIELD-SYMBOL(<ls_charc_value>).
+        APPEND INITIAL LINE TO <lt_mapping_typed_to_original> ASSIGNING <ls_mapping_typed_to_original>.
+
+        ASSIGN COMPONENT 'KEY' OF STRUCTURE <ls_mapping_typed_to_original> TO <lv_key>.
+        <lv_key> = <ls_charc_value>-key.
+
+        ASSIGN COMPONENT 'VALUE' OF STRUCTURE <ls_mapping_typed_to_original> TO <lv_value>.
+        TRY.
+            me->convert_untyped_value_to_typed(
+              EXPORTING
+                iv_characteristic_uuid = <ls_characteristic>-characteristicuuid
+                iv_untyped_charc_value = <ls_charc_value>-value
+              IMPORTING
+                ev_typed_charc_value   = <lv_value>
+            ).
+          CATCH cx_sy_conversion_error.
+            " If the untyped value cannot be converted without a data loss, that value can't exist in the (typed) check table.
+            " Thus, we don't need to process that value further.
+            CONTINUE.
+        ENDTRY.
+
+        ASSIGN COMPONENT 'ORIGINAL_VALUE' OF STRUCTURE <ls_mapping_typed_to_original> TO <lv_original_value>.
+        <lv_original_value> = <ls_charc_value>-value.
+
+        APPEND INITIAL LINE TO <lt_typed_charc_value> ASSIGNING <ls_typed_charc_value>.
+
+        ASSIGN COMPONENT 'SIGN' OF STRUCTURE <ls_typed_charc_value> TO <lv_sign>.
+        <lv_sign> = 'I'.
+
+        ASSIGN COMPONENT 'OPTION' OF STRUCTURE <ls_typed_charc_value> TO <lv_option>.
+        <lv_option> = 'EQ'.
+
+        ASSIGN COMPONENT 'LOW' OF STRUCTURE <ls_typed_charc_value> TO <lv_low>.
+        <lv_low> = <lv_value>.
+
+
+      ENDLOOP.
+
+      " REMARK: We reuse those field symbols later and should therefor ensure that they don't reference the wrong data.
+      UNASSIGN: <lv_key>, <lv_value>, <lv_original_value>, <lv_low>.
+
+
+* ===================================================================================================================
+      me->select_blocking_information(
+        EXPORTING
+          iv_characteristic_uuid  = <ls_characteristic>-characteristicuuid
+          it_typed_charc_value    = <lt_typed_charc_value>
+        IMPORTING
+          er_blocking_information = lr_blocking_information
+      ).
+
+      ASSIGN lr_blocking_information->* TO <lt_blocking_information>.
+
+
+
+* = Bring the blocking information back into the characteristic value table =========================================
+      LOOP AT <lt_blocking_information> ASSIGNING FIELD-SYMBOL(<ls_blocking_information>).
+        ASSIGN COMPONENT 'VALUE'         OF STRUCTURE <ls_blocking_information> TO <lv_value>.
+        ASSIGN COMPONENT 'VALUE_BLOCKED' OF STRUCTURE <ls_blocking_information> TO FIELD-SYMBOL(<lv_value_blocked>).
+
+        READ TABLE <lt_mapping_typed_to_original> ASSIGNING <ls_mapping_typed_to_original>
+                                          WITH KEY ('VALUE') = <lv_value>.
+        ASSERT sy-subrc = 0.
+
+        ASSIGN COMPONENT 'ORIGINAL_VALUE' OF STRUCTURE <ls_mapping_typed_to_original> TO <lv_original_value>.
+
+
+
+        LOOP AT et_charc_value_w_existence ASSIGNING FIELD-SYMBOL(<ls_charc_value_w_existence>)
+                                           WHERE characteristic = <lv_characteristic> AND value = <lv_original_value>.
+
+          <ls_charc_value_w_existence>-value_exists  = abap_true.
+          <ls_charc_value_w_existence>-value_blocked = <lv_value_blocked>.
+
+        ENDLOOP.
+
+      ENDLOOP.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    mt_characteristic = it_characteristic.
+
+  ENDMETHOD.
+
+
+  METHOD convert_untyped_value_to_typed.
+
+    DATA: lo_charc_value_type TYPE REF TO cl_abap_elemdescr,
+          ls_ddic_field       TYPE dfies.
+
+
+    READ TABLE mt_characteristic WITH TABLE KEY characteristicuuid = iv_characteristic_uuid
+                                 ASSIGNING FIELD-SYMBOL(<ls_characteristic>).
+    ASSERT sy-subrc = 0.
+
+
+    lo_charc_value_type ?= cl_abap_datadescr=>describe_by_name( <ls_characteristic>-abapdataelement ).
+    ls_ddic_field = lo_charc_value_type->get_ddic_field( ).
+
+
+    ev_typed_charc_value = EXACT #( iv_untyped_charc_value ).
+
+
+
+
+    IF ls_ddic_field IS INITIAL OR ls_ddic_field-lowercase = abap_false.
+      TRANSLATE ev_typed_charc_value TO UPPER CASE.
+    ENDIF.
+
+
+    IF ls_ddic_field-convexit IS NOT INITIAL.
+      DATA(lv_function) = 'CONVERSION_EXIT_' && ls_ddic_field-convexit && '_INPUT'.
+      CALL FUNCTION lv_function
+        EXPORTING
+          input  = ev_typed_charc_value
+        IMPORTING
+          output = ev_typed_charc_value.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD select_blocking_information.
+
+    DATA: lo_charc_value_type      TYPE REF TO cl_abap_elemdescr,
+          lo_fieldcatalog_db       TYPE REF TO if_atp_fieldcatalog_db,
+          lt_typed_table_component TYPE abap_component_tab.
+
+    FIELD-SYMBOLS: <lv_typed_charc_value>    TYPE any,
+                   <lt_blocking_information> TYPE ANY TABLE.
+
+
+    READ TABLE mt_characteristic WITH TABLE KEY characteristicuuid = iv_characteristic_uuid
+                                 ASSIGNING FIELD-SYMBOL(<ls_characteristic>).
+    ASSERT sy-subrc = 0.
+
+
+
+
+    lo_charc_value_type ?= cl_abap_datadescr=>describe_by_name( <ls_characteristic>-abapdataelement ).
+
+    lt_typed_table_component = VALUE #( (
+      name = 'VALUE'
+      type = CAST #( lo_charc_value_type  )
+    ) (
+      name = 'VALUE_BLOCKED'
+      type = CAST #( cl_abap_datadescr=>describe_by_name( 'ABAP_BOOL' ) )
+    ) ).
+
+    DATA(lo_structure_description) = cl_abap_structdescr=>get( p_components = lt_typed_table_component ).
+
+    DATA(lo_table_type_description) = cl_abap_tabledescr=>get(
+      EXPORTING
+        p_line_type  = lo_structure_description
+        p_key        = CORRESPONDING #( lt_typed_table_component )
+        p_table_kind = cl_abap_tabledescr=>tablekind_std
+    ).
+
+
+
+    CREATE DATA er_blocking_information TYPE HANDLE lo_table_type_description.
+    ASSIGN er_blocking_information->* TO <lt_blocking_information>.
+
+
+
+
+    DATA(lv_select_clause) = <ls_characteristic>-prodalloccharcvalhelptblfield                       && | AS value |                                              ##NO_TEXT.
+    IF <ls_characteristic>-prodalloccharcvalblockfield IS NOT INITIAL.
+      lv_select_clause = lv_select_clause && |, | && <ls_characteristic>-prodalloccharcvalblockfield && | AS value_blocked|                                       ##NO_TEXT.
+    ENDIF.
+
+    DATA(lv_from_clause)   = <ls_characteristic>-prodalloccharcvaluehelp && | WITH PRIVILEGED ACCESS|                                                             ##NO_TEXT.
+
+*    DATA(lv_where_clause)  = <ls_characteristic>-prodalloccharcvalhelptblfield && | = @it_typed_charc_value-value|                                                ##NO_TEXT.
+    DATA(lv_where_clause)  = <ls_characteristic>-prodalloccharcvalhelptblfield && | in @it_typed_charc_value|                                                ##NO_TEXT.
+    " in case of group values, make sure only to show values of THIS group
+    IF <ls_characteristic>-prodalloccharcvaluehelp = |I_ALLOCCHARCCTLGVALGRPVAL|                                                                             ##NO_TEXT.
+      lo_fieldcatalog_db = NEW cl_atp_fieldcatalog_db( ).
+
+      lo_fieldcatalog_db->read_catalog_base_paths(
+        EXPORTING
+          it_catalog_path_uuid = VALUE #( ( charc_path_uuid = <ls_characteristic>-characteristicuuid ) )
+        IMPORTING
+          et_catalog_path      = DATA(lt_base_catalog_path)
+      ).
+      lv_where_clause      = lv_where_clause && | AND ( I_ALLOCCHARCCTLGVALGRPVAL~prodalloccharcctlgpathuuid = '| && <ls_characteristic>-characteristicuuid && |'|  ##NO_TEXT.
+      LOOP AT lt_base_catalog_path ASSIGNING FIELD-SYMBOL(<ls_base_catalog_path>).
+        lv_where_clause    = lv_where_clause && | OR I_ALLOCCHARCCTLGVALGRPVAL~prodalloccharcctlgpathuuid = '| && <ls_base_catalog_path>-prodalloccharcctlgpathuuid && |'|  ##NO_TEXT.
+      ENDLOOP.
+      lv_where_clause      = lv_where_clause && | )|                                                                                                                  ##NO_TEXT.
+    ENDIF.
+
+
+
+    " REMARK: Ensure that our dynamically constructed SQL statement will work safely and doesn't allow injections.
+    "         This, admittedly, doesn't improve security, but the syntax checks require that and the content from which
+    "         the clauses are built are controlled by SAP and cannot be influenced by end users.
+    TRY.
+        "build whitelist
+        DATA lv_whitelist TYPE string.
+        lv_whitelist = lv_select_clause.
+        lv_select_clause = cl_abap_dyn_prg=>check_whitelist_str(
+          EXPORTING
+            val       = lv_select_clause
+            whitelist = lv_whitelist
+        ).
+
+        lv_whitelist = lv_from_clause.
+        lv_from_clause = cl_abap_dyn_prg=>check_whitelist_str(
+          EXPORTING
+            val       = lv_from_clause
+            whitelist = lv_whitelist
+        ).
+
+        lv_whitelist = lv_where_clause.
+        lv_where_clause = cl_abap_dyn_prg=>check_whitelist_str(
+          EXPORTING
+            val       = lv_where_clause
+            whitelist = lv_whitelist
+        ).
+      CATCH cx_abap_not_in_whitelist cx_abap_invalid_value.
+        "TODO: HANDLE!
+    ENDTRY.
+
+    CHECK it_typed_charc_value IS NOT INITIAL.
+
+    SELECT (lv_select_clause)
+      FROM (lv_from_clause)
+*      FOR ALL ENTRIES IN @it_typed_charc_value
+      WHERE (lv_where_clause)
+      INTO CORRESPONDING FIELDS OF TABLE @<lt_blocking_information>.
+
+  ENDMETHOD.
+ENDCLASS.

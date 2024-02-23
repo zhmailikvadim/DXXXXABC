@@ -1,0 +1,200 @@
+" -----------------------------------------------------------------------
+"  R E V I S I O N   H I S T O R Y                                     -
+" -----------------------------------------------------------------------
+" AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+"              |            | TRANSPORT REQUESTS                       -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 30.04.2023 | 20690     : Feature - ATP push from S/4  -
+"              |            | DS4K950897                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 04.07.2023 | 22968     : Feature - ATP push from S/4  -
+"              |            | DS4K957400                               -
+" -----------------------------------------------------------------------
+" NAGARSOW     | 30.08.2023 | 22968     : Feature - ATP push from S/4  -
+"              |            | DS4K957400                               -
+" -----------------------------------------------------------------------
+"  ZHMAIVAD    | 20.10.2023 | 22968     : Feature - ATP push from S/4  -
+"              |            | DS4K957400                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 05.01.2024 | 27294     : Feature - GAH - Performance  -
+"              |            | DS4K972552                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 20.02.2024 | 28986     : Feature - ATP push from S/4  -
+"              |            | DS4K979378                                -
+" -----------------------------------------------------------------------
+
+FUNCTION zsd_fm_aif_map_atp_to_kafka
+  IMPORTING
+    raw_struct TYPE zsd_s_aif_atp_kafka_keys_t
+    raw_line TYPE any ##ADT_PARAMETER_UNTYPED
+    smap TYPE /aif/t_smap
+    intrec TYPE /aif/t_intrec
+    sending_system TYPE /aif/aif_business_system_key OPTIONAL
+  CHANGING
+    out_struct TYPE zsd_s_aif_atp_kafka_t
+    dest_line TYPE any ##ADT_PARAMETER_UNTYPED
+    dest_table TYPE any ##ADT_PARAMETER_UNTYPED
+    append_flag TYPE c
+  TABLES
+    return_tab LIKE bapiret2 OPTIONAL ##FM_NO_TYPE.
+
+
+
+
+  TYPES ltyp_param TYPE STANDARD TABLE OF d_detmavailycharcvaluep.
+  TYPES: BEGIN OF ltyp_topic_name,
+           topic_name TYPE zsd_kafka_topic_name,
+         END OF ltyp_topic_name.
+
+  CONSTANTS lc_available_max_quantity TYPE quan15 VALUE '9999999999.999'.
+  CONSTANTS lc_atpsync                TYPE string VALUE 'ATPSync'.
+  CONSTANTS lc_atpsync_create         TYPE string VALUE 'ATPSync_Create'.
+  CONSTANTS lc_supchange              TYPE string VALUE 'SUPChange'.
+  CONSTANTS lc_supchanges_create      TYPE string VALUE 'SUPChanges_Create'.
+
+  DATA lt_topic_name TYPE TABLE OF ltyp_topic_name.
+  DATA ls_msg        LIKE LINE OF out_struct-messages.
+  DATA ls_payload    TYPE zsd_s_aif_atp_kafka_payload_t.
+  DATA lt_param      TYPE ltyp_param.
+
+  TRY.
+      zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '024F85009E261EEDBC92D68B8FD5E0D2'
+                                              iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-data_elements
+                                    IMPORTING et_table        = lt_topic_name ).
+    CATCH zcx_pe_hm.
+      RETURN.
+  ENDTRY.
+  TRY.
+      DATA(ls_kafka_topic) = lt_topic_name[ 1 ].
+    CATCH cx_sy_itab_line_not_found.
+      CLEAR ls_kafka_topic.
+  ENDTRY.
+
+  SELECT * FROM zsd_i_atp_relevantnetchange
+    INTO TABLE @DATA(lt_atp_relevantnetchange)
+    FOR ALL ENTRIES IN @raw_struct-messages
+    WHERE plant    = @raw_struct-messages-plant
+      AND material = @raw_struct-messages-material.
+
+  IF sy-subrc = 0.
+    SORT lt_atp_relevantnetchange BY material
+                                     plant
+                                     distributionchannel DESCENDING
+                                     checkingrule.
+
+    LOOP AT raw_struct-messages ASSIGNING FIELD-SYMBOL(<ls_raw_struct>).
+
+      IF <ls_raw_struct>-distributionchannel IS NOT INITIAL.
+        DATA(ls_atp) = VALUE #( lt_atp_relevantnetchange[ plant               = <ls_raw_struct>-plant
+                                                          material            = <ls_raw_struct>-material
+                                                          supflag             = <ls_raw_struct>-supflag
+                                                          distributionchannel = <ls_raw_struct>-distributionchannel ]
+                                OPTIONAL ).
+      ELSE.
+        ls_atp = VALUE #( lt_atp_relevantnetchange[ plant    = <ls_raw_struct>-plant
+                                                    material = <ls_raw_struct>-material
+                                                    supflag  = <ls_raw_struct>-supflag ] OPTIONAL ).
+        CLEAR ls_atp-distributionchannel.
+      ENDIF.
+      ls_atp-checkingrule = <ls_raw_struct>-checkingrule.
+
+      FINAL(lv_timestamp) = CONV string( utclong_current( ) ).
+      FINAL(lv_current_timestamp) = |{ lv_timestamp(10) }T{ lv_timestamp+11(13) }Z|.
+      CLEAR ls_msg.
+      ls_msg-topic         = ls_kafka_topic. "'csd_fulfilment.s4hana.event.atp_netchanges' ##NO_TEXT.
+      ls_msg-key-event_key = |{ condense( val = |{ ls_atp-material }| ) }_{ ls_atp-plant }_{
+                               COND vtweg( WHEN ls_atp-distributionchannel IS INITIAL
+                                           THEN '0'
+                                           ELSE ls_atp-distributionchannel ) }|.
+
+      TRY.
+          ls_msg-value-metadata-event_id = cl_system_uuid=>create_uuid_c32_static( ).
+        CATCH cx_uuid_error.
+          MESSAGE e120(zsd_aif).
+      ENDTRY.
+      ls_msg-value-metadata-event_key     = ls_msg-key-event_key.
+      ls_msg-value-metadata-event_time    = lv_current_timestamp.
+      ls_msg-value-metadata-event_version = '1'.
+
+      ls_payload = CORRESPONDING #( BASE ( VALUE #( start_time = lv_current_timestamp  ) )
+                                     ls_atp MAPPING material_number = material
+                                                    parent_item = parentid
+                                                    sub_characteristic = subcharacteristic
+                                                    plant = plant
+                                                    distribution_channel = distributionchannel
+                                                    unit = baseunit
+                                                    supflag = supflag
+                                                    ean_upc_code = eanupccode ).
+      ls_payload-plant_location = CORRESPONDING #( ls_atp MAPPING code = countrycode
+                                                                  region = countrytext ).
+      IF ls_atp-supflag = abap_true.
+        ls_msg-key-event_name = lc_supchange.
+        ls_msg-value-metadata-event_name = lc_supchanges_create.
+        ls_msg-value-metadata-event_key  = ls_msg-key-event_key.
+        ls_msg-value-payload = ls_payload.
+        CLEAR ls_msg-value-payload-distribution_channel.
+        ls_atp-supflag = abap_false.
+      ELSE.
+        ls_msg-key-event_name = lc_atpsync.
+        ls_msg-value-metadata-event_name = lc_atpsync_create.
+      ENDIF.
+
+      IF ls_atp-distributionchannel <> ''.
+        lt_param = VALUE #( ( charccatalogcharacteristicname = 'SD_I_DP-DELIVERYPRIORITY'
+                              charccatalogcharcvalue         = '#' )
+                            ( charccatalogcharacteristicname = 'SD-ZZ1_ZSUP_VTWEG_SDH'
+                              charccatalogcharcvalue         = ls_atp-distributionchannel ) ).
+      ENDIF.
+
+      TRY.
+          MODIFY ENTITY a_atprlvtproductmrparea
+                 EXECUTE detmavailabilitytimeseries
+                 FROM VALUE #( ( %cid                                                  = '1'
+                                 %key-mrparea                                          = CONV #( ls_atp-plant )
+                                 %key-product                                          = ls_atp-material
+                                 %param-_documentattributes-atprelevantdocumentpurpose = 'SLS'
+                                 %param-atpcheckingrule                                = ls_atp-checkingrule
+                                 %param-_documentattributes-_characteristics           = VALUE #(
+                                     FOR ls_param IN lt_param
+                                     ( charccatalogcharacteristicname = ls_param-charccatalogcharacteristicname
+                                       charccatalogcharcvalue         = ls_param-charccatalogcharcvalue ) ) ) )
+                 RESULT DATA(lt_result_from_action).
+
+          LOOP AT lt_result_from_action ASSIGNING FIELD-SYMBOL(<ls_result_from_action>). "#EC CI_NESTED
+            IF <ls_result_from_action>-%param-availablequantityinbaseunit = lc_available_max_quantity.
+              <ls_result_from_action>-%param-availablequantityinbaseunit = floor(
+                  <ls_result_from_action>-%param-availablequantityinbaseunit ).
+            ENDIF.
+            APPEND VALUE #(
+                quantity   = <ls_result_from_action>-%param-availablequantityinbaseunit
+                time_zone  = <ls_result_from_action>-%param-prodavailyperdendtimezone
+                start_time = |{ <ls_result_from_action>-%param-prodavailyperdstrtutcdtetme TIMESTAMP = ISO }Z|
+                end_time   = |{ <ls_result_from_action>-%param-prodavailyperdendutcdtetme TIMESTAMP = ISO }Z| )
+                   TO ls_payload-value.
+          ENDLOOP.
+
+          ls_msg-value-payload = ls_payload.
+          INSERT ls_msg INTO TABLE out_struct-messages.
+          CLEAR: ls_msg,
+                 lt_param.
+        CATCH cx_atp_info_api_fail INTO FINAL(lo_exc_api).
+          CALL FUNCTION 'RS_EXCEPTION_TO_BAPIRET2'
+            EXPORTING
+              i_r_exception = lo_exc_api
+            CHANGING
+              c_t_bapiret2  = return_tab[].
+      ENDTRY.
+    ENDLOOP.
+  ENDIF.
+
+  IF out_struct-messages IS INITIAL.
+    MESSAGE e095(/aif/mes) INTO FINAL(lv_dummy1) ##NEEDED.
+    CALL FUNCTION '/AIF/UTIL_ADD_MSG'
+      EXPORTING
+        msgty      = 'E'
+        msgid      = '/AIF/MES'
+        msgno      = '095'
+      TABLES
+        return_tab = return_tab[].
+  ENDIF.
+ENDFUNCTION.

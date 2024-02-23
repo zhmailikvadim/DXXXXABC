@@ -1,0 +1,499 @@
+class ZCL_SD_FACTORY_CALENDAR_KAFKA definition
+  public
+  final
+  create public .
+
+public section.
+
+  types:
+    gtyp_range_plant       TYPE RANGE OF i_plant-plant . "t001w-werks .
+  types:
+    gtyp_range_calendar_id TYPE RANGE OF tfacd-ident .
+  types:
+    gtyp_range_date        TYPE RANGE OF datum .
+  types:
+    gtyp_range_spras       TYPE RANGE OF spras .
+
+  data:
+    mt_kafka_factory_calendar TYPE TABLE OF zsd_s_aif_kafka_factory_calend .
+  data MT_DB_DATA type ZSD_TT_FACTORY_CLND_FLAT_STRUC .
+  constants MC_OBJ_NAME type BALOBJ_D value 'Z_SD_FACT_CAL_LOG' ##NO_TEXT.
+  constants MC_SUBOBJ type BALSUBOBJ value 'Z_SD_FCT_CAL' ##NO_TEXT.
+  class-data GIF_BAL_LOG type ref to IF_BALI_LOG .
+  data MT_DB_DATA_TMP type ZSD_TT_FACTORY_CLND_FLAT_STRUC .
+
+  methods SEND_TO_KAFKA
+    importing
+      !IT_RANGE_PLANT type GTYP_RANGE_PLANT optional
+      !IT_RANGE_CALENDAR_ID type GTYP_RANGE_CALENDAR_ID optional
+      !IT_RANGE_DATE type GTYP_RANGE_DATE optional
+      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional .
+  methods GET_DB_DATA
+    importing
+      !IT_RANGE_PLANT type GTYP_RANGE_PLANT optional
+      !IT_RANGE_CALENDAR_ID type GTYP_RANGE_CALENDAR_ID optional
+      !IT_RANGE_DATE type GTYP_RANGE_DATE optional
+      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional .
+  methods GET_PAYLOAD .
+  class-methods VALIDATIONS
+    importing
+      !IT_RANGE_PLANT type GTYP_RANGE_PLANT optional
+      !IT_RANGE_CALENDAR_ID type GTYP_RANGE_CALENDAR_ID optional
+      !IT_RANGE_DATE type GTYP_RANGE_DATE optional
+      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional .
+  class-methods CREATE_LOG
+    returning
+      value(RV_SUCCESS) type ABAP_BOOLEAN .
+  class-methods ADD_MESSAGE
+    importing
+      !IV_TYPE type SYMSGTY
+      !IV_MESSAGE type CHAR200 .
+  class-methods SAVE_LOG .
+  class-methods CREATE_LOG_MESSAGE
+    importing
+      !IV_TYPE type SYMSGTY
+      !IV_MESSAGE type CHAR200 .
+  methods GET_DB_DATA_CALENDAR_ID
+    importing
+      !IT_RANGE_PLANT type GTYP_RANGE_PLANT optional
+      !IT_RANGE_CALENDAR_ID type GTYP_RANGE_CALENDAR_ID optional
+      !IT_RANGE_DATE type GTYP_RANGE_DATE optional
+      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional
+    exporting
+      !EV_ID_NOT_FOUND type ABAP_BOOLEAN .
+private section.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
+
+
+  METHOD send_to_kafka.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHUTLGIO     | 03.02.2023 | 16268     : Factory Calendar Replication *
+*              |            | DS4K938254                               *
+*----------------------------------------------------------------------*
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+    get_db_data( it_range_calendar_id = it_range_calendar_id
+           it_range_plant = it_range_plant
+           it_range_date = it_range_date
+           it_range_spras = it_range_spras ).
+
+    get_payload(  ).
+
+    LOOP AT mt_kafka_factory_calendar ASSIGNING FIELD-SYMBOL(<ls_kafka_factory_calendar>).
+      TRY.
+          /aif/cl_enabler_xml=>transfer_to_aif( <ls_kafka_factory_calendar> ).
+
+        CATCH cx_root INTO DATA(lo_cx) ##CATCH_ALL.
+          MESSAGE lo_cx->get_longtext( ) TYPE 'I'.
+      ENDTRY.
+    ENDLOOP.
+
+    MESSAGE s002(zsd_fact_cal_replica).
+  ENDMETHOD.
+
+
+  METHOD: get_db_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHUTLGIO     | 03.02.2023 | 16268     : Factory Calendar Replication *
+*              |            | DS4K938254                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 28.04.2023 | 20812     : Factory Calendar Replication *
+*              |            | DS4K951191                               *
+*----------------------------------------------------------------------*
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+
+    DATA : lv_err_msg      TYPE char200,
+           lv_id_not_found TYPE abap_boolean.
+
+    IF it_range_plant[] IS NOT INITIAL.
+
+      SELECT DISTINCT       ##TOO_MANY_ITAB_FIELDS
+          i_plant~plant                     AS plantname,
+          I_FactoryCalendar~FactoryCalendar AS factorycal,
+          ValidityStartYear                 AS fromyear,
+          ValidityEndYear         AS toyear,
+          MondayIsWorkingDay      AS monworkday,
+          TuesdayIsWorkingDay     AS tueworkday,
+          WednesdayIsWorkingDay   AS wedworkday,
+          ThursdayIsWorkingDay    AS thrsworkday,
+          FridayIsWorkingDay      AS friworkday,
+          SaturdayIsWorkingDay    AS satworkday,
+          SundayIsWorkingDay      AS sunworkday,
+          HolidayIsWorkingDay     AS publicholiday,
+          PublicHolidayCalendar   AS holidaycal
+        FROM I_FactoryCalendar
+          LEFT JOIN i_plant ON i_plant~factorycalendar = I_FactoryCalendar~FactoryCalendar
+        WHERE
+          plant IN @it_range_plant
+        ORDER BY plant, I_FactoryCalendar~FactoryCalendar
+        INTO CORRESPONDING FIELDS OF TABLE @mt_db_data_tmp.
+      IF sy-subrc <> 0.
+        DATA(lv_plant_not_found) = abap_true.
+      ELSE.
+        SORT mt_db_data_tmp BY plantname factorycal.
+        DELETE ADJACENT DUPLICATES FROM  mt_db_data_tmp COMPARING
+                        plantname factorycal.
+        SELECT i_plant~plant AS plantname,         "#EC CI_NO_TRANSFORM
+               I_FactoryCalendar~FactoryCalendar AS factorycal,
+               I_PublHolidayCalHolidayDate~PublicHolidayDate,
+               I_PublicHolidayCodeText~PublicHolidayName AS publicholiday_text
+          FROM I_FactoryCalendar
+        LEFT JOIN i_plant ON i_plant~factorycalendar = I_FactoryCalendar~FactoryCalendar
+        LEFT JOIN I_PublHolidayCalHolidayDate
+             ON I_FactoryCalendar~PublicHolidayCalendar = I_PublHolidayCalHolidayDate~PublicHolidayCalendar
+        LEFT JOIN I_PublicHolidayCodeText
+             ON I_PublHolidayCalHolidayDate~PublicHolidayCode  = I_PublicHolidayCodeText~PublicHolidayCode "  "#EC CI_BUFFJOIN
+       FOR ALL ENTRIES IN @mt_db_data_tmp
+        WHERE plant = @mt_db_data_tmp-plantname AND
+              I_PublHolidayCalHolidayDate~PublicHolidayDate IN @it_range_date AND
+             ( I_PublicHolidayCodeText~language IN @it_range_spras OR I_PublicHolidayCodeText~language IS NULL )
+          INTO TABLE @DATA(lt_holiday).
+        IF sy-subrc NE 0.
+          LOOP AT mt_db_data_tmp ASSIGNING FIELD-SYMBOL(<ls_db_data_tmp>).
+            MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
+
+            create_log_message( iv_type    = 'E'
+                                iv_message = lv_err_msg ).
+            save_log( ).
+            CLEAR: lv_err_msg.
+
+            APPEND <ls_db_data_tmp> TO mt_db_data.
+          ENDLOOP.
+        ELSE.
+          LOOP AT lt_holiday ASSIGNING FIELD-SYMBOL(<ls_holiday>).
+            READ TABLE mt_db_data_tmp ASSIGNING <ls_db_data_tmp>
+                       WITH KEY plantname  = <ls_holiday>-plantname
+                                factorycal = <ls_holiday>-factorycal.
+            IF sy-subrc EQ 0.
+              <ls_db_data_tmp>-holiday_date       = <ls_holiday>-publicholidaydate.
+              <ls_db_data_tmp>-publicholiday_text = <ls_holiday>-publicholiday_text.
+              APPEND <ls_db_data_tmp> TO mt_db_data.
+            ENDIF.
+          ENDLOOP.
+
+          LOOP AT mt_db_data_tmp ASSIGNING <ls_db_data_tmp> WHERE holidaycal IS INITIAL.
+
+            MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
+            create_log_message( iv_type    = 'E'
+                                iv_message = lv_err_msg ).
+            save_log( ).
+            CLEAR: lv_err_msg.
+
+            APPEND <ls_db_data_tmp> TO mt_db_data.
+          ENDLOOP.
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF it_range_calendar_id[] IS NOT INITIAL.
+      get_db_data_calendar_id( EXPORTING
+             it_range_calendar_id = it_range_calendar_id
+             it_range_plant = it_range_plant
+             it_range_date = it_range_date
+             it_range_spras = it_range_spras
+             IMPORTING ev_id_not_found = lv_id_not_found
+             ).
+    ENDIF.
+
+    IF lines( mt_db_data ) = 0 AND lv_plant_not_found = abap_true AND it_range_plant IS NOT INITIAL.
+      create_log_message( iv_type    = 'E'
+                          iv_message = TEXT-001 ).
+      save_log( ).
+      MESSAGE e001(zsd_fact_cal_replica).
+    ELSEIF lines( mt_db_data ) = 0 AND lv_id_not_found = abap_true AND it_range_calendar_id IS NOT INITIAL.
+      create_log_message( iv_type    = 'E'
+                          iv_message = TEXT-002 ).
+      save_log( ).
+      MESSAGE e003(zsd_fact_cal_replica).
+    ELSEIF lines( mt_db_data ) = 0.
+      create_log_message( iv_type    = 'E'
+                          iv_message = TEXT-003 ).
+      save_log( ).
+      MESSAGE e004(zsd_fact_cal_replica).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD: get_payload.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHUTLGIO     | 03.02.2023 | 16268     : Factory Calendar Replication *
+*              |            | DS4K938254                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 28.04.2023 | 20812     : Factory Calendar Replication *
+*              |            | DS4K951191                               *
+*----------------------------------------------------------------------*
+* BATCHVIN     | 21.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+
+    CONSTANTS lc_event_version TYPE zpe_kafka_event_version VALUE '1.0'.
+
+    DATA ls_metadata TYPE ZPE_S_KAFKA_METADATA.
+
+    TRY.
+        DATA(lt_name_topic) = zcl_pe_hm_basic=>get_table( '1178' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    LOOP AT lt_name_topic ASSIGNING FIELD-SYMBOL(<ls_topic_name>).
+      DATA(lv_topic) = <ls_topic_name>-field2 && <ls_topic_name>-field3.
+
+      LOOP AT mt_db_data ASSIGNING FIELD-SYMBOL(<ls_data>)  GROUP BY ( key_plant = <ls_data>-plantname key_id = <ls_data>-factorycal )
+                                 ASSIGNING FIELD-SYMBOL(<ls_plant_group>) ##INTO_OK . "#EC CI_NESTED
+
+        DATA(lv_event_source) = condense( syst-sysid && '_' && syst-mandt ).   " BATCHVIN
+ "   Generate GUID for Kafka Message
+        TRY.
+            DATA(lv_event_id) = cl_system_uuid=>create_uuid_c32_static( ).
+          CATCH cx_uuid_error INTO DATA(lo_uuid_exc).
+ "       No actions needed here, EVENT_ID will be generated in AIF Action later
+            MESSAGE lo_uuid_exc->get_longtext( ) TYPE 'S'.
+        ENDTRY.
+
+
+        DATA(ls_kafka_key) = VALUE zpe_s_kafka_key( event_name = <ls_topic_name>-field1
+                                                    event_source = lv_event_source      " BATCHVIN
+                                                    event_key =  |{ condense( val = |{ <ls_plant_group>-key_id }| ) }_{ <ls_plant_group>-key_plant }| ).
+
+        ls_metadata = CORRESPONDING #( ls_kafka_key ).
+
+        GET TIME STAMP FIELD DATA(lv_timestamp).
+        ls_metadata-event_time = |{ lv_timestamp TIMESTAMP = ISO }|.
+        ls_metadata-event_id      = lv_event_id.
+        ls_metadata-event_version = lc_event_version.
+        DATA(ls_kafka_data) = VALUE zsd_s_aif_kafka_factory_calend( topic = lv_topic
+                                                                    key = ls_kafka_key
+                                                                    value-metadata = ls_metadata
+                                                                     ).
+        ls_kafka_data-value-metadata-event_id = lv_event_id.     " BATCHVIN
+        ls_kafka_data-value-payload-plantname = <ls_plant_group>-key_plant.
+
+        LOOP AT GROUP <ls_plant_group> ASSIGNING FIELD-SYMBOL(<ls_plant_group_line>).
+          ls_kafka_data-value-payload-factorycalendardetails = CORRESPONDING #( <ls_plant_group_line> ) ##ENH_OK.
+          EXIT.
+        ENDLOOP.
+
+        ls_kafka_data-value-payload-factorycalendardetails-holidaycalendardetails-holidaydate =
+                            VALUE #( FOR <ls_date_line> IN GROUP <ls_plant_group> ( CORRESPONDING #( <ls_date_line>
+                                                                             MAPPING date          = holiday_date
+                                                                                     publicholiday = publicholiday_text ) ) ).
+        APPEND ls_kafka_data TO mt_kafka_factory_calendar.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD: validations.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CHUTLGIO     | 03.02.2023 | 16268     : Factory Calendar Replication *
+*              |            | DS4K938254                               *
+*----------------------------------------------------------------------*
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+
+    IF it_range_plant[] IS INITIAL AND it_range_calendar_id[] IS INITIAL.
+      DATA(lo_fact) = NEW zcl_sd_factory_calendar_kafka( ).
+      lo_fact->create_log_message( iv_type    = 'E'
+                                   iv_message = text-004 ).
+      lo_fact->save_log( ).
+      MESSAGE e000(zsd_fact_cal_replica).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD add_message.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+    CHECK gif_bal_log IS BOUND.
+    TRY.
+        gif_bal_log->add_item( item = cl_bali_free_text_setter=>create( severity = iv_type text = iv_message ) ).
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD create_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+    rv_success = abap_true.
+    TRY.
+        gif_bal_log = cl_bali_log=>create_with_header( header = cl_bali_header_setter=>create( object = mc_obj_name
+                                                       subobject = mc_subobj ) ).
+
+      CATCH cx_bali_runtime.
+        rv_success = abap_false.
+        FREE gif_bal_log.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD create_log_message.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+    create_log( ).
+    add_message( iv_type    = iv_type
+                 iv_message = iv_message ).
+    save_log( ).
+  ENDMETHOD.
+
+
+  METHOD save_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+    CHECK gif_bal_log IS BOUND.
+    TRY.
+        cl_bali_log_db=>get_instance( )->save_log( log = gif_bal_log ).
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD get_db_data_calendar_id.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
+*              |            | DS4K975156                               *
+*----------------------------------------------------------------------*
+
+    DATA : lv_err_msg TYPE char200.
+
+    SELECT DISTINCT   ##TOO_MANY_ITAB_FIELDS
+              i_plant~plant                     AS plantname,
+              I_FactoryCalendar~FactoryCalendar AS factorycal,
+              ValidityStartYear                 AS fromyear,
+              ValidityEndYear           AS toyear,
+              MondayIsWorkingDay        AS monworkday,
+              TuesdayIsWorkingDay       AS tueworkday,
+              WednesdayIsWorkingDay     AS wedworkday,
+              ThursdayIsWorkingDay      AS thrsworkday,
+              FridayIsWorkingDay        AS friworkday,
+              SaturdayIsWorkingDay      AS satworkday,
+              SundayIsWorkingDay        AS sunworkday,
+              HolidayIsWorkingDay       AS publicholiday,
+              PublicHolidayCalendar     AS holidaycal
+            FROM I_FactoryCalendar
+              LEFT JOIN i_plant ON i_plant~factorycalendar = I_FactoryCalendar~FactoryCalendar
+            WHERE
+              I_FactoryCalendar~FactoryCalendar IN @it_range_calendar_id
+            ORDER BY I_FactoryCalendar~FactoryCalendar, I_FactoryCalendar~FactoryCalendar
+            INTO CORRESPONDING FIELDS OF TABLE @mt_db_data_tmp.
+    IF sy-subrc <> 0.
+      ev_id_not_found = abap_true.
+    ELSE.
+      SORT mt_db_data_tmp BY plantname factorycal.
+      DELETE ADJACENT DUPLICATES FROM  mt_db_data_tmp COMPARING
+                      plantname factorycal.
+      SELECT i_plant~plant AS plantname,           "#EC CI_NO_TRANSFORM
+             I_FactoryCalendar~FactoryCalendar AS factorycal,
+             I_PublHolidayCalHolidayDate~PublicHolidayDate,                               "thoc~datum  AS holiday_date,
+             I_PublicHolidayCodeText~PublicHolidayName AS publicholiday_text
+        FROM I_FactoryCalendar
+        LEFT JOIN i_plant ON i_plant~factorycalendar = I_FactoryCalendar~FactoryCalendar
+        LEFT JOIN I_PublHolidayCalHolidayDate
+            ON I_FactoryCalendar~PublicHolidayCalendar = I_PublHolidayCalHolidayDate~PublicHolidayCalendar
+        LEFT JOIN I_PublicHolidayCodeText
+            ON I_PublHolidayCalHolidayDate~PublicHolidayCode  = I_PublicHolidayCodeText~PublicHolidayCode "#EC CI_BUFFJOIN
+        FOR ALL ENTRIES IN @mt_db_data_tmp
+       WHERE I_FactoryCalendar~FactoryCalendar = @mt_db_data_tmp-factorycal AND
+             I_PublHolidayCalHolidayDate~PublicHolidayDate IN @it_range_date AND
+             ( I_PublicHolidayCodeText~Language IN @it_range_spras OR I_PublicHolidayCodeText~Language IS NULL )
+                INTO TABLE @DATA(lt_holiday).
+      IF sy-subrc NE 0.
+        LOOP AT mt_db_data_tmp ASSIGNING FIELD-SYMBOL(<ls_db_data_tmp>).
+          MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
+          create_log_message( iv_type    = 'E'
+                              iv_message = lv_err_msg ).
+          save_log( ).
+          CLEAR: lv_err_msg.
+
+          APPEND <ls_db_data_tmp> TO mt_db_data.
+        ENDLOOP.
+      ELSE.
+        LOOP AT lt_holiday ASSIGNING FIELD-SYMBOL(<ls_holiday>).
+          READ TABLE mt_db_data_tmp ASSIGNING <ls_db_data_tmp>
+                     WITH KEY plantname  = <ls_holiday>-plantname
+                              factorycal = <ls_holiday>-factorycal.
+          IF sy-subrc EQ 0.
+            <ls_db_data_tmp>-holiday_date       = <ls_holiday>-PublicHolidayDate.
+            <ls_db_data_tmp>-publicholiday_text = <ls_holiday>-publicholiday_text.
+            APPEND <ls_db_data_tmp> TO mt_db_data.
+          ENDIF.
+        ENDLOOP.
+
+        LOOP AT mt_db_data_tmp ASSIGNING <ls_db_data_tmp> WHERE holidaycal IS INITIAL.
+          MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
+          create_log_message( iv_type    = 'E'
+                              iv_message = lv_err_msg ).
+          save_log( ).
+          CLEAR: lv_err_msg.
+
+          APPEND <ls_db_data_tmp> TO mt_db_data.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

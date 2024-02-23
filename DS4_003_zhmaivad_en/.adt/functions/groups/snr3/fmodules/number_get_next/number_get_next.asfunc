@@ -1,0 +1,178 @@
+FUNCTION number_get_next
+  IMPORTING
+    VALUE(nr_range_nr) LIKE inri-nrrangenr
+    VALUE(object) LIKE inri-object
+    VALUE(quantity) LIKE inri-quantity DEFAULT '1'
+    VALUE(subobject) TYPE any DEFAULT space ##ADT_PARAMETER_UNTYPED
+    VALUE(toyear) LIKE inri-toyear DEFAULT '0000'
+    VALUE(ignore_buffer) TYPE any DEFAULT space ##ADT_PARAMETER_UNTYPED
+  EXPORTING
+    VALUE(number) TYPE any ##ADT_PARAMETER_UNTYPED
+    VALUE(quantity) LIKE inri-quantity
+    VALUE(returncode) LIKE inri-returncode
+  EXCEPTIONS
+    interval_not_found
+    number_range_not_intern
+    object_not_found
+    quantity_is_0
+    quantity_is_not_1
+    interval_overflow
+    buffer_overflow.
+
+
+
+
+  DATA: lv_exit(1)    TYPE c,
+        ls_nriv       TYPE nriv,
+        ls_nkparms    TYPE nkparms,
+        ls_tnro       TYPE tnro,
+        lv_trace(1)   TYPE c,
+        ls_nriv_calls TYPE nriv_calls,
+        ls_trace      TYPE cl_szn_number_range=>ty_trace.
+
+  SELECT SINGLE * FROM tnro INTO ls_tnro
+         WHERE object = object.
+* exceptions
+  IF sy-subrc <> 0.
+    MESSAGE e002 WITH object RAISING object_not_found.
+  ENDIF.
+  IF quantity = 0.
+    MESSAGE e029 RAISING quantity_is_0.
+  ENDIF.
+  IF ( ls_tnro-buffer = 'L' OR ls_tnro-buffer = 'P' OR
+       ls_tnro-buffer = 'S' ) AND quantity <> 1.
+    MESSAGE e030 RAISING quantity_is_not_1.
+  ENDIF.
+  IF ( ls_tnro-buffer = yes OR ls_tnro-buffer = 'L' OR
+       ls_tnro-buffer = 'P' OR ls_tnro-buffer = 'S' ) AND ls_tnro-noivbuffer = 0.
+*   buffersize 0 --> no buffering
+    ls_tnro-buffer = no.
+  ENDIF.
+
+* fill ls_nriv ------------------------------------------------------
+  ls_nriv-object    = object.
+  ls_nriv-subobject = subobject.
+  ls_nriv-nrrangenr = nr_range_nr.
+  ls_nriv-toyear    = toyear.
+* trace ------------------------------------------------------------
+  PERFORM write_trace_check
+          USING    ls_nriv
+          CHANGING lv_trace.
+  IF lv_trace = yes.
+    MOVE-CORRESPONDING ls_nriv TO: ls_trace,
+                                   ls_nriv_calls.
+    ls_trace-buffer          = ls_tnro-buffer.
+    ls_trace-im_quantity     = quantity.
+    ls_trace-im_toyear       = toyear.
+    ls_trace-im_ignore       = ignore_buffer.
+    ls_nriv_calls-tr_number  = ls_nriv-nrlevel.
+    ls_nriv_calls-tr_option  = '0003'.
+    PERFORM write_trace
+            USING ls_trace
+                  ls_nriv_calls.
+  ENDIF.
+* ignore buffer -->  entry in syslog --------------------------------
+  IF ignore_buffer = 'X'.
+*   no buffering
+    ls_tnro-buffer = no.
+    MOVE-CORRESPONDING ls_nriv TO ls_nkparms.
+    CLEAR ls_nkparms-par_value.
+    ls_nkparms-par_name  = 'SYS_IGNORE_BUFFER'.
+    PERFORM syslog_write
+            USING ls_nkparms
+                  '1'
+                  'IGNORE'.
+  ENDIF.
+* buffering type
+  CASE ls_tnro-buffer.
+*   no buffering or ignore buffer ----------------------------------
+    WHEN no.
+      PERFORM read_nriv
+              USING    ls_tnro
+                       lv_trace
+              CHANGING ls_nriv
+                       quantity
+                       returncode
+                       number.
+*   main memory buffering -------------------------------------------
+    WHEN yes.
+      PERFORM local_buffer
+              USING ls_nriv
+                    ls_tnro
+                    quantity
+                    returncode
+                    number
+                    lv_exit
+                    lv_trace.
+      IF lv_exit = no.
+*       no number from main memory buffer --> get number from NRIV
+        PERFORM read_nriv
+                USING    ls_tnro
+                         lv_trace
+                CHANGING ls_nriv
+                         quantity
+                         returncode
+                         number.
+      ENDIF.
+*   local buffering or local buffering with WP-Id -------------------
+    WHEN 'L' OR 'P'.
+      PERFORM local_nriv
+              USING ls_nriv
+                    ls_tnro
+                    returncode
+                    number
+                    lv_trace.
+*   parallel buffering ----------------------------------------------
+    WHEN 'S'.
+      PERFORM shadow_nriv
+              USING    ignore_buffer
+                       ls_tnro
+                       ls_nriv
+                       lv_trace
+              CHANGING returncode
+                       number.
+*     if no number could be determined try again
+      IF number IS INITIAL.
+        PERFORM shadow_nriv
+                USING    ignore_buffer
+                         ls_tnro
+                         ls_nriv
+                         lv_trace
+                CHANGING returncode
+                         number.
+      ENDIF.
+  ENDCASE.
+
+* number with prefix
+  IF ls_tnro-nrcheckascii = 'X' AND ls_nriv-subobject IS NOT INITIAL.
+    PERFORM number_with_prefix
+            USING    ls_nriv-subobject
+            CHANGING number.
+  ENDIF.
+
+* write trace
+  IF number IS INITIAL OR lv_trace = yes.
+    MOVE-CORRESPONDING ls_nriv TO: ls_trace,
+                                   ls_nriv_calls.
+    IF ignore_buffer = 'S'.
+      ls_trace-buffer = 'I'.
+    ELSE.
+      ls_trace-buffer = ls_tnro-buffer.
+    ENDIF.
+    ls_trace-ex_number       = number.
+    ls_trace-ex_quantity     = quantity.
+    ls_trace-ex_return       = returncode.
+    ls_nriv_calls-tr_number  = ls_nriv-nrlevel.
+    ls_nriv_calls-tr_option  = '0005'.
+    PERFORM write_trace
+            USING ls_trace
+                  ls_nriv_calls.
+    IF number IS INITIAL.
+      MESSAGE e070 WITH    ls_nriv-object
+                           ls_nriv-subobject
+                           ls_nriv-nrrangenr
+                           ls_nriv-toyear
+                   RAISING quantity_is_0.
+    ENDIF.
+  ENDIF.
+ENDFUNCTION.

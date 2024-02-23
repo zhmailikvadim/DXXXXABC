@@ -1,0 +1,748 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SRIKAVEN     | 12.01.2023 | 15094     : BE: Case Lot -Enhancement *
+*              |            | DS4K934909                               *
+* SRIKAVEN     | 28.04.2023 | 20611     : BE: Case Lot -Enhancement *
+*              |            | DS4K950721                               *
+*----------------------------------------------------------------------*
+CLASS lsc_zsd_i_case_lot_h DEFINITION INHERITING FROM cl_abap_behavior_saver.
+
+  PROTECTED SECTION.
+
+    METHODS save_modified REDEFINITION.
+
+ENDCLASS.
+
+CLASS lhc_caselotitem DEFINITION INHERITING FROM cl_abap_behavior_handler.
+
+  PRIVATE SECTION.
+
+    CONSTANTS:
+      BEGIN OF mc_packing_mode,
+        ssp  TYPE c LENGTH 4 VALUE 'SSP',
+        msp  TYPE c LENGTH 4 VALUE 'MSP',
+        sssp TYPE c LENGTH 4 VALUE 'SSSP',
+        mssp TYPE c LENGTH 4 VALUE 'MSSP',
+      END OF mc_packing_mode.
+
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys
+        REQUEST requested_features ##NEEDED
+        FOR caselotitem RESULT result.
+
+ENDCLASS.
+
+CLASS lhc_caselotheader DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PRIVATE SECTION.
+
+    CONSTANTS:
+      BEGIN OF mc_packing_mode,
+        ssp  TYPE c LENGTH 4 VALUE 'SSP',
+        msp  TYPE c LENGTH 4 VALUE 'MSP',
+        sssp TYPE c LENGTH 4 VALUE 'SSSP',
+        mssp TYPE c LENGTH 4 VALUE 'MSSP',
+      END OF mc_packing_mode.
+
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys
+                  REQUEST it_requested_authorizations  ##NEEDED
+                  FOR caselotheader
+      RESULT    result.
+
+    METHODS get_global_authorizations FOR GLOBAL AUTHORIZATION
+      IMPORTING REQUEST requested_authorizations FOR caselotheader RESULT result.
+
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys
+        REQUEST it_requested_features ##NEEDED
+         FOR caselotheader RESULT result.
+
+    METHODS caselotnumber FOR DETERMINE ON SAVE
+      IMPORTING keys FOR caselotheader~caselotnumber.
+
+    METHODS calnoofunits FOR MODIFY
+      IMPORTING keys FOR ACTION caselotheader~calnoofunits.
+
+    METHODS calculatenoofunits FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR caselotheader~calculatenoofunits.
+
+    METHODS manualplanning FOR MODIFY
+      IMPORTING keys FOR ACTION caselotheader~manualplanning RESULT result.
+    METHODS validatemandatory FOR VALIDATE ON SAVE
+      IMPORTING keys FOR caselotheader~validatemandatory.
+    METHODS changepackingmode FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR caselotheader~changepackingmode.
+    METHODS calculatenoofpolybags FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR caselotheader~calculatenoofpolybags.
+
+    METHODS is_create_granted
+      RETURNING VALUE(rv_create_granted) TYPE abap_bool.
+    METHODS is_update_granted
+      RETURNING VALUE(rv_update_granted) TYPE abap_bool.
+    METHODS is_delete_granted
+      RETURNING VALUE(rv_delete_granted) TYPE abap_bool.
+
+ENDCLASS.
+
+CLASS lhc_caselotheader IMPLEMENTATION.
+
+  METHOD get_instance_authorizations.
+    DATA: lv_update_granted TYPE abap_bool,
+          lv_delete_granted TYPE abap_bool.
+
+    lv_update_granted = is_update_granted(  ).
+    lv_delete_granted = is_delete_granted(  ).
+
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+        FIELDS ( caselotno )
+        WITH CORRESPONDING #( keys )
+        RESULT DATA(lt_caselots)
+      FAILED failed.
+*
+    CHECK lt_caselots IS NOT INITIAL.
+
+    LOOP AT lt_caselots INTO DATA(ls_caselot).
+      APPEND VALUE #( LET lv_upd_auth = COND #( WHEN lv_update_granted = abap_true
+                                             THEN if_abap_behv=>auth-allowed
+                                             ELSE if_abap_behv=>auth-unauthorized )
+                          lv_del_auth = COND #( WHEN lv_delete_granted = abap_true
+                                             THEN if_abap_behv=>auth-allowed
+                                             ELSE if_abap_behv=>auth-unauthorized )
+                      IN
+                       %tky = ls_caselot-%tky
+                       %update                = lv_upd_auth
+                       %action-edit           = lv_upd_auth
+
+                       %delete                = lv_del_auth
+                    ) TO result.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD get_global_authorizations.
+    IF requested_authorizations-%create EQ if_abap_behv=>mk-on.
+      IF is_create_granted( ) = abap_true.
+        result-%create = if_abap_behv=>auth-allowed.
+      ELSE.
+        result-%create = if_abap_behv=>auth-unauthorized.
+
+      ENDIF.
+    ENDIF.
+
+    "Actions are treated like update
+    IF requested_authorizations-%update                =  if_abap_behv=>mk-on OR
+       requested_authorizations-%action-edit           =  if_abap_behv=>mk-on.
+
+
+      IF  is_update_granted( ) = abap_true.
+        result-%update                =  if_abap_behv=>auth-allowed.
+        result-%action-edit           =  if_abap_behv=>auth-allowed.
+
+
+
+      ELSE.
+        result-%update                =  if_abap_behv=>auth-unauthorized.
+        result-%action-edit           =  if_abap_behv=>auth-unauthorized.
+
+
+      ENDIF.
+    ENDIF.
+
+
+    IF requested_authorizations-%delete =  if_abap_behv=>mk-on.
+      IF is_delete_granted( ) = abap_true.
+        result-%delete = if_abap_behv=>auth-allowed.
+      ELSE.
+        result-%delete = if_abap_behv=>auth-unauthorized.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD caselotnumber.
+    "This method is used to create the early number for the caselot object
+    "using the ZV_CASLOT number range object
+
+    "Ensure idempotence
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+        FIELDS ( caselotno )
+        WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_caselots).
+
+    DELETE lt_caselots WHERE caselotno IS NOT INITIAL.
+    CHECK lt_caselots IS NOT INITIAL.
+
+
+    LOOP AT lt_caselots ASSIGNING FIELD-SYMBOL(<ls_caselot>).
+
+TRY.
+    cl_numberrange_runtime=>number_get( EXPORTING
+        nr_range_nr       = '0'
+        object            = 'ZV_CASLOT'
+      IMPORTING
+            number            = data(lv_number) ).
+  CATCH cx_nr_object_not_found  cx_number_ranges INTO DATA(lo_cx).
+  DATA(lv_text) = lo_cx->get_text( ).
+  "handle exception
+  APPEND VALUE #(  %msg = new_message_with_text( text = lv_text
+                                 severity = if_abap_behv_message=>severity-error
+                               ) )
+               TO reported-caselotheader.
+ENDTRY.
+<ls_caselot>-caselotno = lv_number+10(10).
+    ENDLOOP.
+
+    MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+     ENTITY caselotheader
+       UPDATE FIELDS ( caselotno )
+       WITH CORRESPONDING #( lt_caselots )
+
+   REPORTED DATA(ls_update_reported).
+
+    "fill reported
+    reported = CORRESPONDING #( DEEP ls_update_reported ).
+
+
+  ENDMETHOD.
+
+  METHOD is_create_granted.
+    "setting the create authorization
+    rv_create_granted = abap_true.
+  ENDMETHOD.
+
+  METHOD is_update_granted.
+    "setting the update authorization
+    rv_update_granted = abap_true.
+  ENDMETHOD.
+
+  METHOD is_delete_granted.
+    "setting the delete authorization
+    rv_delete_granted = abap_true.
+  ENDMETHOD.
+
+  METHOD get_instance_features.
+    "setting the instance features based on packing mode
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+        FIELDS ( packingmode )
+        WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_caselots)
+      FAILED failed.
+
+    result = VALUE #( FOR ls_caselotheader IN lt_caselots
+                          ( %tky                   = ls_caselotheader-%tky
+                            %field-totalqtyperctn    = COND #(  WHEN ls_caselotheader-packingmode = mc_packing_mode-mssp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-msp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-sssp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-ssp
+                                                             THEN if_abap_behv=>fc-f-read_only )
+
+                            %field-numberofmpb = COND #(  WHEN ls_caselotheader-packingmode = mc_packing_mode-ssp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-msp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-sssp
+                                                             THEN if_abap_behv=>fc-f-read_only
+*                                                             WHEN ls_caselotheader-packingmode = mc_packing_mode-sssp
+                                                             WHEN ls_caselotheader-packingmode = mc_packing_mode-mssp
+                                                             THEN if_abap_behv=>fc-f-mandatory  )
+
+                             %field-numberofunits    = COND #(  WHEN ls_caselotheader-packingmode = mc_packing_mode-ssp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-sssp
+                                                                THEN if_abap_behv=>fc-f-mandatory
+                                                                WHEN ls_caselotheader-packingmode = mc_packing_mode-mssp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-msp
+*                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-sssp
+                                                             THEN if_abap_behv=>fc-f-read_only )
+
+                            %field-numberofmpbpercnt = COND #( WHEN ls_caselotheader-packingmode = mc_packing_mode-ssp
+                                                               THEN if_abap_behv=>fc-f-read_only
+                                                                WHEN ls_caselotheader-packingmode = mc_packing_mode-mssp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-msp
+                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-sssp
+                                                             THEN if_abap_behv=>fc-f-mandatory )
+*                             %field-numberofmpbpercnt = COND #( WHEN ls_caselotheader-packingmode = mc_packing_mode-ssp
+*                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-mssp
+*                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-msp
+*                                                                  OR ls_caselotheader-packingmode = mc_packing_mode-sssp
+*                                                             THEN if_abap_behv=>fc-f-mandatory )
+
+
+                            %assoc-_caselotitem        =  if_abap_behv=>fc-o-enabled
+                            %update = COND #(  WHEN ls_caselotheader-vascutoffflag IS NOT INITIAL
+                            THEN if_abap_behv=>fc-o-disabled
+                            ELSE if_abap_behv=>fc-o-enabled )
+
+                            %action-manualplanning = COND #(  WHEN ls_caselotheader-vascutoffflag IS NOT INITIAL
+                            THEN if_abap_behv=>fc-o-disabled
+                            ELSE if_abap_behv=>fc-o-enabled ) ) ) .
+
+  ENDMETHOD.
+
+  METHOD calnoofunits.
+    DATA : lv_total_quantity TYPE kbmeng.
+    "this method is used to calculate the number of units based on the total confirmed quantity from SO and Number of MPB entered by user
+
+    " Read all relevant caselot instances.
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+         ENTITY caselotheader
+            FIELDS ( totalconfirmedqty numberofmpbpercnt numberofunits manualflag )
+            WITH CORRESPONDING #( keys )
+         RESULT DATA(lt_caselots).
+
+
+    LOOP AT lt_caselots ASSIGNING FIELD-SYMBOL(<ls_caselot>).
+
+      IF <ls_caselot>-manualflag EQ ' '.
+*Need to keep manual flag check and packing mode checks separate
+        IF <ls_caselot>-packingmode IS NOT INITIAL.
+          IF  <ls_caselot>-packingmode NE mc_packing_mode-ssp AND <ls_caselot>-packingmode NE mc_packing_mode-sssp.
+            DATA(lv_flag) = 'X'.
+          ENDIF.
+          CLEAR: <ls_caselot>-totalactualqty.
+
+          READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+          ENTITY caselotheader BY  \_caselotitem
+            FIELDS ( caselotquantity orderquantity material )
+          WITH VALUE #( ( %tky = <ls_caselot>-%tky ) )
+          RESULT DATA(lt_caselotitems).
+
+          IF <ls_caselot>-numberofmpbpercnt IS NOT INITIAL.
+            <ls_caselot>-numberofunits = trunc( <ls_caselot>-totalconfirmedqty / <ls_caselot>-numberofmpbpercnt ).
+          ELSE.
+            <ls_caselot>-numberofunits = 0.
+          ENDIF.
+          IF lv_flag IS NOT INITIAL.
+            IF <ls_caselot>-numberofmpb IS NOT INITIAL .
+              <ls_caselot>-totalqtyperctn = <ls_caselot>-numberofmpb * <ls_caselot>-numberofunits.
+            ELSE.
+              <ls_caselot>-totalqtyperctn = 0.
+            ENDIF.
+          ENDIF.
+          LOOP AT lt_caselotitems                        "#EC CI_NESTED
+           ASSIGNING FIELD-SYMBOL(<ls_caselotitem>).
+
+            IF <ls_caselot>-packingmode EQ mc_packing_mode-ssp OR <ls_caselot>-packingmode EQ mc_packing_mode-sssp.
+              IF <ls_caselot>-numberofmpbpercnt IS NOT INITIAL.
+                <ls_caselotitem>-caselotquantity = trunc( <ls_caselotitem>-orderquantity / <ls_caselot>-numberofmpbpercnt ).
+                <ls_caselotitem>-confddelivqtyinorderqtyunit = <ls_caselotitem>-caselotquantity * <ls_caselot>-numberofmpbpercnt.
+              ELSE.
+                <ls_caselotitem>-confddelivqtyinorderqtyunit = 0.
+                <ls_caselotitem>-caselotquantity = 0.
+              ENDIF.
+
+              IF <ls_caselotitem>-confddelivqtyinorderqtyunit = <ls_caselotitem>-orderquantity.
+                <ls_caselotitem>-criticality = 3.
+              ELSE.
+                <ls_caselotitem>-criticality = 1.
+              ENDIF.
+
+            ENDIF.
+
+
+            IF <ls_caselot>-packingmode EQ mc_packing_mode-msp OR <ls_caselot>-packingmode EQ mc_packing_mode-mssp.
+              IF <ls_caselot>-numberofmpbpercnt IS NOT INITIAL.
+                <ls_caselotitem>-caselotquantity = trunc( <ls_caselotitem>-orderquantity / <ls_caselot>-numberofmpbpercnt ).
+                <ls_caselotitem>-confddelivqtyinorderqtyunit = <ls_caselotitem>-caselotquantity * <ls_caselot>-numberofmpbpercnt.
+              ELSE.
+                <ls_caselotitem>-confddelivqtyinorderqtyunit = 0.
+                <ls_caselotitem>-caselotquantity = 0.
+              ENDIF.
+
+              IF <ls_caselotitem>-confddelivqtyinorderqtyunit = <ls_caselotitem>-orderquantity.
+                <ls_caselotitem>-criticality = 3.
+              ELSE.
+                <ls_caselotitem>-criticality = 1.
+              ENDIF.
+
+            ENDIF.
+
+
+
+            <ls_caselot>-totalactualqty = <ls_caselot>-totalactualqty + <ls_caselotitem>-confddelivqtyinorderqtyunit.
+            lv_total_quantity = lv_total_quantity + (  <ls_caselotitem>-confddelivqtyinorderqtyunit ).
+          ENDLOOP.
+          " write back the modified caselotitems
+          MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+            ENTITY caselotitem
+              UPDATE FIELDS ( confddelivqtyinorderqtyunit caselotquantity criticality )
+              WITH CORRESPONDING #( lt_caselotitems ).
+
+
+        ENDIF.
+        <ls_caselot>-totalquantity = lv_total_quantity.
+      ENDIF.
+    ENDLOOP.
+    IF lv_flag = 'X'.
+      " write back the modified No Of Units of caselots
+      MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+        ENTITY caselotheader
+          UPDATE FIELDS ( totalquantity totalactualqty numberofunits totalqtyperctn )
+          WITH CORRESPONDING #( lt_caselots ).
+    ELSE.
+      MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+     ENTITY caselotheader
+       UPDATE FIELDS ( totalquantity totalactualqty   )
+
+       WITH CORRESPONDING #( lt_caselots ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD calculatenoofunits.
+    "Method to call internal action calnoofunits
+
+    MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+        EXECUTE calnoofunits
+        FROM CORRESPONDING #( keys ).
+
+  ENDMETHOD.
+
+  METHOD manualplanning.
+    "method to do manual planning when caselot quantity is changed manually by the user at the item level
+
+    DATA lv_totalcaselotqty TYPE kbmeng VALUE 0.
+    " Read all parent UUIDs
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+        FIELDS ( caselothuuid numberofunits numberofmpbpercnt totalconfirmedqty packingmode numberofmpb )
+        WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_caselots).
+
+
+    LOOP AT lt_caselots ASSIGNING FIELD-SYMBOL(<ls_caselot>).
+      IF <ls_caselot>-packingmode EQ mc_packing_mode-msp OR <ls_caselot>-packingmode EQ mc_packing_mode-mssp.
+
+        READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+          ENTITY caselotheader BY \_caselotitem
+            FIELDS ( caselotitem caselotquantity orderquantity )
+            WITH VALUE #( ( %tky = <ls_caselot>-%tky ) )
+          RESULT DATA(lt_caselotitems).
+
+        " find total quantity
+        LOOP AT lt_caselotitems                          "#EC CI_NESTED
+         INTO DATA(ls_caselotitem).
+          lv_totalcaselotqty = lv_totalcaselotqty + ls_caselotitem-caselotquantity.
+        ENDLOOP.
+
+        <ls_caselot>-numberofunits = lv_totalcaselotqty.
+        <ls_caselot>-manualflag = 'X'.
+        IF <ls_caselot>-numberofunits IS NOT INITIAL.
+          <ls_caselot>-numberofmpbpercnt = trunc( <ls_caselot>-totalconfirmedqty / <ls_caselot>-numberofunits ).
+          <ls_caselot>-totalqtyperctn = <ls_caselot>-numberofmpb * <ls_caselot>-numberofunits.
+        ENDIF.
+
+        LOOP AT lt_caselotitems                          "#EC CI_NESTED
+         ASSIGNING FIELD-SYMBOL(<ls_caselotitem>).
+
+          <ls_caselotitem>-confddelivqtyinorderqtyunit = <ls_caselotitem>-caselotquantity * <ls_caselot>-numberofmpbpercnt.
+          IF <ls_caselotitem>-confddelivqtyinorderqtyunit = <ls_caselotitem>-orderquantity.
+            <ls_caselotitem>-criticality = 3.
+          ELSE.
+            <ls_caselotitem>-criticality = 1.
+          ENDIF.
+
+        ENDLOOP.
+        " write back the modified caselotitems
+        MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+          ENTITY caselotitem
+            UPDATE FIELDS ( confddelivqtyinorderqtyunit caselotquantity criticality )
+            WITH CORRESPONDING #( lt_caselotitems ).
+
+      ENDIF.
+
+    ENDLOOP.
+
+    " Trigger Re-Calculation on Root Node
+    MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+        UPDATE FIELDS ( numberofmpbpercnt numberofunits manualflag totalqtyperctn )
+        WITH CORRESPONDING #( lt_caselots ).
+
+    LOOP AT lt_caselots ASSIGNING FIELD-SYMBOL(<ls_caselot1>).
+      <ls_caselot1>-manualflag = ' '.
+    ENDLOOP.
+
+    MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+    ENTITY caselotheader
+      UPDATE FIELDS ( manualflag )
+      WITH CORRESPONDING #( lt_caselots ).
+
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+    ENTITY caselotheader
+    ALL FIELDS WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_caselot).
+
+    result = VALUE #( FOR ls_caselot IN lt_caselot
+                       ( %tky   = ls_caselot-%tky
+                         %param = ls_caselot ) ).
+
+
+  ENDMETHOD.
+
+  METHOD validatemandatory.
+    "method to validate mandatory fields during create
+
+    CLEAR: failed, reported.
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+        ENTITY caselotheader
+          FIELDS (  caselottext packingmode numberofmpbpercnt )
+          WITH CORRESPONDING #( keys )
+        RESULT DATA(lt_caselots)
+        FAILED DATA(ls_failed).
+
+    failed = CORRESPONDING #( DEEP ls_failed ).
+
+    LOOP AT lt_caselots INTO DATA(ls_caselot).
+
+      APPEND VALUE #( %tky = ls_caselot-%tky
+                      %state_area = 'VALIDATE_CASELOT' ) TO
+                      reported-caselotheader.
+      IF  ls_caselot-packingmode IS INITIAL.
+        APPEND VALUE #( %tky = ls_caselot-%tky ) TO failed-caselotheader.
+        APPEND VALUE #( %tky = ls_caselot-%tky
+                        %state_area = 'VALIDATE_CASELOT'
+                        %msg = NEW zcx_sd_caselot(
+                                 severity   = if_abap_behv_message=>severity-error
+                                 textid = zcx_sd_caselot=>caselot_failed )
+                        %element-packingmode = if_abap_behv=>mk-on ) TO
+                        reported-caselotheader.
+
+      ENDIF.
+
+      IF ls_caselot-numberofmpbpercnt IS INITIAL.
+        APPEND VALUE #( %tky = ls_caselot-%tky ) TO failed-caselotheader.
+        APPEND VALUE #( %tky = ls_caselot-%tky
+                        %state_area = 'VALIDATE_CASELOT'
+                        %msg = NEW zcx_sd_caselot(
+                                 severity   = if_abap_behv_message=>severity-error
+                                 textid = zcx_sd_caselot=>caselot_failed )
+                        %element-numberofmpbpercnt = if_abap_behv=>mk-on ) TO
+                        reported-caselotheader.
+
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD changepackingmode.
+    "Determination used to set the field control on change of packing modes
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+       ENTITY caselotheader
+          FIELDS ( packingmode )
+          WITH CORRESPONDING #( keys )
+       RESULT DATA(lt_caselots).
+
+    DELETE lt_caselots WHERE packingmode IS INITIAL.
+
+    LOOP AT lt_caselots ASSIGNING FIELD-SYMBOL(<ls_caselot>).
+      IF  <ls_caselot>-packingmode EQ mc_packing_mode-ssp.
+        <ls_caselot>-pbfieldcontrol = ' '.
+      ENDIF.
+      IF   <ls_caselot>-packingmode EQ mc_packing_mode-msp.
+        <ls_caselot>-pbfieldcontrol = 'X'.
+      ELSE.
+        <ls_caselot>-pbfieldcontrol = ' '.
+      ENDIF.
+
+      IF  <ls_caselot>-packingmode EQ mc_packing_mode-ssp OR <ls_caselot>-packingmode EQ mc_packing_mode-msp.
+        <ls_caselot>-pbfieldcontrol = 'X'.
+      ELSE.
+        <ls_caselot>-pbfieldcontrol = ' '.
+      ENDIF.
+
+      IF <ls_caselot>-packingmode EQ mc_packing_mode-ssp OR <ls_caselot>-packingmode EQ mc_packing_mode-sssp.
+        <ls_caselot>-clquanfieldcontrol = 'X'.
+      ENDIF.
+
+    ENDLOOP.
+    " write back the modified No Of Units of caselots
+    MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+        UPDATE FIELDS ( pbfieldcontrol numberofmpbpercnt numberofmpb totalquantity )
+        WITH CORRESPONDING #( lt_caselots ).
+
+
+
+
+  ENDMETHOD.
+*/
+  METHOD calculatenoofpolybags.
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+      ENTITY caselotheader
+          FIELDS ( totalconfirmedqty numberofmpbpercnt numberofunits manualflag )
+          WITH CORRESPONDING #( keys )
+       RESULT DATA(lt_caselots).
+
+
+    LOOP AT lt_caselots ASSIGNING FIELD-SYMBOL(<ls_caselot>).
+      IF <ls_caselot>-packingmode = mc_packing_mode-ssp.
+
+        IF <ls_caselot>-numberofunits IS NOT INITIAL.
+          IF ( <ls_caselot>-totalconfirmedqty MOD <ls_caselot>-numberofunits  ) = 0 .
+            DATA(lv_flag) = 'X'.
+            <ls_caselot>-numberofmpbpercnt  = ( <ls_caselot>-totalconfirmedqty / <ls_caselot>-numberofunits ).
+            <ls_caselot>-totalqtyperctn = ( <ls_caselot>-numberofunits * <ls_caselot>-numberofmpbpercnt ).
+
+          ELSE.
+*            APPEND VALUE #( %tky = <ls_caselot>-%tky ) TO .
+            APPEND VALUE #( %tky = <ls_caselot>-%tky
+
+                            %msg = NEW zcx_sd_caselot(
+                                     severity   = if_abap_behv_message=>severity-error
+                                     textid = zcx_sd_caselot=>caselot_pack_error )
+                                                     ) TO
+                            reported-caselotheader.
+
+          ENDIF.
+        ENDIF.
+      ENDIF.
+      IF <ls_caselot>-packingmode = mc_packing_mode-sssp.
+
+        <ls_caselot>-totalqtyperctn = <ls_caselot>-numberofunits * <ls_caselot>-numberofmpbpercnt.
+        IF <ls_caselot>-totalqtyperctn IS NOT INITIAL.
+        IF  <ls_caselot>-totalconfirmedqty MOD <ls_caselot>-totalqtyperctn = 0.
+          lv_flag = 'X'.
+          <ls_caselot>-numberofmpb = <ls_caselot>-totalconfirmedqty / <ls_caselot>-totalqtyperctn.
+        ELSE.
+          APPEND VALUE #( %tky = <ls_caselot>-%tky
+                           %state_area = 'VALIDATE_CASELOT'
+                           %msg = NEW zcx_sd_caselot(
+                                    severity   = if_abap_behv_message=>severity-error
+                                    textid = zcx_sd_caselot=>caselot_pack_error )
+                                                    ) TO
+                           reported-caselotheader.
+
+          "Error
+        ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    IF lv_flag = 'X'.
+      MODIFY ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+       ENTITY caselotheader
+         UPDATE FIELDS ( numberofmpb numberofmpbpercnt totalqtyperctn  )
+         WITH CORRESPONDING #( lt_caselots ).
+    ENDIF.
+  ENDMETHOD.
+*/
+ENDCLASS.
+
+CLASS lhc_caselotitem IMPLEMENTATION.
+
+  METHOD get_instance_features.
+    "Setting the instance features for caselot items
+
+    READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+          ENTITY caselotitem BY \_caselotheader
+            FIELDS ( caselothuuid packingmode )
+            WITH CORRESPONDING #(  keys  )
+          RESULT DATA(lt_caselots).
+
+    LOOP AT lt_caselots INTO DATA(ls_caselot).
+
+      READ ENTITIES OF zsd_i_case_lot_h IN LOCAL MODE
+        ENTITY caselotheader BY \_caselotitem
+          FIELDS ( caselotitem )
+          WITH VALUE #( ( %tky = ls_caselot-%tky ) )
+        RESULT DATA(lt_caselotitems).
+
+      result = VALUE #( FOR ls_caselotitem IN lt_caselotitems
+                            ( %tky                   = ls_caselotitem-%tky
+
+
+                              %field-caselotquantity = COND #(  WHEN ls_caselot-packingmode = mc_packing_mode-ssp
+                                                                    OR ls_caselot-packingmode = mc_packing_mode-sssp
+                                                               THEN if_abap_behv=>fc-f-read_only
+                                                               WHEN ls_caselot-packingmode = mc_packing_mode-msp
+                                                                    OR ls_caselot-packingmode = mc_packing_mode-mssp
+                                                               THEN if_abap_behv=>fc-f-unrestricted  )
+                              %field-HigherLevelItem        = if_abap_behv=>fc-f-read_only
+                              %field-SalesOrderItem         = if_abap_behv=>fc-f-read_only
+                              %field-ScheduleLine           = if_abap_behv=>fc-f-read_only
+                              %field-ConfirmedDeliveryDate  = if_abap_behv=>fc-f-read_only
+                              %field-Material               = if_abap_behv=>fc-f-read_only
+                              %field-CaselotItem            = if_abap_behv=>fc-f-read_only
+                                                     ) ).
+
+    ENDLOOP.
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS lsc_zsd_i_case_lot_h IMPLEMENTATION.
+
+  METHOD save_modified.
+    DATA: lt_order_item_in  TYPE TABLE OF bapisditm,
+          lt_order_item_inx TYPE TABLE OF bapisditmx,
+          lt_return         TYPE TABLE OF bapiret2,
+          ls_order_h_inx    TYPE  bapisdh1x.
+
+    IF create-caselotheader IS NOT INITIAL.
+      ##WARN_OK
+      SELECT SINGLE salesorder,
+                    material
+      FROM @create-caselotheader AS caselotheader
+      INTO @DATA(ls_sales_order).
+
+      IF sy-subrc = 0.
+*     get all sales document items for corresponding sales order
+        SELECT salesdocument,
+               salesdocumentitem,
+               pricingreferencematerial,
+               deliverygroup
+        FROM i_salesdocumentitembasic
+        WHERE salesdocument = @ls_sales_order-salesorder
+        AND pricingreferencematerial IS NOT INITIAL
+        INTO TABLE @DATA(lt_sale_order_item).
+
+        IF sy-subrc = 0.
+*     get max delivery group for sales document
+          SELECT MAX( deliverygroup ) AS maxdeliverygroup
+          FROM @lt_sale_order_item AS salesorderitem
+          INTO @DATA(lv_max_delivery_group).
+
+          IF sy-subrc = 0.
+            DELETE lt_sale_order_item WHERE pricingreferencematerial <> ls_sales_order-material
+                                        OR deliverygroup IS NOT INITIAL.
+
+            LOOP AT lt_sale_order_item ASSIGNING FIELD-SYMBOL(<ls_sale_order_item>).
+
+              CLEAR:
+              ls_order_h_inx.
+
+              ls_order_h_inx-updateflag = 'U'.
+              APPEND INITIAL LINE TO lt_order_item_inx ASSIGNING FIELD-SYMBOL(<ls_order_item_inx>).
+              <ls_order_item_inx>-itm_number = <ls_sale_order_item>-salesdocumentitem.
+              <ls_order_item_inx>-updateflag = abap_true.
+              <ls_order_item_inx>-dlv_group  = abap_true.
+
+              APPEND INITIAL LINE TO lt_order_item_in ASSIGNING FIELD-SYMBOL(<ls_order_item_in>).
+              <ls_order_item_in>-itm_number = <ls_sale_order_item>-salesdocumentitem.
+              <ls_order_item_in>-dlv_group  = lv_max_delivery_group + 1.
+
+            ENDLOOP.
+
+            IF lt_order_item_in IS NOT INITIAL.
+              CALL FUNCTION 'BAPI_SALESORDER_CHANGE'
+                EXPORTING
+                  salesdocument    = ls_sales_order-salesorder
+                  order_header_inx = ls_order_h_inx
+                TABLES
+                  return           = lt_return
+                  order_item_in    = lt_order_item_in
+                  order_item_inx   = lt_order_item_inx.
+
+            ENDIF.
+
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.

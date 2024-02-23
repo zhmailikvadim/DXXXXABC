@@ -1,0 +1,147 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ASPERDAN     | 01.06.2022 | 11452     : API - [Integration] - WMS to S4 - Delive *
+*              |            | DS4K919713                               *
+* KARPOSER     | 07.07.2022 | 12054    :  API - [Integration] - WMS to S4 - Delive *                             *
+*              |            | DS4K923702                               *
+* SHNIPALI     | 06.10.2022 | 13989     : [Platform] POD completion from external *
+*              |            | DS4K931539                               *
+* BEGMUAZI     | 11.03.2023 | FB_18949_SD_Trigger DN update *
+*              |            | DS4K946582                               *
+* BEGMUAZI     | 28.03.2023 | FB_19441_SD_CR for Trigger DN update event
+*              |            | DS4K948810                               *
+* YURCHALA     | 10.04.2023 | 19877     : CR for Trigger DN update     *
+*              |            | DS4K949393                               *
+* HURTSALE     | 18.07.2023 | 22864 : [Build] - Milestone interface Ref*
+*              |            | DS4K958705                               *
+* GERTSVIK     | 31.08.2023 | 22864 : [Build] - HU status to REFU/PODE *
+*              |            | DS4K958705                               *
+* ZUJSKAS      | 09.11.2023 | 26452     : Feature - CR T4MTEMP 47520 R *
+*              |            | DS4K968883                               *
+* SHNIPALI     | 12.11.2023 | 26460     : Feature - Delivery & Shipmen *
+*              |            | DS4K968965                               *
+*----------------------------------------------------------------------*
+FUNCTION zsc_fm_aif_outdeliv_update_mil
+  IMPORTING
+    testrun TYPE c
+    sending_system TYPE /aif/aif_business_system_key OPTIONAL
+  CHANGING
+    data TYPE zsd_s_upd_mlstns_bulk_rq_sap
+    curr_line TYPE zsd_s_upd_mlstns_bulk_rq_sap
+    success TYPE /aif/successflag
+    old_messages TYPE /aif/bal_t_msg
+  TABLES
+    return_tab LIKE bapiret2.
+
+
+
+
+  TYPES:
+    BEGIN OF ltyp_s_data,
+      zsd_dlv_event     TYPE zsd_dlv_event,
+      zsd_dlv_event_des TYPE zsd_dlv_event_des,
+      zsd_evkorg        TYPE zsd_evkorg,
+      zsd_trigger_dn    TYPE zsd_trigger_dn,
+      zsd_trigger_edf   TYPE zsd_trigger_edf,
+    END OF ltyp_s_data.
+
+  DATA lts_data TYPE SORTED TABLE OF ltyp_s_data WITH NON-UNIQUE KEY zsd_dlv_event.
+
+  TRY.
+      DATA(lv_refu_event) = zcl_pe_hm_basic=>get_value( iv_id = '1987' ).
+    CATCH zcx_pe_hm.
+      CLEAR lv_refu_event.
+  ENDTRY.
+  TRY.
+      DATA(lv_pode_event) = zcl_pe_hm_basic=>get_value( iv_id = '795' ).
+    CATCH zcx_pe_hm.
+      CLEAR lv_pode_event.
+  ENDTRY.
+
+
+  DATA(lt_dn_level) = VALUE zupdate_milestone_tab( FOR ls_dn_level IN data-update_milestones_request
+                                                   WHERE ( handling_unit = space AND
+                                                           event_type <> lv_refu_event AND
+                                                           event_type <> lv_pode_event )
+                                                   ( CORRESPONDING #( ls_dn_level ) ) ) ##ENH_OK. "#EC CI_STDSEQ
+
+  DATA(lt_hu_level) = VALUE zupdate_milestone_tab( FOR ls_hu_level IN data-update_milestones_request
+                                                   WHERE ( handling_unit <> space OR
+                                                           event_type = lv_refu_event OR
+                                                           event_type = lv_pode_event )
+                                                   ( CORRESPONDING #( ls_hu_level ) ) ) ##ENH_OK. "#EC CI_STDSEQ
+
+  IF lt_dn_level[] IS NOT INITIAL.
+    "DN level
+    zcl_sd_delivery_events_update=>process(
+      EXPORTING
+        iv_test   = testrun
+        it_data   = CORRESPONDING #( lt_dn_level[] MAPPING plan_time_zone = actual_time_zone )
+      CHANGING
+        ct_return = return_tab[] ).
+
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '024F85009E261EEDB3AF4D9AA640C0D2'
+                                                iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-data_elements
+                                      IMPORTING et_table        = lts_data ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+    READ TABLE lt_dn_level ASSIGNING FIELD-SYMBOL(<ls_dn>) INDEX 1.
+    IF sy-subrc = 0 AND <ls_dn> IS ASSIGNED.
+
+      SELECT SINGLE salesorganization
+        FROM i_deliverydocument
+          INTO @DATA(lv_sales_org)
+            WHERE deliverydocument = @<ls_dn>-delivery_note.
+      IF sy-subrc <> 0.
+        CLEAR lv_sales_org.
+      ENDIF.
+
+      LOOP AT lts_data ASSIGNING FIELD-SYMBOL(<ls_data>) WHERE zsd_dlv_event = CONV zsd_dlv_event( <ls_dn>-event_type )
+.
+        IF <ls_data>-zsd_trigger_dn = abap_true AND ( lv_sales_org = <ls_data>-zsd_evkorg OR <ls_data>-zsd_evkorg IS INITIAL ).
+          TRY.
+              cl_swf_evt_event=>raise( im_objcateg = cl_swf_evt_event=>mc_objcateg_bor
+                                       im_objtype  = 'LIKP'
+                                       im_event    = 'CHANGED'
+                                       im_objkey   = <ls_dn>-delivery_note ).
+            CATCH cx_swf_evt_invalid_objtype.
+              RETURN.
+            CATCH cx_swf_evt_invalid_event.
+              RETURN.
+          ENDTRY.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    SELECT deliverydocument, handle, zz1_zotcbook_dlh, zz1_route_st_dlh
+      FROM i_deliverydocument
+      INTO TABLE @DATA(lt_delivery)
+      FOR ALL ENTRIES IN @lt_dn_level
+      WHERE deliverydocument = @lt_dn_level-delivery_note.
+    IF sy-subrc = 0.
+      APPEND LINES OF zcl_sd_del_routing_ind_upd=>update_routing_ind( lt_delivery ) TO return_tab.
+    ENDIF.
+
+  ENDIF.
+
+  IF lt_hu_level[] IS NOT INITIAL.
+    "HU level
+    zcl_sd_hu_processing_ext=>process(
+      EXPORTING
+        iv_test   = testrun
+        its_data  = CORRESPONDING #( lt_hu_level[] )
+      CHANGING
+        ct_return = return_tab[] ).
+  ENDIF.
+
+
+  success = SWITCH #( cl_bapi_msg=>contains_error( return_tab[] )
+                      WHEN abap_false THEN /aif/if_globals=>gc_success_flag-std_success
+                      WHEN abap_true THEN /aif/if_globals=>gc_success_flag-std_failure ).
+ENDFUNCTION.

@@ -1,0 +1,584 @@
+*"* use this source file for your ABAP unit test classes
+
+CLASS ltcl_sd_sls_soa_cr_bulk_proc DEFINITION DEFERRED.
+CLASS cl_sd_sls_soa_crt_bulk_proc DEFINITION LOCAL FRIENDS ltcl_sd_sls_soa_cr_bulk_proc.
+
+CLASS ltcl_sd_sls_soa_cr_bulk_proc DEFINITION FOR TESTING DURATION SHORT RISK LEVEL HARMLESS FINAL.
+
+  PRIVATE SECTION.
+
+    DATA: mo_bulk_proc         TYPE REF TO cl_sd_sls_soa_crt_bulk_proc,  "class under test
+          mo_factory           TYPE REF TO ldcl_factory,
+          mv_timestamp         TYPE timestampl,
+          mv_created_date_time TYPE sdesr_global_date_time.
+
+    METHODS:
+      duplicate_customer_return_fail FOR TESTING,
+      business_system_not_in_cloud FOR TESTING,
+      business_system_id_empty FOR TESTING,
+      last_change_date_initial FOR TESTING,
+      check_last_change_date_failed FOR TESTING,
+      process_single_return FOR TESTING,
+      process_single_return_fail FOR TESTING,
+      process_multi_return_success FOR TESTING,
+      process_multi_return_fail FOR TESTING,
+      assert_result_flag
+        IMPORTING
+          iv_exp_result TYPE char1
+          iv_act_result TYPE char1,
+      setup,
+      teardown.
+ENDCLASS.       "ltcl_Sd_Sls_Soa_Cr_Bulk_Proc
+
+CLASS ltcl_sd_sls_soa_cr_bulk_proc IMPLEMENTATION.
+
+  METHOD setup.
+    mo_bulk_proc = NEW cl_sd_sls_soa_crt_bulk_proc( ).
+    mo_factory = NEW ldcl_factory( ).
+    mo_bulk_proc->mo_factory = mo_factory.
+    CLEAR ldcl_processing_single=>st_results.
+    GET TIME STAMP FIELD mv_timestamp.
+    TRY.
+        cl_bs_soa_convert_xsddatetime=>map_xsddatetime_long_z_out(
+          EXPORTING
+            iv_timestamp    = mv_timestamp
+          IMPORTING
+            ev_xsd_datetime = mv_created_date_time ).
+      CATCH cx_bs_soa_exception.
+        cl_aunit_assert=>fail(
+          msg = 'XSD TImestamp could not be created!' ).
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD teardown.
+    CLEAR mo_bulk_proc.
+    CLEAR mo_factory.
+  ENDMETHOD.
+
+  METHOD duplicate_customer_return_fail.
+    DATA:
+      ls_bulk_message   TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab     TYPE bapiret2_t,
+      lt_exp_return_tab TYPE bapiret2_t,
+      lv_success        TYPE abap_bool.
+    CONSTANTS:
+      lc_external_document_id
+                        TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1'.
+
+    "Given
+    ls_bulk_message = VALUE #(
+       message_header  = VALUE #(
+         id-content                = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time        = mv_created_date_time"conv #( '2017-08-28T12:00:01.1234567Z' )
+         sender_business_system_id = 'UNITEST BUlk process' )
+       customer_return = VALUE #(
+         ( action_code                   = if_sd_sls_soa_const=>co_action_code-change
+           external_document_id          = lc_external_document_id
+           external_doc_last_change_date = mv_created_date_time )
+         ( action_code                   = if_sd_sls_soa_const=>co_action_code-change
+           external_document_id          = 'AUNIT TEST EXT ODER ID 3'
+           external_doc_last_change_date = mv_created_date_time )
+         ( action_code                   = if_sd_sls_soa_const=>co_action_code-change
+           external_document_id          = 'AUNIT TEST EXT ODER ID 2'
+           external_doc_last_change_date = mv_created_date_time )
+         ( action_code                   = if_sd_sls_soa_const=>co_action_code-change
+           external_document_id          = lc_external_document_id
+           external_doc_last_change_date = mv_created_date_time ) ) ).
+
+    lt_exp_return_tab = VALUE #( (
+      id         = if_sd_sls_message=>co_t100_msgid-soa_sd
+      number     = 070
+      type       = if_sd_sls_message=>co_severity-error
+      message_v1 = lc_external_document_id ) ).
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      iv_exp_result = /aif/if_globals=>gc_success_flag-std_failure
+      iv_act_result = lv_success ).
+
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+
+    cl_aunit_assert=>assert_equals(
+      act = lt_return_tab
+      exp = lt_exp_return_tab
+      msg = 'Wrong message thrown!' ).
+  ENDMETHOD.
+
+  METHOD business_system_not_in_cloud.
+    DATA:
+      ls_bulk_message   TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab     TYPE bapiret2_t,
+      lt_exp_return_tab TYPE bapiret2_t,
+      lv_success        TYPE abap_bool.
+    CONSTANTS:
+      lc_external_document_id
+                        TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1'.
+
+    "Given
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                    = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time            = mv_created_date_time"conv #( '2017-08-28T12:00:01.1234567Z' )
+         sender_business_system_id     = 'UNITEST BUlk process')
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = mv_created_date_time )
+       ) ).
+
+    lt_exp_return_tab = VALUE #( (
+      id         = if_sd_sls_message=>co_t100_msgid-soa_sd
+      number     = if_sd_sls_message=>co_t100_soa_sd-msgno_036
+      type       = if_sd_sls_message=>co_severity-error ) ).
+
+    "Is cloud system
+    TEST-INJECTION ls_s4h_cloud.
+      lv_is_cloud = abap_true.
+    end-test-injection.
+    "Business system is not maintained
+    TEST-INJECTION bus_syst_maintained.
+      lv_bus_syst_not_maint = abap_true.
+    end-test-injection.
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      iv_exp_result = /aif/if_globals=>gc_success_flag-std_failure
+      iv_act_result = lv_success ).
+
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+
+    cl_aunit_assert=>assert_equals(
+      act = lt_return_tab
+      exp = lt_exp_return_tab
+      msg = 'Wrong message thrown!' ).
+  ENDMETHOD.
+
+  METHOD business_system_id_empty.
+    DATA:
+      ls_bulk_message   TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab     TYPE bapiret2_t,
+      lt_exp_return_tab TYPE bapiret2_t,
+      lv_success        TYPE abap_bool.
+    CONSTANTS:
+      lc_external_document_id
+                        TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1'.
+
+    "Given
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                    = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time            = mv_created_date_time"conv #( '2017-08-28T12:00:01.1234567Z' )
+         sender_business_system_id     = '' )"Business system is not given
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = mv_created_date_time )
+       ) ).
+
+    lt_exp_return_tab = VALUE #( (
+      id         = if_sd_sls_message=>co_t100_msgid-soa_sd
+      number     = if_sd_sls_message=>co_t100_soa_sd-msgno_015
+      type       = if_sd_sls_message=>co_severity-error ) ).
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      iv_exp_result = /aif/if_globals=>gc_success_flag-std_failure
+      iv_act_result = lv_success ).
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+    cl_aunit_assert=>assert_equals(
+      act = lt_return_tab
+      exp = lt_exp_return_tab
+      msg = 'Wrong message thrown!' ).
+  ENDMETHOD.
+
+  METHOD last_change_date_initial.
+    DATA:
+      ls_bulk_message   TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab     TYPE bapiret2_t,
+      lt_exp_return_tab TYPE bapiret2_t,
+      lv_success        TYPE abap_bool.
+    CONSTANTS:
+      lc_creation_date_time   TYPE sdesr_global_date_time VALUE 0,
+      lc_external_document_id
+                        TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1'.
+
+    "Given
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                    = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time            = lc_creation_date_time
+         sender_business_system_id     = 'UNITEST BUlk process')
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = lc_creation_date_time )
+       ) ).
+
+    lt_exp_return_tab = VALUE #( (
+      id         = if_sd_sls_message=>co_t100_msgid-soa_sd
+      number     = if_sd_sls_message=>co_t100_soa_sd-msgno_018
+      type       = if_sd_sls_message=>co_severity-error ) ).
+
+    "Is cloud system
+    TEST-INJECTION ls_s4h_cloud.
+      lv_is_cloud = abap_true.
+    end-test-injection.
+    "Business system is maintained
+    TEST-INJECTION bus_syst_maintained.
+      lv_bus_syst_not_maint = abap_false.
+    end-test-injection.
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      iv_exp_result = /aif/if_globals=>gc_success_flag-std_failure
+      iv_act_result = lv_success ).
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+    cl_aunit_assert=>assert_equals(
+      act = lt_return_tab
+      exp = lt_exp_return_tab
+      msg = 'Wrong message thrown!' ).
+  ENDMETHOD.
+
+  METHOD check_last_change_date_failed.
+    DATA:
+      ls_bulk_message   TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab     TYPE bapiret2_t,
+      lt_exp_return_tab TYPE bapiret2_t,
+      lv_success        TYPE abap_bool.
+    CONSTANTS:
+      lc_creation_date_time   TYPE sdesr_global_date_time VALUE '99999',
+      lc_external_document_id
+                        TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1'.
+
+    "Given
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                    = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time            = lc_creation_date_time
+         sender_business_system_id     = 'UNITEST BUlk process')
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = lc_creation_date_time )
+       ) ).
+
+    lt_exp_return_tab = VALUE #( (
+      id         = if_sd_sls_message=>co_t100_msgid-soa_sd
+      number     = if_sd_sls_message=>co_t100_soa_sd-msgno_011
+      type       = if_sd_sls_message=>co_severity-error ) ).
+
+    TEST-INJECTION ls_s4h_cloud.
+      lv_is_cloud = abap_false.
+    end-test-injection.
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      iv_exp_result = /aif/if_globals=>gc_success_flag-std_failure
+      iv_act_result = lv_success ).
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+    cl_aunit_assert=>assert_equals(
+      act = lt_return_tab
+      exp = lt_exp_return_tab
+      msg = 'Wrong message thrown!' ).
+  ENDMETHOD.
+
+  METHOD process_multi_return_fail.
+    DATA:
+      ls_bulk_message TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab   TYPE bapiret2_t,
+      lv_success      TYPE abap_bool.
+    CONSTANTS:
+      lc_external_document_id  TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1',
+      lc_external_document_id2 TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 2',
+      lc_external_document_id3 TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 3'.
+
+    ldcl_processing_single=>st_results = VALUE #( (
+        ext_document_id = lc_external_document_id
+        result_tab      = VALUE #( ( ) ) )
+      ( ext_document_id = lc_external_document_id2
+        result_tab      = VALUE #( (
+          type     = 'E') ) )
+      ( ext_document_id = lc_external_document_id3
+        result_tab      = VALUE #( ( ) ) ) ).
+
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time        = mv_created_date_time"conv #( '2017-08-28T12:00:01.1234567Z' )
+         sender_business_system_id = 'AUNIT1')
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = mv_created_date_time )
+         (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id2
+         external_doc_last_change_date = mv_created_date_time )
+         (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id3
+         external_doc_last_change_date = mv_created_date_time )
+       ) ).
+
+    TEST-INJECTION ls_s4h_cloud.
+      lv_is_cloud = abap_false.
+    end-test-injection.
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      iv_exp_result = /aif/if_globals=>gc_success_flag-std_failure
+      iv_act_result = lv_success ).
+    cl_aunit_assert=>assert_equals(
+      exp = 3
+      act = lines( mo_factory->mt_calls )
+      msg = 'Wrong amount of single processing instances created' ).
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+  ENDMETHOD.
+
+  METHOD process_multi_return_success.
+    DATA:
+      ls_bulk_message TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab   TYPE bapiret2_t,
+      lv_success      TYPE abap_bool.
+    CONSTANTS:
+      lc_external_document_id  TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1',
+      lc_external_document_id2 TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 2',
+      lc_external_document_id3 TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 3',
+      lc_external_document_id4 TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 4'.
+
+    "Given
+    ldcl_processing_single=>st_results = VALUE #(
+      ( ext_document_id = lc_external_document_id
+        result_tab      = VALUE #( ( ) ) )
+      ( ext_document_id = lc_external_document_id2
+        result_tab      = VALUE #( ) )
+      ( ext_document_id = lc_external_document_id3
+        result_tab      = VALUE #( ( ) ) )
+      ( ext_document_id = lc_external_document_id4
+        result_tab      = VALUE #( ( ) ) ) ).
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                    = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time            = mv_created_date_time"conv #( '2017-08-28T12:00:01.1234567Z' )
+         sender_business_system_id     = 'AUNIT1')
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = mv_created_date_time  )
+         (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id2
+         external_doc_last_change_date = mv_created_date_time )
+         (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id3
+         external_doc_last_change_date = mv_created_date_time )
+       (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id4
+         external_doc_last_change_date = mv_created_date_time )
+       ) ).
+
+    TEST-INJECTION ls_s4h_cloud.
+      lv_is_cloud = abap_false.
+    end-test-injection.
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      EXPORTING
+        iv_exp_result = /aif/if_globals=>gc_success_flag-std_success
+        iv_act_result = lv_success
+    ).
+    cl_aunit_assert=>assert_equals(
+      exp = 4
+      act = lines( mo_factory->mt_calls )
+      msg = 'Wrong amount of single processing instances created' ).
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+
+  ENDMETHOD.
+
+  METHOD process_single_return.
+    DATA:
+      ls_bulk_message TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab   TYPE bapiret2_t,
+      lv_success      TYPE abap_bool.
+    CONSTANTS:
+      lc_external_document_id TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1'.
+
+    ldcl_processing_single=>st_results = VALUE #(
+      ( ext_document_id = lc_external_document_id
+        result_tab      = VALUE #( ( ) ) ) ).
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                    = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time            = mv_created_date_time"conv #( '2017-08-28T12:00:01.1234567Z' )
+         sender_business_system_id     = 'AUNIT1')
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = mv_created_date_time )
+       ) ).
+
+    TEST-INJECTION ls_s4h_cloud.
+      lv_is_cloud = abap_false.
+    end-test-injection.
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      EXPORTING
+        iv_exp_result = /aif/if_globals=>gc_success_flag-std_success
+        iv_act_result = lv_success
+    ).
+    cl_aunit_assert=>assert_equals(
+      exp = 1
+      act = lines( mo_factory->mt_calls )
+      msg = 'Wrong amount of single processing instances created' ).
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+
+  ENDMETHOD.
+
+  METHOD process_single_return_fail.
+    DATA:
+      ls_bulk_message TYPE sdsls_esr_customer_return_bulk,
+      lt_return_tab   TYPE bapiret2_t,
+      lv_success      TYPE abap_bool.
+    CONSTANTS:
+      lc_external_document_id TYPE sdesr_external_ref_key_id VALUE 'AUNIT TEST EXT ODER ID 1'.
+
+    "Given
+    ldcl_processing_single=>st_results = VALUE #( (
+      ext_document_id = lc_external_document_id
+      result_tab      = VALUE #( ( type = 'E' ) ) ) ).
+    ls_bulk_message = VALUE #(
+       message_header = VALUE #(
+         id-content                    = '8CDCD40032541ED89DC044470B618D67'
+         creation_date_time            = mv_created_date_time"conv #( '2017-08-28T12:00:01.1234567Z' )
+         sender_business_system_id     = 'AUNIT1')
+       customer_return = VALUE #( (
+         action_code                   = if_sd_sls_soa_const=>co_action_code-change
+         external_document_id          = lc_external_document_id
+         external_doc_last_change_date = mv_created_date_time ) ) ).
+
+    TEST-INJECTION ls_s4h_cloud.
+      lv_is_cloud = abap_false.
+    end-test-injection.
+
+    "When
+    mo_bulk_proc->if_sd_sls_soa_crt_bulk_proc~process_bulk(
+      EXPORTING
+        is_customer_return_bulk_msg = ls_bulk_message
+        iv_test_run_flag            = abap_false
+      IMPORTING
+        ev_aif_success_flag         = lv_success
+        et_return_tab               = lt_return_tab ).
+
+    "Then
+    assert_result_flag(
+      iv_exp_result = /aif/if_globals=>gc_success_flag-std_failure
+      iv_act_result = lv_success ).
+    cl_aunit_assert=>assert_equals(
+      exp = 1
+      act = lines( mo_factory->mt_calls )
+      msg = 'Wrong amount of single processing instances created' ).
+    cl_aunit_assert=>assert_not_initial(
+      act = lt_return_tab
+      msg = 'Message should have been returned.' ).
+
+  ENDMETHOD.
+
+  METHOD assert_result_flag.
+    cl_aunit_assert=>assert_equals(
+      exp = iv_exp_result
+      act = iv_act_result
+      msg = 'Other success outcome was expected!' ).
+  ENDMETHOD.
+
+ENDCLASS.

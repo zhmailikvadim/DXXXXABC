@@ -1,0 +1,266 @@
+CLASS zcl_sd_ve_outbdelv_schsto DEFINITION
+  PUBLIC FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    INTERFACES if_sadl_exit.
+    INTERFACES if_sadl_exit_calc_element_read.
+ENDCLASS.
+
+
+CLASS zcl_sd_ve_outbdelv_schsto IMPLEMENTATION.
+  METHOD if_sadl_exit_calc_element_read~calculate.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " NAGARSOW     | 20.11.2023 | 26318     : [Build] DN OS compliance Repor -
+    "              |            | DS4K968461                               -
+    " -----------------------------------------------------------------------
+    DATA: lt_data     TYPE STANDARD TABLE OF zsd_i_outb_sched_stodcube WITH DEFAULT KEY,
+          lv_mid      TYPE fsh_sc_mid,
+          lv_cid      TYPE fsh_sc_cid,
+          lt_matnr    TYPE pre03_tab,
+          lt_sizedesc TYPE fsh_t_sc_val.
+
+    lt_data = CORRESPONDING #( it_original_data ).
+
+    TRY.
+        DATA(lt_hm_table) = zcl_pe_hm_basic=>get_table( iv_id = '2486' ).
+        DATA(lt_hm_table_lt) = zcl_pe_hm_basic=>get_table( iv_id = '1039' ).
+      CATCH zcx_pe_hm. " Hardcode Manager.
+        RETURN.
+    ENDTRY.
+    SORT lt_hm_table BY sequence DESCENDING.
+    IF lt_data IS NOT INITIAL.
+      SELECT deliverydocument,
+             eventtype
+        FROM zsd_i_tevents_out_delivery_int
+        INTO TABLE @DATA(lt_eventdet)
+        FOR ALL ENTRIES IN @lt_data
+        WHERE deliverydocument = @lt_data-outbounddelivery.
+      IF sy-subrc = 0.
+        SORT lt_eventdet BY deliverydocument eventtype.
+      ENDIF.
+      SELECT shippingpoint,
+             vascode,
+             leadtime
+       FROM zsd_i_vas_lt
+       FOR ALL ENTRIES IN @lt_data
+       WHERE shippingpoint = @lt_data-shippingpoint
+       AND   vascode       = @lt_data-valueaddedsubservicetype
+       INTO TABLE @DATA(lt_vas_data).
+      IF sy-subrc = 0.
+        SORT lt_vas_data BY shippingpoint vascode leadtime  DESCENDING.
+      ENDIF.
+      SELECT shippingpoint,
+             vascode,
+             leadtime
+       FROM zsd_i_vas_lt
+       FOR ALL ENTRIES IN @lt_data
+       WHERE shippingpoint = @lt_data-dnshippingpoint
+       AND   vascode       = @lt_data-dnvalueaddedsubservicetype
+       INTO TABLE @DATA(lt_vas_data_dn).
+      IF sy-subrc = 0.
+        SORT lt_vas_data_dn BY shippingpoint vascode leadtime  DESCENDING.
+      ENDIF.
+      SELECT product,
+             matlcnvrsidcharvalconversion
+       FROM zfi_i_productd_ex
+       FOR ALL ENTRIES IN @lt_data
+       WHERE product = @lt_data-material
+       INTO TABLE @DATA(lt_mat_data).
+      IF sy-subrc = 0.
+        SORT lt_mat_data BY product.
+      ENDIF.
+      SELECT customer,
+             salesorganization,
+             distributionchannel,
+             organizationdivision,
+             custsuppid
+             FROM zsd_i_supdmndsalesarea
+             FOR ALL ENTRIES IN @lt_data
+             WHERE customer = @lt_data-shiptoparty
+             AND   salesorganization = @lt_data-salesorganization
+             INTO TABLE @DATA(lt_cus_data).
+      IF sy-subrc = 0.
+        SORT lt_cus_data BY customer salesorganization distributionchannel distributionchannel.
+      ENDIF.
+      SELECT shippingpoint,
+             distributionchannel,
+             ordertype,
+             orderreason,
+             dncreationlt,
+             zlt_type
+         FROM zsd_i_dncreationleadtimes
+         FOR ALL ENTRIES IN @lt_data
+         WHERE shippingpoint = @lt_data-shippingpoint
+         AND   distributionchannel = @lt_data-saleschannel
+         AND   ordertype           = @lt_data-purchasingdocumenttype
+         AND   orderreason         = @lt_data-orderreason
+         INTO TABLE @DATA(lt_leadtime_orea).
+      IF sy-subrc = 0.
+        SORT lt_leadtime_orea BY shippingpoint distributionchannel ordertype orderreason.
+      ENDIF.
+      SELECT shippingpoint,
+             distributionchannel,
+             ordertype,
+             dncreationlt,
+             zlt_type
+        FROM zsd_i_dncreationleadtimes
+        FOR ALL ENTRIES IN @lt_data
+         WHERE shippingpoint = @lt_data-shippingpoint
+         AND   distributionchannel = @lt_data-saleschannel
+         AND   ordertype           = @lt_data-purchasingdocumenttype
+        AND   orderreason           = ''
+        INTO TABLE @DATA(lt_leadtime_otype).
+      IF sy-subrc = 0.
+        SORT lt_leadtime_otype BY shippingpoint distributionchannel ordertype.
+      ENDIF.
+      SELECT shippingpoint,
+             distributionchannel,
+             dncreationlt,
+             zlt_type
+        FROM zsd_i_dncreationleadtimes
+        FOR ALL ENTRIES IN @lt_data
+        WHERE shippingpoint = @lt_data-shippingpoint
+        AND   distributionchannel = @lt_data-saleschannel
+        AND   ordertype           = ''
+        AND   orderreason           = ''
+        INTO TABLE @DATA(lt_leadtime_dis).
+      IF sy-subrc = 0.
+        SORT lt_leadtime_dis BY shippingpoint distributionchannel.
+      ENDIF.
+      LOOP AT lt_data ASSIGNING FIELD-SYMBOL(<ls_data>).
+        LOOP AT lt_hm_table ASSIGNING FIELD-SYMBOL(<ls_hm_table>). "#EC CI_NESTED
+          READ TABLE lt_eventdet WITH KEY deliverydocument = <ls_data>-outbounddelivery
+                                          eventtype = CONV #( <ls_hm_table>-field1 ) TRANSPORTING NO FIELDS.
+          IF sy-subrc = 0.
+            <ls_data>-overalldelvstatus = <ls_hm_table>-field2.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+        READ TABLE lt_mat_data ASSIGNING FIELD-SYMBOL(<ls_material>) WITH KEY product = <ls_data>-material BINARY SEARCH.
+        IF sy-subrc = 0.
+          lv_mid = <ls_material>-matlcnvrsidcharvalconversion.
+          APPEND <ls_material> TO lt_matnr ##ENH_OK.
+        ENDIF.
+        READ TABLE lt_cus_data ASSIGNING FIELD-SYMBOL(<ls_cus_data>) WITH KEY customer = <ls_data>-shiptoparty
+                                                                              salesorganization = <ls_data>-salesorganization BINARY SEARCH.
+        IF sy-subrc = 0.
+          lv_cid = <ls_cus_data>-custsuppid.
+        ENDIF.
+        CALL FUNCTION 'FSH_SC_CONVERT_SIZE'
+          EXPORTING
+            it_matnr     = lt_matnr
+            iv_mid       = lv_mid
+            iv_cid       = lv_cid
+          IMPORTING
+            et_converted = lt_sizedesc.
+        IF lt_sizedesc[] IS NOT INITIAL.
+          DATA(lt_desc) = lt_sizedesc[ 1 ]-conversion.
+          IF lt_desc[] IS NOT INITIAL.
+            <ls_data>-sizedescription = lt_sizedesc[ 1 ]-conversion[ 1 ]-fsh_sc_stxt.
+          ENDIF.
+        ENDIF.
+        CLEAR: lt_matnr, lv_mid, lv_cid, lt_sizedesc.
+        READ TABLE lt_vas_data ASSIGNING FIELD-SYMBOL(<ls_vas_data>) WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                              vascode       = <ls_data>-valueaddedsubservicetype BINARY SEARCH.
+        IF sy-subrc = 0.
+          <ls_data>-vasleadtimesto = <ls_vas_data>-leadtime.
+        ENDIF.
+        READ TABLE lt_vas_data ASSIGNING <ls_vas_data> WITH KEY shippingpoint = <ls_data>-dnshippingpoint
+                                                                vascode       = <ls_data>-dnvalueaddedsubservicetype BINARY SEARCH.
+        IF sy-subrc = 0.
+          <ls_data>-vasleadtimedn = <ls_vas_data>-leadtime.
+        ENDIF.
+        READ TABLE lt_leadtime_orea ASSIGNING FIELD-SYMBOL(<ls_lead_orea>)     WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                                        distributionchannel = <ls_data>-saleschannel
+                                                                                        ordertype           = <ls_data>-purchasingdocumenttype
+                                                                                        orderreason         = <ls_data>-orderreason
+                                                                                        zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field1 ) BINARY SEARCH.
+        IF sy-subrc = 0.
+          <ls_data>-creationleadtime = <ls_lead_orea>-dncreationlt.
+        ELSE.
+          READ TABLE lt_leadtime_otype ASSIGNING FIELD-SYMBOL(<ls_lead_otype>) WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                                        distributionchannel = <ls_data>-saleschannel
+                                                                                        ordertype           = <ls_data>-purchasingdocumenttype
+                                                                                        zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field1 ) BINARY SEARCH.
+          IF sy-subrc = 0.
+            <ls_data>-creationleadtime = <ls_lead_otype>-dncreationlt.
+          ELSE.
+            READ TABLE lt_leadtime_dis ASSIGNING FIELD-SYMBOL(<ls_lead_dis>) WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                              distributionchannel = <ls_data>-saleschannel
+                                                                              zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field1 ) BINARY SEARCH.
+            IF sy-subrc = 0.
+              <ls_data>-creationleadtime = <ls_lead_dis>-dncreationlt.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+        READ TABLE lt_leadtime_orea ASSIGNING <ls_lead_orea>     WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                                 distributionchannel = <ls_data>-saleschannel
+                                                                                 ordertype           = <ls_data>-purchasingdocumenttype
+                                                                                 orderreason         = <ls_data>-orderreason
+                                                                                 zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field2 ) BINARY SEARCH.
+        IF sy-subrc = 0.
+          <ls_data>-processingleadtime = <ls_lead_orea>-dncreationlt.
+        ELSE.
+          READ TABLE lt_leadtime_otype ASSIGNING <ls_lead_otype> WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                                        distributionchannel = <ls_data>-saleschannel
+                                                                                        ordertype           = <ls_data>-purchasingdocumenttype
+                                                                                        zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field2 ) BINARY SEARCH.
+          IF sy-subrc = 0.
+            <ls_data>-processingleadtime = <ls_lead_otype>-dncreationlt.
+          ELSE.
+            READ TABLE lt_leadtime_dis ASSIGNING <ls_lead_dis> WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                              distributionchannel = <ls_data>-saleschannel
+                                                                              zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field2 ) BINARY SEARCH.
+            IF sy-subrc = 0.
+              <ls_data>-processingleadtime = <ls_lead_dis>-dncreationlt.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+        READ TABLE lt_leadtime_orea ASSIGNING <ls_lead_orea>     WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                                 distributionchannel = <ls_data>-saleschannel
+                                                                                 ordertype           = <ls_data>-purchasingdocumenttype
+                                                                                 orderreason         = <ls_data>-orderreason
+                                                                                 zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field3 ) BINARY SEARCH.
+        IF sy-subrc = 0.
+          <ls_data>-loadingleadtime = <ls_lead_orea>-dncreationlt.
+        ELSE.
+          READ TABLE lt_leadtime_otype ASSIGNING <ls_lead_otype> WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                                        distributionchannel = <ls_data>-saleschannel
+                                                                                        ordertype           = <ls_data>-purchasingdocumenttype
+                                                                                        zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field3 ) BINARY SEARCH.
+          IF sy-subrc = 0.
+            <ls_data>-loadingleadtime = <ls_lead_otype>-dncreationlt.
+          ELSE.
+            READ TABLE lt_leadtime_dis ASSIGNING <ls_lead_dis> WITH KEY shippingpoint = <ls_data>-shippingpoint
+                                                                              distributionchannel = <ls_data>-saleschannel
+                                                                              zlt_type            = CONV #( lt_hm_table_lt[ 1 ]-field3 ) BINARY SEARCH.
+            IF sy-subrc = 0.
+              <ls_data>-loadingleadtime = <ls_lead_dis>-dncreationlt.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+        <ls_data>-goodsissuequantity = <ls_data>-issuedquantity + <ls_data>-pickedquantity.
+      ENDLOOP.
+      ct_calculated_data = CORRESPONDING #( lt_data ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD if_sadl_exit_calc_element_read~get_calculation_info.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " NAGARSOW     | 20.11.2023 | 26318     : [Build] DN OS compliance Repor -
+    "              |            | DS4K968461                               -
+    " -----------------------------------------------------------------------
+    RETURN.
+  ENDMETHOD.
+ENDCLASS.

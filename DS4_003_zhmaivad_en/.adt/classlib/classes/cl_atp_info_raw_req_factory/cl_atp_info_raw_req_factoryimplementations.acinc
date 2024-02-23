@@ -1,0 +1,139 @@
+*"* use this source file for the definition and implementation of
+*"* local helper classes, interface definitions and type
+*"* declarations
+
+
+CLASS lcl_material_plant_req DEFINITION.
+
+  PUBLIC SECTION.
+
+    INTERFACES:
+      if_atp_info_raw_req.
+
+    METHODS:
+      constructor
+        IMPORTING
+          io_request_interpreter TYPE REF TO cl_atp_info_req_interpreter
+          it_material_plant      TYPE cl_atp_info_raw_req_factory=>tt_material_plant_combination
+          iv_checking_rule       TYPE prreg.
+
+  PROTECTED SECTION.
+
+    DATA: mt_material_plant TYPE cl_atp_info_raw_req_factory=>tt_material_plant_combination,
+          mv_checking_rule  TYPE prreg,
+
+          mo_request_interpreter TYPE REF TO cl_atp_info_req_interpreter.
+
+ENDCLASS.
+
+CLASS lcl_material_plant_req IMPLEMENTATION.
+
+  METHOD if_atp_info_raw_req~validate.
+
+    DATA: lt_check_key         TYPE tbl_atp_check_key,
+          lv_exception_occured TYPE abap_bool,
+          lv_error_occured     TYPE abap_bool.
+
+
+    LOOP AT mt_material_plant ASSIGNING FIELD-SYMBOL(<ls_material_plant>).
+
+      INSERT VALUE #(
+        matnr = <ls_material_plant>-material
+        werks = <ls_material_plant>-supplying_plant
+        berid = <ls_material_plant>-supplying_plant
+        prreg = mv_checking_rule
+      ) INTO TABLE lt_check_key.
+
+    ENDLOOP.
+
+
+    cl_atp_settings_api=>get_instance( )->get_settings_for_material(
+      EXPORTING
+        it_material  = lt_check_key
+      IMPORTING
+        et_message   = DATA(lt_message)
+        et_check_key = DATA(lt_enriched_check_key)
+      EXCEPTIONS
+        others      = 1
+    ).
+
+    lv_exception_occured = xsdbool( sy-subrc <> 0 ).
+
+    " REMARK: The settings API detects whether a checking rule has been provided and issues a warning message if not. It doesn't issue an error because
+    "         some consumers of the settings API are not interested whether a product availability check can be performed with the provided data
+    "         but rather want to only partially check the customizing for the provided data.
+    "         In the ATP Info API, however, we need to be more strict because without checking rule a product availability check can't be executed.
+    "         We therefore "upgrade" the warning message to an error message.
+    MODIFY lt_message
+      FROM VALUE #( msgty = 'E' )
+      TRANSPORTING msgty
+      WHERE msgid = 'CO'
+        AND msgno = 143.
+
+
+    lv_error_occured = xsdbool(
+      lv_exception_occured = abap_true         OR
+      line_exists( lt_message[ msgty = 'E' ] ) OR
+      line_exists( lt_message[ msgty = 'X' ] ) OR
+      line_exists( lt_message[ msgty = 'A' ] )
+    ).
+
+    ev_valid = xsdbool( lv_error_occured = abap_false ).
+    et_message = CORRESPONDING #( lt_message ).
+
+
+
+    LOOP AT lt_enriched_check_key
+      ASSIGNING FIELD-SYMBOL(<ls_check_key>).
+
+      IF <ls_check_key>-verpn = abap_true.
+        MESSAGE e028(ag) WITH <ls_check_key>-matnr <ls_check_key>-werks INTO DATA(lv_message).
+        INSERT CORRESPONDING #( sy ) INTO TABLE et_message.
+        ev_valid = abap_false.
+      ENDIF.
+
+      IF <ls_check_key>-adv_atp <> cl_atp_customizing_c=>check_s4.
+        MESSAGE e040(ag) WITH <ls_check_key>-matnr <ls_check_key>-werks <ls_check_key>-mtvfp INTO lv_message.
+        INSERT CORRESPONDING #( sy ) INTO TABLE et_message.
+        ev_valid = abap_false.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD if_atp_info_raw_req~interprete.
+
+    DATA: ls_check_context TYPE atpcs_s4,
+          lt_check_context TYPE tbl_atpcs_s4.
+
+    LOOP AT mt_material_plant ASSIGNING FIELD-SYMBOL(<ls_material_plant>).
+
+      ls_check_context-matnr = <ls_material_plant>-material.
+      ls_check_context-werks = <ls_material_plant>-supplying_plant.
+      ls_check_context-berid = <ls_material_plant>-supplying_plant. " Hach, life can be easy, when the current API version is simple. :)
+      ls_check_context-prreg = mv_checking_rule.
+
+      APPEND ls_check_context TO lt_check_context.
+
+    ENDLOOP.
+
+    mo_request_interpreter->complement_check_context(
+      CHANGING
+        ct_check_context = lt_check_context
+    ).
+
+    CREATE OBJECT ro_interpreted_request TYPE cl_atp_info_req
+      EXPORTING
+        it_check_context = lt_check_context.
+
+  ENDMETHOD.
+
+  METHOD constructor.
+    mt_material_plant = it_material_plant.
+    mv_checking_rule  = iv_checking_rule.
+
+    mo_request_interpreter = io_request_interpreter.
+  ENDMETHOD.
+
+ENDCLASS.

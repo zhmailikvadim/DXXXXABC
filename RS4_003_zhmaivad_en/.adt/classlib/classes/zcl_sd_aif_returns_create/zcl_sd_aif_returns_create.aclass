@@ -33,6 +33,7 @@ CLASS zcl_sd_aif_returns_create DEFINITION
         ext_ref_doc_id   TYPE sd_ext_ref_doc_id,
         vbeln            TYPE vbeln_va,
         posnr            TYPE posnr_va,
+        externalitemid   TYPE sd_ext_ref_item_id,
         arktx            TYPE arktx,
         matnr            TYPE matnr,
         werks            TYPE werks_ext,
@@ -113,6 +114,13 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
     " ZHMAIVAD     | 23.11.2023 | 25135 : O2C - Returns - LPD check        -
     "              |            | DS4K963930                               -
     " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 29.01.2024 | 28123     : Feature- Defect- Test- Retur -
+    "              |            | DS4K977699                               -
+    "-----------------------------------------------------------------------
+    " ZHMAIVAD     | 26.02.2024 | 29320     : Feature- Defect- Test- Retur -
+    "              |            | DS4K980623                               -
+    " -----------------------------------------------------------------------
+
     CHECK cs_data-customer_return IS NOT INITIAL.
 
     TRY.
@@ -127,22 +135,25 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
 
     FINAL(lv_external_id) = get_external_document_id( cs_data-message_header-reference_id-content ).
 
+    LOOP AT cs_data-customer_return ASSIGNING FIELD-SYMBOL(<ls_header>).
+      <ls_header>-external_doc_last_change_date = cs_data-message_header-creation_date_time.
+      <ls_header>-external_document_id          = lv_external_id.
+    ENDLOOP.
+
+    " IF the same line item exists more than once and the grading is different
+    manage_multiply_inspect_codes( CHANGING cs_data = cs_data ).
+
     " Get DB data for all items
     FINAL(lts_pos_data) = get_position_data( iv_externaldoc_id = lv_external_id
                                              iv_sendersys_id   = cs_data-message_header-sender_business_system_id ).
 
     " Find a "template" item
-    LOOP AT cs_data-customer_return ASSIGNING FIELD-SYMBOL(<ls_header>).
-      <ls_header>-external_doc_last_change_date = cs_data-message_header-creation_date_time.
-      <ls_header>-external_document_id          = lv_external_id.
+    LOOP AT cs_data-customer_return ASSIGNING <ls_header>.
       ASSIGN <ls_header>-item[ 1 ] TO FIELD-SYMBOL(<ls_template_item>).
       IF sy-subrc = 0.
-        FINAL(ls_template_item) = <ls_template_item>.
         EXIT.
       ENDIF.
     ENDLOOP.
-    " IF the same line item exists more than once and the grading is different
-    manage_multiply_inspect_codes( CHANGING cs_data = cs_data ).
 
     LOOP AT cs_data-customer_return ASSIGNING <ls_header>.
       SORT <ls_header>-item BY external_item_id.       "#EC CI_SORTLOOP
@@ -210,6 +221,9 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
                               return_information-returns_refund_extent = <ls_pos_data>-msr_refund_code ) INTO TABLE <ls_header>-item
                      ASSIGNING <ls_new_item>.
 
+              <ls_new_item>-return_information-returns_refund_procg_mode = lt_cust[ 1 ]-field1.
+              <ls_new_item>-return_information-returns_refund_extent     = lt_cust[ 1 ]-field2.
+
               <ls_new_item>-requested_quantity-unit_code = <ls_pos_data>-vrkme.
               <ls_new_item>-material = <ls_pos_data>-matnr.
               <ls_new_item>-return_information-return_reason = gc_status-over_rec.
@@ -236,6 +250,9 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
                               external_item_id                         = get_new_posnr( <ls_header>-item )
                               return_information-returns_refund_extent = <ls_pos_data>-msr_refund_code ) INTO TABLE <ls_header>-item
                      ASSIGNING <ls_new_item>.
+
+              <ls_new_item>-return_information-returns_refund_procg_mode = lt_cust[ 1 ]-field1.
+              <ls_new_item>-return_information-returns_refund_extent     = lt_cust[ 1 ]-field2.
 
               <ls_item>-requested_quantity-unit_code = <ls_pos_data>-vrkme.
 
@@ -303,13 +320,13 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
             <ls_item>-return_information-returns_refund_type            = <ls_pos_data>-refund_type.
             <ls_item>-return_information-returns_refund_procg_mode      = <ls_pos_data>-refund_control.
           ENDIF.
-        ELSEIF ls_template_item IS NOT INITIAL.
+        ELSEIF <ls_template_item> IS ASSIGNED.
 
           " No item found - create a new item
           FINAL(lv_index) = sy-tabix.
-          INSERT VALUE #( BASE ls_template_item
+          INSERT VALUE #( BASE <ls_template_item>
                           customer_return_item_id                           = space
-                          external_item_id                                  = <ls_pos_data>-posnr
+                          external_item_id                                  = <ls_pos_data>-externalitemid
                           customer_return_item_text                         = <ls_pos_data>-arktx
                           material                                          = <ls_pos_data>-matnr
                           plant                                             = <ls_pos_data>-werks
@@ -401,10 +418,15 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
     " IAPRYALE     | 05.06.2023 | 21530: O2C - Returns - LPD check         -
     "              |            | DS4K953169                               -
     " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 26.02.2024 | 29320     : Feature- Defect- Test- Retur -
+    "              |            | DS4K980623                               -
+    " -----------------------------------------------------------------------
+
     SELECT                                                "#EC CI_SUBRC
            vk~externaldocumentid      AS ext_ref_doc_id,
            vp~salesdocument           AS vbeln,
            vp~salesdocumentitem       AS posnr,
+           vp~externalitemid          AS externalitemid,
            vp~salesdocumentitemtext   AS arktx,
            vp~material                AS matnr,
            vp~plant                   AS werks,
@@ -426,18 +448,18 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
            msr_d~refund_control,
            msr_i~fu_code,
            msr_i~mat_received
-      FROM                                              i_salesdocument AS vk
-      JOIN i_salesdocumentitem
-           AS vp ON vk~salesdocument = vp~salesdocument
+      FROM i_salesdocument                       AS vk
+             JOIN
+               i_salesdocumentitem               AS vp    ON vk~salesdocument = vp~salesdocument
                  LEFT JOIN
-                                                                zsd_c_vbep_aggr_discrepancies AS vp2 ON  vp2~vbeln = vp~salesdocument
-                                                                                                     AND vp2~posnr = vp~salesdocumentitem
+                   zsd_c_vbep_aggr_discrepancies AS vp2   ON  vp2~vbeln = vp~salesdocument
+                                                          AND vp2~posnr = vp~salesdocumentitem
                      LEFT JOIN
-                                                                    msr_d_executed AS msr_d                  "#EC CI_BUFFJOIN
-                                                                                            ON  msr_d~doc_nr   = vp~salesdocument
-                                                                                            AND msr_d~doc_item = concat( '0000', vp~salesdocumentitem )
+                       msr_d_executed            AS msr_d "#EC CI_BUFFJOIN
+                                                          ON  msr_d~doc_nr   = vp~salesdocument
+                                                          AND msr_d~doc_item = concat( '0000', vp~salesdocumentitem )
                          LEFT JOIN
-                                                                        msr_i_chain AS msr_i ON msr_i~chain_id = msr_d~chain_id
+                           msr_i_chain           AS msr_i ON msr_i~chain_id = msr_d~chain_id
       WHERE vk~externaldocumentid       = @iv_externaldoc_id
         AND vk~senderbusinesssystemname = @iv_sendersys_id
       INTO CORRESPONDING FIELDS OF TABLE @rts_result.
@@ -557,7 +579,7 @@ CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
         ENDLOOP.
       ENDLOOP.
 
-      SORT lt_item BY external_item_id. "#EC CI_SORTLOOP
+      SORT lt_item BY external_item_id.                "#EC CI_SORTLOOP
 
       <ls_header>-item = lt_item.
       CLEAR lv_item_id.

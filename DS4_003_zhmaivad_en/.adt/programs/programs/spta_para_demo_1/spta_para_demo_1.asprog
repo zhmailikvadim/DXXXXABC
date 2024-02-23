@@ -1,0 +1,316 @@
+REPORT spta_para_demo_1 .
+
+TABLES: spta_dt1.
+
+TYPE-POOLS: spta.
+
+PARAMETERS:
+   rfcgroup   TYPE spta_rfcgr OBLIGATORY MEMORY ID spta_rfcgr,
+   maxtasks   LIKE sy-index DEFAULT '10',
+   lo_numbr   LIKE sy-index DEFAULT '100',
+   hi_numbr   LIKE sy-index DEFAULT '300'.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECT-OPTIONS:
+   err_nrs    FOR spta_dt1-number.
+
+DATA:
+   gd_repid         LIKE sy-repid,
+   gd_error_count   LIKE sy-index,
+   gd_taskstat      TYPE LINE OF spta_t_statistics-taskstat.
+
+DATA:
+   gt_work_area LIKE spta_dt1 OCCURS 0 WITH HEADER LINE,
+   gt_result_area LIKE spta_dt1 OCCURS 0 WITH HEADER LINE.
+
+INITIALIZATION.
+* Not just anybody may execute this report
+  AUTHORITY-CHECK OBJECT 'S_ADMI_FCD'
+    ID 'S_ADMI_FCD' FIELD 'PADM'.
+  IF not sy-subrc is initial.
+    RAISE no_authority_for_report.
+  ENDIF.
+
+START-OF-SELECTION.
+  WHILE lo_numbr <= hi_numbr.
+    gt_work_area-number = lo_numbr.
+    APPEND gt_work_area.
+    ADD 1 TO lo_numbr.
+  ENDWHILE.
+
+  gd_repid = sy-repid.
+  CLEAR: gd_error_count.
+
+  CALL FUNCTION 'SPTA_PARA_PROCESS_START_2'
+       EXPORTING
+            server_group             = rfcgroup
+            max_no_of_tasks          = maxtasks
+            before_rfc_callback_form = 'BEFORE_RFC'
+            in_rfc_callback_form     = 'IN_RFC'
+            after_rfc_callback_form  = 'AFTER_RFC'
+            callback_prog            = gd_repid
+       EXCEPTIONS
+            invalid_server_group     = 1
+            no_resources_available   = 2
+            OTHERS                   = 3.
+
+
+END-OF-SELECTION.
+  SKIP.
+  LOOP AT gt_result_area.
+    WRITE: / sy-tabix, text-res,
+            gt_result_area-number,' : '.
+    sy-index = strlen( gt_result_area-string ).
+    WRITE: AT (sy-index) gt_result_area-string.
+  ENDLOOP.
+  SKIP.
+
+* Define a type that contains ALL the input & output data
+* needed for the RFC
+  TYPES: BEGIN OF t_rfcdata,
+           BEGIN OF importing,
+             workarea LIKE gt_work_area OCCURS 0,
+           END OF importing,
+           BEGIN OF exporting,
+             workarea LIKE gt_work_area OCCURS 0,
+           END   OF exporting,
+         END   OF t_rfcdata.
+
+
+*---------------------------------------------------------------------*
+*       FORM BEFORE_RFC                                               *
+*---------------------------------------------------------------------*
+*       Callback-Form invoked before each RFC                         *
+*---------------------------------------------------------------------*
+FORM before_rfc
+   USING
+      p_before_rfc_imp     TYPE spta_t_before_rfc_imp
+   CHANGING
+      p_before_rfc_exp     TYPE spta_t_before_rfc_exp
+      pt_rfcdata           TYPE spta_t_indxtab
+      p_failed_objects     TYPE spta_t_failed_objects
+      p_objects_in_process TYPE spta_t_objects_in_process
+      p_user_param.
+
+  DATA:
+     ld_package_size   LIKE sy-tabix,
+     ld_task_data      TYPE t_rfcdata,
+     ld_work_area      LIKE LINE OF gt_work_area,
+     ld_failed_obj     LIKE LINE OF p_failed_objects,
+     ld_obj_in_process LIKE LINE OF p_objects_in_process.
+
+
+* Delete list of objects in process
+  CLEAR ld_obj_in_process.
+* Check if there are objects from previously failed tasks left ...
+  READ TABLE p_failed_objects INDEX 1 INTO ld_failed_obj.
+  IF sy-subrc = 0.
+* Yes there are.
+* Take first object and delete it from list of failed objects
+    DELETE p_failed_objects INDEX 1.
+    ld_obj_in_process = ld_failed_obj.
+    ld_work_area-number = ld_obj_in_process-obj_id.
+    APPEND ld_work_area TO ld_task_data-importing-workarea.
+* Add list of objects that are about to be processed
+* to list of "objects in process"
+* so the task manager has that information
+    APPEND ld_obj_in_process TO p_objects_in_process.
+  ELSE.
+* No there aren't.
+* Take objects from regular input list of objects
+
+* The number of objects that are processed at once is determined
+* by the application. This sample coding here uses a dynamically
+* determined package size (one 5th of remaining objects).
+* In order to avoid extremly large or extremly small packages
+* there is a maximum and minimum package size.
+    DESCRIBE TABLE gt_work_area LINES sy-tabix.
+    ld_package_size = sy-tabix / 5.
+    IF ld_package_size > 100.
+      ld_package_size = 100.
+    ELSEIF ld_package_size < 10.
+      ld_package_size = 10.
+    ENDIF.
+    DO ld_package_size TIMES.
+      READ TABLE gt_work_area INDEX 1.
+      IF sy-subrc is initial.
+        ld_work_area-number = gt_work_area-number.
+        APPEND ld_work_area TO ld_task_data-importing-workarea.
+        ld_obj_in_process-obj_id = ld_work_area-number.
+        DELETE gt_work_area INDEX 1.
+* Add list of objects that are about to be processed
+* to list of "objects in process"
+* so the task manager has that information
+        APPEND ld_obj_in_process TO p_objects_in_process.
+      ENDIF.
+    ENDDO.
+  ENDIF.
+
+* If there is (currently) nothing to do, clear the
+* START_RFC field and leave the form.
+* This informs the task manager that no rfc has to be started.
+* If there are no more RFCs in process this also ends
+* the processing of the task manager
+* If there are still RFCs in process the BEFORE_RFC form
+* will be invoked after each RFC has been received to give
+* the application an opportunity to launch new RFCs that have been
+* waiting on the RFC that was just received.
+  IF p_objects_in_process is initial.
+    CLEAR p_before_rfc_exp-start_rfc.
+    EXIT.
+  ENDIF.
+
+* Convert the input data into the INDX structure
+* that is needed for the RFC
+  CALL FUNCTION 'SPTA_INDX_PACKAGE_ENCODE'
+       EXPORTING
+            data    = ld_task_data
+       IMPORTING
+            indxtab = pt_rfcdata.
+
+* Inform task manager that an RFC can be started from the
+* data compiled
+  p_before_rfc_exp-start_rfc = 'X'.
+
+ENDFORM.                               "BEFORE_RFC
+
+
+*---------------------------------------------------------------------*
+*       FORM IN_RFC                                                   *
+*---------------------------------------------------------------------*
+*       Callback-Form invoked within the RFC                          *
+*---------------------------------------------------------------------*
+FORM in_rfc
+   USING
+      p_in_rfc_imp  TYPE spta_t_in_rfc_imp
+   CHANGING
+      p_in_rfc_exp  TYPE spta_t_in_rfc_exp
+      p_rfcdata     TYPE spta_t_indxtab.
+
+  DATA:
+     ld_taskdata   TYPE t_rfcdata.
+
+* Force synchronous update
+* This is the most efficient method for parallel processing
+* since no update data will be written to the DB but rather
+* stored in memory.
+* This statement must be reissued after each COMMIT WORK !!!!
+  SET UPDATE TASK LOCAL.
+
+* Unpack RFC input data (that has been packed in the BEFORE_RFC form)
+  CALL FUNCTION 'SPTA_INDX_PACKAGE_DECODE'
+       EXPORTING
+            indxtab = p_rfcdata
+       IMPORTING
+            data    = ld_taskdata.
+
+* Begin processing of RFC
+  CALL FUNCTION 'SPTA_SAMPLES_PRIMEFACTORS_GET'
+       TABLES
+            data = ld_taskdata-importing-workarea.
+
+* Fill result tables
+* This would include data for result lists, message handler etc.
+  ld_taskdata-exporting-workarea = ld_taskdata-importing-workarea.
+
+* Clear all data that is unnecessary for the AFTER_RFC form
+* This keeps the amount of data transfered over the network
+* small and makes the RFC more efficient!
+  CLEAR ld_taskdata-importing.
+
+* Repack output data for AFTER_RFC form
+  CALL FUNCTION 'SPTA_INDX_PACKAGE_ENCODE'
+       EXPORTING
+            data    = ld_taskdata
+       IMPORTING
+            indxtab = p_rfcdata.
+
+* Don't forget to COMMIT your data, because if you don't, the
+* RFC will end with an automatic rollback and data written to the
+* database will be lost.
+  COMMIT WORK.
+
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+*       FORM AFTER_RFC                                                *
+*---------------------------------------------------------------------*
+*       Callback-Form invoked after RFC                               *
+*---------------------------------------------------------------------*
+FORM after_rfc
+   USING
+      p_rfcdata            TYPE spta_t_indxtab
+      p_rfcsubrc           TYPE sy-subrc
+      p_rfcmsg             TYPE spta_t_rfcmsg
+      p_objects_in_process TYPE spta_t_objects_in_process
+      p_after_rfc_imp      TYPE spta_t_after_rfc_imp
+   CHANGING
+      p_after_rfc_exp      TYPE spta_t_after_rfc_exp
+      p_user_param.
+
+  DATA:
+     ld_obj_in_process     LIKE LINE OF p_objects_in_process,
+     ld_tabsize            TYPE sy-tabix,
+     ld_taskdata           TYPE t_rfcdata.
+
+  IF p_rfcsubrc is initial.
+* No RFC error occured
+
+* Unpack RFC output data and add RFC-results to global data,
+* e.g. output list, message handler etc.
+    CALL FUNCTION 'SPTA_INDX_PACKAGE_DECODE'
+         EXPORTING
+              indxtab = p_rfcdata
+         IMPORTING
+              data    = ld_taskdata.
+    APPEND LINES OF ld_taskdata-exporting-workarea
+           TO gt_result_area.
+    EXIT.
+  ENDIF.
+
+* Error handling
+* Note: An incorrect way to handle application specific errors
+*       may lead to an infinite loop in the application, because
+*       if an error is returned to the task manager that object
+*       ist rescheduled in the FAILED_OBJS table and is supposed
+*       to be reprocessed again which may lead to another application
+*       error. The only way out of this behaviour is to set
+*       the flag 'NO_RESUBMISSION_ON_ERROR' to the task manager
+*       and store an error message in the application's error log.
+*       Hoever there are situations where is is appropriate
+*       to not set this flag and thus allow a resubmission of those
+*       objects:
+*       - If one aRFC processes 100 objects and the task fails
+*         return an application_error to the task manager.
+*         Then reprocess each failed_objs one by one. If a task
+*         fails that processes only one object then return
+*         no_error to the task manager and store the error
+*         in the application's log.
+
+  DESCRIBE TABLE p_objects_in_process LINES ld_tabsize.
+  IF ld_tabsize = 1.
+* The failed task contained one object
+* Inform task manager not to resubmit objects
+    p_after_rfc_exp-no_resubmission_on_error = 'X'.
+
+* Application specific error handling
+* This is the point to report this error by
+* storing an error message etc...
+* The content of p_rfcmsg should be reported as well
+* in this message as it contains important information
+* about the nature of the error.
+    READ TABLE p_objects_in_process INDEX 1
+               INTO ld_obj_in_process.
+    CLEAR: gt_work_area.
+    gt_work_area-number = ld_obj_in_process-obj_id.
+    gt_work_area-string = text-err.
+    APPEND gt_work_area.
+  ELSE.
+* The failed taks contained several objects.
+* Enable resubmission to process objects individually.
+    CLEAR p_after_rfc_exp-no_resubmission_on_error.
+  ENDIF.
+
+ENDFORM.                               "AFTER_RFC

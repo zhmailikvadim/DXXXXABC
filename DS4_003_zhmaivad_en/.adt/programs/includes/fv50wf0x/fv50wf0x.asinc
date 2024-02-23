@@ -1,0 +1,1910 @@
+************************************************************************
+*  Unterroutinen SD/WS-Lieferabwicklung Warenausgang alphabetisch:     *
+*----------------------------------------------------------------------*
+*  Buchstabe X                                                         *
+*                                                                      *
+*     PERFORM XIMSEG_ERROR_HANDLING.                                   *
+*     PERFORM XIMSEG_FUELLEN.        "Schnittstelle IM-WA              *
+*     PERFORM XIMSEG_FUELLEN_WMS.    "Schnittstelle WMS-WA Umlagerung  *
+*     PERFORM XIMSEG_REFRESH.                                          *
+*     PERFORM XLSEG_COM_FUELLEN.     "Schnittstelle WMS-WA             *
+*     PEROFRM XIMSEG_FUELLEN_AIP.    "Schittstelle SÜW                 *
+*                                                                      *
+************************************************************************
+
+
+
+*----------------------------------------------------------------------*
+*     FORM XIMSEG_ERROR_HANDLING                                       *
+*----------------------------------------------------------------------*
+*       Falls beim Buchen des WAs ein Fehler auftrat, wird und die     *
+*       die Viewtabelle abgearbeitet und ein Fehlerprotokoll           *
+*       aufgebaut.                                                     *
+*       MB_WA_ERR = 2                                                  *
+*                   Fehler in der Belegerstellung => allg. Fehler      *
+*                                                    aus MM07          *
+*       MB_WA_ERR = 3                                                  *
+*                   Fehler bei den Positionen     => Fehlerprotokoll   *
+*                                                    aus MM07          *
+*----------------------------------------------------------------------*
+
+FORM ximseg_error_handling.
+  DATA: trans LIKE sy-tcode.
+  IMPORT trans FROM MEMORY ID 'WA_TRANS'.
+
+
+*... Welche Art von Fehler?
+  CASE wb_wa_err.
+    WHEN char2.
+*... Kopfmeldungen in die Statuszeile
+      IF NOT trans EQ 'VL21' AND
+             v50agl-kommirueckmeldung IS INITIAL.           "n_842717
+        PERFORM message_senden(sapmv50a) USING wb_msgno
+                                               chare     "note 197864
+                                               wb_msgid
+                                               wb_msgv1
+                                               wb_msgv2
+                                               wb_msgv3
+                                               wb_msgv4.
+      ELSE.
+        PERFORM release_ewm_delivery(saplv50k) IF FOUND.    "n_2969273
+        PERFORM wat_fehlerprotokoll_fuellen.
+        PERFORM wat_fehlerprotokoll_ausgeben.
+      ENDIF.
+
+    WHEN char3.
+*... Positionsmeldungen in das WAT Protokoll
+      PERFORM release_ewm_delivery(saplv50k) IF FOUND.      "n_2969273
+      PERFORM wat_fehlerprotokoll_fuellen.
+      PERFORM wat_fehlerprotokoll_ausgeben.
+      IF v50agl-dialog NE space.
+        LEAVE TO SCREEN gf_dynnr.                           "n_1102308
+      ENDIF.
+
+  ENDCASE.
+
+ENDFORM.                    "XIMSEG_ERROR_HANDLING
+*eject
+
+
+*----------------------------------------------------------------------*
+*       FORM XIMSEG_FUELLEN                                            *
+*----------------------------------------------------------------------*
+*       - Die XIMSEG wird positionsweise aus der XLIPS gefüllt.        *
+*       - Wenn Vorgängerbeleg Auftrag ist, wird Kontierung mitgegeben  *
+*       - Ermittlung des Sonderbestandsführers, falls erforderlich     *
+*                                                                      *
+*----------------------------------------------------------------------*
+FORM ximseg_fuellen.
+  DATA: wb_result(2) TYPE c VALUE space,      "Resultat Bestandsfindung
+        t156n_subrc  LIKE sy-subrc VALUE 0,   "T156N_SELECT
+        t156n_fcode  LIKE t156n-fcode.
+  DATA: lf_imseg_tabix LIKE sy-tabix.                       "HUM
+  DATA: ls_mara  TYPE mara.                                 "n_1855197
+  DATA: ls_t156 TYPE t156.                                  "n_2452466
+  DATA  wa_ximseg LIKE LINE OF ximseg.
+  CLEAR: ximseg, lf_imseg_tabix.                            "HUM
+  DATA: l_j1btf_tfill      LIKE sy-tfill,
+        lf_imseg_no_split  TYPE sytfill VALUE 0,            "n_1653186
+        lf_imseg_after_std TYPE sytfill VALUE 0.            "n_1653186
+  DATA: lf_ebelp LIKE ekpo-ebelp.
+  DATA: ls_ekko  TYPE ekko.
+  DATA: ls_afpo TYPE afpo.                                  "n_2094726
+  TYPES: BEGIN OF s_ekes.                                   "v_n_655641
+      INCLUDE STRUCTURE ekes.
+  TYPES  END OF s_ekes.
+  TYPES: t_ekes TYPE s_ekes OCCURS 0.
+  DATA: lt_ekes TYPE t_ekes.
+  DATA: wa_tvpod TYPE tvpodvb.                               "SIT
+  DATA: xkna1 TYPE kna1.                                    "n_2050487
+
+  FIELD-SYMBOLS <ls_ekes> TYPE s_ekes.
+
+* Umrechnungsfaktoren in Catch-Weight Fall
+  DATA: l_umvkz TYPE lipsvb-umvkz,                          "n_1563322
+        l_umvkn TYPE lipsvb-umvkn.                          "n_1563322
+  DATA: lf_ebelp2 LIKE ekes-ebelp.                          "^_n_655641
+
+  DATA: l_fkivp TYPE vbup-fkivp,                            "n_2288234
+        zvbup   TYPE vbup.                                  "n_2288234
+
+  "{ Begin ENHO ISAUTO_VHU_RL_SAPFV50W IS-A-RL AM_RL }
+* Modifications for returnables logistics (RL)
+  DATA: l_vbpa LIKE LINE OF xvbpa.
+
+  "{ End ENHO ISAUTO_VHU_RL_SAPFV50W IS-A-RL AM_RL }
+
+ENHANCEMENT-POINT fv50wf0x_11 SPOTS es_sapfv50w STATIC.
+
+ENHANCEMENT-POINT ehp4_fv50wf0x_01 SPOTS es_sapfv50w.
+*... Festwerte zur Kennzeichnung bei der Bestandsbuchung festlegen
+  CASE likp-vbtyp.
+    WHEN if_sd_doc_category=>delivery OR if_sd_doc_category=>returns_delivery_for_order.
+      ximseg-called_by = 'VL02N'.
+    WHEN if_sd_doc_category=>delivery_shipping_notif.
+      ximseg-called_by = 'VL32N'.
+  ENDCASE.
+
+*... Aus der XLIPS wird eine XIMSEG Zeile erzeugt
+*    Felder aus Lieferposition, Auftragskopf und -position
+  IF NOT xlips-vgtyp EQ if_sd_doc_category=>purchase_order  "n_3248721
+  AND NOT xlips-vgbel IS INITIAL                            "n_3248721
+  AND NOT xlips-vgpos IS INITIAL.                           "n_3248721
+    ximseg-kdauf_sd     = xlips-vgbel. "Kundenauftragsnummer
+    ximseg-kdpos_sd     = xlips-vgpos. "Pos.nummer im Kundenauftrag
+  ENDIF.
+  ximseg-xdeliv       = char1.         "Materialbeleg erzeugen "HUM
+  ximseg-vbeln        = xlips-vbeln.   "Lieferungsnummer
+  ximseg-posnr        = xlips-posnr.   "Pos.nummer in der Lieferung
+  ximseg-bwart        = xlips-bwart.   "Bewegungsart (Bestand)
+  IF likp-vbtyp EQ if_sd_doc_category=>delivery AND xlips-kztlf EQ charx.
+    ximseg-elikz = xlips-kztlf.
+  ENDIF.
+
+* if  likp-vbtyp = vbtyp_mmli and                "v_n_512464 "v_n_517393
+  IF  cl_sd_doc_category_util=>is_delivery_incoming( iv_vbtyp = likp-vbtyp ) AND "^_n_517393
+      tvlk-aufer = charo.                                   "v_n_965214
+    IF xlips-kztlf = charx.
+      ximseg-elikz = charx.
+    ELSEIF xlips-kztlf = chary.
+      ximseg-elikz      = charx.
+      ximseg-migo_elikz = char3.
+    ENDIF.
+  ENDIF.                                                    "^_n_965214
+
+  IF tvlk-aufer CA 'BO' AND likp-vbtyp EQ if_sd_doc_category=>delivery  "< insert 499270
+     AND xlips-kzbew EQ charb
+     AND likp-werks IS INITIAL.                             "n_1010806
+    MOVE 'R161' TO t156n_fcode.
+    PERFORM t156n_select USING t156n_fcode
+                               xlips-bwart
+                               t156n_subrc.
+    IF t156n_subrc EQ 0 AND
+       t156n_fcode EQ t156n-fcode.
+      ximseg-bwart = t156n-bwart_next.
+    ENDIF.
+  ENDIF.
+
+  ximseg-bwlvs        = xlips-bwlvs.   "Bewegungsart (LVS)
+* XIMSEG-CHARG        = XLIPS-BWTAR.   "Bewertungsart     "note: 114787
+  ximseg-bwtar        = xlips-bwtar.   "Bewertungsart     "note: 114787
+  ximseg-umbar        = xlips-umbar.   "Bewertungsart UL  "note: 114787
+  IF NOT xlips-xchpf IS INITIAL.       "note: 114787
+    ximseg-charg      = xlips-charg.   "Chargennummer     "note: 114787
+  ENDIF.                               "note: 114787
+  ximseg-umcha        = xlips-umcha.   "Chargennummer UL  "note: 114787
+  ximseg-mbdat        = xlips-mbdat.   "Materialbereitstellungsdatum
+  ximseg-voleh        = xlips-voleh.   "Volumeneinheit
+  ximseg-gewei        = xlips-gewei.   "Gewichtseinheit
+*... Anzahl der Serialnummern
+  ximseg-anzsn        = xlips-anzsn.
+
+ENHANCEMENT-POINT ximseg_fuellen_01 SPOTS es_sapfv50w.
+
+ENHANCEMENT-POINT ximseg_fuellen_02 SPOTS es_sapfv50w.
+*... Gewicht u. Volumen zuweisen, auf 1 Mengeneinheit bezogen
+  IF NOT xlips-lgmng IS INITIAL.
+    ximseg-brgew = xlips-brgew / xlips-lgmng.  "Bruttogew. pro 1 EH
+    ximseg-volum = xlips-volum / xlips-lgmng.  "Volumen pro 1 EH
+  ENDIF.
+
+*... Übergeben der Prüflosnummer                            "v_n_536988
+  IF NOT xlips-qplos IS INITIAL          AND
+         xlips-qplos NE space            AND                  "n_2933810
+       ( likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif       OR
+         xlips-posting_change EQ charc ) AND
+         likp-vlstk NE space.                               "n_649530
+    ximseg-qplos = xlips-qplos.
+  ENDIF.                                                    "^_n_536988
+
+*... Bewegungskennzeichen für neue Lieferungen übernehmen, wurde
+*    bereits beim Anlegen der Lieferung gesetzt!
+  ximseg-kzbew      = xlips-kzbew.
+
+*... Bewegungskennzeichen nur noch für alte Lieferungen setzen
+  IF likp-kzwab EQ space OR xlips-kzbew IS INITIAL.
+*... Bewegungskennzeichen setzen für MM
+    IF xlips-kzbew IS INITIAL.         "Bewegungskennzeichen
+      ximseg-kzbew      = charl.       "L für Lieferung
+    ELSE.                              "oder
+      ximseg-kzbew      = xlips-kzbew. "B für Bestellung
+    ENDIF.
+
+*... Bewegungskennzeichen setzen für LVS
+*   XIMSEG-WM_KZBEW     = CHARL.       "L für Lieferung     "HUM
+    IF likp-kzwab IS INITIAL.                               "HUM
+      ximseg-wm_kzbew     = charl.     "L für Lieferung     "HUM
+    ELSE.                                                   "HUM
+      CLEAR ximseg-wm_kzbew.                                "HUM
+    ENDIF.                                                  "HUM
+
+*... WE zum Lieferavis
+    IF likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif AND NOT xlips-vgbel IS INITIAL
+                                AND NOT xlips-vgpos IS INITIAL.
+      ximseg-kzbew      = charb.
+*     XIMSEG-WM_KZBEW   = CHARB.
+    ELSEIF likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif AND xlips-vgbel IS INITIAL
+                                    AND xlips-vgpos IS INITIAL.
+      CLEAR ximseg-kzbew.
+*     CLEAR XIMSEG-WM_KZBEW.
+    ENDIF.
+
+*... Warenbewegung für Komponente
+    IF tvlk-aufer EQ charo OR tvlk-aufer EQ charh          "HUM
+       OR tvlk-aufer EQ charw.                              "SP_365448
+      CLEAR ximseg-kzbew.
+*     CLEAR XIMSEG-WM_KZBEW.
+    ENDIF.
+
+*... KZBEW bei RÜLI zu Lieferanten
+    IF tvlk-aufer EQ charr AND NOT xlips-vgbel IS INITIAL
+                           AND NOT xlips-vgpos IS INITIAL.
+      ximseg-kzbew = charb.
+    ENDIF.
+
+*   begin of Application Component : IS-AD-ROT,/ SWITCH : AD_ROT_SSP_SUB_SFWS_01 ,/ DESCRIPTION : Enhancements for IS-ADEC-ROT/SSP/SUB
+    IF likp-vbtyp  EQ if_sd_doc_category=>delivery_shipping_notif AND
+       xlips-aufnr IS NOT INITIAL.
+      CALL METHOD cl_rotsub_assist=>check_order
+        EXPORTING
+          iv_order_number     = xlips-aufnr
+        EXCEPTIONS
+          not_found           = 1
+          not_refo            = 2
+          not_refo_with_mpi   = 3
+          not_valid_mpi_usage = 4.
+      IF sy-subrc EQ 0 OR
+         sy-subrc EQ cl_rotsub_assist=>gc_not_refo_with_mpi.
+        ximseg-kzbew = cl_adsub_constants=>kzbew_ppo.
+      ENDIF.
+    ENDIF.
+*   end of Application Component : IS-AD-ROT,/ SWITCH : AD_ROT_SSP_SUB_SFWS_01 ,/ DESCRIPTION : Enhancements for IS-ADEC-ROT/SSP/SUB
+
+  ENDIF.
+
+  "{ Begin ENHO ISAUTO_VHU_RL_SAPFV50W IS-A-RL AM_RL }
+* Modifications for returnable packaging logistics (RPL)
+* copy delivery date
+  ximseg-lfdat = likp-lfdat.
+* copy partner data for goods supplier and carrier
+  READ TABLE xvbpa
+       WITH KEY
+         vbeln = xlips-vbeln
+         posnr = posnr_low
+         parvw = 'WL'         "goods supplier
+       INTO l_vbpa TRANSPORTING lifnr.
+  IF sy-subrc = 0.
+    ximseg-llief = l_vbpa-lifnr.
+  ENDIF.
+  READ TABLE xvbpa
+       WITH KEY
+         vbeln = xlips-vbeln
+         posnr = posnr_low
+         parvw = 'SP'         "carrier / forwarding agent
+       INTO l_vbpa TRANSPORTING lifnr.
+  IF sy-subrc = 0.
+    ximseg-spdnr = l_vbpa-lifnr.
+  ENDIF.
+  "{ End ENHO ISAUTO_VHU_RL_SAPFV50W IS-A-RL AM_RL }
+
+ENHANCEMENT-POINT fv50wf0x_10 SPOTS es_sapfv50w.
+
+*... Bestandsart ist nur sinnvoll, wenn Bewegungskz. auf B sitzt!
+  IF xlips-qplos IS INITIAL OR xlips-qplos EQ space            "n_2933810
+                            OR tvlk-aufer CN 'OH'.
+    IF xlips-kzbew CA 'BF'.
+      ximseg-insmk = xlips-insmk.
+* Assign stock type value in LIPS to IMSEG in case of STO process
+    ELSEIF xlips-vgtyp = if_sd_doc_category=>purchase_order AND NOT xlips-vgbel IS INITIAL AND
+                                 NOT xlips-vgpos IS INITIAL AND
+                                 NOT xlips-insmk IS INITIAL.
+      ximseg-insmk = xlips-insmk.
+* SPE MP 17.01.2005 Take over stock type for return to dealer deliveries
+    ELSEIF xlips-spe_auth_number NE space      AND
+       likp-vbtyp           EQ if_sd_doc_category=>delivery AND
+       xlips-insmk          NE space.
+      ximseg-insmk = xlips-insmk.
+    ELSEIF tvlk-aufer CA 'OH' AND                           "v_n_1048099
+           ( likp-vbtyp = if_sd_doc_category=>delivery_shipping_notif OR likp-vbtyp = if_sd_doc_category=>delivery ) AND NOT
+           xlips-insmk IS INITIAL.
+      ximseg-insmk = xlips-insmk.                           "^_n_1048099
+    ELSE.
+      CLEAR ximseg-insmk.
+    ENDIF.
+  ELSE.
+    ximseg-insmk = xlips-insmk.
+  ENDIF.
+
+*... Bestandsart ist nur sinnvoll, wenn Bewegungs-    "n_v_750836
+*    art <> 103 'Buchung in WE-Sperrbestand' ist!
+  IF xlips-bwart = gc_bwart_103.
+    CLEAR ximseg-insmk.
+  ENDIF.                                                    "n_^_750836
+
+*... Bestellhistorie nachlesen bei RÜLI zum Lieferanten
+  IF tvlk-aufer EQ charr AND NOT xlips-vgbel IS INITIAL
+                         AND NOT xlips-vgpos IS INITIAL.
+    PERFORM bestellhistory_read.
+*   XIMSEG-XSTOR = CHAR1.                           "n_1580258, 1664096
+  ENDIF.
+
+*  ... Bestellpositionsdaten nachlesen bei RÜLI zum Lieferanten
+  IF NOT xlips-vgbel IS INITIAL AND                            "2904829
+     NOT xlips-vgpos IS INITIAL AND                            "2904829
+     ( tvlk-aufer EQ charr OR                                  "2904829
+       lips-vgtyp = if_sd_doc_category=>purchase_order ).      "2904829
+    MOVE xlips-vgpos TO lf_ebelp.
+    CALL FUNCTION 'ME_EKPO_SINGLE_READ'
+      EXPORTING
+        pi_ebeln         = xlips-vgbel
+        pi_ebelp         = lf_ebelp
+      IMPORTING
+        po_ekpo          = xekpo
+      EXCEPTIONS
+        no_records_found = 1
+        OTHERS           = 2.
+    IF NOT xlips-bpmng IS INITIAL.
+      ximseg-bprme = xekpo-bprme.
+    ENDIF.
+  ENDIF.
+
+  ximseg-lfimg        = xlips-lfimg.   "temporär, nicht für MM
+  ximseg-vrkme        = xlips-vrkme.   "temporär, nicht für MM
+
+*... Kennzeichen: 'Mengenumrechnung nicht erforderlich' wird gesetzt!
+  ximseg-xnocon       = charx.
+
+*... Liefer-/Basismenge u. Mengeneinheiten für MM/CO übergeben
+  ximseg-erfmg        = xlips-lfimg.   "Liefermenge in VME
+  ximseg-erfme        = xlips-vrkme.   "Verkaufsmengeneinheit (VME)
+  ximseg-menge        = xlips-lgmng.   "Lieferistmenge in Lgmeh.
+  IF likp-vbtyp <> if_sd_doc_category=>delivery_shipping_notif OR
+     NOT xlips-matnr IS INITIAL.                            "n_2083496
+    ximseg-meins        = xlips-meins.   "Basismengeneinheit
+  ENDIF.                                                    "n_2083496
+
+*... Teil-WE: Übernahme der Mengen aus der EBUMG
+  IF NOT likpd-kzebu IS INITIAL.
+    ximseg-erfmg = xlips-ebumg.
+    ximseg-menge = xlips-ebumg_bme.
+    IF cl_ops_switch_check=>le_sfws_sc3( ) = gc_true.      "v_n_1563322
+      BREAK-POINT ID /spe/inb_cw. "Inbound Catch Weight
+      l_umvkz = xlips-umvkz.
+      l_umvkn = xlips-umvkn.
+      IF NOT xlips-spe_xnocon IS INITIAL.
+*     Umrechnen der EBUMG von BME nach VME
+        CALL FUNCTION 'SHP_QUANTITY_SET'
+          EXPORTING
+            if_action              = 'C'
+          CHANGING
+            cf_lfimg               = xlips-ebumg
+            cf_lgmng               = xlips-ebumg_bme
+            cf_lfimg_flo           = xlips-ebumg_flo
+            cf_lgmng_flo           = xlips-ebumg_flt
+            cf_umvkz               = l_umvkz
+            cf_umvkn               = l_umvkn
+          EXCEPTIONS
+            conversion_overflow    = 1
+            essential_data_missing = 2
+            error                  = 3
+            OTHERS                 = 4.
+        IF sy-subrc <> 0.
+          MOVE-CORRESPONDING xlips TO wat.
+          wat-msgno = sy-msgno.
+          wat-msgty = sy-msgty.
+          wat-msgid = sy-msgid.
+          wat-msgv1 = sy-msgv1.
+          wat-msgv2 = sy-msgv2.
+          wat-msgv3 = sy-msgv3.
+          wat-msgv4 = sy-msgv4.
+          APPEND wat.
+        ENDIF.                                                   "^_YG_PGR
+      ENDIF.
+    ENDIF.                                                 "^_n_1563322
+* Rest-WE Menge buchen
+  ELSEIF xlips-vbumg > 0.
+* letzter Teil-WE
+    ximseg-erfmg = xlips-lfimg - xlips-vbumg.
+    IF xlips-vrkme = xlips-meins.
+      ximseg-menge = ximseg-erfmg.
+    ELSE.
+      ximseg-menge = xlips-lgmng - xvbapf-rmenge_p.
+    ENDIF.
+* Mengen in xlips setzen wegen späterer VBFA-Fortschreibung
+    xlips-ebumg_flo = ximseg-menge * xlips-umvkn
+                                   / xlips-umvkz.    "VRKME
+    xlips-ebumg_flt = ximseg-menge.                  "LAGME
+    xlips-ebumg_bme = ximseg-menge.                          "v_YG_PGR
+    xlips-ebumg = ximseg-erfmg.
+    IF cl_ops_switch_check=>le_sfws_sc3( ) = gc_true.      "v_n_1563322
+      l_umvkz = xlips-umvkz. "CW
+      l_umvkn = xlips-umvkn.
+    ENDIF.                                                 "^_n_1563322
+  ELSEIF xlips-vbumg = 0.
+    xlips-ebumg_bme = xlips-lgmng.
+* Umrechnen der EBUMG von BME nach VME
+    CALL FUNCTION 'SHP_QUANTITY_SET'
+      EXPORTING
+        if_action              = 'B'
+      CHANGING
+        cf_lfimg               = xlips-ebumg
+        cf_lgmng               = xlips-ebumg_bme
+        cf_lfimg_flo           = xlips-ebumg_flo
+        cf_lgmng_flo           = xlips-ebumg_flt
+        cf_umvkz               = xlips-umvkz
+        cf_umvkn               = xlips-umvkn
+      EXCEPTIONS
+        conversion_overflow    = 1
+        essential_data_missing = 2
+        error                  = 3
+        OTHERS                 = 4.
+    IF sy-subrc <> 0.
+      MOVE-CORRESPONDING xlips TO wat.
+      wat-msgno = sy-msgno.
+      wat-msgty = sy-msgty.
+      wat-msgid = sy-msgid.
+      wat-msgv1 = sy-msgv1.
+      wat-msgv2 = sy-msgv2.
+      wat-msgv3 = sy-msgv3.
+      wat-msgv4 = sy-msgv4.
+      APPEND wat.
+    ENDIF.                                                   "^_YG_PGR
+    IF cl_ops_switch_check=>le_sfws_sc3( ) = gc_true.      "v_n_1563322
+      l_umvkz = xlips-umvkz. "CW
+      l_umvkn = xlips-umvkn.
+    ENDIF.                                                 "^_n_1563322
+  ENDIF.
+*... end Teil-WE
+
+  IF cl_ops_switch_check=>le_sfws_sc3( ) = gc_false.       "v_n_1563322
+    ximseg-umren      = xlips-umvkn.   "Divisor -> VKME in LME
+    ximseg-umrez      = xlips-umvkz.   "Zähler  -> VKME in LME
+  ELSE.
+    BREAK-POINT ID /spe/inb_cw. "Inbound Catch Weight
+    ximseg-umren      = l_umvkn.       "Divisor -> VKME in LME
+    ximseg-umrez      = l_umvkz.       "Zähler  -> VKME in LME
+  ENDIF.                                                   "^_n_1563322
+
+  ximseg-lgnum        = xlips-lgnum.   "Lagernummer/Lagerkomplex
+  ximseg-lgort        = xlips-lgort.   "Lagerort
+  ximseg-lgpla        = xlips-lgpla.   "Lagerplatz
+  ximseg-lgtyp        = xlips-lgtyp.   "Lagertyp
+  ximseg-matnr        = xlips-matnr.   "Materialnummer
+  ximseg-arktx        = xlips-arktx.   "Auftragspositionstext
+  ximseg-werks        = xlips-werks.   "Werk
+  ximseg-sobkz        = xlips-sobkz.   "Sonderbestandskennzeichen
+  ximseg-gsber        = xlips-gsber.   "Geschäftsbereich
+  ximseg-kzbws        = xlips-kzbws.   "Bewert.kz für Sonderbest.
+  ximseg-resourcename_sid = xlips-resource_id.
+  ximseg-resourcename_cid = xlips-umresource_id. "n_3191414
+  IF xvbup-lvsta EQ charc.             "note 421589
+    ximseg-kzkub        = charx.       "Keine Umbuchanweisung anlegen
+  ENDIF.                               "note 393714
+
+
+  IF cl_ops_switch_check=>mm_sfws_sit( ) IS NOT INITIAL.             "v_SIT
+    PERFORM restore_sit_itm USING xlips
+          CHANGING ximseg.
+*   CHECK XIMSEG-MENGE > 0.                                  "n_1650505
+    CHECK ximseg-erfmg > 0.                                 "n_1664119
+  ENDIF.                                                             "^_SIT
+
+ENHANCEMENT-POINT ximseg_fuellen_11 SPOTS es_sapfv50w .
+
+
+* SPE Update XIMSEG from quantity difference fields         "v_n_997473
+  PERFORM spe_ximseg_fuellen_mdiff USING    xlikp
+                                            xlips
+                                   CHANGING ximseg.         "^_n_997473
+
+  "{ Begin ENHO AUTO_BOR_FV50WF0X IS-A-GR AM_GR }
+  ximseg-compl_mark = xlips-mdiff_compl.
+  ximseg-fzgls_mark = xlips-mdiff_fzgls.
+  ximseg-etanp_mark = xlips-mdiff_etanp.
+  "{ End ENHO AUTO_BOR_FV50WF0X IS-A-GR AM_GR }
+
+ENHANCEMENT-POINT fv50wf0x_02 SPOTS es_sapfv50w.
+
+  IF NOT xlips-ematn IS INITIAL AND                         "v_n_732435
+          likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif.
+    ximseg-ematn         = xlips-ematn.
+  ENDIF.                                                    "^_n_732435
+
+* Falls Umrechnungsfaktoren für Bestellmengeneinheit geändert wurden:
+* Übernehmen der Umrechnungsfaktoren aus Bestellung und Berechnen
+* der Erfassungsmengeneinheit aus diesen Umrechnungsfaktoren
+* nicht anwenden für Wirkstoff- und Produktmengen
+  IF xlips-kzfme NA 'AB'.
+    IF xlips-vgtyp = if_sd_doc_category=>purchase_order.    "457360
+      IF ( xlips-umvkz <> xlips-umrez OR xlips-umvkn <> xlips-umren )
+           AND xlips-umrez <> 0 AND xlips-umren <> 0.
+        DATA: l_ebelp LIKE ekpo-ebelp.
+        MOVE xlips-vgpos TO l_ebelp.
+        CALL FUNCTION 'ME_EKPO_SINGLE_READ'
+          EXPORTING
+            pi_ebeln         = xlips-vgbel
+            pi_ebelp         = l_ebelp
+          IMPORTING
+            po_ekpo          = xekpo
+          EXCEPTIONS
+            no_records_found = 1
+            OTHERS           = 2.
+
+        IF sy-subrc = 0.
+          IF xlips-vrkme = xekpo-meins.
+            ximseg-umren  = xlips-umren.   "Divisor -> BSTME in LME
+            ximseg-umrez  = xlips-umrez.   "Zähler  -> BSTME in LME
+
+            IF cl_ops_switch_check=>le_sfws_sc3( ) =
+                                                 gc_false OR"v_n_2128857
+                xlips-spe_xnocon IS INITIAL OR
+                                likp-spe_le_scenario = 'S'. "^_n_2128857
+              IF likpd-kzebu IS INITIAL.      "n_1636253         "v_n_1880536
+                ximseg-erfmg  = xlips-lgmng * xlips-umren / xlips-umrez.
+              ELSE.                                              "v_n_1636253
+                ximseg-erfmg  = xlips-ebumg_bme * xlips-umren / xlips-umrez.
+              ENDIF.                                             "^_n_1636253
+            ENDIF.                                          "n_2128857
+* lines moved down with correction of note 2509923
+          ENDIF.
+* start_of_reinsertion                                          "v_n_2509923
+          IF cl_ops_switch_check=>le_sfws_sc3( ) = gc_true AND
+               NOT xlips-spe_xnocon IS INITIAL AND
+               xekpo-bprme = xlips-meins AND
+               xlips-bpmng IS INITIAL.                         "^_n_1880536
+* EhP3 EWM catch Weight: Fill Quantity in Purchase Order Price Unit if
+* Purchase Order Price Unit is identical with Base Unit of Measure
+              ximseg-bprme = xekpo-bprme.
+              IF likpd-kzebu IS INITIAL.                    "n_1636253
+                ximseg-bpmng = xlips-lgmng.
+              ELSE.                                              "v_n_1636253
+                ximseg-bpmng = xlips-ebumg_bme.
+              ENDIF.                                             "^_n_1636253
+            ximseg-umren  = xlips-umren.   "Divisor -> BSTME in LME
+            ximseg-umrez  = xlips-umrez.   "Zähler  -> BSTME in LME
+          ENDIF.                                               "^_n_1563322
+* end of reinsertion                                            "^_n_2509923
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+* TR creation not required if WM activities already performed
+  IF NOT xvbup-lvsta EQ space.                              "n_2027028
+    ximseg-tbpkz = charx.
+  ENDIF.
+
+*... Daten für die Bestandsfindung
+  ximseg-eprio        = xlips-eprio.   "Entnahmepriorität (temporär)
+  ximseg-rules        = xlips-rules.   "Regel (temporär)
+
+*... KUNNR an Warenempfänger WEMPF in der IMSEG weiterreichen
+  ximseg-wempf        = likp-kunnr.
+
+*... KUNNR in IMSEG füllen für Konsi-Umlagerung               "AIP
+* this coding comes later since note 2348022
+
+* IF NOT xvbup-fkivp IS INITIAL AND NOT likp-kuniv IS INITIAL. "v_n_2050487
+  IF NOT likp-kuniv IS INITIAL.                                "v_n_2288234
+* determine CC relevance for MM/FI
+    IF NOT xvbup-fkivp IS INITIAL.
+      l_fkivp = xvbup-fkivp.
+    ELSEIF NOT xlips-uecha IS INITIAL.
+      zvbup = xvbup.
+      PERFORM xvbup_lesen(SAPFV50P) USING xlips-vbeln
+                                          xlips-uecha.
+      l_fkivp = xvbup-fkivp.
+      xvbup = zvbup.
+    ENDIF.
+    IF NOT l_fkivp IS INITIAL.                                 "^_n_2288234
+      ximseg-kunnr_cc = likp-kuniv.
+      IF xkna1-kunnr IS INITIAL.
+        CALL FUNCTION 'VIEW_KNA1'
+          EXPORTING
+            kunde     = likp-kuniv
+          IMPORTING
+            anschrift = xkna1
+          EXCEPTIONS
+            no_kna1   = 1
+            OTHERS    = 2.
+      ENDIF.
+      IF NOT xkna1-vbund IS INITIAL.
+        ximseg-vbund_cc = xkna1-vbund.              "partner company ID
+        IF likp-vbund IS INITIAL.
+          likp-vbund = xkna1-vbund.
+        ENDIF.
+      ENDIF.
+    ENDIF.                                                     "n_2288234
+  ENDIF.                                                       "^_n_2050487
+
+  IF xlips-posting_change = chara.                          "v_n_979305
+* ... Inbound delivery for intracompany STO: Check if vendor
+* ... is maintained in STO. If yes, then copy it for MM-IM posting
+    CALL FUNCTION 'ME_EKKO_SINGLE_READ'
+      EXPORTING
+        pi_ebeln         = xlips-vgbel
+      IMPORTING
+        po_ekko          = ls_ekko
+      EXCEPTIONS
+        no_records_found = 1
+        OTHERS           = 2.
+    IF sy-subrc = 0 AND
+       ls_ekko-lifnr IS NOT INITIAL.
+      ximseg-lifnr = likp-lifnr.
+    ENDIF.
+*... Lieferanten-Nummer auf Positionsebene ziehen
+*... falls kein Bestellbezug, nur für Anlieferungen "n_729135/737083
+  ELSEIF tvlk-aufer CA 'LB' OR                              "^_n_979305
+     ( tvlk-aufer CA 'OH' AND likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif AND "n_827983 n_3107201
+       xlips-vgbel IS INITIAL AND xlips-vgpos IS INITIAL AND "n_827983
+*       xlips-kzbew <> 'F' ).                                "n_2963215 n_3107201
+       xlips-aufnr IS INITIAL ).                                       "n_3107201
+    ximseg-lifnr = likp-lifnr.
+    IF tvlk-aufer EQ gc_aufer-lohnbei AND NOT              "v_n_2113392
+       xlips-umwrk IS INITIAL.
+      ximseg-umwrk = xlips-umwrk.
+    ENDIF.                                                 "^_n_2113392
+  ENDIF.
+
+ENHANCEMENT-POINT ximseg_fuellen_03 SPOTS es_sapfv50w.
+
+*... Empfangendes Werk aus Lieferkopf ermitteln
+ENHANCEMENT-SECTION     ximseg_fuellen_05 SPOTS es_sapfv50w.
+  DATA: l_t134 LIKE t134.                                   "1550905
+  CLEAR l_t134.
+  SELECT SINGLE * FROM t134 INTO l_t134 WHERE mtart = xlips-mtart.
+
+  IF xlips-vgbel IS INITIAL
+  OR l_t134-kzrac = 'X'.
+    MOVE 'WEUB' TO t156n_fcode.
+    PERFORM t156n_select USING t156n_fcode
+                               xlips-bwart
+                               t156n_subrc.
+    IF t156n_subrc EQ 0 AND
+       t156n_fcode EQ t156n-fcode.
+      IF likp-werks IS INITIAL.
+        SELECT * FROM t001w WHERE kunnr EQ likp-kunnr.
+          IF sy-subrc EQ 0.
+            ximseg-umwrk = t001w-werks.
+            EXIT.
+          ENDIF.
+        ENDSELECT.
+      ELSE.
+        ximseg-umwrk    = likp-werks.  "Empfang. Werk zur Lieferung
+      ENDIF.
+    ENDIF.
+  ENDIF.
+END-ENHANCEMENT-SECTION.
+
+*... predecessor document to select the correct              "v_n_655641
+*    ekes record with FM me_read_item_goods_receipt in MM-IM
+
+  IF NOT xlips-pre_vl_etens IS INITIAL AND
+     NOT xlips-vgbel        IS INITIAL AND
+     NOT xlips-vgpos        IS INITIAL AND
+         xlips-vgtyp = if_sd_doc_category=>purchase_order.
+
+    lf_ebelp2 = xlips-vgpos.
+
+    CALL FUNCTION 'ME_EKES_SINGLE_READ_ITEM'
+      EXPORTING
+        pi_ebeln            = xlips-vgbel
+        pi_ebelp            = lf_ebelp2
+*       PI_BYPASSING_BUFFER =
+*       PI_REFRESH_BUFFER   =
+      TABLES
+        pto_ekes            = lt_ekes
+      EXCEPTIONS
+        err_no_record_found = 1
+        OTHERS              = 2.
+
+    IF sy-subrc = 0.
+      READ TABLE lt_ekes ASSIGNING <ls_ekes> WITH KEY
+                            ebeln = xlips-vgbel
+                            ebelp = lf_ebelp2
+                            etens = xlips-pre_vl_etens.
+      IF sy-subrc = 0.
+
+        ximseg-vlief_avis = <ls_ekes>-vbeln.
+        ximseg-vbelp_avis = <ls_ekes>-vbelp.
+
+      ENDIF.
+    ENDIF.
+  ENDIF.                                                    "^_n_655641
+
+*... Diese Felder müssen gefüllt werden, sonst stimmt die DABMG im
+*... Einkauf nicht.
+  IF likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif.
+    ximseg-vlief_avis = lips-vbeln.
+    ximseg-vbelp_avis = lips-posnr.
+  ENDIF.
+
+* note 406912:
+* ... wenn eine neue Chargensplitposition vom WM erstellt wurde,
+* ... ist die Chargenhauptposition einzusetzen
+  IF  NOT xlips-uecha IS INITIAL AND
+      NOT xlips-lfimg IS INITIAL AND
+    ( NOT xlips-lichn IS INITIAL OR
+      NOT xlips-bwtar IS INITIAL OR                        "n_2974600
+        NOT xlips-charg IS INITIAL OR
+        ( xlips-charg IS INITIAL   AND                      "n_838241
+          tvlp-chpkz  EQ charx ) ) AND                      "n_838241
+          xlips-kcmeng IS INITIAL  AND
+          xlips-xchar  EQ charx    AND
+        ( xlips-xchpf  EQ charx OR
+          xlips-bwtex  EQ charx ).                         "n_2974600
+    IF xlips-updkz EQ chari.
+      ximseg-vbelp_avis = xlips-uecha.
+    ENDIF.
+  ENDIF.
+
+*... Übernahme der Bestellnummer und Positionsnummer  (VGTYP = V)
+*... wenn Umlagerungslieferung (VL04) vorliegt, dann handelt es sich
+*... nicht um VBTYP = 7;
+*... oder wenn Sonderfall vorliegt: VBTYP = 7 u. Liefertyp über
+*... MB11 gefüllt. (JB + J v.D)
+  IF xlips-vgtyp = if_sd_doc_category=>purchase_order.
+    IF cl_ops_switch_check=>ops_sfws_sc_advret1( ) = 'X'.
+      IF NOT likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif
+        OR ( likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif AND NOT xlips-dlvtp IS INITIAL )
+        OR ( likp-vbtyp = if_sd_doc_category=>delivery_shipping_notif AND xekpo-fls_rsto = 'X' ).
+        ximseg-ebeln      = xlips-vgbel. "Bestellnummer
+        ximseg-ebelp      = xlips-vgpos. "Pos.nummer in der Bestellung
+      ENDIF.
+    ELSE.
+      IF NOT likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif
+        OR ( likp-vbtyp EQ if_sd_doc_category=>delivery_shipping_notif AND NOT xlips-dlvtp IS INITIAL ).
+        ximseg-ebeln      = xlips-vgbel. "Bestellnummer
+        ximseg-ebelp      = xlips-vgpos. "Pos.nummer in der Bestellung
+      ENDIF.
+    ENDIF.
+
+    IF NOT ( xlikp-sitkz = 'R' AND                          "v_n_3013512
+             xvbuk-wbstk = charc AND NOT
+             xvbuk-pdstk IS INITIAL AND NOT
+             likp-podat IS INITIAL          ).
+      ximseg-paobjnr = xlips-paobjnr.
+    ENDIF.                                                  "^_n_3013512
+  ELSE.
+*... oder der Kundenauftragsnummer und Positionsnummer für Kunden-
+*... einzelfertigung
+    ximseg-kdauf      = xlips-vbelv.   "Kundenauftragsnummer
+    ximseg-kdpos      = xlips-posnv.   "Pos.nummer im Kundenauftrag
+
+*... Übergabe der Kontierung, falls es keine Kundeneinzelfertigung
+*... ist, andernfalls wird die Kontierung im MM ermittelt
+    ximseg-kostl      =  xlips-kostl.
+    ximseg-gsber      =  xlips-gsber.
+    ximseg-kokrs      =  xlips-kokrs.
+    ximseg-prctr      =  xlips-prctr.
+    IF ( xlips-rsnum IS INITIAL AND
+         xlips-rspos IS INITIAL     ) OR
+       tvlk-aufer  CA gc_aufer-lohnbei.
+      ximseg-ps_psp_pnr =  xlips-ps_psp_pnr.
+    ENDIF.
+    ximseg-paobjnr    =  xlips-paobjnr.
+    ximseg-kzvbr      =  xlips-kzvbr.
+    ximseg-fipos      =  xlips-fipos.
+    ximseg-fistl      =  xlips-fistl.
+    ximseg-geber      =  xlips-geber.
+* Take over Budget Period if the switch is on:
+    IF cl_psm_core_switch_check=>psm_fm_core_bud_per_rev_1( ) IS NOT INITIAL.
+      MOVE xlips-budget_pd TO ximseg-budget_pd.
+    ENDIF.
+    ximseg-aufnr      =  xlips-aufnr.
+* Operation Account Assignment                                            "v_n_2053361
+    IF cl_erp_co_olc_tools=>is_rel_for_order( iv_aufnr = xlips-aufnr ) IS NOT INITIAL.
+      IF NOT xlips-aufnr IS INITIAL AND ( likp-vbtyp =
+              if_sd_doc_category=>RETURNS_DELIVERY_FOR_ORDER  "n_3055642
+        OR likp-vbtyp = if_sd_doc_category=>DELIVERY ).       "n_3055642
+        PERFORM vbap_select_single_buffer(sapmv50a)
+                USING xlips-mandt
+                      xlips-vgbel
+                      xlips-vgpos.
+        ximseg-aufpl = vbap-aufpl_oaa.
+        ximseg-aplzl = vbap-aplzl_oaa.
+      ENDIF.
+    ENDIF.                                                                "^_n_2053361
+    ximseg-aufps      =  xlips-posnr_pp.
+  ENDIF.
+
+*... weitere Kontierungen in Abhängigkeit vom Sonderbestandskennzeichen
+  IF xlips-sobkz EQ chare AND xlips-vgtyp NE if_sd_doc_category=>purchase_order.
+    ximseg-mat_kdauf =   ximseg-kdauf.
+    ximseg-mat_kdpos =   ximseg-kdpos.
+  ENDIF.
+  IF xlips-sobkz EQ charq.
+    IF xlips-ps_psp_pnr IS INITIAL.
+      ximseg-mat_pspnr = xlips-pspnr.
+    ELSE.
+      ximseg-mat_pspnr = xlips-ps_psp_pnr.
+    ENDIF.
+
+*... Bedarfszusammenfassung im PS, wenn SD-Auftrag vorhanden "v_n_413226
+    IF tvlk-aufer EQ charx.
+      DATA: lf_pspnr LIKE ximseg-mat_pspnr.
+      CALL FUNCTION 'GRPG_FIND_GRPNR_WITH_MATNR'
+        EXPORTING
+          i_pspnr = ximseg-mat_pspnr
+          i_werks = ximseg-werks
+          i_matnr = ximseg-matnr
+        IMPORTING
+          e_grpnr = lf_pspnr
+        EXCEPTIONS
+          OTHERS  = 1.
+      IF sy-subrc EQ 0 AND NOT lf_pspnr IS INITIAL.
+        ximseg-mat_pspnr = lf_pspnr.
+      ENDIF.                                                "^_n_413226
+    ENDIF.
+  ENDIF.
+
+  "{ Begin ENHO ADSUB_FV50WF0X IS-AD-SUC AD_SUB }
+* DI A&D SUB Set special stock number for subcontracting
+  IF tvlk-aufer CA gc_aufer-lohnbei AND
+     NOT ( xlips-sobkz IS INITIAL ).
+    MOVE xlips-vgpos TO l_ebelp.
+    CALL FUNCTION 'ME_EKPO_SINGLE_READ'
+      EXPORTING
+        pi_ebeln         = xlips-vgbel
+        pi_ebelp         = l_ebelp
+      IMPORTING
+        po_ekpo          = xekpo
+      EXCEPTIONS
+        no_records_found = 1
+        OTHERS           = 2.
+    IF sy-subrc = 0.
+      CASE xlips-sobkz.
+        WHEN 'B'. ximseg-kunnr     = xekpo-disub_kunnr.
+        WHEN 'E'.
+          ximseg-mat_kdauf = xekpo-disub_vbeln.
+          ximseg-mat_kdpos = xekpo-disub_posnr.
+        WHEN 'K'. ximseg-llief     = xekpo-disub_owner.
+        WHEN 'M'. ximseg-llief     = xekpo-disub_owner.
+        WHEN 'Q'.
+          ximseg-mat_pspnr = xekpo-disub_pspnr.
+
+          CALL FUNCTION 'GRPG_FIND_GRPNR_WITH_MATNR'         "GA1404302
+            EXPORTING
+              i_pspnr = ximseg-mat_pspnr
+              i_werks = ximseg-werks
+              i_matnr = ximseg-matnr
+            IMPORTING
+              e_grpnr = ximseg-mat_pspnr.
+
+      ENDCASE.
+    ENDIF.
+  ELSEIF tvlk-aufer EQ charo        AND
+         xlips-vgbel IS NOT INITIAL AND
+         xlips-vgpos IS NOT INITIAL..
+    DATA: lv_adrelev TYPE adsub_d_isads.
+    MOVE xlips-vgpos TO l_ebelp.
+    CALL FUNCTION 'ADSUB_CHECK_PO'
+      EXPORTING
+        iv_ebeln       = xlips-vgbel
+        iv_ebelp       = l_ebelp
+      IMPORTING
+        ev_adrelev     = lv_adrelev
+      EXCEPTIONS
+        ex_no_po_found = 1
+        OTHERS         = 2.
+    IF sy-subrc   IS INITIAL    AND
+       lv_adrelev IS NOT INITIAL.
+      CALL FUNCTION 'ME_EKKO_SINGLE_READ'
+        EXPORTING
+          pi_ebeln                  = xlips-vgbel
+        IMPORTING
+          PO_EKKO                   = ls_ekko
+        EXCEPTIONS
+          NO_RECORDS_FOUND          = 1
+          OTHERS                    = 2.
+      IF sy-subrc IS INITIAL.
+        ximseg-lifnr = ls_ekko-lifnr.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+  "{ End ENHO ADSUB_FV50WF0X IS-AD-SUC AD_SUB }
+
+ENHANCEMENT-POINT ximseg_fuellen_04 SPOTS es_sapfv50w.
+
+*... Buchung in den Lohnbeistellbestand muß evt. Reservierungen abbauen
+  IF tvlk-aufer NE gc_aufer-project AND                     "n_787619
+     NOT xlips-rsnum IS INITIAL AND
+     NOT xvbup-wbsta = charc.                               "n_1901676
+    ximseg-rsnum = xlips-rsnum.
+    ximseg-rspos = xlips-rspos.
+    ximseg-xrere = yes.
+    IF likp-spe_le_scenario = gc_le_scenario-kts AND        "v_n_2379930
+       likp-spe_orig_sys = '1'.
+      ximseg-xrere = no.
+    ENDIF.                                                  "^_n_2379930
+    IF tvlk-aufer CA 'OH'.                                  "v_n_790375
+      IF NOT xlips-rsart IS INITIAL.                        "n_787619
+        IF xlips-rsart EQ 0.
+          CLEAR ximseg-rsart.
+        ELSE.
+          ximseg-rsart = xlips-rsart.
+        ENDIF.
+      ELSE.
+        TABLES: resb.
+        SELECT SINGLE * FROM  resb
+                        WHERE rsnum EQ xlips-rsnum AND
+                              rspos EQ xlips-rspos AND
+                              matnr EQ xlips-matnr.
+        ximseg-rsart = resb-rsart.
+      ENDIF.                                                "n_787619
+    ELSEIF tvlk-aufer  EQ charw AND NOT                     "v_n_795280
+           xlips-rsart IS INITIAL.
+      ximseg-rsart = xlips-rsart.                           "^_n_795280
+    ENDIF.                                                  "^_n_790375
+  ENDIF.
+
+* Remove reservation reference for production supply deliveries. This
+* is needed for avoiding an update of the reservation item
+  IF cl_ewm_switch_check=>le_sfws_sc_ewm_man( ) = gc_true.
+    CASE xlikp-spe_le_scenario.
+      WHEN gc_le_scenario-prdsup.
+        CALL METHOD /spe/cl_ewm_staging_intf=>goods_movement_correct
+          CHANGING
+            cs_imseg = ximseg.
+      WHEN /spe/cl_dlv_doc=>c_le_scenario-id_handling.      "v_n_2768484
+        IF xlips-posnr_pp IS NOT INITIAL.
+          CALL FUNCTION 'CO_DB_HEADER_READ'
+            EXPORTING
+              aufnr     = xlips-aufnr
+            IMPORTING
+              afpowa    = ls_afpo
+            EXCEPTIONS
+              not_found = 1
+              OTHERS    = 2.
+          IF not ls_afpo-elikz is initial and
+             xlips-kztlf is initial and
+             ximseg-elikz is initial.
+            ximseg-elikz = charx.
+          ENDIF.
+        ENDIF.                                              "^_n_2768484
+      WHEN gc_le_scenario-consum OR
+           gc_le_scenario-main OR                           "n_2911832
+           gc_le_scenario-prdgr.                            "n_1971993
+        IF xlips-rsnum IS NOT INITIAL AND
+           xlips-posnr_pp IS INITIAL.                       "n_1971993
+          CALL METHOD /spe/cl_ewm_consumption_intf=>imseg_from_resb_enrich
+            EXPORTING
+              is_xlips  = xlips
+            CHANGING
+              cs_ximseg = ximseg.
+        ELSEIF xlips-posnr_pp IS NOT INITIAL.               "v_n_2094726
+*         Read order header
+          CALL FUNCTION 'CO_DB_HEADER_READ'
+            EXPORTING
+              aufnr     = xlips-aufnr
+            IMPORTING
+              afpowa    = ls_afpo
+            EXCEPTIONS
+              not_found = 1
+              OTHERS    = 2.
+          IF NOT ls_afpo-elikz IS INITIAL AND
+             xlips-kztlf IS INITIAL AND
+             ximseg-elikz IS INITIAL.
+*         order has already got "Delivery completed" indicator, this
+*         should not be reset during subsequent GRs any more
+            ximseg-elikz = charx.
+            "^_n_2094726
+          ENDIF.
+        ENDIF.
+        ximseg-kanba = xlips-kbnkz.
+      WHEN gc_le_scenario-kanban.
+        ximseg-kanba = xlips-kbnkz.
+    ENDCASE.
+  ENDIF.
+
+  ximseg-konto = xlips-konto.                               "HUM
+  ximseg-kzear = xlips-kzear.                               "HUM
+* get date of production from date of expiration      "v_n_1855197
+  IF xlips-hsdat IS INITIAL AND NOT xlips-vfdat IS INITIAL
+     AND NOT xlips-matnr IS INITIAL.
+    IF NOT xlips-bwart IS INITIAL AND                          "v_n_2452466
+       likp-vbtyp = IF_SD_DOC_CATEGORY=>DELIVERY_SHIPPING_NOTIF.
+      CLEAR ls_t156.
+      CALL FUNCTION '/SPE/GEN_T156_GET'
+        EXPORTING
+          if_bwart  = xlips-bwart
+        IMPORTING
+          es_t156   = ls_t156
+        EXCEPTIONS
+          not_found = 1
+          OTHERS    = 2.
+      IF ls_t156-kzmhd = '1'.                                  "^_n_2452466
+        CLEAR ls_mara.
+    CALL FUNCTION 'MARA_SINGLE_READ'
+      EXPORTING
+        matnr             = xlips-matnr
+      IMPORTING
+        wmara             = ls_mara
+      EXCEPTIONS
+        lock_on_material  = 1
+        lock_system_error = 2
+        wrong_call        = 3
+        not_found         = 4
+        OTHERS            = 5.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+    IF sy-subrc = 0 AND ls_mara-mhdhb > 0.
+      CALL FUNCTION 'SUBTRACT_TIME_FROM_DATE'
+        EXPORTING
+          i_idate               = xlips-vfdat
+          i_time                = ls_mara-mhdhb
+          i_iprkz               = ls_mara-iprkz
+        IMPORTING
+          o_idate               = xlips-hsdat
+        EXCEPTIONS
+          invalid_period        = 1
+          invalid_round_up_rule = 2
+          internal_error        = 3
+          OTHERS                = 4.
+          IF xlips-hsdat > sy-datum.                           "v_n_2452466
+            xlips-hsdat = sy-datum.
+          ENDIF.                                               "^_n_2452466
+        ENDIF.
+      ENDIF.                                                   "n_2452466
+    ENDIF.                                                     "n_2452466
+  ENDIF.                                              "^_n_1855197
+  ximseg-vfdat = xlips-vfdat.                               "HUM
+  ximseg-hsdat = xlips-hsdat.                               "HUM
+* get date of production and expiration for receiving batch "v_n_914238
+  IF tvlk-aufer = 'H' AND
+     NOT xlips-charg IS INITIAL AND NOT xlips-umcha IS INITIAL.
+    CALL FUNCTION 'VB_BATCH_DEFINITION'
+      IMPORTING
+        kzdch = gf_batch_level.
+    IF gf_batch_level = '0'.
+      SELECT SINGLE * FROM mcha WHERE matnr = xlips-ummat
+                                AND   werks = xlips-umwrk
+                                AND   charg = xlips-umcha.
+      IF sy-subrc = 0 AND
+*        NOT mcha-hsdat IS INITIAL AND NOT mcha-vfdat IS INITIAL.
+         ( NOT mcha-hsdat IS INITIAL OR NOT mcha-vfdat IS INITIAL ). "n_3195409
+        ximseg-vfdat = mcha-vfdat.
+        ximseg-hsdat = mcha-hsdat.
+      ENDIF.
+    ELSEIF gf_batch_level CA '12'.
+      SELECT SINGLE * FROM mch1 WHERE matnr = xlips-ummat
+                                AND   charg = xlips-umcha.
+      IF sy-subrc = 0 AND
+*         NOT mch1-hsdat IS INITIAL AND NOT mch1-vfdat IS INITIAL.
+         ( NOT mch1-hsdat IS INITIAL OR NOT mch1-vfdat IS INITIAL ). "n_3195409
+        ximseg-vfdat = mch1-vfdat.
+        ximseg-hsdat = mch1-hsdat.
+      ENDIF.
+    ENDIF.
+  ENDIF.                                                    "^_n_914238
+
+  ximseg-exbwr = xlips-exbwr.                               "HUM
+  IF cl_ops_switch_check=>le_sfws_sc3( ) = gc_false OR     "v_n_1563322
+     xlips-spe_xnocon IS INITIAL.
+    IF NOT ximseg-bprme IS INITIAL.                         "v_n_573417
+      ximseg-bpmng = xlips-bpmng.                           "HUM
+    ENDIF.                                                  "^_n_573417
+  ELSE.
+    IF ximseg-bprme IS NOT INITIAL AND
+       xlips-bpmng  IS NOT INITIAL.
+      ximseg-bpmng = xlips-bpmng.                           "HUM
+    ENDIF.
+  ENDIF.                                                   "^_n_1563322
+  ximseg-exvkw = xlips-exvkw.
+  ximseg-grund = xlips-grund.
+
+*SPE MDIFF                                                    "v_XAN-SPE
+  IF NOT ( xlikp-kzebu IS INITIAL ).
+    IF xlikp-mdiff_buch = 'X' AND NOT ( xlips-mdiff_bwart IS INITIAL ).
+      IF NOT xlips-mdiff_grund IS INITIAL.
+        ximseg-grund      = xlips-mdiff_grund.
+      ENDIF.
+    ENDIF.
+  ENDIF.                                                      "^_XAN-SPE
+
+*... Localization Brazil (only with transfer orders)
+*  IF ( LIKP-VBTYP EQ VBTYP_LINO                            "1512390
+  IF ( ( likp-vbtyp EQ if_sd_doc_category=>delivery         "1512390
+* allow return Order                                        "1512390
+         OR  likp-vbtyp EQ if_sd_doc_category=>returns_delivery_for_order ) "1512390
+       AND NOT likp-werks IS INITIAL
+       AND tvlk-aufer EQ charb
+       AND NOT xlips-j_1btxsdc IS INITIAL )
+     OR                                                     "1168320
+       ( ( likp-vbtyp EQ if_sd_doc_category=>delivery       "1512390
+* allow return Order                                       "1512390
+         OR  likp-vbtyp EQ if_sd_doc_category=>returns_delivery_for_order ) "1512390
+         AND tvlk-aufer EQ charl                            "1168320
+         AND NOT xlips-j_1btxsdc IS INITIAL ).              "1168320
+*----Note 354133
+*    ximseg-mwskz      = xlips-j_1btxsdc.
+*    ximseg-j_1bexbase = xlips-netwr.
+    DESCRIBE TABLE ximseg LINES l_j1btf_tfill.
+    IF l_j1btf_tfill IS INITIAL.               "first item
+
+      CALL FUNCTION 'J_1B_IM_TF_SET_GLOBAL_VAR'
+        EXPORTING
+          i_tf_sd_data_reset = 'X'.
+    ENDIF.
+    CALL FUNCTION 'J_1B_IM_TF_SET_GLOBAL_VAR'
+      EXPORTING
+        i_tf_sd_header      = likp
+        i_tf_sd_item        = lips
+        i_tf_sd_data_active = 'X'
+        i_tf_sd_fkarv       = tvak-fkarv
+        i_tf_mm_doc_num     = xekpo-ebeln                 "1879100
+      TABLES
+        t_partner           = xvbpa.
+
+  ENDIF.
+
+* XIMSEG-TXJCD = XLIPS-TXJCD.             "HUM
+* XIMSEG-ZUSTD = XLIPS-ZUSTD.             "HUM
+  ximseg-licha = xlips-lichn.                               "HUM
+  ximseg-ablad = likp-ablad.                                "HUM
+  IF NOT tvlk-aufer EQ charr.                               "HUM
+    ximseg-lfbja = xlips-lfgja.                             "HUM
+    ximseg-lfbnr = xlips-lfbnr.                             "HUM
+    ximseg-lfpos = xlips-lfpos.                             "HUM
+*    XIMSEG-GRUND = XLIPS-GRUND.                    "note 364385
+  ENDIF.                                                    "HUM
+ENHANCEMENT-POINT fv50wf0x_04 SPOTS es_sapfv50w STATIC .
+
+
+  "{ Begin ENHO AUTO_BOR_FV50WF0X IS-A-GR AM_GR }
+* DI4.6C2: Texte an Materialbeleg übergeben  RC 14.09.2000
+  DATA:
+    l_tdname  TYPE tdobname,
+    l_tdspras TYPE tdspras,
+    ls_tline  TYPE tline,
+    lt_tline  TYPE STANDARD TABLE OF tline.
+
+  IF NOT tvlp-tdid IS INITIAL.
+    CONCATENATE likp-vbeln xlips-posnr INTO l_tdname.
+    IF tvlp-tdspras IS INITIAL.
+      l_tdspras = sy-langu.
+    ELSE.
+      l_tdspras = tvlp-tdspras.
+    ENDIF.
+    CALL FUNCTION 'READ_TEXT'
+      EXPORTING
+        id                      = tvlp-tdid
+        language                = l_tdspras      "3219636
+        name                    = l_tdname
+        object                  = tdobject_vbbp
+      TABLES
+        lines                   = lt_tline
+      EXCEPTIONS
+        id                      = 1
+        language                = 2
+        name                    = 3
+        not_found               = 4
+        object                  = 5
+        reference_check         = 6
+        wrong_access_to_archive = 7
+        OTHERS                  = 8.
+    IF sy-subrc = 0.
+      READ TABLE lt_tline INTO ls_tline INDEX 1.
+      IF sy-subrc = 0.
+        MOVE ls_tline-tdline TO ximseg-sgtxt.
+      ELSE.
+        CLEAR ximseg-sgtxt.
+      ENDIF.
+    ELSE.
+      CLEAR ximseg-sgtxt.
+    ENDIF.
+  ELSE.
+    CLEAR ximseg-sgtxt.
+  ENDIF.
+*
+*MW 20020923 - GR slips from BORGR
+  DATA: ls_borgr_gr_slip TYPE borgr_gr_slip.
+  FIELD-SYMBOLS: <ls_weanz> TYPE borgr_weanz.
+  IF likp-vbtyp = if_sd_doc_category=>delivery_shipping_notif. "SDIMP ZJK I306463 vbtyp_liav.
+    IMPORT borgr_gr_slip TO ls_borgr_gr_slip
+           FROM MEMORY ID 'BORGR_GR_SLIP'.
+    IF sy-subrc EQ 0.
+      READ TABLE ls_borgr_gr_slip-weanz_t ASSIGNING <ls_weanz>
+           WITH KEY vbeln = xlikp-vbeln
+                    posnr = xlips-posnr.
+      IF sy-subrc EQ 0.
+*        IF <ls_weanz>-weanz > 0.                              "NC916642
+        IF <ls_weanz>-weanz >= 0 .                          "NC916642
+          ximseg-weanz  = <ls_weanz>-weanz.
+          ximseg-weanzx = 'X'.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+  "{ End ENHO AUTO_BOR_FV50WF0X IS-A-GR AM_GR }
+
+ENHANCEMENT-POINT fv50wf0x_03 SPOTS es_sapfv50w.
+
+* Fill additional data for application integration process  "AIP
+* systemübergreifender Warenfluß)                           "AIP
+  PERFORM ximseg_fuellen_aip USING    xlips                 "AIP
+                             CHANGING ximseg.               "AIP
+
+*... Feldzuweisung für Umlagerung aus WMS/MB11.
+  PERFORM ximseg_fuellen_wms.
+
+*... move additional fields to material document
+  IF xlips-aufpl IS NOT INITIAL AND                           "n_3055642
+     xlips-aplzl IS NOT INITIAL.                              "n_3146595
+    ximseg-aufpl = xlips-aufpl.
+    ximseg-aplzl = xlips-aplzl.
+  ENDIF.                                                      "n_3055642
+
+* For Goods issue posting against network in case of        "v_n_3146595
+* EWM-relevant delivery, ximseg-nplnr needs to be filled in addition to
+* ximseg-aufpl and ximseg-aplzl
+  IF ximseg-aplzl IS NOT INITIAL AND ximseg-aufnr IS INITIAL.
+    CALL FUNCTION 'READ_NETWORK_NPLNR_VORNR'
+      EXPORTING
+        aplzl     = ximseg-aplzl
+        aufpl     = ximseg-aufpl
+      IMPORTING
+        nplnr     = ximseg-nplnr
+      EXCEPTIONS
+        not_found = 1
+        OTHERS    = 2.
+  ENDIF.                                                    "^_n_3146595
+* populating stock segment for goods movement
+  IF cl_ops_switch_check=>sfsw_segmentation( ) EQ abap_on.
+    ximseg-sgt_scat = xlips-sgt_scat.
+  ENDIF.
+
+* lines deleted concerning note 1451791 and special stock partner
+  IF ximseg-kunnr IS INITIAL.                               "v_n_2076626
+    CALL FUNCTION 'SD_PARTNER_FOR_SPECIAL_STOCK'
+      EXPORTING
+        document  = xlips-vbeln
+        item      = xlips-posnr
+      IMPORTING
+        customer  = ximseg-kunnr
+      TABLES
+        xvbpa     = xvbpa
+      EXCEPTIONS
+        not_found = 01.
+  ENDIF.
+
+  IF tvlk-aufer = 'X' AND ximseg-kunnr IS INITIAL.
+    ximseg-kunnr = likp-kunnr.
+  ENDIF.                                                    "^_n_2076626
+
+  IF XLIPS-VGTYP EQ IF_SD_DOC_CATEGORY=>PURCHASE_ORDER AND  "v_n_2348022
+     XLIPS-VGSYS IS INITIAL       AND
+     XEKPO-PSTYP EQ CHAR2         AND  "konsi
+     XIMSEG-KUNNR IS INITIAL.
+    XIMSEG-KUNNR = LIKP-KUNNR.
+  ENDIF.                                                    "^_n_2348022
+
+*...restore goods movement data from buffer                   "v_XAN-SPM
+  PERFORM restore_gm_itm USING    xlips
+                         CHANGING ximseg.                    "^_XAN-SPM
+
+  data: ls_lips     type lipsvb.
+
+*... Falls Auftrag und Unterposition -> pruefen, ob Leergut
+* get index of main position
+*... WA-Retoure mit Stückliste (BWA 161)
+  IF xlips-uepvw EQ charg.                                 "note 304108
+    ximseg-uptyp = char3.                                  "note 304108
+* lines deleted                  "note 304108 "note 549736 "note 646572
+    READ TABLE ximseg INTO wa_ximseg                     "note 304108
+                      WITH KEY vbeln = xlips-vbeln       "note 304108
+                               posnr = xlips-uepos.      "note 304108
+    IF sy-subrc IS INITIAL.                              "note 304108
+      ximseg-refix = sy-tabix.                           "note 304108
+    ELSEIF NOT xlips-uepos IS INITIAL.
+**    Change related to Retail Structured Article having multiple levels
+**    This is the case for structured article with multi level BOM.
+**    In this case get the parent of the component and it gives
+**    the index of the main position.
+      READ TABLE xlips into ls_lips WITH KEY vbeln = xlips-vbeln
+                                             posnr = xlips-uepos.
+      if sy-subrc IS INITIAL.
+        READ TABLE ximseg INTO wa_ximseg
+                          WITH KEY vbeln = ls_lips-vbeln
+                                   posnr = ls_lips-uepos.
+        IF sy-subrc IS INITIAL.
+          ximseg-refix = sy-tabix.
+        ENDIF.
+      endif.
+    ENDIF.                                               "note 304108
+  ENDIF.                                                   "note 304108
+
+*... Übernehme Kundenauftrag aus Lieferung, sofern vorhanden  "V_n_1366023
+*   (z.B. BWA 231)
+  IF tvlk-aufer CA 'OH' AND NOT xlips-kdauf IS INITIAL
+                        AND NOT xlips-kdpos IS INITIAL.
+    IF xlikp-sitkz = 'C'.                                    "v_n_2445679
+*     SIT correction posting like 411T
+      if xlips-sobkz = 'E' and xlips-umsok = 'T'.
+        ximseg-mat_kdauf = xlips-vbelv.
+        ximseg-mat_kdpos = xlips-posnv.
+        ximseg-kdauf     = xlips-kdauf.
+        ximseg-kdpos     = xlips-kdpos.
+      else.
+        ximseg-mat_kdauf = xlips-kdauf.
+        ximseg-mat_kdpos = xlips-kdpos.
+      ENDIF.
+    ELSE.
+      ximseg-kdauf = xlips-kdauf.
+      ximseg-kdpos = xlips-kdpos.
+    ENDIF.                                                   "^_n_2445679
+  ENDIF.                                                      "^_n_1366023
+
+  "{ Begin ENHO AUTO_BOR_FV50WF0X IS-A-GR AM_GR }
+* Kanbankennzeichen weiterreichen Kehse (D024693) 21.2.01
+  IF NOT likp-kbnkz IS INITIAL.
+    MOVE likp-kbnkz TO ximseg-kanba.
+  ENDIF.
+  "{ End ENHO AUTO_BOR_FV50WF0X IS-A-GR AM_GR }
+
+ENHANCEMENT-POINT fv50wf0x_01 SPOTS es_sapfv50w.
+
+*... Gegebenfalls Bestandsfindung für diese Lieferposition durchführen *
+*----------------------------------------------------------------------*
+*    Entscheidungsfindung:                                             *
+*    =====================                                             *
+*    Keine Bestandsfindung durchführen:                                *
+*          WB_RESULT = 11 oder 13 oder 22 oder 32                      *
+*                                                                      *
+*    Bestandsfindung durch SHP/GI:                                     *
+*          WB_RESULT = 12 oder 33                                      *
+*                                                                      *
+*    Bestandsfindung durch WM bereits erfolgt:                         *
+*          WB_RESULT = 21 oder 31                                      *
+*                                                                      *
+*    Bestandsfindung im dezentralen WMS bereits erfolgt:               *
+*          WB_RESULT = 51                                              *
+*                                                                      *
+*    Fatal Error:                                                      *
+*          WB_RESULT = 41 oder 42                                      *
+*----------------------------------------------------------------------*
+
+  CLEAR: wb_result, lf_imseg_no_split, lf_imseg_after_std.  "n_1653186
+  PERFORM bestandsfindung_check USING wb_result.
+
+  IF wb_result EQ '12' OR wb_result EQ '33' OR              "v_n_1653186
+     wb_result EQ '21' OR wb_result EQ '31' OR
+     wb_result EQ '51'.
+*   Relevant for stock determination => Additional split items?!
+    IF NOT xlips-anzsn  IS INITIAL AND
+       NOT xlips-serail IS INITIAL.
+      DESCRIBE TABLE ximseg LINES lf_imseg_no_split.
+      lf_imseg_no_split = lf_imseg_no_split + 1.      "Only 1 line added
+    ENDIF.
+  ENDIF.                                                    "^_n_1653186
+
+*... Auswertung des WB_RESULT zur Entscheidung über Folgeaktion
+  IF wb_result EQ '12' OR wb_result EQ '33'.
+*--- Bestandsfindung läuft hier beim WA ------------------------------*
+    ximseg-lifnr      = likp-lifnr.    "LIFNR für Best.findung
+    PERFORM bestandsfindung_durchfuehren.
+
+  ELSEIF wb_result EQ '21' OR wb_result EQ '31'.
+*--- Bestandsfindung durch WM bereits erfolgt, VBFA nachlesen --------*
+    ximseg-lifnr      = likp-lifnr.    "LIFNR für Best.findung
+    PERFORM vbfa_imseg_position_create.
+
+  ELSEIF wb_result EQ '41' OR wb_result EQ '42'.
+*--- Irgendetwas ist schief gelaufen ---------------------------------*
+    MESSAGE a641.                      "Fehlerhandling
+
+  ELSEIF wb_result EQ '51'.
+*--- Bestandsfindung ist im dezentralen WMS gelaufen -----------------*
+    ximseg-lifnr      = likp-lifnr.    "LIFNR für Best.findung
+    PERFORM vbsupcon_imseg_position_create.
+
+  ELSEIF wb_result EQ '11' OR wb_result EQ '13' OR
+         wb_result EQ '22' OR wb_result EQ '32' OR
+         wb_result IS INITIAL.
+*--- Delete storage location for 2 step transfers created with VLMOVE
+    IF xlips-bwart EQ '303'.                                "v_n_1007548
+      CLEAR ximseg-umlgo.
+    ENDIF.                                                  "^_n_1007548
+* SPE Kit to order: Only for spe outbound delivery and not for sub items
+    IF xlikp-vbtyp           =  if_sd_doc_category=>delivery       AND
+     ( xlikp-spe_le_scenario =  gc_le_scenario-crm OR       "n_1563322
+       cl_ops_switch_check=>le_sfws_sc3( ) = gc_true ) AND  "n_1563322
+       xlips-spe_struc       IS NOT INITIAL        AND
+       xlips-uepos IS INITIAL.
+      PERFORM spe_kit_gr_line_create TABLES   ximseg[]
+                                     USING    xlikp
+                                              xlips
+                                              xlips[]
+                                              ximseg
+                                     CHANGING tvlp.
+    ENDIF.
+*--- Keine Bestandsfindung durchführen - normaler WA -----------------*
+    ximseg-l_tabix = xlips_tabix.
+    APPEND ximseg.
+*... Für HU IMSEG_TABIX merken                              "HUM
+    lf_imseg_tabix = sy-tabix.                              "HUM
+
+*SPE TWE-MDIFF                                                "v_XAN-SPE
+    PERFORM ximseg_mengen_split USING lf_imseg_tabix.         "^_XAN-SPE
+
+    xlips-lbefu_ind = xlips_tabix.
+    xlips-lips_up   = charx.
+    MODIFY xlips.
+*... Für HU ggf. globale Tabelle schreiben                  "HUM
+    PERFORM hu_fill_hu_imseg USING lf_imseg_tabix.          "HUM
+
+*   Check for item split of inbound deliveries when using the movement
+*   types 107 and 109 in sequence.
+    IF xlikp-vbtyp = if_sd_doc_category=>delivery_shipping_notif AND xlips-anzsn IS INITIAL "1602566
+    AND lines( xvbpok_split[] ) = 0 AND xvbup-pksta IS INITIAL
+    AND cl_mm_im_sit_info=>get_sit_info_weora(
+                   iv_ebeln = xlips-vgbel ) IS NOT INITIAL.
+      PERFORM ximseg_107_split USING lf_imseg_tabix.
+    ENDIF.
+  ENDIF.
+
+  IF NOT lf_imseg_no_split IS INITIAL.                      "v_n_1653186
+    DESCRIBE TABLE ximseg LINES lf_imseg_after_std.
+    IF lf_imseg_no_split < lf_imseg_after_std.
+*     Stock determination split with SN leads to dump => Error message!
+      IF 1 = 2.
+        MESSAGE e748(vl) WITH xlips-posnr.
+      ELSE.
+        MOVE-CORRESPONDING xlips TO wat.
+        wat-msgno = '748'.
+        wat-msgty = chare.
+        wat-msgid = 'VL'.
+        wat-msgv1 = xlips-posnr.
+        APPEND wat.
+      ENDIF.
+    ENDIF.
+  ENDIF.                                                    "^_n_1653186
+
+  PERFORM imseg_csl_token_fuellen_aip
+                            TABLES ximseg_csl_token
+                            USING  xlips
+                                   lf_imseg_tabix.
+ENDFORM.                    "XIMSEG_FUELLEN
+*eject
+
+
+
+*----------------------------------------------------------------------*
+*       FORM XIMSEG_REFRESH                                            *
+*----------------------------------------------------------------------*
+*       Löschen der View beim Initialisieren des Beleges               *
+*                                                                      *
+*----------------------------------------------------------------------*
+FORM ximseg_refresh.
+
+*... Strukturen, int. Tabellen, Flags
+  CLEAR   ximseg.
+  REFRESH ximseg.
+
+  CLEAR   yimseg.
+  REFRESH yimseg.
+
+  CLEAR   imseg.
+  REFRESH imseg.
+
+  CLEAR   emseg.
+  REFRESH emseg.
+
+  CLEAR   xlseg_com.
+  REFRESH xlseg_com.
+
+  CLEAR   e_bfstock.
+  REFRESH e_bfstock.
+
+  CLEAR:  xbfcom,
+          wa_zaehl,
+          v50agl-warenausgang,
+          v50agl-fo_fkt_lt06,
+          imkpf,
+          emkpf.
+ENHANCEMENT-POINT ximseg_refresh_01 SPOTS es_sapfv50w.
+  CALL FUNCTION 'MB_MOVEMENTS_REFRESH'.
+
+ENDFORM.                    "XIMSEG_REFRESH
+
+
+*----------------------------------------------------------------------*
+*   Form  XLSEG_COM_FUELLEN                                            *
+*----------------------------------------------------------------------*
+*       Schnittstelle für Beleg 'Lagerzu-/abgänge' füllen              *
+*----------------------------------------------------------------------*
+FORM xlseg_com_fuellen.
+
+  DATA: lf_result(2) TYPE c VALUE space.    "Resultat Bestandsfindung
+  DATA: lf_xlseg_com_tabix LIKE sy-tabix.   "HUM
+
+  xlseg_com-lgnum  =  xlips-lgnum.
+  xlseg_com-matnr  =  xlips-matnr.
+  xlseg_com-werks  =  xlips-werks.
+  xlseg_com-lgort  =  xlips-lgort.
+  xlseg_com-rblvs  =  xlips-rblvs.
+*... WM führt Charge u. Bwtar im gleichen Feld, deshalb vorher prüfen,
+*... welches Feld nach CHARG übergeben werden soll.
+  IF NOT xlips-bwtar IS INITIAL AND xlips-charg IS INITIAL.
+    xlseg_com-charg  =  xlips-bwtar.
+  ELSE.
+    xlseg_com-charg  =  xlips-charg.
+  ENDIF.
+  xlseg_com-knttp  =  xlips-knttp.
+  xlseg_com-bestq  =  xlips-bestq.
+  xlseg_com-sobkz  =  xlips-sobkz.
+  xlseg_com-sonum  =  xlips-sonum.
+  xlseg_com-menge  =  xlips-lgmng.
+  xlseg_com-meins  =  xlips-meins.
+
+*  Move the Stock Segment Data
+  IF cl_ops_switch_check=>sfsw_segmentation_02( ) EQ abap_on .
+    xlseg_com-sgt_scat  =  xlips-sgt_scat.
+  ENDIF.
+
+*... Teil-WE: Übernahme der Mengen aus der EBUMG
+  IF NOT likpd-kzebu IS INITIAL.
+    xlseg_com-menge = xlips-ebumg_bme.
+* Rest-WE Menge buchen
+  ELSEIF xlips-vbumg > 0.
+* letzter Teil-WE:
+    xlseg_com-menge = xlips-lgmng - xvbapf-rmenge_p.
+* Mengen in xlips setzen wegen späterer VBFA-Fortschreibung
+    xlips-ebumg_flo = xlseg_com-menge * xlips-umvkn
+                                      / xlips-umvkz.   "VRKME
+    xlips-ebumg_flt = xlseg_com-menge.                 "LAGME
+    xlips-ebumg_bme = xlseg_com-menge.                       "v_YG_PGR
+    xlips-ebumg = xlips-ebumg_flo.
+
+  ELSEIF xlips-vbumg = 0.
+    xlips-ebumg_bme = xlips-lgmng.
+* Umrechnen der EBUMG von BME nach VME
+    CALL FUNCTION 'SHP_QUANTITY_SET'
+      EXPORTING
+        if_action              = 'B'
+      CHANGING
+        cf_lfimg               = xlips-ebumg
+        cf_lgmng               = xlips-ebumg_bme
+        cf_lfimg_flo           = xlips-ebumg_flo
+        cf_lgmng_flo           = xlips-ebumg_flt
+        cf_umvkz               = xlips-umvkz
+        cf_umvkn               = xlips-umvkn
+      EXCEPTIONS
+        conversion_overflow    = 1
+        essential_data_missing = 2
+        error                  = 3
+        OTHERS                 = 4.
+    IF sy-subrc <> 0.
+      MOVE-CORRESPONDING xlips TO wat.
+      wat-msgno = sy-msgno.
+      wat-msgty = sy-msgty.
+      wat-msgid = sy-msgid.
+      wat-msgv1 = sy-msgv1.
+      wat-msgv2 = sy-msgv2.
+      wat-msgv3 = sy-msgv3.
+      wat-msgv4 = sy-msgv4.
+      APPEND wat.
+    ENDIF.                                                   "^_YG_PGR
+  ENDIF.
+*... end Teil-WE
+
+  xlseg_com-lgtyp  =  xlips-lgtyp.
+  xlseg_com-lgpla  =  xlips-lgpla.
+  xlseg_com-kzdyn  =  xlips-kzdlg.
+  xlseg_com-bwart  =  xlips-bwart.
+  xlseg_com-kzbew  =  xlips-kzbew.
+  CASE likp-vbtyp.                     "VBTYPen-Umschlüsselung
+    WHEN if_sd_doc_category=>delivery_shipping_notif.                        "Anlieferung
+      xlseg_com-lvbtp = chara.
+    WHEN if_sd_doc_category=>returns_delivery_for_order.                        "Retourenlieferung
+      xlseg_com-lvbtp = chara.
+    WHEN if_sd_doc_category=>delivery.                        "Auslieferung
+      IF tvlk-aufer EQ charh.          "Auslieferung mit Umbuchung
+        xlseg_com-lvbtp = charc.
+      ELSE.
+        xlseg_com-lvbtp = charb.
+      ENDIF.
+    WHEN OTHERS.
+      xlseg_com-lvbtp = charb.
+  ENDCASE.
+  xlseg_com-lvbnr  =  xlips-vbeln.
+  xlseg_com-lvbps  =  xlips-posnr.
+  xlseg_com-ummat  =  xlips-ummat.
+  xlseg_com-umwrk  =  xlips-umwrk.
+  xlseg_com-umlgo  =  xlips-umlgo.
+*... WM führt Charge u. Bwtar im gleichen Feld, deshalb vorher prüfen,
+*... welches Feld nach CHARG übergeben werden soll.
+  IF NOT xlips-umbar IS INITIAL AND xlips-umcha IS INITIAL.
+    xlseg_com-umcha  =  xlips-umbar.
+  ELSE.
+    xlseg_com-umcha  =  xlips-umcha.
+  ENDIF.
+  xlseg_com-umbsq  =  xlips-umbsq.
+  xlseg_com-umsok  =  xlips-umsok.
+  xlseg_com-usonu  =  xlips-usonu.
+  xlseg_com-brgew  =  xlips-brgew.     "Gesamtbruttogewicht
+  xlseg_com-gewei  =  xlips-gewei.
+
+*  Move the Stock Segment Data
+  IF cl_ops_switch_check=>sfsw_segmentation_02( ) EQ abap_on .
+    xlseg_com-sgt_umscat  =  xlips-sgt_rcat.
+  ENDIF.
+
+*... Prüfung, ob Bestandsfindung im dezentralen WMS stattgefunden hat
+*----------------------------------------------------------------------*
+*    Bestandsfindung im dezentralen WMS bereits erfolgt?               *
+*    Dann muß XLSEG_COM aus VBFA gefüllt werden. Da die diese VBFA im  *
+*    ERP jedoch nicht bekannt ist, wird sie per VBSUPCON dorthin       *
+*    überstellt.
+*----------------------------------------------------------------------*
+*    Entscheidungsfindung:                                             *
+*    =====================                                             *
+*    Bestandsfindung durch WM bereits erfolgt:                         *
+*          WB_RESULT = 21 oder 31                                      *
+*                                                                      *
+*    Fatal Error:                                                      *
+*          WB_RESULT = 41 oder 42 oder 51 (VBSUPCON vorhanden?!)       *
+*                                                                      *
+*    Normaler Ablauf ohne Bestandsfindung                              *
+*          WB_RESULT = others                                          *
+*                                                                      *
+*----------------------------------------------------------------------*
+
+  CLEAR lf_result.
+  PERFORM bestandsfindung_check USING lf_result.
+
+  CASE lf_result.
+    WHEN '21' OR '31'.
+*--- Bestandsfindung durch WM bereits erfolgt, VBFA nachlesen --------*
+*    entsprechende Übergabezeilen (XLSEG_COM's) generieren
+      PERFORM vbfa_xlseg_com_position_create.
+
+    WHEN '41' OR '42' OR '51'.
+*--- Irgendetwas ist schief gelaufen ---------------------------------*
+      MESSAGE a641.                      "Fehlerhandling
+
+    WHEN OTHERS.
+*... hier gab's keine Bestandsfindung, also Abschlussarbeiten ausführen
+      APPEND xlseg_com.
+      lf_xlseg_com_tabix = sy-tabix.
+      xlips-lbefu_ind = xlips_tabix.
+      xlips-lips_up   = charx.
+      MODIFY xlips.
+*... Für HU ggf. globale Tabelle schreiben                  "HUM
+      PERFORM hu_fill_hu_imseg USING lf_xlseg_com_tabix.    "HUM
+  ENDCASE.
+
+ENDFORM.                               " XLSEG_COM_FUELLEN
+
+
+*----------------------------------------------------------------------*
+*       Form  XIMSEG_FUELLEN_WMS
+*----------------------------------------------------------------------*
+*       Feldzuweisung für Umlagerung aus WMS/MB11
+*----------------------------------------------------------------------*
+*
+*
+*----------------------------------------------------------------------*
+FORM ximseg_fuellen_wms.
+
+  DATA: lv_cross_dock_partner   TYPE kunnr.                       "SPE
+  DATA: l_imseg                 TYPE imseg.                 "n_3107854
+
+  PERFORM /spe/determine_cd_partner TABLES xvbpa                  "SPE
+                                    USING xlikp                   "SPE
+                                 CHANGING lv_cross_dock_partner.  "SPE
+
+*... Lieferungen aus MB11 oder Umbuchungslieferungen        "HUM
+  IF tvlk-aufer EQ charo OR tvlk-aufer EQ charh OR          "HUM
+     NOT lv_cross_dock_partner IS INITIAL.
+    l_imseg = ximseg.                                       "n_3107854
+    CALL FUNCTION 'L_IMSEG_FROM_SONUM_DETERMINE'
+      EXPORTING
+        i_sobkz  = xlips-sobkz
+        i_umsok  = xlips-umsok
+        i_sonum  = xlips-sonum
+        i_usonu  = xlips-usonu
+      IMPORTING
+        e_rlsond = s_rlsond.
+
+    CASE xlips-shkzg_um.
+      WHEN char1.
+        ximseg-matnr      = xlips-matnr.
+        ximseg-werks      = xlips-werks.
+        ximseg-lgort      = xlips-lgort.
+        ximseg-charg      = xlips-charg.
+        ximseg-ummat      = xlips-ummat.
+        ximseg-umwrk      = xlips-umwrk.
+        ximseg-umlgo      = xlips-umlgo.
+        ximseg-umcha      = xlips-umcha.
+        ximseg-sobkz      = xlips-sobkz.
+        ximseg-resourcename_sid = xlips-resource_id.
+        ximseg-resourcename_cid = xlips-umresource_id.
+* Update XIMSEG from quantity difference fields             "v_n_997473
+        PERFORM spe_ximseg_fuellen_mdiff USING    xlikp
+                                                  xlips
+                                         CHANGING ximseg.   "^_n_997473
+        IF NOT s_rlsond IS INITIAL.
+          MOVE-CORRESPONDING s_rlsond TO ximseg.
+*       coding from note 1952620 deleted and moved down       "n_3095550
+        ENDIF.
+        IF S_RLSOND-PS_PSP_PNR IS INITIAL AND               "v_n_3095550
+          NOT XLIPS-PS_PSP_PNR IS INITIAL.
+          XIMSEG-PS_PSP_PNR = XLIPS-PS_PSP_PNR.
+        ENDIF.                                              "^_n_3095550
+      WHEN char2.
+        CLEAR s_rlsond.
+        CALL FUNCTION 'L_IMSEG_FROM_SONUM_DETERMINE'
+          EXPORTING                  "fields turned around !
+            i_sobkz  = xlips-umsok
+            i_umsok  = xlips-sobkz
+            i_sonum  = xlips-usonu
+            i_usonu  = xlips-sonum
+          IMPORTING
+            e_rlsond = s_rlsond.
+        ximseg-matnr      = xlips-ummat.
+        ximseg-werks      = xlips-umwrk.
+        ximseg-lgort      = xlips-umlgo.
+        ximseg-charg      = xlips-umcha.
+        ximseg-bwtar      = xlips-umbar.
+        ximseg-ummat      = xlips-matnr.
+        ximseg-umwrk      = xlips-werks.
+        ximseg-umlgo      = xlips-lgort.
+        ximseg-umcha      = xlips-charg.
+        ximseg-umbar      = xlips-bwtar.
+        ximseg-resourcename_sid = xlips-umresource_id.
+        ximseg-resourcename_cid = xlips-resource_id.
+
+        IF cl_ops_switch_check=>le_sfws_sc3( ) = gc_true.  "v_n_1563322
+*  Update XIMSEG from quantity difference fields
+          PERFORM spe_ximseg_fuellen_mdiff_um USING    xlikp
+                                                       xlips
+                                              CHANGING ximseg.
+        ENDIF.                                             "^_n_1563322
+
+        IF NOT s_rlsond IS INITIAL.
+          ximseg-mat_kdauf  = s_rlsond-mat_kdauf.
+          ximseg-mat_kdpos  = s_rlsond-mat_kdpos.
+*       ximseg-mat_pspnr  = s_rlsond-ps_psp_pnr.
+          ximseg-mat_pspnr  = s_rlsond-mat_pspnr.
+          ximseg-kdauf      = s_rlsond-kdauf.
+          ximseg-kdpos      = s_rlsond-kdpos.
+          ximseg-ps_psp_pnr = s_rlsond-ps_psp_pnr.
+          ximseg-kunnr      = s_rlsond-kunnr."3108598 "{ ENHO DIPCS_FV50WF0X IS-AD-SSP AD_SUB }
+        ENDIF.
+        ximseg-lifnr      = s_rlsond-lifnr.
+        ximseg-sobkz      = xlips-umsok.
+      WHEN OTHERS.
+        IF NOT s_rlsond IS INITIAL.
+          MOVE-CORRESPONDING s_rlsond TO ximseg.
+*       coding from note 1952620 deleted and moved down       "n_3095550
+        ENDIF.
+        IF S_RLSOND-PS_PSP_PNR IS INITIAL AND               "v_n_3095550
+          NOT XLIPS-PS_PSP_PNR IS INITIAL.
+          XIMSEG-PS_PSP_PNR = XLIPS-PS_PSP_PNR.
+        ENDIF.                                              "^_n_3095550
+        ximseg-sobkz = xlips-umsok.
+        IF xlips-posar = charc.                             "v_n_575210
+          mmove xlips-matnr ximseg-matnr.
+          mmove xlips-werks ximseg-werks.
+          mmove xlips-lgort ximseg-lgort.
+          mmove xlips-charg ximseg-charg.
+          mmove xlips-ummat ximseg-ummat.
+          mmove xlips-umwrk ximseg-umwrk.
+          mmove xlips-umlgo ximseg-umlgo.
+          mmove xlips-umcha ximseg-umcha.
+          mmove xlips-bwtar ximseg-umbar.
+          mmove xlips-resource_id ximseg-resourcename_sid.
+          mmove xlips-umresource_id ximseg-resourcename_cid.
+        ENDIF.                                              "^_n_575210
+    ENDCASE.
+    IF ximseg-lifnr IS INITIAL AND                          "v_n_3107854
+       NOT l_imseg-lifnr IS INITIAL.
+      ximseg-lifnr = l_imseg-lifnr.
+    ENDIF.                                                  "^_n_3107854
+  ENDIF.
+
+ENDFORM.                               " XIMSEG_FUELLEN_WMS
+
+*&---------------------------------------------------------------------*
+*&      Form  ximseg_fuellen_aip                                   "AIP
+*&---------------------------------------------------------------------*
+*       Aplication integration process                             "AIP
+*       delivery with predecessing document in other system        "AIP
+*----------------------------------------------------------------------*
+FORM ximseg_fuellen_aip                                             "AIP
+      USING    is_lips  TYPE lipsvb
+      CHANGING cs_imseg LIKE ximseg.
+
+  FIELD-SYMBOLS
+    <ls_ref_data>              TYPE leshp_delivery_refdata.
+
+
+* additional data from delivery item
+  cs_imseg-recvsystem = xlips-vgsys.
+
+
+* additional data from predecessor, kept in reference data
+  READ TABLE xlips_ref ASSIGNING      <ls_ref_data>
+                       WITH TABLE KEY  handle = is_lips-handle.
+
+  IF <ls_ref_data> IS ASSIGNED.
+*   CO-Daten
+*   des empfangenden Werkes (Nachschub) oder
+*   des empfangenden Buchungskreises (buchungskreisübergreifender
+*                                     Verkauf, Cross Company)
+    cs_imseg-pprctr     = <ls_ref_data>-pprctr.
+    cs_imseg-pargb      = <ls_ref_data>-pargb.
+
+  ENDIF.
+
+ENDFORM.                    " ximseg_fuellen_aip
+"v_XAN-SPE
+*&---------------------------------------------------------------------*
+*&      Form  XIMSEG_MENGEN_SPLIT
+*&---------------------------------------------------------------------*
+*       TWE-Split
+*
+*----------------------------------------------------------------------*
+
+FORM ximseg_mengen_split USING iv_tabix.
+
+  DATA:
+    lv_lines        TYPE i,
+    lv_menge        LIKE imseg-menge,
+    ls_xvbpok_split LIKE LINE OF xvbpok_split,
+    lt_imseg        TYPE STANDARD TABLE OF imseg.
+
+* distribute quantity on goods receipt items
+  DESCRIBE TABLE xvbpok_split LINES lv_lines.
+  CHECK lv_lines >= 1.
+  READ TABLE xvbpok_split INTO ls_xvbpok_split INDEX 1.
+
+  IF lv_lines = 1.
+    IF ls_xvbpok_split-posnr_vl = xlips-posnr.              "n_1340039
+      ximseg-lfbnr = ls_xvbpok_split-lfbnr.
+      ximseg-lfbja = ls_xvbpok_split-lfbja.
+      ximseg-lfpos = ls_xvbpok_split-lfpos.
+    ENDIF.                                                  "n_1340039
+    lv_menge = 0.
+    APPEND ximseg TO lt_imseg.
+  ELSE.
+    lv_menge = ximseg-menge.
+    LOOP AT xvbpok_split INTO  ls_xvbpok_split
+                         WHERE posnr_vl = xlips-posnr.      "n_1268873
+      ximseg-lfbnr = ls_xvbpok_split-lfbnr.
+      ximseg-lfbja = ls_xvbpok_split-lfbja.
+      ximseg-lfpos = ls_xvbpok_split-lfpos.
+
+*     SPE100 RG 11.02.2004 Stock type
+      IF NOT ls_xvbpok_split-spe_insmk IS INITIAL.
+        ximseg-insmk = ls_xvbpok_split-spe_insmk.
+      ENDIF.
+      IF NOT ls_xvbpok_split-spe_lgort IS INITIAL.
+        ximseg-lgort = ls_xvbpok_split-spe_lgort.           "n_1122943
+      ENDIF.
+
+      IF lv_menge > ls_xvbpok_split-menge.
+        ximseg-menge = ls_xvbpok_split-menge.
+        ximseg-erfmg = ximseg-menge * ximseg-umren / ximseg-umrez.
+        APPEND ximseg TO lt_imseg.
+        lv_menge = lv_menge - ls_xvbpok_split-menge.
+      ELSEIF lv_menge = 0.
+        EXIT.
+      ELSE.
+        ximseg-menge = lv_menge.
+        ximseg-erfmg = ximseg-menge * ximseg-umren / ximseg-umrez.
+        APPEND ximseg TO lt_imseg.
+        CLEAR lv_menge.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+* check if total quantity has been distributet
+  CHECK lv_menge = 0.
+  DELETE ximseg INDEX iv_tabix.
+  APPEND LINES OF lt_imseg TO ximseg.
+
+ENDFORM.                    " XIMSEG_MENGEN_SPLIT             "^_XAN-SPE

@@ -1,0 +1,821 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHIZHAND     | 18.07.2022 | 11967     : Billing Output Management -  *
+*              |            |Customized Forms                          *
+*              |            | DS4K923165                               *
+*----------------------------------------------------------------------*
+* KHIZHAND     | 15.11.2022 | 15330     : Billing Output Management -  *
+*              |            | Customized Forms II                      *
+*              |            | DS4K935746                               *
+*----------------------------------------------------------------------*
+* KHIZHAND     | 19.12.2022 | 16439     : Billing Output Management -  *
+*              |            | Customized Forms III                     *
+*              |            | DS4K938684                               *
+*----------------------------------------------------------------------*
+
+
+*&---------------------------------------------------------------------*
+*& Include          ZSD_P_BILLCONF_F01
+*&---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+*       FORM ENTRY                                                    *
+*---------------------------------------------------------------------*
+FORM entry                                                  "#EC CALLED
+  USING uv_return_code  LIKE sy-subrc
+        uv_screen       TYPE c.
+
+  DATA: lv_retcode TYPE sy-subrc.
+
+  PERFORM processing USING    uv_screen
+                     CHANGING lv_retcode.
+  IF lv_retcode NE 0.
+    uv_return_code = 1.
+  ELSE.
+    uv_return_code = 0.
+  ENDIF.
+ENDFORM.   " entry
+
+*&---------------------------------------------------------------------*
+*&      Form  processing
+*&---------------------------------------------------------------------*
+FORM processing
+  USING    uv_screen    TYPE c
+  CHANGING cv_retcode   LIKE sy-subrc.
+
+  DATA: ls_doc_param    TYPE sfpdocparams,
+        ls_outputparams TYPE sfpoutputparams,
+        lv_fm_name      TYPE rs38l_fnam,
+        lv_land1        TYPE land1,
+
+        ls_header       TYPE zsd_s_billing_output_header,
+        lt_items        TYPE zsd_tt_billing_items_header,
+        ls_totals       TYPE zsd_s_billing_output_totals,
+        ls_footer       TYPE zsd_s_billing_output_footer,
+        ls_items_totals TYPE zsd_s_billing_item_totals,
+        lv_qrcode       TYPE string,
+        lv_logo         TYPE xstring.
+
+  IF tnapr-formtype NE gc_pdf.
+    cv_retcode = 1.
+    RETURN.
+  ENDIF.
+
+  PERFORM get_data
+    USING      uv_screen
+    CHANGING ls_header
+             ls_totals
+             ls_footer
+             ls_items_totals
+             lt_items
+             lv_logo
+             lv_land1
+             sy-subrc.
+
+  CHECK cv_retcode IS INITIAL.
+
+  PERFORM set_output_parameters  USING    uv_screen
+                                 CHANGING ls_outputparams.
+
+  TRY.
+      CALL FUNCTION 'FP_FUNCTION_MODULE_NAME'
+        EXPORTING
+          i_name     = tnapr-sform
+        IMPORTING
+          e_funcname = lv_fm_name.
+    CATCH cx_fp_api_repository
+          cx_fp_api_usage
+          cx_fp_api_internal.
+      cv_retcode = 1.
+      RETURN.
+  ENDTRY.
+
+  CALL FUNCTION 'FP_JOB_OPEN'
+    CHANGING
+      ie_outputparams = ls_outputparams
+    EXCEPTIONS
+      cancel          = 1
+      usage_error     = 2
+      system_error    = 3
+      internal_error  = 4
+      OTHERS          = 5.
+  IF sy-subrc <> 0.
+    cv_retcode = sy-subrc.
+    PERFORM protocol_update USING uv_screen.
+    RETURN.
+  ENDIF.
+
+  ls_doc_param-langu      = nast-spras.
+  ls_doc_param-replangu1  = gc_english.
+  ls_doc_param-country    = lv_land1.
+  lv_qrcode = 'qr code test information  '.
+
+  CALL FUNCTION lv_fm_name
+    EXPORTING
+      /1bcdwb/docparams = ls_doc_param
+      is_header         = ls_header
+      is_totals         = ls_totals
+      is_footer         = ls_footer
+      is_item_totals    = ls_items_totals
+      iv_logo           = lv_logo
+      iv_qrcode         = lv_qrcode
+      it_items          = lt_items
+    EXCEPTIONS
+      usage_error       = 1
+      system_error      = 2
+      internal_error    = 3
+      OTHERS            = 4.
+
+
+  IF sy-subrc <> 0.
+    cv_retcode = sy-subrc.
+    PERFORM protocol_update USING uv_screen.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'FP_JOB_CLOSE'
+    EXCEPTIONS
+      usage_error    = 1
+      system_error   = 2
+      internal_error = 3
+      OTHERS         = 4.
+  IF sy-subrc <> 0.
+    cv_retcode = sy-subrc.
+    PERFORM protocol_update USING uv_screen.
+    RETURN.
+  ENDIF.
+ENDFORM.   " processing
+
+*&---------------------------------------------------------------------*
+*&      Form  get_data
+*&---------------------------------------------------------------------*
+FORM get_data
+  USING    uv_screen      TYPE c
+  CHANGING cs_header      TYPE zsd_s_billing_output_header
+         cs_totals        TYPE zsd_s_billing_output_totals
+         cs_footer        TYPE zsd_s_billing_output_footer
+         cs_item_totals   TYPE zsd_s_billing_item_totals
+         ct_items         TYPE zsd_tt_billing_items_header
+         cv_logo          TYPE xstring
+         cv_land1         TYPE land1
+         cv_retcode       TYPE sy-subrc.
+  DATA:
+    ls_key_fields TYPE vbco3,
+    lt_messages   TYPE vbfs_t,
+    lt_vbdpr      TYPE TABLE OF vbdpr,
+    lt_vbpa       TYPE TABLE OF vbpa.
+
+* Init pricing on demand
+  CALL FUNCTION 'RV_PRICE_PRINT_GET_MODE'
+    IMPORTING
+      e_print_mode = gv_price_print_mode.
+  IF gv_price_print_mode = chara.
+    CALL FUNCTION 'RV_PRICE_PRINT_REFRESH'
+      TABLES
+        tkomv = gt_komv.
+  ENDIF.
+
+  ls_key_fields = VALUE #( mandt = sy-mandt spras = nast-spras vbeln = nast-objky kunde = nast-parnr parvw = nast-parvw ).
+
+  CALL FUNCTION 'RV_BILLING_PRINT_VIEW'
+    EXPORTING
+      comwa                        = ls_key_fields
+    IMPORTING
+      kopf                         = gs_bil_print-head_detail-vbdkr
+    TABLES
+      pos                          = lt_vbdpr
+      partner                      = lt_vbpa
+    EXCEPTIONS
+      terms_of_payment_not_in_t052 = 1
+      error_message                = 5
+      OTHERS                       = 4.
+
+  IF sy-subrc <> 0.
+    cv_retcode = sy-subrc.
+    PERFORM protocol_update USING uv_screen.
+    RETURN.
+  ELSE.
+    LOOP AT lt_messages INTO DATA(ls_mess).
+      MESSAGE ID ls_mess-msgid TYPE ls_mess-msgty NUMBER ls_mess-msgno ##NEEDED
+           WITH ls_mess-msgv1 ls_mess-msgv2 ls_mess-msgv3 ls_mess-msgv4
+           INTO DATA(lv_dummy).
+      PERFORM protocol_update USING uv_screen.
+    ENDLOOP.
+  ENDIF.
+
+  DATA(lv_fbuda) = lt_vbdpr[ 1 ]-fbuda.
+
+  cv_land1 = gs_bil_print-head_detail-vbdkr-land1.
+
+  PERFORM get_logo
+    CHANGING cv_logo.
+
+  PERFORM get_header_details
+    USING     gs_bil_print
+              lt_vbpa
+              lv_fbuda
+    CHANGING  cs_header.
+
+  PERFORM get_items_details
+    USING
+       gs_bil_print-head_detail-vbdkr
+    CHANGING
+       lt_vbdpr
+       ct_items
+       cs_item_totals.
+
+  PERFORM get_total_details
+    USING
+       gs_bil_print
+    CHANGING
+       cs_totals.
+
+  PERFORM get_bank_data
+    USING
+      gs_bil_print-head_detail-vbdkr
+      gs_bil_print-head_detail-vbdkr-kunwe
+    CHANGING
+      cs_footer.
+
+ENDFORM.   " get_data
+
+*&---------------------------------------------------------------------*
+*&      Form  get_header_details
+*&---------------------------------------------------------------------*
+FORM get_header_details
+  USING     us_header TYPE bil_s_prt_interface
+            ut_vbpa   TYPE gtyp_vbpa
+            uv_service_date TYPE fbuda
+  CHANGING  cs_header TYPE zsd_s_billing_output_header.
+
+  cs_header-bill_number     = us_header-head_detail-vbdkr-vbeln.
+  cs_header-company_name    = us_header-head_detail-vbdkr-companyname.
+  cs_header-company_address = us_header-head_detail-vbdkr-companyaddressid.
+  cs_header-bill_to_vat_id  = us_header-head_detail-vbdkr-stceg.
+  PERFORM get_ahm_information
+        USING     us_header-head_detail-vbdkr-bukrs
+                  us_header-head_detail-vbdkr-mwskz
+                  us_header-head_detail-vbdkr-land1
+                  us_header-head_detail-vbdkr-landtx
+                  uv_service_date
+        CHANGING  cs_header.
+
+  SELECT SINGLE countryname
+  FROM i_countrytext
+  WHERE language = @sy-langu
+    AND country  = @us_header-head_detail-vbdkr-companycountry
+  INTO @cs_header-company_address .
+
+  IF sy-subrc = 0.
+    cs_header-company_address  = |{ cs_header-company_address  }, { us_header-head_detail-vbdkr-pstlz }, { us_header-head_detail-vbdkr-ort01 }|.
+  ENDIF.
+
+  SELECT SINGLE vtext                                     "#EC CI_SUBRC
+   FROM tvfkt
+   WHERE  spras = @sy-langu
+     AND fkart  = @us_header-head_detail-vbdkr-fkart
+   INTO @cs_header-document_type .
+
+  cs_header-invoice_date     = us_header-head_detail-vbdkr-fkdat.
+  cs_header-payment_term     = SWITCH #( us_header-head_detail-vbdkr-zterm_tx1
+                                         WHEN '' THEN us_header-head_detail-vbdkr-zterm
+                                         ELSE us_header-head_detail-vbdkr-zterm && ' – ' && us_header-head_detail-vbdkr-zterm_tx1 ).
+  cs_header-payment_due_date = us_header-head_detail-vbdkr-payment_due_date.
+  cs_header-order_number    = us_header-head_detail-vbdkr-vbeln_vauf.
+  cs_header-cust_po_number  = us_header-head_detail-vbdkr-bstnk.
+  cs_header-delivery_number = us_header-head_detail-vbdkr-vbeln_vl.
+  cs_header-reference       = us_header-head_detail-vbdkr-ihrez.
+
+  READ TABLE ut_vbpa INTO DATA(ls_ship_to) WITH KEY parvw = gc_ship_to_party_role.
+  IF sy-subrc = 0 .
+    cs_header-ship_customer_number = ls_ship_to-kunnr.
+  ENDIF.
+  PERFORM get_company_information
+    USING
+      us_header-head_detail-vbdkr-vbeln
+      gc_ship_to_party_role
+    CHANGING
+      cs_header-ship_name
+      cs_header-ship_street
+      cs_header-ship_country.
+
+  READ TABLE ut_vbpa INTO DATA(ls_bill_to) WITH KEY parvw = gc_bill_to_party_role.
+  IF sy-subrc = 0 .
+    cs_header-bill_to_customer_number = ls_bill_to-kunnr.
+  ENDIF.
+  PERFORM get_company_information
+   USING
+     us_header-head_detail-vbdkr-vbeln
+     gc_bill_to_party_role
+   CHANGING
+     cs_header-bill_to_name
+     cs_header-bill_to_street
+     cs_header-bill_to_country.
+
+ENDFORM.   " get_header_details
+
+*&---------------------------------------------------------------------*
+*&      Form  get_items_details
+*&---------------------------------------------------------------------*
+FORM get_items_details
+  USING     us_header      TYPE vbdkr
+  CHANGING  ct_vbdpr       TYPE gtyp_items
+            ct_items       TYPE zsd_tt_billing_items_header
+            cs_item_totals TYPE zsd_s_billing_item_totals.
+  DATA:
+    ls_item             TYPE LINE OF zsd_tt_billing_output_items,
+    ls_header_item      TYPE LINE OF zsd_tt_billing_items_header,
+    lv_total_quantity   TYPE netwr_ap,
+    lv_total_price      TYPE netwr_ap,
+    lv_total_discount   TYPE netwr_ap,
+    lv_total_amount     TYPE netwr_ap,
+    lv_total_tax_amount TYPE netwr_ap,
+    lv_total_summ       TYPE netwr_ap,
+    lv_previous_vgbel   TYPE vgbel VALUE '0000000000',
+    lv_previous_aubel   TYPE char10 VALUE '0000000000',
+    ls_in_words         TYPE spell,
+    lv_position         TYPE i,
+    lr_kschl            TYPE RANGE OF kschl,
+    lt_line             TYPE STANDARD TABLE OF tline,
+    lv_readtext_name    TYPE thead-tdname.
+
+  CLEAR:   ct_items.
+
+  TRY.
+      lr_kschl = zcl_pe_hm_basic=>get_range( iv_id = '767' ).
+    ##NO_HANDLER      CATCH zcx_pe_hm.
+  ENDTRY.
+
+  SORT ct_vbdpr BY vgbel aubel.
+  LOOP AT ct_vbdpr ASSIGNING FIELD-SYMBOL(<ls_item>).
+    CLEAR ls_item.
+    IF    <ls_item>-vgbel <> lv_previous_vgbel
+      OR  <ls_item>-aubel <> lv_previous_aubel .
+      lv_position          = 1.
+      lv_previous_vgbel    = <ls_item>-vgbel.
+      lv_previous_aubel    = <ls_item>-aubel.
+      ls_header_item-vgbel = <ls_item>-vgbel.
+      ls_header_item-aubel = <ls_item>-aubel.
+
+      APPEND ls_header_item TO ct_items ASSIGNING FIELD-SYMBOL(<ls_header_item>).
+    ELSE.
+      ls_header_item-vgbel = ''.
+      ls_header_item-aubel = ''.
+    ENDIF.
+
+    ls_item-posnr            = lv_position.
+    ls_item-article          = |{ <ls_item>-matnr ALPHA = OUT }|.
+    ls_item-article_name     = |{ <ls_item>-arktx ALPHA = OUT }|.
+    ls_item-quantity         = <ls_item>-fkimg.
+    ls_item-size_quantity    = <ls_item>-wrf_charstc2.
+    ls_item-ref_doc          = <ls_item>-vgbel.
+    ls_item-price            = <ls_item>-netwr / <ls_item>-fkimg.
+    ls_item-discount         = <ls_item>-kzwi3.
+
+    ##WARN_OK SELECT SINGLE kbetr                    "#EC CI_SEL_NESTED
+              FROM prcd_elements
+              WHERE knumv = @us_header-knumv
+                AND kposn = @<ls_item>-posnr
+                AND kschl IN @lr_kschl
+              INTO @DATA(lv_discount).
+    IF sy-subrc = 0.
+      ls_item-discount_percent = lv_discount.
+    ENDIF.
+
+    ls_item-amount           = <ls_item>-netwr .
+    ls_item-tax              = <ls_item>-mwsbp.
+    ls_item-tax_amount       = <ls_item>-netwr + <ls_item>-mwsbp.
+    ls_item-vgbel            = <ls_item>-vgbel.
+    ls_item-aubel            = <ls_item>-aubel.
+
+    lv_total_quantity   = lv_total_quantity + ls_item-quantity.
+    lv_total_price      = lv_total_price +  ls_item-price .
+    lv_total_discount   = lv_total_discount +   ls_item-discount.
+    lv_total_amount     = lv_total_amount +  ls_item-amount.
+    lv_total_tax_amount = lv_total_tax_amount +  ls_item-tax.
+    lv_total_summ       = lv_total_summ +  ls_item-tax_amount.
+
+    APPEND ls_item TO <ls_header_item>-items.
+
+    lv_position = lv_position + 1.
+  ENDLOOP.
+
+  cs_item_totals-total_quantity   = lv_total_quantity.
+  cs_item_totals-total_price      = lv_total_price.
+  cs_item_totals-total_discount   = lv_total_discount.
+  cs_item_totals-total_amount     = lv_total_amount.
+  cs_item_totals-total_tax_amount = lv_total_tax_amount.
+  cs_item_totals-total_summ       = lv_total_summ.
+  cs_item_totals-waerk            = us_header-waerk.
+  IF lv_total_summ IS NOT INITIAL.
+    CALL FUNCTION 'SPELL_AMOUNT'
+      EXPORTING
+        amount    = lv_total_summ
+        currency  = us_header-waerk
+        filler    = ' '
+        language  = sy-langu
+      IMPORTING
+        in_words  = ls_in_words
+      EXCEPTIONS
+        not_found = 1
+        too_large = 2
+        OTHERS    = 3.
+
+    IF sy-subrc = 0.
+      cs_item_totals-amount_in_word = '"' && to_lower( ls_in_words-word ) && | | && us_header-waerk && '"'.
+      cs_item_totals-amount_in_word = to_upper( cs_item_totals-amount_in_word ).
+    ENDIF.
+    lv_readtext_name = us_header-vbeln.
+    CALL FUNCTION 'READ_TEXT'
+      EXPORTING
+        id                      = 'Z004'
+        language                = nast-spras
+        name                    = lv_readtext_name
+        object                  = 'VBBK'
+      TABLES
+        lines                   = lt_line
+      EXCEPTIONS
+        id                      = 1
+        language                = 2
+        name                    = 3
+        not_found               = 4
+        object                  = 5
+        reference_check         = 6
+        wrong_access_to_archive = 7
+        OTHERS                  = 8.
+    IF sy-subrc = 0.
+      LOOP AT lt_line ASSIGNING FIELD-SYMBOL(<ls_line>).
+        cs_item_totals-text_from_billing = cs_item_totals-text_from_billing && ' ' && <ls_line>-tdline.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.
+ENDFORM.   " get_items_details
+
+*&---------------------------------------------------------------------*
+*&      Form  get_total_details
+*&---------------------------------------------------------------------*
+FORM get_total_details
+  USING     us_header TYPE bil_s_prt_interface
+  CHANGING  cs_totals TYPE zsd_s_billing_output_totals.
+
+  DATA: lv_total_invoice_value TYPE netwr,
+        lv_total_amount        TYPE netwr,
+        lr_kschl               TYPE RANGE OF kschl.
+
+  cs_totals-total_amount_before_tax = us_header-head_detail-vbdkr-netwr.
+  cs_totals-total_tax_amount    = us_header-head_detail-vbdkr-mwsbk.
+  lv_total_invoice_value        = us_header-head_detail-vbdkr-netwr + us_header-head_detail-vbdkr-mwsbk.
+  cs_totals-total_invoice_value = lv_total_invoice_value.
+  TRY.
+      lr_kschl = zcl_pe_hm_basic=>get_range( iv_id = '769' ).
+      SELECT kbetr,
+             SUM( kawrt ) AS kawrt,
+             SUM( kwert ) AS kwert
+      FROM prcd_elements
+      WHERE knumv = @us_header-head_detail-vbdkr-knumv
+        AND kschl IN @lr_kschl
+      GROUP BY kbetr
+      INTO TABLE @DATA(lt_tax_inf).
+    ##NO_HANDLER    CATCH zcx_pe_hm.
+  ENDTRY.
+  IF sy-subrc = 0.
+    cs_totals-total_percent_1 = trunc( lt_tax_inf[ 1 ]-kbetr ) .
+    cs_totals-total_percent_1 = condense( cs_totals-total_percent_1 ) && '%'.
+    cs_totals-total_percent_2 = COND #( WHEN lines( lt_tax_inf ) >= 2
+                                        THEN  trunc( lt_tax_inf[ 2 ]-kbetr )
+                                        ELSE '' ).
+    IF cs_totals-total_percent_2 <> ''.
+      cs_totals-total_percent_2 = condense( cs_totals-total_percent_2 )  && '%'.
+    ENDIF.
+    cs_totals-total_percent_3 = COND #( WHEN lines( lt_tax_inf ) >= 3
+                                        THEN  trunc( lt_tax_inf[ 3 ]-kbetr )
+                                        ELSE '' ).
+    IF cs_totals-total_percent_3 <> ''.
+      cs_totals-total_percent_3 = condense( cs_totals-total_percent_3 ) && '%'.
+    ENDIF.
+    cs_totals-total_percent_4 = COND #( WHEN lines( lt_tax_inf ) >= 4
+                                        THEN  trunc( lt_tax_inf[ 4 ]-kbetr )
+                                        ELSE '' ).
+    IF cs_totals-total_percent_4 <> ''.
+      cs_totals-total_percent_4 = condense( cs_totals-total_percent_4 ) && '%'.
+    ENDIF.
+    cs_totals-total_val_1 = lt_tax_inf[ 1 ]-kawrt .
+    lv_total_amount = cs_totals-total_val_1.
+    cs_totals-total_val_2 = COND #( WHEN lines( lt_tax_inf ) >= 2
+                                        THEN  lt_tax_inf[ 2 ]-kawrt
+                                        ELSE '' ).
+    lv_total_amount = lv_total_amount + cs_totals-total_val_2.
+    cs_totals-total_val_3 = COND #( WHEN lines( lt_tax_inf ) >= 3
+                                        THEN  lt_tax_inf[ 3 ]-kawrt
+                                        ELSE '' ).
+    lv_total_amount = lv_total_amount + cs_totals-total_val_3.
+    cs_totals-total_val_4 = COND #( WHEN lines( lt_tax_inf ) >= 4
+                                        THEN   lt_tax_inf[ 4 ]-kawrt
+                                        ELSE '' ).
+    lv_total_amount = lv_total_amount + cs_totals-total_val_4.
+    cs_totals-total_amount_1 = lt_tax_inf[ 1 ]-kwert .
+    cs_totals-total_amount_2 = COND #( WHEN lines( lt_tax_inf ) >= 2
+                                        THEN  lt_tax_inf[ 2 ]-kwert
+                                        ELSE '' ).
+    cs_totals-total_amount_3 = COND #( WHEN lines( lt_tax_inf ) >= 3
+                                        THEN  lt_tax_inf[ 3 ]-kwert
+                                        ELSE '' ).
+    cs_totals-total_amount_4 = COND #( WHEN lines( lt_tax_inf ) >= 4
+                                        THEN  lt_tax_inf[ 4 ]-kwert
+                                        ELSE '' ).
+  ENDIF.
+  cs_totals-total_amounts =  lv_total_amount.
+ENDFORM. "get_total_details
+*&---------------------------------------------------------------------*
+*&      Form  get_company_information
+*&---------------------------------------------------------------------*
+FORM get_company_information
+  USING
+    uv_vbeln        TYPE vbeln
+    uv_company_type TYPE char2
+  CHANGING
+    cv_name            TYPE zsd_s_billing_output_header-bill_to_name
+    cv_company_street  TYPE zsd_s_billing_output_header-bill_to_street
+    cv_company_country TYPE zsd_s_billing_output_header-bill_to_country.
+
+  CLEAR: cv_name, cv_company_street, cv_company_country.
+
+  ##WARN_OK SELECT SINGLE b~name1,
+                          b~adrnr
+            FROM vbpa AS a
+            INNER JOIN kna1 AS b
+               ON a~kunnr = b~kunnr
+            WHERE a~vbeln = @uv_vbeln
+              AND a~parvw = @uv_company_type
+            INTO (@cv_name, @DATA(lv_adrnr)).
+
+  IF sy-subrc = 0.
+    PERFORM get_address  USING
+                           lv_adrnr
+                         CHANGING
+                           cv_company_street
+                           cv_company_country.
+  ENDIF.
+
+ENDFORM. " get_company_information
+
+*&---------------------------------------------------------------------*
+*&      Form  get_address
+*&---------------------------------------------------------------------*
+FORM get_address
+  USING
+    uv_adrnr TYPE adrnr
+  CHANGING
+    cv_company_street  TYPE zsd_s_billing_output_header-bill_to_street
+    cv_company_country TYPE zsd_s_billing_output_header-bill_to_country.
+
+  DATA:
+    ls_address_selection TYPE addr1_sel,
+    ls_adr               TYPE addr1_val.
+
+  ls_address_selection-addrnumber = uv_adrnr.
+  ls_address_selection-nation     = sy-langu.
+  CALL FUNCTION 'ADDR_GET'
+    EXPORTING
+      address_selection = ls_address_selection
+    IMPORTING
+      address_value     = ls_adr
+    EXCEPTIONS
+      parameter_error   = 1
+      address_not_exist = 2
+      version_not_exist = 3
+      internal_error    = 4
+      OTHERS            = 5.
+
+  IF sy-subrc = 0.
+    cv_company_street  = ls_adr-street.
+    DATA(lv_land1)     = ls_adr-country.
+    DATA(lv_city)      = ls_adr-city1.
+    DATA(lv_post_code) = ls_adr-post_code1.
+  ELSE.
+    CLEAR ls_address_selection-nation.
+    CALL FUNCTION 'ADDR_GET'
+      EXPORTING
+        address_selection = ls_address_selection
+      IMPORTING
+        address_value     = ls_adr
+      EXCEPTIONS
+        parameter_error   = 1
+        address_not_exist = 2
+        version_not_exist = 3
+        internal_error    = 4
+        OTHERS            = 5.
+  ENDIF.
+
+  IF sy-subrc = 0.
+    cv_company_street = ls_adr-street.
+    lv_land1          = ls_adr-country.
+    lv_city           = ls_adr-city1.
+    lv_post_code      = ls_adr-post_code1.
+
+    SELECT \_text-countryname AS landx50
+       FROM i_country
+       WHERE country         = @lv_land1
+         AND \_text-language = @sy-langu
+       INTO @DATA(lv_country)
+      UP TO 1 ROWS.
+    ENDSELECT.
+
+    IF sy-subrc = 0.
+      cv_company_country = |{ lv_country }, { lv_post_code }, { lv_city }|.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.  " get_address
+
+*&---------------------------------------------------------------------*
+*&      Form  get_bank_data
+*&---------------------------------------------------------------------*
+FORM get_bank_data
+  USING
+    us_header      TYPE vbdkr
+    uv_bp_partner TYPE bapibus1006_head-bpartner
+  CHANGING  cs_footer  TYPE zsd_s_billing_output_footer.
+
+  DATA: lt_result        TYPE STANDARD TABLE OF  bapibus1006_bankdetails,
+        lt_bapi_messages TYPE bus_bapi-return_table.
+
+  CLEAR cs_footer.
+
+  CALL FUNCTION 'BAPI_BUPA_BANKDETAILS_GET'
+    EXPORTING
+      businesspartner = uv_bp_partner
+    TABLES
+      bankdetails     = lt_result
+      return          = lt_bapi_messages.
+
+  IF lt_result IS NOT INITIAL.
+    cs_footer-swift  = lt_result[ 1 ]-bank_key.
+    cs_footer-iban   = lt_result[ 1 ]-iban.
+
+
+    DATA(lv_bankl) = lt_result[ 1 ]-bank_key.
+    DATA(lv_banks) = lt_result[ 1 ]-bank_ctry.
+
+    SELECT SINGLE bankname                                "#EC CI_SUBRC
+      FROM i_bank
+      WHERE  bankcountry    = @lv_banks
+        AND  bankinternalid = @lv_bankl
+      INTO @cs_footer-bank.
+  ENDIF.
+  cs_footer-footer_text = us_header-zterm_tx1 && ' ' && us_header-zterm_tx2 && ' ' && us_header-zterm_tx3.
+ENDFORM.   " get_bank_data
+
+*&---------------------------------------------------------------------*
+*&      Form  get_logo
+*&---------------------------------------------------------------------*
+FORM get_logo
+  CHANGING
+    cv_logo TYPE xstring.
+
+  DATA:
+    lt_forms   TYPE STANDARD TABLE OF gtyp_forms.
+
+  CONSTANTS: lc_logo_function TYPE if_fdt_types=>id VALUE '024F85009E261EECBBAF9B0FBFF120D2'.
+
+  TRY.
+      zcl_pe_hm_complex=>get_table(
+        EXPORTING
+          iv_id           = lc_logo_function
+          is_filter       = VALUE gtyp_filters(
+                                       fpwbformname = 'ZSD_F_BILLING'
+                                       seoclsname   = 'HEADER' )
+          iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-names
+        IMPORTING
+          et_table        = lt_forms ).
+
+      LOOP AT lt_forms INTO DATA(ls_form).
+        IF ls_form-datab-date <= sy-datlo AND ls_form-datbi-date >= sy-datlo.
+          DATA(ls_logo) = cl_somu_logo=>get_instance( )->read( ls_form-sfm_v_logo_name ).
+          IF ls_logo-name IS NOT INITIAL.
+            cv_logo = ls_logo-logo.
+            EXIT.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+    CATCH zcx_pe_hm.
+      RETURN.
+  ENDTRY.
+
+ENDFORM.   " get_logo
+*&---------------------------------------------------------------------*
+*&      Form  set_output_parameters
+*&---------------------------------------------------------------------*
+FORM set_output_parameters
+  USING    uv_screen        TYPE char1
+  CHANGING cs_outputparams  TYPE sfpoutputparams.
+
+  cs_outputparams-preview   = uv_screen.
+  IF uv_screen EQ abap_true.
+    cs_outputparams-noprint   = abap_true. " no printing in the preview
+    cs_outputparams-nopributt = abap_true. " no print buttons in the preview
+    cs_outputparams-noarchive = abap_true. " no archiving in the preview
+  ENDIF.
+  cs_outputparams-nodialog  = abap_true.   " suppress printer dialog popup
+  cs_outputparams-dest      = nast-ldest.
+  cs_outputparams-copies    = nast-anzal.
+  cs_outputparams-dataset   = nast-dsnam.
+  cs_outputparams-suffix1   = nast-dsuf1.
+  cs_outputparams-suffix2   = nast-dsuf2.
+  cs_outputparams-cover     = nast-tdocover.
+  cs_outputparams-covtitle  = nast-tdcovtitle.
+  cs_outputparams-authority = nast-tdautority.
+  cs_outputparams-receiver  = nast-tdreceiver.
+  cs_outputparams-division  = nast-tddivision.
+  cs_outputparams-arcmode   = nast-tdarmod.
+  cs_outputparams-reqimm    = nast-dimme.
+  cs_outputparams-reqdel    = nast-delet.
+  cs_outputparams-senddate  = nast-vsdat.
+  cs_outputparams-sendtime  = nast-vsura.
+ENDFORM.  " set_output_parameters
+
+*&---------------------------------------------------------------------*
+*&      Form  protocol_update
+*&---------------------------------------------------------------------*
+FORM protocol_update   USING uv_screen TYPE c.
+  CHECK uv_screen = space.
+  CALL FUNCTION 'NAST_PROTOCOL_UPDATE'
+    EXPORTING
+      msg_arbgb = syst-msgid
+      msg_nr    = syst-msgno
+      msg_ty    = syst-msgty
+      msg_v1    = syst-msgv1
+      msg_v2    = syst-msgv2
+      msg_v3    = syst-msgv3
+      msg_v4    = syst-msgv4
+    EXCEPTIONS
+      OTHERS    = 1.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+ENDFORM.   " protocol_update
+*&---------------------------------------------------------------------*
+*&      Form  get_ahm_information
+*&---------------------------------------------------------------------*
+FORM get_ahm_information
+ USING     uv_bukrs       TYPE bukrs
+           uv_mwskz       TYPE mwskz
+           uv_land1       TYPE land1
+           uv_landtx      TYPE landtx
+           uv_invoicedate TYPE sy-datlo
+ CHANGING  cs_header      TYPE zsd_s_billing_output_header.
+
+  DATA: lt_vat_texts    TYPE STANDARD TABLE OF gtyp_vat_text.
+
+  CONSTANTS: lc_text_function TYPE if_fdt_types=>id VALUE '024F85009E261EED87F2FB1DDD4420D2'.
+
+  TRY.
+      zcl_pe_hm_complex=>get_table(
+      EXPORTING
+       iv_id            = lc_text_function
+       is_filter        = VALUE gtyp_vat_filters(
+                                    bukrs   = uv_bukrs
+                                    mwskz   = uv_mwskz
+                                    landtx  = uv_landtx
+                                    land1tx = uv_land1 )
+       iv_mapping_type  = zcl_pe_hm_complex=>gc_s_mapping_type-names
+      IMPORTING
+        et_table        = lt_vat_texts ).
+
+      LOOP AT lt_vat_texts INTO DATA(ls_vat).
+        IF ls_vat-enddate-date >= uv_invoicedate AND ls_vat-begdate-date <= uv_invoicedate.
+          cs_header-supplier_vat_id = ls_vat-supp_vatn.
+          PERFORM  get_fiori_text
+               USING ls_vat-vat_text
+               CHANGING  cs_header-tax_code_text.
+          PERFORM  get_fiori_text
+               USING ls_vat-fiscrep
+               CHANGING cs_header-fiscal_rep.
+        ENDIF.
+      ENDLOOP.
+
+    CATCH zcx_pe_hm .
+      RETURN.
+  ENDTRY.
+
+ENDFORM.   "get_ahm_information
+*&---------------------------------------------------------------------*
+*&      Form  get_fiori_text
+*&---------------------------------------------------------------------*
+FORM get_fiori_text
+  USING    uv_field_name TYPE char70
+  CHANGING cv_text       TYPE string.
+  TRY.
+      DATA(ls_text) = cl_somu_text=>get_instance( )->read( CONV #( uv_field_name ) ).
+      READ TABLE ls_text-language_full_tab WITH KEY language COMPONENTS language = sy-langu ASSIGNING FIELD-SYMBOL(<ls_text_language>).
+      IF sy-subrc IS INITIAL.
+        cv_text = <ls_text_language>-content.
+      ENDIF.
+    CATCH zcx_pe_hm .
+      RETURN.
+  ENDTRY.
+ENDFORM.   "get_fiori_text

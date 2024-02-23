@@ -1,0 +1,139 @@
+FUNCTION shp_enqueue_evvblke
+  IMPORTING
+    VALUE(mode_likp) TYPE enqmode DEFAULT 'E'
+    VALUE(mandt) TYPE likp-mandt DEFAULT sy-mandt
+    VALUE(vbeln) TYPE likp-vbeln
+    VALUE(x_vbeln) TYPE any DEFAULT space ##ADT_PARAMETER_UNTYPED
+    VALUE(_scope) TYPE any DEFAULT '2' ##ADT_PARAMETER_UNTYPED
+    VALUE(_wait) TYPE any DEFAULT space ##ADT_PARAMETER_UNTYPED
+    VALUE(_collect) TYPE ddenqcoll DEFAULT ' '
+  EXCEPTIONS
+    foreign_lock
+    system_failure
+    csl_no_connection
+    csl_inconsistency.
+
+
+
+  DATA:
+    ls_likp       TYPE likp,
+    lf_chg_active TYPE xfeld,
+    lf_chg_off    TYPE xfeld,
+    ls_msg        TYPE csl_prsy.
+
+  SELECT SINGLE * FROM likp INTO ls_likp WHERE vbeln = vbeln.
+
+  " First lock the VCM value chain, if necessary
+  DATA(lo_ico_delivery_process) = cl_le_shp_ico_factory=>get( )->get_delivery_instance( ).
+  TRY.
+      lo_ico_delivery_process->set_vcm_lock( EXPORTING iv_delivery_id     = vbeln
+                                                       iv_collect         = _collect
+                                             IMPORTING et_locked_vcm      = data(lt_locked_vcm) ).
+    CATCH cx_le_shp_ico_vcm_not_locked INTO DATA(lx_not_locked).
+      " Delivery &1 cannot be changed due to running process in ValChainMgm
+      MESSAGE e023(le_shp_vl) WITH sy-msgv1 vbeln RAISING foreign_lock.
+  ENDTRY.
+
+* standard enqueue
+  CALL FUNCTION 'ENQUEUE_EVVBLKE'
+    EXPORTING
+      mode_likp      = mode_likp
+      mandt          = mandt
+      vbeln          = vbeln
+      x_vbeln        = x_vbeln
+      _scope         = _scope
+      _wait          = _wait
+      _collect       = _collect
+    EXCEPTIONS
+      foreign_lock   = 1
+      system_failure = 2
+      OTHERS         = 3.
+  DATA(lv_subrc) = sy-subrc.
+
+  IF  lv_subrc <> 0
+  AND lt_locked_vcm is not initial.
+    " Now the previous set VCM locks must be deleted
+    lo_ico_delivery_process->release_vcm_lock( it_locked_vcm = lt_locked_vcm ).
+  ENDIF.
+
+  CASE lv_subrc.
+    WHEN 0.
+    WHEN 1.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+              RAISING foreign_lock.
+    WHEN OTHERS.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+              RAISING system_failure.
+  ENDCASE.
+
+* csl-enqueue for distributed deliveries and changemanagement only
+  CHECK ls_likp-vbeln IS NOT INITIAL AND NOT ls_likp-lgnum IS INITIAL.
+
+  IF ls_likp-verursys IS INITIAL.
+    CHECK ls_likp-vlstk = 'B'.
+  ELSE.
+    CHECK ls_likp-vlstk = 'A'.
+  ENDIF.
+
+  CALL FUNCTION 'SHP_CHANGE_ACTIVE'
+    EXPORTING
+      if_vbtyp            = ls_likp-vbtyp
+      if_lgnum            = ls_likp-lgnum
+      if_logsys           = ls_likp-verursys
+      if_tm_adv_ship_recv = ls_likp-tm_adv_ship_recv
+    IMPORTING
+      ef_active           = lf_chg_active
+      ef_emergency_off    = lf_chg_off.
+  CHECK NOT lf_chg_active IS INITIAL AND lf_chg_off IS INITIAL.
+
+  "Initialize change management if not already done
+  DATA(lo_cm) = cl_shp_change_management_setup=>get( )->set_likp( is_likp = ls_likp )->get_change_management( ).
+
+  "CSL enqueue
+  DATA(lo_csl) = lo_cm->get_csl( ).
+  DATA(ls_token) = lo_csl->get_token_from_likp( ls_likp ).
+  DATA(lv_csl_status) = lo_csl->enqueue( is_token   = ls_token
+                                         iv_scope   = _scope
+                                         iv_wait    = _wait
+                                         iv_collect = _collect )->status.
+
+  IF lv_csl_status <> if_shp_csl=>c_status_ok.
+    IF lo_csl->status <> if_shp_csl=>c_status_no_connection.
+      CALL FUNCTION 'DEQUEUE_EVVBLKE'
+        EXPORTING
+          mode_likp = mode_likp
+          mandt     = mandt
+          vbeln     = vbeln
+          x_vbeln   = x_vbeln
+          _scope    = _scope
+          _synchron = 'X'
+          _collect  = ' '.
+    ENDIF.
+    CASE lo_csl->status.
+      WHEN if_shp_csl=>c_status_foreign_lock.
+        PERFORM handle_csl_foreign_lock USING ls_likp
+                                        CHANGING ls_msg.
+        MESSAGE ID ls_msg-msgid TYPE ls_msg-msgty NUMBER ls_msg-msgno
+                 WITH ls_msg-msgv1 ls_msg-msgv2 ls_msg-msgv3 ls_msg-msgv4
+        RAISING foreign_lock.
+
+      WHEN if_shp_csl=>c_status_no_connection.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                 WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+        RAISING csl_no_connection.
+
+      WHEN if_shp_csl=>c_status_inconsistency.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                 WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+        RAISING csl_inconsistency.
+
+      WHEN OTHERS.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                 WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+        RAISING system_failure.
+    ENDCASE.
+  ENDIF.
+
+ENDFUNCTION.

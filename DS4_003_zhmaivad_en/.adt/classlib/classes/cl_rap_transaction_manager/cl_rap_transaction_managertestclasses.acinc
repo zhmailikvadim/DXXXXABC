@@ -1,0 +1,293 @@
+CLASS ltd_processor DEFINITION FINAL FOR TESTING.
+  PUBLIC SECTION.
+    INTERFACES if_rap_transaction_processor PARTIALLY IMPLEMENTED.
+    INTERFACES if_rap_legacy_transaction PARTIALLY IMPLEMENTED.
+    TYPES BEGIN OF ENUM ty_state STRUCTURE co_state.
+    TYPES initial.
+    TYPES modified.
+    TYPES finalized.
+    TYPES checked.
+    TYPES numbers_adjusted.
+    TYPES saved.
+    TYPES END OF ENUM ty_state STRUCTURE co_state.
+    DATA mv_state TYPE ty_state READ-ONLY.
+    DATA BEGIN OF ms_key.
+    DATA id TYPE c LENGTH 1 VALUE 'X'.
+    DATA END OF ms_key.
+    DATA mt_create TYPE if_rap_transaction_processor=>tt_create READ-ONLY.
+    METHODS request_failure IMPORTING iv_failure_state TYPE ty_state.
+  PRIVATE SECTION.
+    DATA mv_failure_state TYPE ty_state.
+ENDCLASS.
+
+CLASS ltd_processor IMPLEMENTATION.
+  METHOD request_failure.
+    mv_failure_state = iv_failure_state.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~modify.
+    CASE mv_state.
+      WHEN co_state-initial.
+        mv_state = co_state-modified.
+      WHEN co_state-saved.
+        cl_abap_unit_assert=>fail( 'CLEANUP NOT CALLED AFTER SUCCESSFUL SAVE' ).
+    ENDCASE.
+    IF mv_failure_state = co_state-modified.
+      io_reporter->add_failed( iv_entity = 'A' iv_reason = io_reporter->co_failure_reason-non_specific is_instance = ms_key ).
+    ENDIF.
+    mt_create = it_create.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~finalize.
+    IF NOT mv_state IS INITIAL.
+      cl_abap_unit_assert=>assert_equals( act = mv_state exp = co_state-modified ).
+    ENDIF.
+    mv_state = co_state-finalized.
+    IF mv_failure_state = co_state-finalized.
+      io_reporter->add_failed( iv_entity = 'A' iv_reason = io_reporter->co_failure_reason-non_specific is_instance = ms_key ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~check_before_save.
+    cl_abap_unit_assert=>assert_equals( act = mv_state exp = co_state-finalized ).
+    mv_state = co_state-checked.
+    IF mv_failure_state = co_state-checked.
+      io_reporter->add_failed( iv_entity = 'A' iv_reason = io_reporter->co_failure_reason-non_specific is_instance = ms_key ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~adjust_numbers.
+    cl_abap_unit_assert=>assert_equals( act = mv_state exp = co_state-checked ).
+    mv_state = co_state-numbers_adjusted.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~save.
+    cl_abap_unit_assert=>assert_equals( act = mv_state exp = co_state-numbers_adjusted ).
+    mv_state = co_state-initial.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~cleanup.
+    cl_abap_unit_assert=>assert_differs( act = mv_state exp = co_state-numbers_adjusted ).
+    CLEAR mv_state.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~cleanup_finalization.
+    IF mv_state <> co_state-finalized.
+      cl_abap_unit_assert=>assert_equals( act = mv_state exp = co_state-checked ).
+    ENDIF.
+    mv_state = co_state-modified.
+  ENDMETHOD.
+
+  METHOD if_rap_transaction_processor~has_changes.
+    IF mv_state = co_state-initial.
+      rv_has_changes = abap_false.
+    ELSE.
+      rv_has_changes = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD if_rap_legacy_transaction~check_is_not_aborted.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD if_rap_legacy_transaction~set_ai_involved.
+    RETURN.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS ltc_save_sequence DEFINITION FINAL FOR TESTING DURATION SHORT RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    CONSTANTS co_state LIKE ltd_processor=>co_state VALUE ltd_processor=>co_state.
+    DATA mo_transaction_manager TYPE REF TO if_sadl_transaction_manager.
+    CLASS-METHODS class_setup.
+    CLASS-METHODS class_teardown.
+    METHODS setup.
+    METHODS assert_state IMPORTING iv_exp_state TYPE ltd_processor=>ty_state.
+    METHODS request_failure IMPORTING iv_failure_state TYPE ltd_processor=>ty_state.
+    METHODS success FOR TESTING RAISING cx_sadl_static.
+    METHODS modify_fail FOR TESTING RAISING cx_sadl_static.
+    METHODS finalize_fail FOR TESTING RAISING cx_sadl_static.
+    METHODS check_fail FOR TESTING RAISING cx_sadl_static.
+    METHODS has_changes FOR TESTING RAISING cx_sadl_static.
+ENDCLASS.
+
+CLASS cl_rap_transaction_manager DEFINITION LOCAL FRIENDS ltc_save_sequence.
+
+
+CLASS ltc_save_sequence IMPLEMENTATION.
+
+  METHOD class_setup.
+    th_sadl_db_doubles=>create( it_cds_views = VALUE #( ( 'SADL_RS_SO_ROOT_BHV' ) ( 'SADL_RS_SO_ITEM_BHV' ) ) ).
+  ENDMETHOD.
+
+  METHOD class_teardown.
+    th_sadl_db_doubles=>destroy( ).
+  ENDMETHOD.
+
+  METHOD setup.
+    mo_transaction_manager = cl_rap_transaction_manager=>get( ).
+    cl_rap_transaction_manager=>go_instance->mo_bhv_transaction_processor = NEW ltd_processor( ).
+    cl_rap_transaction_manager=>go_instance->mv_bhv_transaction_registered = abap_true.
+  ENDMETHOD.
+
+  METHOD assert_state.
+    DATA(lv_act_state) = CAST ltd_processor( cl_rap_transaction_manager=>go_instance->mo_bhv_transaction_processor )->mv_state.
+    cl_abap_unit_assert=>assert_equals( act = lv_act_state exp = iv_exp_state ).
+  ENDMETHOD.
+
+  METHOD request_failure.
+    CAST ltd_processor( cl_rap_transaction_manager=>go_instance->mo_bhv_transaction_processor )->request_failure( iv_failure_state ).
+  ENDMETHOD.
+
+  METHOD success.
+    CAST if_sadl_changeset( mo_transaction_manager )->modify( IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+    assert_state( co_state-initial ). "TGPMBSA-5802: Cleanup after successful save
+  ENDMETHOD.
+
+  METHOD modify_fail.
+    request_failure( co_state-modified ).
+    CAST if_sadl_changeset( mo_transaction_manager )->modify( EXPORTING it_create = VALUE #( ( entity_id      = 'SADL_RS_SO_ROOT_BHV'
+                                                                                               rs_entity_data = NEW sadl_rs_so_root_bhv( id = 'MURX' ) ) )
+                                                              IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_true( lv_failed ).
+    assert_state( co_state-initial ).
+  ENDMETHOD.
+
+  METHOD finalize_fail.
+    request_failure( co_state-finalized ).
+    CAST if_sadl_changeset( mo_transaction_manager )->modify( IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_true( lv_failed ).
+    assert_state( co_state-initial ).
+  ENDMETHOD.
+
+  METHOD check_fail.
+    request_failure( co_state-checked ).
+    CAST if_sadl_changeset( mo_transaction_manager )->modify( IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_true( lv_failed ).
+    assert_state( co_state-initial ).
+  ENDMETHOD.
+
+  METHOD has_changes.
+    cl_abap_unit_assert=>assert_false( mo_transaction_manager->has_changes( ) ).
+    CAST if_sadl_changeset( mo_transaction_manager )->modify( IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+    cl_abap_unit_assert=>assert_false( mo_transaction_manager->has_changes( ) ).
+    CAST if_sadl_changeset( mo_transaction_manager )->modify(
+      EXPORTING it_create = VALUE #( ( entity_id      = 'SADL_RS_SO_ROOT_BHV'
+                                       rs_entity_data = NEW sadl_rs_so_root_bhv( id = 'MURX' ) ) )
+      IMPORTING ev_failed = lv_failed ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+    cl_abap_unit_assert=>assert_false( mo_transaction_manager->has_changes( ) ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS ltc_modify DEFINITION FINAL FOR TESTING DURATION SHORT RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    DATA mo_transaction_manager TYPE REF TO if_sadl_transaction_manager.
+    CLASS-METHODS class_setup.
+    CLASS-METHODS class_teardown.
+    METHODS setup.
+    METHODS deep_create FOR TESTING RAISING cx_sadl_static.
+    METHODS deep_create_by_content_id FOR TESTING RAISING cx_sadl_static.
+ENDCLASS.
+
+CLASS cl_rap_transaction_manager DEFINITION LOCAL FRIENDS ltc_modify.
+
+CLASS ltc_modify IMPLEMENTATION.
+
+  METHOD class_setup.
+    th_sadl_db_doubles=>create( it_cds_views = VALUE #( ( 'SADL_RS_SO_ROOT_BHV' ) ( 'SADL_RS_SO_ITEM_BHV' ) ) ).
+  ENDMETHOD.
+
+  METHOD class_teardown.
+    th_sadl_db_doubles=>destroy( ).
+  ENDMETHOD.
+
+  METHOD setup.
+    mo_transaction_manager = cl_rap_transaction_manager=>get( ).
+    cl_rap_transaction_manager=>go_instance->mo_bhv_transaction_processor = NEW ltd_processor( ).
+    cl_rap_transaction_manager=>go_instance->mv_bhv_transaction_registered = abap_true.
+  ENDMETHOD.
+
+  METHOD deep_create.
+    CAST if_sadl_changeset( mo_transaction_manager )->modify(
+      EXPORTING it_create = VALUE #( ( entity_id      = 'SADL_RS_SO_ROOT_BHV'
+                                       rs_entity_data = NEW sadl_rs_so_root_bhv( id = 'MURX' ) )
+                                     ( entity_id      = 'SADL_RS_SO_ITEM_BHV'
+                                       rs_entity_data = NEW sadl_rs_so_item_bhv( id = 'MIST' )
+                                       source         = VALUE #( association_name = '_ITEMS'
+                                                                 entity_id        = 'SADL_RS_SO_ROOT_BHV'
+                                                                 tabix            = 1 ) ) )
+      IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+    DATA(lt_create) = CAST ltd_processor( cl_rap_transaction_manager=>go_instance->mo_bhv_transaction_processor )->mt_create.
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_create ) exp = 2 ).
+    ASSIGN lt_create[ 1 ] TO FIELD-SYMBOL(<s_create_root>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_not_initial( <s_create_root>-content_id ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_root>-entity_id exp = 'SADL_RS_SO_ROOT_BHV' ).
+    ASSIGN <s_create_root>-rs_entity_data->* TO FIELD-SYMBOL(<s_root>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    ASSIGN COMPONENT 'ID' OF STRUCTURE <s_root> TO FIELD-SYMBOL(<value>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_equals( act = <value> exp = 'MURX' ).
+    ASSIGN lt_create[ 2 ] TO FIELD-SYMBOL(<s_create_item>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_not_initial( <s_create_item>-content_id ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_item>-entity_id exp = 'SADL_RS_SO_ITEM_BHV' ).
+    ASSIGN <s_create_item>-rs_entity_data->* TO FIELD-SYMBOL(<s_item>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    ASSIGN COMPONENT 'ID' OF STRUCTURE <s_item> TO <value>.
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_equals( act = <value> exp = 'MIST' ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_item>-source-entity_id exp = 'SADL_RS_SO_ROOT_BHV' ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_item>-source-content_id_ref exp = <s_create_root>-content_id ).
+    ASSIGN <s_create_item>-source-rs_key_values->* TO FIELD-SYMBOL(<s_source_key>).
+    ASSIGN COMPONENT 'ID' OF STRUCTURE <s_source_key> TO <value>.
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_equals( act = <value> exp = 'MURX' ).
+  ENDMETHOD.
+
+  METHOD deep_create_by_content_id.
+    CAST if_sadl_changeset( mo_transaction_manager )->modify(
+      EXPORTING it_create = VALUE #( ( content_id     = 'R'
+                                       entity_id      = 'SADL_RS_SO_ROOT_BHV'
+                                       rs_entity_data = NEW sadl_rs_so_root_bhv( id = 'MURX' ) )
+                                     ( content_id     = 'I'
+                                       entity_id      = 'SADL_RS_SO_ITEM_BHV'
+                                       rs_entity_data = NEW sadl_rs_so_item_bhv( id = 'MIST' )
+                                       source         = VALUE #( content_id_ref   = 'R'
+                                                                 association_name = '_ITEMS'
+                                                                 entity_id        = 'SADL_RS_SO_ROOT_BHV' ) ) )
+      IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+    DATA(lt_create) = CAST ltd_processor( cl_rap_transaction_manager=>go_instance->mo_bhv_transaction_processor )->mt_create.
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_create ) exp = 2 ).
+    ASSIGN lt_create[ 1 ] TO FIELD-SYMBOL(<s_create_root>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_not_initial( <s_create_root>-content_id ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_root>-entity_id exp = 'SADL_RS_SO_ROOT_BHV' ).
+    ASSIGN <s_create_root>-rs_entity_data->* TO FIELD-SYMBOL(<s_root>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    ASSIGN COMPONENT 'ID' OF STRUCTURE <s_root> TO FIELD-SYMBOL(<value>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_equals( act = <value> exp = 'MURX' ).
+    ASSIGN lt_create[ 2 ] TO FIELD-SYMBOL(<s_create_item>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_not_initial( <s_create_item>-content_id ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_item>-entity_id exp = 'SADL_RS_SO_ITEM_BHV' ).
+    ASSIGN <s_create_item>-rs_entity_data->* TO FIELD-SYMBOL(<s_item>).
+    cl_abap_unit_assert=>assert_subrc( ).
+    ASSIGN COMPONENT 'ID' OF STRUCTURE <s_item> TO <value>.
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_equals( act = <value> exp = 'MIST' ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_item>-source-entity_id exp = 'SADL_RS_SO_ROOT_BHV' ).
+    cl_abap_unit_assert=>assert_equals( act = <s_create_item>-source-content_id_ref exp = <s_create_root>-content_id ).
+    ASSIGN <s_create_item>-source-rs_key_values->* TO FIELD-SYMBOL(<s_source_key>).
+    ASSIGN COMPONENT 'ID' OF STRUCTURE <s_source_key> TO <value>.
+    cl_abap_unit_assert=>assert_subrc( ).
+    cl_abap_unit_assert=>assert_equals( act = <value> exp = 'MURX' ).
+  ENDMETHOD.
+ENDCLASS.

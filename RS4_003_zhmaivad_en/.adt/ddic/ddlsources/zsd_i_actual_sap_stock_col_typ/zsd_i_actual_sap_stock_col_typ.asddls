@@ -34,13 +34,13 @@ define view entity zsd_i_actual_sap_stock_col_typ
   key        cast( matnr  as matnr preserving type ) as Article,
   key        vbeln                                   as SalesOrderNumber,
   key        posnr                                   as SalesOrderItem,
-             @Semantics.quantity.unitOfMeasure : 'Meins'
+             @Semantics.quantity.unitOfMeasure : 'UnitOfMeasure'
              kalab                                   as UuQty,
-             @Semantics.quantity.unitOfMeasure : 'Meins'
+             @Semantics.quantity.unitOfMeasure : 'UnitOfMeasure'
              kains                                   as QiQty,
-             @Semantics.quantity.unitOfMeasure : 'Meins'
+             @Semantics.quantity.unitOfMeasure : 'UnitOfMeasure'
              kaspe                                   as BlQty,
-             BaseUnit                                as Meins,
+             BaseUnit                                as UnitOfMeasure,
              tstmp_current_utctimestamp()            as SapTimeStamp
 }
 union select distinct from zsd_i_nsdm_v_mard
@@ -54,6 +54,6 @@ union select distinct from zsd_i_nsdm_v_mard
        labst                                     as UuQty,
        insme                                     as QiQty,
        speme                                     as BlQty,
-       BaseUnit                                  as Meins,
+       BaseUnit                                  as UnitOfMeasure,
        tstmp_current_utctimestamp()              as SapTimeStamp
 }

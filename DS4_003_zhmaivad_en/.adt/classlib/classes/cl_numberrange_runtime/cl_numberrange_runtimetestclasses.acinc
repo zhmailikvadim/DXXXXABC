@@ -1,0 +1,828 @@
+*"* use this source file for your ABAP unit test classes
+
+CLASS lcl_numberrange_runtime DEFINITION FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+
+  PRIVATE SECTION.
+
+    DATA:  f_cut  TYPE REF TO cl_numberrange_runtime.   "class under test
+
+    CLASS-DATA: zero_downtime TYPE abap_bool,
+                environment   TYPE REF TO if_osql_test_environment.
+
+    CONSTANTS: c_parallel   TYPE cl_numberrange_objects=>nr_object VALUE 'ZTEST_1',
+               c_main       TYPE cl_numberrange_objects=>nr_object VALUE 'ZTEST_3',
+               c_nobuffer   TYPE cl_numberrange_objects=>nr_object VALUE 'ZTEST_4',
+               c_not_exists TYPE cl_numberrange_objects=>nr_object VALUE 'ZTEST_5'.
+
+    CLASS-METHODS: class_setup,
+                   class_teardown.
+
+    METHODS: number_get_main      FOR TESTING,
+             number_get_parallel  FOR TESTING,
+             number_get_italy     FOR TESTING,
+             number_get_nobuffer  FOR TESTING,
+             number_check         FOR TESTING.
+
+ENDCLASS.       "lcl_NumberRange_Runtime
+
+
+CLASS lcl_numberrange_runtime IMPLEMENTATION.
+
+  METHOD class_setup.
+
+    DATA: lv_zdm_running TYPE boole_d.
+
+    DATA: tnro_data  TYPE STANDARD TABLE OF tnro,
+          nriv_data  TYPE STANDARD TABLE OF nriv.
+
+*   no changes are allowed on productive system during zero downtime
+    CALL FUNCTION 'UPGRUNT_CHECK_ZDM_RUNNING'
+         IMPORTING
+           ev_zdm_running = lv_zdm_running.
+
+    IF lv_zdm_running = 'B'.
+      zero_downtime = abap_true.
+    ELSE.
+      environment = cl_osql_test_environment=>create(
+      i_dependency_list = VALUE #( ( 'TNRO'  )
+                                   ( 'NRIV'  ) ) ).
+
+      "supply DB with initial content
+      tnro_data = VALUE #(
+        ( object = c_parallel  domlen = 'CHAR10' percentage = 10 buffer = 'S' noivbuffer = 10 )
+        ( object = c_main      domlen = 'CHAR10' percentage = 10 buffer = 'X' noivbuffer = 10 )
+        ( object = c_nobuffer  domlen = 'CHAR10' percentage = 10 buffer = ' ' ) ).
+
+      nriv_data = VALUE #(
+        " parallel
+        ( object = c_parallel  nrrangenr = '01' fromnumber = '1000000000' tonumber = '1999999999'  )
+        ( object = c_parallel  nrrangenr = '99' fromnumber = '9000000000' tonumber = '9999999999' nrlevel = '9999999999')
+        ( object = c_parallel  nrrangenr = '02' fromnumber = '2000000000' tonumber = '2999999999' externind = 'X' )
+        " main memory
+        ( object = c_main      nrrangenr = '01' fromnumber = '1000000000' tonumber = '1999999999'  )
+        ( object = c_main      nrrangenr = '99' fromnumber = '9000000000' tonumber = '9999999999' nrlevel = '9999999999')
+        ( object = c_main      nrrangenr = '02' fromnumber = '4000000000' tonumber = '4999999999' externind = 'X' )
+        " no buffering
+        ( object = c_nobuffer  nrrangenr = '01' fromnumber = '1000000000' tonumber = '1999999999'  )
+        ( object = c_nobuffer  nrrangenr = '99' fromnumber = '9000000000' tonumber = '9999999999' nrlevel = '9999999999')
+        ( object = c_nobuffer  nrrangenr = '02' fromnumber = '2000000000' tonumber = '2999999999' externind = 'X' ) ).
+
+
+      environment->insert_test_data( tnro_data ).
+      environment->insert_test_data( nriv_data ).
+    ENDIF.
+  ENDMETHOD.
+
+* main memory *******************************************************
+  METHOD number_get_main.
+
+    DATA: lr_err_not_found  TYPE REF TO cx_nr_object_not_found,
+          lr_err_num        TYPE REF TO cx_number_ranges.
+
+    IF zero_downtime IS INITIAL.
+      CREATE OBJECT f_cut.
+
+*     object_not_found
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_not_exists ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act   = lr_err_not_found->if_t100_message~t100key-msgno
+            exp   = '002' ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+*     interval not found
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '03'
+            object      = c_main
+            subobject   = '123456' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '751' ).
+        ENDIF.
+      ENDTRY.
+
+*     external interval
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '02'
+            object      = c_main ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '752' ).
+        ENDIF.
+      ENDTRY.
+
+*     quantity = 0
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_main
+            quantity    = '0' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+          IF lr_err_num IS NOT INITIAL.
+            cl_abap_unit_assert=>assert_equals(
+              act = lr_err_num->if_t100_message~t100key-msgno
+              exp = '029' ).
+        ENDIF.
+      ENDTRY.
+
+*     interval overflow
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '99'
+            object      = c_main
+            quantity    = '1' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '028' ).
+        ENDIF.
+      ENDTRY.
+
+*     ignore buffer = X
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            ignore_buffer = 'X'
+            nr_range_nr   = '01'
+            object        = c_main
+            quantity      = '1' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+**     get a number --> does not work with main memory buffer
+*      CLEAR: lr_err_not_found, lr_err_num.
+*      TRY.
+*        f_cut->number_get(
+*          EXPORTING
+*            nr_range_nr = '01'
+*            object      = c_main
+*            quantity    = '1' ).
+*        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+*        IF lr_err_not_found IS NOT INITIAL.
+*            cl_aunit_assert=>fail( ).
+*        ENDIF.
+*        CATCH cx_number_ranges INTO lr_err_num.
+*        IF lr_err_num IS NOT INITIAL.
+*            cl_aunit_assert=>fail( ).
+*        ENDIF.
+*      ENDTRY.
+
+    ENDIF.
+  ENDMETHOD.
+
+* parallel buffering ************************************************
+  METHOD number_get_parallel.
+
+    DATA: lr_err_not_found  TYPE REF TO cx_nr_object_not_found,
+          lr_err_num        TYPE REF TO cx_number_ranges.
+
+    IF zero_downtime IS INITIAL.
+      CREATE OBJECT f_cut.
+
+*     quantity_is_not_1
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_parallel
+            quantity    = '5' ).
+
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+             act   = lr_err_num->if_t100_message~t100key-msgno
+             exp   = '030' ).
+        ENDIF.
+      ENDTRY.
+
+*     get a number
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_parallel
+            quantity    = '1' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+    ENDIF.
+  ENDMETHOD.
+
+* Italian buffering *************************************************
+  METHOD number_get_italy.
+
+    DATA: lr_err_not_found  TYPE REF TO cx_nr_object_not_found,
+          lr_err_num        TYPE REF TO cx_number_ranges.
+
+    IF zero_downtime IS INITIAL.
+      CREATE OBJECT f_cut.
+
+*     quantity_is_not_1
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            ignore_buffer = 'S'
+            nr_range_nr   = '01'
+            object        = c_parallel
+            quantity      = '5' ).
+
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+             act   = lr_err_num->if_t100_message~t100key-msgno
+             exp   = '030' ).
+        ENDIF.
+      ENDTRY.
+
+*     get a number
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            ignore_buffer = 'S'
+            nr_range_nr   = '01'
+            object        = c_parallel
+            quantity      = '1' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+
+    ENDIF.
+  ENDMETHOD.
+
+* no buffering ******************************************************
+  METHOD number_get_nobuffer.
+
+    DATA: lr_err_not_found TYPE REF TO cx_nr_object_not_found,
+          lr_err_num       TYPE REF TO cx_number_ranges.
+
+    IF zero_downtime IS INITIAL.
+      CREATE OBJECT f_cut.
+*     interval not found
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '03'
+            object      = c_nobuffer ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '751' ).
+        ENDIF.
+      ENDTRY.
+
+*     external interval
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '02'
+            object      = c_nobuffer ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '752' ).
+        ENDIF.
+      ENDTRY.
+
+*     interval overflow
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '99'
+            object      = c_nobuffer
+            quantity    = '1' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '028' ).
+        ENDIF.
+      ENDTRY.
+
+*     get a number
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_nobuffer
+            quantity    = '1' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+*     get 10 numbers
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_get(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_nobuffer
+            quantity    = '10' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+            cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+    ENDIF.
+  ENDMETHOD.
+
+* number  check *****************************************************
+  METHOD number_check.
+
+    DATA: lr_err_not_found  TYPE REF TO cx_nr_object_not_found,
+          lr_err_num        TYPE REF TO cx_number_ranges.
+
+    IF zero_downtime IS INITIAL.
+      CREATE OBJECT f_cut.
+
+*     object not found
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_check(
+          EXPORTING
+            nr_range_nr   = '01'
+            number        = '00000011'
+            object        = c_not_exists ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_not_found->if_t100_message~t100key-msgno
+            exp = '002' ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+*     interval_not_found
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_check(
+          EXPORTING
+            nr_range_nr  = '40'
+            number_alpha = '00000011'
+            object       = c_main
+            subobject    = 'Subobj' ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '751' )  .
+        ENDIF.
+      ENDTRY.
+
+*     no number to be checked
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_check(
+          EXPORTING
+            nr_range_nr  = '40'
+            object       = c_main ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '098' )  .
+        ENDIF.
+      ENDTRY.
+**     check number --> does not work (memory buffer)
+*      CLEAR: lr_err_not_found, lr_err_num.
+*      TRY.
+*        f_cut->number_check(
+*          EXPORTING
+*            nr_range_nr   = '01'
+*            number        = '0000000011'
+*            object        = c_parallel ).
+*        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+*        IF lr_err_not_found IS NOT INITIAL.
+*          cl_aunit_assert=>fail( ).
+*        ENDIF.
+*        CATCH cx_number_ranges INTO lr_err_num.
+*        IF lr_err_num IS NOT INITIAL.
+*          cl_aunit_assert=>fail( ).
+*        ENDIF.
+*      ENDTRY.
+
+*     interval is not external --> does not work (memory buffer)
+*      CLEAR: lr_err_not_found, lr_err_num.
+*      TRY.
+*        f_cut->number_check(
+*          EXPORTING
+*            nr_range_nr = '01'
+*            number      = '00000011'
+*            object      = c_parallel ).
+*        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+*        IF lr_err_not_found IS NOT INITIAL.
+*          cl_aunit_assert=>fail( ).
+*        ENDIF.
+*        CATCH cx_number_ranges INTO lr_err_num.
+*        IF lr_err_num IS NOT INITIAL.
+*          cl_abap_unit_assert=>assert_equals(
+*            act = lr_err_num->if_t100_message~t100key-msgno
+*            exp = '753' ).
+*        ENDIF.
+*      ENDTRY.
+
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD class_teardown.
+
+  ENDMETHOD.
+
+
+ENDCLASS.
+
+CLASS lcl_numberrange_status DEFINITION FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+
+  PRIVATE SECTION.
+
+    DATA:  f_cut  TYPE REF TO cl_numberrange_runtime.   "class under test
+
+    CLASS-DATA: zero_downtime TYPE abap_bool,
+                environment   TYPE REF TO if_osql_test_environment.
+
+    CONSTANTS: c_year       TYPE cl_numberrange_objects=>nr_object VALUE 'ZTEST_1',
+               c_object     TYPE cl_numberrange_objects=>nr_object VALUE 'ZTEST_2',
+               c_not_exists TYPE cl_numberrange_objects=>nr_object VALUE 'ZTEST_5'.
+
+    CLASS-METHODS: class_setup,
+                   class_teardown.
+
+    METHODS: number_status         FOR TESTING.
+
+ENDCLASS.
+
+CLASS lcl_numberrange_status IMPLEMENTATION.
+
+  METHOD class_setup.
+
+    DATA: lv_zdm_running TYPE boole_d.
+
+    DATA: tnro_data  TYPE STANDARD TABLE OF tnro,
+          nriv_data  TYPE STANDARD TABLE OF nriv.
+
+*   no changes are allowed on productive system during zero downtime
+    CALL FUNCTION 'UPGRUNT_CHECK_ZDM_RUNNING'
+         IMPORTING
+           ev_zdm_running = lv_zdm_running.
+
+    IF lv_zdm_running = 'B'.
+      zero_downtime = abap_true.
+    ELSE.
+      environment = cl_osql_test_environment=>create(
+      i_dependency_list = VALUE #( ( 'TNRO'  )
+                                   ( 'NRIV'  ) ) ).
+
+      "supply DB with initial content
+      tnro_data = VALUE #(
+        ( object = c_year   domlen = 'CHAR10' yearind = 'X' percentage = 10 buffer = 'S' noivbuffer = 10 )
+        ( object = c_object domlen = 'CHAR10' percentage = 10 buffer = 'X' noivbuffer = 10 ) ).
+
+      nriv_data = VALUE #(
+        " year dependent
+        ( object = c_year  nrrangenr = '01' toyear = '2020' fromnumber = '1000000000' tonumber = '1999999999' nrlevel = '1999999888' )
+        ( object = c_year  nrrangenr = '01' toyear = '2025' fromnumber = '1000000000' tonumber = '1999999999' nrlevel = '1999999889' )
+        ( object = c_year  nrrangenr = '02' toyear = '2021' fromnumber = '2000000000' tonumber = '2999999999' externind = 'X' )
+        " not year dependent
+        ( object = c_object      nrrangenr = '01' fromnumber = '1000000000' tonumber = '1999999999' nrlevel = '1999999888' )
+        ( object = c_object      nrrangenr = '02' fromnumber = '4000000000' tonumber = '4999999999' externind = 'X' ) ).
+
+
+      environment->insert_test_data( tnro_data ).
+      environment->insert_test_data( nriv_data ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD number_status.
+
+    DATA: lr_err_not_found  TYPE REF TO cx_nr_object_not_found,
+          lr_err_num        TYPE REF TO cx_number_ranges.
+
+    IF zero_downtime IS INITIAL.
+      CREATE OBJECT f_cut.
+
+*     object not found
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_not_exists
+*            subobject   =
+*            toyear      =
+*          IMPORTING
+*            number      =
+        ).
+        CATCH cx_nr_object_not_found INTO lr_err_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_not_found->if_t100_message~t100key-msgno
+            exp = '002' ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+*     no year provided
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_year
+*            subobject   =
+*            toyear      =
+*          IMPORTING
+*            number      =
+        ).
+        CATCH cx_nr_object_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '890' )  .
+        ENDIF.
+      ENDTRY.
+
+*     interval does not exist
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '03'
+            object      = c_year
+*            subobject   =
+            toyear      = '2020'
+*          IMPORTING
+*            number      =
+        ).
+        CATCH cx_nr_object_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '019' )  .
+        ENDIF.
+      ENDTRY.
+
+*     interval not intern
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '02'
+            object      = c_object
+*            subobject   =
+*          IMPORTING
+*            number      =
+        ).
+        CATCH cx_nr_object_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '752' )  .
+        ENDIF.
+      ENDTRY.
+
+*     interval not intern year dependent
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '02'
+            object      = c_year
+            toyear      = '2021'
+*            subobject   =
+*          IMPORTING
+*            number      =
+        ).
+        CATCH cx_nr_object_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '752' )  .
+        ENDIF.
+      ENDTRY.
+
+*     incorrect subobject
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_year
+            subobject   = 'DUMMY'
+            toyear      = '2020'
+*          IMPORTING
+*            number      =
+        ).
+        CATCH cx_nr_object_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_abap_unit_assert=>assert_equals(
+            act = lr_err_num->if_t100_message~t100key-msgno
+            exp = '005' )  .
+        ENDIF.
+      ENDTRY.
+
+*     number staus year specific object
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_year
+            toyear      = '2025'
+          IMPORTING
+            number      = DATA(lv_number)
+        ).
+        CATCH cx_nr_object_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+      IF lv_number IS NOT INITIAL.
+        cl_abap_unit_assert=>assert_equals(
+          act = lv_number
+          exp = '00000000001999999889' )  .
+      ENDIF.
+
+*     number staus year independent object
+      CLEAR: lr_err_not_found, lr_err_num.
+      TRY.
+        f_cut->number_status(
+          EXPORTING
+            nr_range_nr = '01'
+            object      = c_object
+          IMPORTING
+            number      = lv_number
+        ).
+        CATCH cx_nr_object_not_found.
+        IF lr_err_not_found IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+        CATCH cx_number_ranges INTO lr_err_num.
+        IF lr_err_num IS NOT INITIAL.
+          cl_aunit_assert=>fail( ).
+        ENDIF.
+      ENDTRY.
+
+      IF lv_number IS NOT INITIAL.
+        cl_abap_unit_assert=>assert_equals(
+          act = lv_number
+          exp = '00000000001999999888' )  .
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD class_teardown.
+
+  ENDMETHOD.
+
+
+ENDCLASS.

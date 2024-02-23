@@ -1,0 +1,153 @@
+CLASS zcl_sd_stoitm_rejection_reason DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PRIVATE .
+
+  PUBLIC SECTION.
+    CLASS-METHODS get_instance
+      RETURNING VALUE(ro_instance) TYPE REF TO zcl_sd_stoitm_rejection_reason.
+
+    METHODS mass_update
+      IMPORTING
+        !it_keys TYPE zif_sd_i_stoitm_rejection_reas=>gtyp_actiontype.
+
+    METHODS save
+      IMPORTING
+        !iif_handler TYPE REF TO zif_sd_i_stoitm_rejection_reas
+      CHANGING
+        !cs_reported TYPE zif_sd_i_stoitm_rejection_reas=>gtyp_reported.
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    CLASS-DATA go_instance TYPE REF TO zcl_sd_stoitm_rejection_reason .
+    CLASS-DATA gt_keys TYPE zif_sd_i_stoitm_rejection_reas=>gtyp_actiontype .
+
+    METHODS process_in_background
+      RETURNING
+        VALUE(rv_success) TYPE abap_bool .
+ENDCLASS.
+
+
+
+CLASS zcl_sd_stoitm_rejection_reason IMPLEMENTATION.
+  METHOD get_instance.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+
+    IF go_instance IS INITIAL.
+      go_instance = NEW #( ).
+    ENDIF.
+
+    ro_instance = go_instance.
+  ENDMETHOD.
+
+  METHOD mass_update.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+    gt_keys = CORRESPONDING #( it_keys ).
+  ENDMETHOD.
+
+  METHOD save.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+    DATA: lv_successfull TYPE abap_bool.
+
+    lv_successfull = process_in_background(  ).
+    IF lv_successfull = abap_true.
+      MESSAGE s000(zsd_so_mass_change) WITH gt_keys[ 1 ]-purchaseorderitemuniqueid INTO DATA(lv_message) ##NEEDED.
+    ELSE.
+      MESSAGE e001(zsd_so_mass_change) WITH gt_keys[ 1 ]-purchaseorderitemuniqueid INTO lv_message.
+    ENDIF.
+
+    " Add message on UI
+    INSERT VALUE #( %key = gt_keys[ 1 ]-%key
+                    %msg = iif_handler->create_message_object( is_bapiret2 = VALUE #(
+                      id = sy-msgid
+                      number = sy-msgno
+                      type = sy-msgty
+                      message_v1 = sy-msgv1
+                      message_v2 = sy-msgv2
+                      message_v3 = sy-msgv3
+                      message_v4 = sy-msgv4 ) ) ) INTO TABLE cs_reported-soitmrejectionreason.
+  ENDMETHOD.
+
+  METHOD process_in_background.
+************************************************************************
+* R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* HURTSALE     | 30.11.2023 | 26853   : STO Orderbook Cleans Rej Reason*
+*              |            | DS4K970865                               *
+*----------------------------------------------------------------------*
+    DATA:
+      lv_job_text       TYPE apj_job_text,
+      lt_job_parameters TYPE if_apj_rt_types=>tt_job_parameter_value,
+      lt_sto_number     TYPE if_apj_rt_types=>tt_value_range.
+
+    rv_success = abap_true.
+
+    " Job text in the Application Jobs Fiori application
+    lv_job_text = VALUE #( gt_keys[ 1 ]-%param-jobtext OPTIONAL ).
+
+    LOOP AT gt_keys ASSIGNING FIELD-SYMBOL(<ls_key>).
+      INSERT INITIAL LINE INTO TABLE lt_sto_number ASSIGNING FIELD-SYMBOL(<ls_sto_number>).
+      <ls_sto_number>-sign   = 'I'.
+      <ls_sto_number>-option = 'EQ'.
+      <ls_sto_number>-low    = |{ <ls_key>-purchaseorder }/{ <ls_key>-purchaseorderitem }|.
+    ENDLOOP.
+
+    " Job parameter: STO Number
+    INSERT VALUE #( name    = zif_sd_mass_change_sto_apj=>gc_apj_parameter-sto_numbers
+                    t_value = lt_sto_number  ) INTO TABLE lt_job_parameters.
+
+    " Job parameter: STO Rejection Reason
+    INSERT VALUE #( name = zif_sd_mass_change_sto_apj=>gc_apj_parameter-storej_reason
+                    t_value = VALUE #( ( sign = 'I' option = 'EQ' low = VALUE #( gt_keys[ 1 ]-%param-zrjcnreason OPTIONAL ) ) ) )
+      INTO TABLE lt_job_parameters.
+
+    TRY.
+        cl_apj_rt_job_scheduling_api=>schedule_job(
+          EXPORTING
+            iv_job_template_name   = zif_sd_mass_change_sto_apj=>gc_apj_template
+            iv_job_text            = lv_job_text
+            is_start_info          = VALUE #( start_immediately = abap_true )
+            it_job_parameter_value = lt_job_parameters
+          IMPORTING
+            et_message             = DATA(lt_job_messages)
+            es_job_details         = DATA(ls_job_details) ).
+
+        IF ls_job_details-job_name IS INITIAL
+        OR line_exists( lt_job_messages[ type = if_abap_behv_message=>severity-error ] ) ##TYPE.
+          rv_success = abap_false.
+        ELSE.
+          rv_success = abap_true.
+        ENDIF.
+
+      CATCH cm_apj_base.
+        rv_success = abap_false.
+    ENDTRY.
+  ENDMETHOD.
+
+ENDCLASS.

@@ -1,0 +1,231 @@
+CLASS zcl_sd_stock_recon_savepayload DEFINITION
+  PUBLIC FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    METHODS decompose_structure
+      IMPORTING is_message       TYPE any
+                iv_from_path     TYPE /aif/pers_db_map-from_comp_path OPTIONAL
+      RETURNING VALUE(rt_return) TYPE bapirettab.
+
+    METHODS decompose_table_type
+      IMPORTING is_data            TYPE any
+                is_message         TYPE any
+                is_aif_pers_db_map TYPE /aif/pers_db_map.
+
+    METHODS store_to_persistence
+      IMPORTING iv_uuid          TYPE guid_32
+                io_payload       TYPE REF TO data
+                iv_db_table_name TYPE /aif/pers_db_map-to_dbtab_name
+      RETURNING VALUE(rv_error)  TYPE abap_boolean.
+
+  PRIVATE SECTION.
+    DATA mt_processed_fields TYPE TABLE OF /aif/pers_db_map-from_comp_path.
+    DATA mt_mdreq_mate       TYPE TABLE OF zsd_t_mdreq_mate.
+    DATA ms_mdreq_mate       LIKE LINE OF mt_mdreq_mate.
+    DATA mt_aif_pers_db_map  TYPE TABLE OF /aif/pers_db_map.
+ENDCLASS.
+
+
+CLASS zcl_sd_stock_recon_savepayload IMPLEMENTATION.
+  METHOD decompose_structure.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 15.11.2023 | 22859     : Feature - Stock reconciliati -
+    "              |            | DS4K957133                               -
+    " -----------------------------------------------------------------------
+
+    FIELD-SYMBOLS <ls_data>        TYPE any.
+    FIELD-SYMBOLS <ls_data_common> TYPE any.
+    FIELD-SYMBOLS <ls_data_next>   TYPE any.
+
+    DATA(lt_aif_pers_db_map) = mt_aif_pers_db_map.
+    IF iv_from_path IS NOT INITIAL.
+      DELETE lt_aif_pers_db_map WHERE from_comp_path NS iv_from_path OR from_comp_path = iv_from_path.
+    ENDIF.
+
+    LOOP AT lt_aif_pers_db_map ASSIGNING FIELD-SYMBOL(<ls_aif_pers_db_map>).
+      READ TABLE mt_processed_fields WITH KEY table_line = <ls_aif_pers_db_map>-from_comp_path TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+        CONTINUE.
+      ENDIF.
+
+      SPLIT <ls_aif_pers_db_map>-from_comp_path AT '-' INTO TABLE FINAL(lt_comp_path).
+
+      DATA(lv_assigment_count) = 1.
+      DATA(lv_last_node_assigned) = abap_false.
+
+      LOOP AT lt_comp_path ASSIGNING FIELD-SYMBOL(<lv_comp_path>). "#EC CI_NESTED
+        IF lv_assigment_count = 1.
+          ASSIGN COMPONENT <lv_comp_path> OF STRUCTURE is_message TO <ls_data>.
+          IF sy-subrc = 0.
+            lv_assigment_count += 1.
+            IF sy-tabix = lines( lt_comp_path ). lv_last_node_assigned = abap_true.ENDIF.
+          ENDIF.
+        ELSE.
+          ASSIGN COMPONENT <lv_comp_path> OF STRUCTURE <ls_data_common> TO <ls_data_next>.
+          IF sy-tabix = lines( lt_comp_path ) AND sy-subrc = 0. lv_last_node_assigned = abap_true.ENDIF.
+        ENDIF.
+
+        IF <ls_data> IS ASSIGNED.
+          ASSIGN <ls_data> TO <ls_data_common>.
+        ENDIF.
+        IF <ls_data_next> IS ASSIGNED.
+          ASSIGN <ls_data_next> TO <ls_data_common>.
+        ENDIF.
+      ENDLOOP.
+
+      UNASSIGN: <ls_data>, <ls_data_next>.
+      IF lv_last_node_assigned = abap_false.
+        CONTINUE.
+      ENDIF.
+
+      FINAL(lo_type_description) = cl_abap_typedescr=>describe_by_data( <ls_data_common> ).
+
+      IF lo_type_description->type_kind = cl_abap_structdescr=>typekind_table.
+        decompose_table_type( is_data            = <ls_data_common>
+                              is_aif_pers_db_map = <ls_aif_pers_db_map>
+                              is_message         = is_message ).
+      ENDIF.
+
+      IF     lo_type_description->type_kind <> cl_abap_structdescr=>typekind_struct1
+         AND lo_type_description->type_kind <> cl_abap_structdescr=>typekind_struct2
+         AND lo_type_description->type_kind <> cl_abap_structdescr=>typekind_table
+         AND lo_type_description->type_kind <> cl_abap_structdescr=>kind_struct.
+        FINAL(lv_from_comp_path) = |{ <ls_aif_pers_db_map>-from_comp_path }|.
+        FINAL(lv_persistence_field_name_simp) = VALUE #( mt_aif_pers_db_map[
+                                                             from_comp_path = lv_from_comp_path ]-to_column_name OPTIONAL ).
+        ASSIGN COMPONENT lv_persistence_field_name_simp OF STRUCTURE ms_mdreq_mate TO FIELD-SYMBOL(<ls_persistence_smpl_field_dt>).
+        IF sy-subrc = 0.
+          <ls_persistence_smpl_field_dt> = <ls_data_common>.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD store_to_persistence.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 15.11.2023 | 22859     : Feature - Stock reconciliati -
+    "              |            | DS4K957133                               -
+    " -----------------------------------------------------------------------
+
+    FIELD-SYMBOLS <ls_message_payload> TYPE any.
+
+    FINAL(lv_struct_name) = cl_abap_structdescr=>describe_by_data_ref( io_payload )->absolute_name+6.
+    ms_mdreq_mate-msgguid = iv_uuid.
+
+    SELECT ddicstructure UP TO 1 ROWS
+      FROM /aif/t_finf INTO @DATA(lv_ddicstructure)
+      WHERE rectyperaw = @lv_struct_name. ENDSELECT.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    SELECT * FROM /aif/pers_db_map
+      INTO CORRESPONDING FIELDS OF TABLE mt_aif_pers_db_map
+      WHERE  structure_name = lv_ddicstructure AND to_dbtab_name = iv_db_table_name.
+    IF sy-subrc <> 0.
+      rv_error = abap_true.
+      RETURN.
+    ENDIF.
+
+    LOOP AT mt_aif_pers_db_map ASSIGNING FIELD-SYMBOL(<ls_aif_pers_db_map>).
+      <ls_aif_pers_db_map>-from_comp_path = substring( val = <ls_aif_pers_db_map>-from_comp_path
+                                                       off = find( val  = <ls_aif_pers_db_map>-from_comp_path
+                                                                   pcre = '-[^-]+' ) + 1 ).
+    ENDLOOP.
+
+    SORT mt_aif_pers_db_map BY from_comp_path.
+    ASSIGN io_payload->* TO <ls_message_payload>.
+
+    decompose_structure( is_message = <ls_message_payload> ).
+
+    MODIFY ENTITIES OF zsd_i_mdreq_mate
+           ENTITY zsd_i_mdreq_mate
+           CREATE ##SETFIELDS_OK
+           SET FIELDS WITH VALUE #( FOR ls_item IN mt_mdreq_mate
+                                    ( CORRESPONDING #( BASE ( VALUE #( %cid = ls_item-msgguid ) ) ls_item  )  ) )
+           FAILED DATA(ls_failed).
+    IF ls_failed IS NOT INITIAL.
+      CLEAR ls_failed.
+
+      MODIFY ENTITIES OF zsd_i_mdreq_mate
+             ENTITY zsd_i_mdreq_mate
+             UPDATE ##SETFIELDS_OK
+             SET FIELDS WITH VALUE #(
+                 FOR ls_item IN mt_mdreq_mate
+                 ( CORRESPONDING #( BASE ( VALUE #( %key-msgguid = ls_item-msgguid ) ) ls_item  )  ) )
+             FAILED ls_failed.
+    ENDIF.
+    COMMIT ENTITIES.
+    IF ls_failed IS NOT INITIAL.
+      rv_error = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD decompose_table_type.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 15.11.2023 | 22859     : Feature - Stock reconciliati -
+    "              |            | DS4K957133                               -
+    " -----------------------------------------------------------------------
+
+    DATA lo_descr_ref TYPE REF TO cl_abap_structdescr.
+
+    FINAL(lo_type_description) = cl_abap_typedescr=>describe_by_data( is_data ).
+    lo_descr_ref ?= CAST cl_abap_tabledescr( lo_type_description )->get_table_line_type( ).
+
+    LOOP AT is_data ASSIGNING FIELD-SYMBOL(<ls_data_common_item>).
+      LOOP AT lo_descr_ref->components ASSIGNING FIELD-SYMBOL(<ls_common_item_components>). "#EC CI_NESTED
+        ASSIGN COMPONENT <ls_common_item_components>-name OF STRUCTURE <ls_data_common_item> TO FIELD-SYMBOL(<ls_field_data>).
+
+        IF sy-subrc <> 0.
+          CONTINUE.
+        ENDIF.
+
+        FINAL(lv_from_comp_path) = |{ is_aif_pers_db_map-from_comp_path }-{ <ls_common_item_components>-name }|.
+        FINAL(lo_type_description_line) = cl_abap_typedescr=>describe_by_data( <ls_field_data> ).
+
+        IF    lo_type_description_line->kind = cl_abap_structdescr=>typekind_struct1
+           OR lo_type_description_line->kind = cl_abap_structdescr=>typekind_struct2
+           OR lo_type_description_line->kind = lo_type_description_line->kind_struct.
+
+          decompose_structure( is_message   = <ls_field_data>
+                               iv_from_path = lv_from_comp_path ).
+        ENDIF.
+
+        APPEND is_aif_pers_db_map-from_comp_path TO mt_processed_fields.
+
+        TRY.
+            FINAL(lv_persist_field_name) = mt_aif_pers_db_map[ from_comp_path = lv_from_comp_path ]-to_column_name.
+
+            IF sy-subrc = 0.
+              ASSIGN COMPONENT lv_persist_field_name OF STRUCTURE ms_mdreq_mate TO FIELD-SYMBOL(<ls_persistence_field_data>).
+              IF sy-subrc = 0.
+                <ls_persistence_field_data> = <ls_field_data>.
+                APPEND lv_from_comp_path TO mt_processed_fields.
+              ENDIF.
+            ENDIF.
+
+          CATCH cx_sy_itab_line_not_found.
+            CONTINUE.
+        ENDTRY.
+      ENDLOOP.
+
+      APPEND ms_mdreq_mate TO mt_mdreq_mate.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.

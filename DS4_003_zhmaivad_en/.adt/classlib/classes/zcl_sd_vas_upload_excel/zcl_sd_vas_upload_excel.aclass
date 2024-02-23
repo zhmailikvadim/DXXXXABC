@@ -1,0 +1,868 @@
+class ZCL_SD_VAS_UPLOAD_EXCEL definition
+  public
+  final
+  create public .
+
+public section.
+
+  data MT_BAPIRET type BAPIRET2_T .
+
+  methods BUILD_WHERE_COND
+    importing
+      !IS_CONDRECHEADERS_INT type FSH_S_VAS_HDR_INT
+      !IS_CONDRECHEADERS_EXTENSION type FSH_S_VAS_CHG_HDR_EXTENSION
+    changing
+      !CV_WHERE type STRING
+      !CV_TABLE type STRING .
+  methods CONSTRUCTOR .
+  methods MAP_INPUT_LINE
+    importing
+      !IS_VAS_COND_LINE type ZSD_S_VAS_COND .
+  methods UPLOAD_DATA
+    importing
+      !IV_IS_SIMULATION type ABAP_BOOL
+    returning
+      value(RT_LOG) type BAPIRET2_TAB .
+  methods VALIDATE_LINE
+    importing
+      !IV_LINE_NO type I optional
+    changing
+      !CS_VAS_COND type ZSD_S_VAS_COND
+    returning
+      value(RT_RETURN_TAB) type BAPIRET2_TAB .
+  methods SEND_FIORI_NOTIFICATION
+    importing
+      !IV_NS type /AIF/NS default 'ZSD'
+      !IV_IFNAME type /AIF/IFNAME default 'VAS_UPLOAD'
+      !IV_IFVERSION type /AIF/IFVERSION default '00001'
+      !IV_MESSAGE_TYPE type BAPI_MTYPE default 'E'
+      !IT_BAPIRET type BAPIRET2_T
+      !IV_IS_COMMIT type ABAP_BOOL default ABAP_TRUE .
+  PROTECTED SECTION.
+PRIVATE SECTION.
+
+  DATA mt_cond_rec_headers TYPE fsh_tt_vas_hdr_ext .
+  DATA mt_cond_rec_headers_ext TYPE bapiparex_t .
+  DATA mt_cond_rec_items TYPE fsh_tt_vas_itm_ext .
+  DATA mt_cond_rec_item_long_texts TYPE fsh_tt_vas_itm_txt_ext .
+  DATA mt_return TYPE bapiret2_t .
+  DATA mv_condition_id TYPE fsh_var_condrec_id VALUE '0000' ##NO_TEXT.
+  DATA mv_vas_zvas TYPE kschl .
+  DATA mv_vas_zvae TYPE kschl .
+  DATA mv_vas_zsha TYPE kschl .
+  DATA mv_vas_zret TYPE kschl .
+  CONSTANTS mc_charx TYPE c VALUE 'X' ##NO_TEXT.
+  CONSTANTS mc_r3tr TYPE pgmid VALUE 'R3TR' ##NO_TEXT.
+  CONSTANTS mc_tabl TYPE trobjtype VALUE 'TABL' ##NO_TEXT.
+  CONSTANTS:
+    BEGIN OF mc_s_condrecheaders,
+      varnumh        TYPE fieldname VALUE 'VARNUMH',
+      timestamp_from TYPE fieldname VALUE 'TIMESTAMP_FROM',
+      timestamp_to   TYPE fieldname VALUE 'TIMESTAMP_TO',
+    END OF mc_s_condrecheaders.
+
+  METHODS change_record
+    IMPORTING
+      !is_condrecheaders TYPE fsh_s_vas_hdr_ext
+      !it_table          TYPE ANY TABLE
+    EXPORTING
+      !et_return         TYPE bapiret2_t .
+  METHODS create_record
+    IMPORTING
+      !is_condrecheaders TYPE fsh_s_vas_hdr_ext
+    EXPORTING
+      !et_return         TYPE bapiret2_t .
+  METHODS get_condition_table_name_match
+    IMPORTING
+      !it_dyn_fsh_fields TYPE zsd_s_vas_cond-dyn_fsh_fields
+      !iv_condition_type TYPE kschl
+    RETURNING
+      VALUE(rv_result)   TYPE /sapcnd/cond_table_id .
+  METHODS determine_ser_from_sub_serv
+    IMPORTING
+      !iv_sub_service  TYPE fsh_vas_sub_ser
+    RETURNING
+      VALUE(rv_result) TYPE fsh_vas_ser ##RELAX.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_VAS_UPLOAD_EXCEL IMPLEMENTATION.
+
+
+  METHOD determine_ser_from_sub_serv.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 24.02.2023 | 16257  : VAS condition record mass       *
+*              |            | DS4K938452                               *
+*----------------------------------------------------------------------*
+    SELECT SINGLE fsh_vas_ser    ##WARN_OK           "#EC CI_SEL_NESTED
+     FROM fsh_vas_subser
+     WHERE fsh_vas_sub_ser = @iv_sub_service
+     INTO @rv_result.                                     "#EC CI_SUBRC
+  ENDMETHOD.
+
+
+  METHOD get_condition_table_name_match.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 05.01.2023 | 16257  : VAS condition record mass       *
+*              |            | DS4K938452                               *
+*----------------------------------------------------------------------*
+* ADAKHIKB     | 25.04.2023 | 19866  : Development - VAS condition re  *
+*              |            | DS4K949378                               *
+*----------------------------------------------------------------------*
+    " This method finds best match among the specified table ranges using the given fieldnames.
+    " If all fieldnames are found from specific table, it means this table is a match
+
+    DATA lt_sql_join_tables TYPE TABLE OF string.
+    DATA lt_sql_where_condition_fields TYPE TABLE OF string.
+    DATA lt_sql_table_fields TYPE TABLE OF string.
+    DATA lt_table_range TYPE RANGE OF tabname.
+    DATA lv_index TYPE i.
+
+    DATA lv_fsh_components_count TYPE i.
+    DATA lv_min_fields_difference TYPE i VALUE 10000.
+    DATA lv_fields_difference TYPE i.
+
+    DATA lo_struct_descr TYPE REF TO cl_abap_structdescr.
+    DATA lo_table_descr TYPE REF TO cl_abap_tabledescr.
+    DATA lt_components TYPE cl_abap_structdescr=>component_table.
+    DATA lo_table_ref TYPE REF TO data.
+    FIELD-SYMBOLS <lt_result_table> TYPE ANY TABLE.
+
+    CASE iv_condition_type.
+      WHEN mv_vas_zsha OR mv_vas_zret.
+        lt_table_range = VALUE #( ( sign = 'I' option = 'BT' low = '/1CN/AVSCUSVS951' high = '/1CN/AVSCUSVS999' ) ).
+      WHEN mv_vas_zvas OR mv_vas_zvae.
+        lt_table_range = VALUE #( ( sign = 'I' option = 'BT' low = '/1CN/AVSCUSVS900' high = '/1CN/AVSCUSVS950' ) ).
+      WHEN OTHERS.
+    ENDCASE.
+
+    " Prepare SQL Selection Components
+    DATA(lv_total_fields_count) = lines( it_dyn_fsh_fields ).
+
+    APPEND `dd02l` TO lt_sql_join_tables.                   "#EC NOTEXT
+    APPEND `dd02l~tabname,` TO lt_sql_table_fields.         "#EC NOTEXT
+
+    lt_components = VALUE #( ( name = 'TABNAME'
+                               type = CAST #( cl_abap_elemdescr=>describe_by_name( 'TABNAME' ) ) ) ).
+
+
+    LOOP AT it_dyn_fsh_fields ASSIGNING FIELD-SYMBOL(<ls_fsh_fieldname>).
+      lv_index = sy-tabix.
+      " Build SQL source tables code
+      APPEND |INNER JOIN dd03l as f{ lv_index } on dd02l~tabname = f{ sy-tabix }~tabname|  TO lt_sql_join_tables. "#EC NOTEXT
+
+      " Build SQL Where condition code
+      IF lt_sql_where_condition_fields IS INITIAL.
+        APPEND |f{ lv_index }~fieldname = '{ <ls_fsh_fieldname>-field_name }'|      TO lt_sql_where_condition_fields. "#EC NOTEXT
+      ELSE.
+        APPEND |AND f{ lv_index }~fieldname = '{ <ls_fsh_fieldname>-field_name }'|  TO lt_sql_where_condition_fields. "#EC NOTEXT
+      ENDIF.
+
+      " Build SQL Selection fields code
+      IF lv_index = lv_total_fields_count.
+        APPEND |f{ lv_index }~fieldname AS field_{ lv_index } |                   TO lt_sql_table_fields. "#EC NOTEXT
+      ELSE.
+        APPEND |f{ lv_index }~fieldname AS field_{ lv_index }, |                  TO lt_sql_table_fields. "#EC NOTEXT
+      ENDIF.
+
+      " Build Structure components for result table
+      lt_components = VALUE #( BASE lt_components
+                               ( name = |FIELD_{ lv_index }|
+                                 type = CAST #( cl_abap_elemdescr=>describe_by_name( 'FIELDNAME' ) ) ) ).
+    ENDLOOP.
+
+    lo_struct_descr = cl_abap_structdescr=>create( lt_components ).
+
+    " Dynamic line type from structure components , table type STANDARD TABLE
+    lo_table_descr = cl_abap_tabledescr=>create(
+      p_line_type  = lo_struct_descr
+      p_table_kind = cl_abap_tabledescr=>tablekind_std ).
+
+    " Create a RTTS table object using the table description class
+    CREATE DATA lo_table_ref TYPE HANDLE lo_table_descr .
+    ASSIGN lo_table_ref->* TO <lt_result_table>.
+
+    SELECT DISTINCT (lt_sql_table_fields)
+      FROM (lt_sql_join_tables)
+      WHERE dd02l~tabname IN @lt_table_range         "#EC CI_SEL_NESTED
+      AND (lt_sql_where_condition_fields)
+      ORDER BY dd02l~tabname
+      INTO CORRESPONDING FIELDS OF TABLE @<lt_result_table>.
+    IF sy-subrc = 0.
+      " Find the closest match which has minimum table fields difference starting with "FSH_*" fieldnames
+      LOOP AT <lt_result_table> ASSIGNING FIELD-SYMBOL(<ls_result_table>).
+        ASSIGN COMPONENT 'TABNAME' OF STRUCTURE <ls_result_table> TO FIELD-SYMBOL(<lv_tabname>).
+        IF sy-subrc = 0.
+          lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( <lv_tabname> ).
+          lt_components = lo_struct_descr->get_components( ).
+          LOOP AT lt_components ASSIGNING FIELD-SYMBOL(<ls_component>) WHERE name CP 'FSH_*' "#EC CI_NESTED
+                                                                          OR name CP 'ZZ+FSH_*'
+                                                                          OR name CP 'ZZFSH_*'.
+            lv_fsh_components_count = lv_fsh_components_count + 1.
+          ENDLOOP.
+
+          lv_fields_difference = lv_fsh_components_count - lv_total_fields_count.
+          IF lv_fields_difference < lv_min_fields_difference .
+            lv_min_fields_difference = lv_fields_difference.
+            rv_result = substring( val = <lv_tabname>
+                                   off = strlen( <lv_tabname> ) - 8
+                                   len = 8 ).
+          ENDIF.
+
+        ENDIF.
+
+        CLEAR: lv_fsh_components_count.
+      ENDLOOP.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD send_fiori_notification.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 05.01.2023 | 16257  : VAS condition record mass       *
+*              |            | DS4K938452                               *
+*----------------------------------------------------------------------*
+* ADAKHIKB     | 25.04.2023 | 19866  : Development - VAS condition re  *
+*              |            | DS4K949378                               *
+*----------------------------------------------------------------------*
+
+    DATA:
+      lv_provider_id  TYPE /iwngw/notif_provider_id VALUE '/AIF/DEFAULT_NOTIF_PROVIDER',
+      lt_notif        TYPE /iwngw/if_notif_provider=>ty_t_notification,
+      ls_notif        LIKE LINE OF lt_notif,
+      lt_param_bundle TYPE /iwngw/if_notif_provider=>ty_t_notification_param_bundle,
+      ls_param_bundle LIKE LINE OF lt_param_bundle.
+
+    DATA(lt_recipient) = VALUE /iwngw/if_notif_provider=>ty_t_notification_recipient( ( id = sy-uname ) ).
+
+    DATA(lo_not_serv) = /aif/cl_notification_services=>get_instance( ).
+
+    DATA(lif_system_uuid) = cl_uuid_factory=>create_system_uuid( ).
+
+    TRY.
+        ls_notif-id = lif_system_uuid->create_uuid_x16( ).
+        ##NO_HANDLER
+      CATCH cx_uuid_error.
+    ENDTRY.
+
+    DATA(ls_type_id) = /aif/cl_notification_provider=>get_if_notification_type_id( ).
+    ls_param_bundle-language = 'E'.
+
+    ls_param_bundle-parameters = lo_not_serv->/aif/if_notification_services~get_if_notif_parameter(
+      iv_ns           = iv_ns
+      iv_ifname       = iv_ifname
+      iv_ifversion    = iv_ifversion
+      iv_msgguid      = CONV #( ls_notif-id )
+      it_log_messages = it_bapiret ).
+    APPEND ls_param_bundle TO lt_param_bundle.
+
+    lo_not_serv->/aif/if_notification_services~get_if_notification_nav(
+      EXPORTING
+        iv_ns                       = iv_ns
+        iv_ifname                   = iv_ifname
+        iv_ifversion                = iv_ifversion
+        iv_msgguid                  = CONV #( ls_notif-id )
+        it_log_messages             = it_bapiret
+      IMPORTING
+        ev_navigation_target_object = DATA(lv_navigation_target_object)
+        ev_navigation_target_action = DATA(lv_navigation_target_action)
+        et_navigation_parameters    = DATA(lt_navigation_parameters) ).
+
+    lt_notif = VALUE #(  ( priority = COND #( WHEN iv_message_type EQ 'W' THEN /iwngw/if_notif_provider=>gcs_priorities-medium
+                                              ELSE /iwngw/if_notif_provider=>gcs_priorities-high )
+                          type_key                 = ls_type_id-type_key
+                          type_version             = ls_type_id-version
+                          recipients               = lt_recipient
+                          navigation_target_object = lv_navigation_target_object
+                          navigation_target_action = lv_navigation_target_action
+                          navigation_parameters    = lt_navigation_parameters
+                          parameters               = lt_param_bundle ) ).
+
+    TRY.
+        /iwngw/cl_notification_api=>create_notifications( iv_provider_id  = lv_provider_id
+                                                          it_notification = lt_notif ).
+        ##NO_HANDLER
+      CATCH /iwngw/cx_notification_api.
+    ENDTRY.
+
+    IF iv_is_commit = abap_true.
+      COMMIT WORK.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 28.02.2023 | 16257  : VAS condition record mass       *
+*              |            | DS4K938452                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+
+        DATA(lt_hm_1267_vas_types) = zcl_pe_hm_basic=>get_table( '1267' ).
+
+        DATA(ls_hm_1267_seq_1) = VALUE zpe_s_hm_table( lt_hm_1267_vas_types[ sequence = '001' ] ).
+        DATA(ls_hm_1267_seq_2) = VALUE zpe_s_hm_table( lt_hm_1267_vas_types[ sequence = '002' ] ).
+
+        mv_vas_zvas = CONV #( ls_hm_1267_seq_1-field1 ).
+        mv_vas_zvae = CONV #( ls_hm_1267_seq_2-field1 ).
+        mv_vas_zsha = CONV #( ls_hm_1267_seq_1-field2 ).
+        mv_vas_zret = CONV #( ls_hm_1267_seq_2-field2 ).
+
+      CATCH zcx_pe_hm INTO DATA(lo_exception).
+        MESSAGE lo_exception.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD map_input_line.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 05.01.2023 | 16257  : VAS condition record mass       *
+*              |            | DS4K938452                               *
+*----------------------------------------------------------------------*
+* ADAKHIKB     | 07.04.2023 | 19866  : Development - VAS condition re  *
+*              |            | DS4K949378                               *
+*----------------------------------------------------------------------*
+    DATA: ls_vas_hdr_extension TYPE fsh_s_vas_hdr_extension.
+    DATA ls_extensionin TYPE bapiparex.
+    CLEAR: mt_cond_rec_headers, mt_cond_rec_headers_ext, mt_cond_rec_items, mt_cond_rec_item_long_texts.
+
+    APPEND INITIAL LINE TO mt_cond_rec_headers ASSIGNING FIELD-SYMBOL(<ls_cond_rec_header>).
+    " Condition Record headers
+    mv_condition_id = COND #( WHEN is_vas_cond_line-condition_id IS NOT INITIAL THEN is_vas_cond_line-condition_id ELSE mv_condition_id + 1 ).
+    <ls_cond_rec_header>-condition_id = mv_condition_id.
+    <ls_cond_rec_header>-maintenance_group = COND #( WHEN is_vas_cond_line-kschl = mv_vas_zsha OR is_vas_cond_line-kschl = mv_vas_zret  THEN 'VAS_MM' ELSE 'VAS_SD' ).
+    <ls_cond_rec_header>-condition_type = is_vas_cond_line-kschl.
+    IF  is_vas_cond_line-matching_table_name IS NOT INITIAL.
+      <ls_cond_rec_header>-condition_table = is_vas_cond_line-matching_table_name.
+    ELSE.
+      <ls_cond_rec_header>-condition_table = get_condition_table_name_match( it_dyn_fsh_fields = is_vas_cond_line-dyn_fsh_fields iv_condition_type = is_vas_cond_line-kschl ).
+    ENDIF.
+    <ls_cond_rec_header>-valid_from = is_vas_cond_line-date_from.
+    <ls_cond_rec_header>-valid_to   = is_vas_cond_line-date_to.
+
+    <ls_cond_rec_header>-sales_organization     = is_vas_cond_line-sales_organization   .
+    <ls_cond_rec_header>-dist_channel           = is_vas_cond_line-dist_channel         .
+    <ls_cond_rec_header>-division               = is_vas_cond_line-division             .
+    <ls_cond_rec_header>-customer               = is_vas_cond_line-customer             .
+    <ls_cond_rec_header>-customer_group         = is_vas_cond_line-customer_group       .
+    <ls_cond_rec_header>-purchase_organization  = is_vas_cond_line-purchase_organization.
+    <ls_cond_rec_header>-purchase_group         = is_vas_cond_line-purchase_group       .
+    <ls_cond_rec_header>-vendor                 = is_vas_cond_line-vendor               .
+    <ls_cond_rec_header>-vas_customer_group     = is_vas_cond_line-vas_customer_group   .
+    <ls_cond_rec_header>-material               = is_vas_cond_line-material             .
+    <ls_cond_rec_header>-plant                  = is_vas_cond_line-plant                .
+    <ls_cond_rec_header>-material_group         = is_vas_cond_line-material_group       .
+    <ls_cond_rec_header>-season_year            = is_vas_cond_line-season_year          .
+
+
+    " Condition Record Headers Extenstion for custom fields
+    ls_vas_hdr_extension = CORRESPONDING #( is_vas_cond_line ) ##ENH_OK.
+    ls_vas_hdr_extension-condition_id = mv_condition_id.
+
+
+    APPEND INITIAL LINE TO mt_cond_rec_headers_ext ASSIGNING FIELD-SYMBOL(<ls_cond_rec_header_ext>).
+
+    ls_extensionin-structure = 'FSH_S_VAS_HDR_EXTENSION'.
+    cl_abap_container_utilities=>fill_container_c(
+      EXPORTING
+        im_value     = ls_vas_hdr_extension
+      IMPORTING
+        ex_container = ls_extensionin+30 ).
+
+    <ls_cond_rec_header_ext> = ls_extensionin.
+
+    " Condition Record Items
+    LOOP AT is_vas_cond_line-vas_sub_services ASSIGNING FIELD-SYMBOL(<ls_vas_sub_service>).
+      APPEND INITIAL LINE TO mt_cond_rec_items ASSIGNING FIELD-SYMBOL(<ls_cond_rec_item>).
+
+
+      <ls_cond_rec_item>-condition_id = mv_condition_id.
+      <ls_cond_rec_item>-sub_service  = <ls_vas_sub_service>-sub_service.
+      <ls_cond_rec_item>-service      = <ls_vas_sub_service>-service.
+      <ls_cond_rec_item>-textfield1   = <ls_vas_sub_service>-field1.
+
+      IF <ls_vas_sub_service>-field1 = '***'.
+        <ls_cond_rec_item>-textfield1   = space.
+      ELSEIF <ls_vas_sub_service>-field1 IS NOT INITIAL.
+        <ls_cond_rec_item>-textfield1   = <ls_vas_sub_service>-field1.
+      ENDIF.
+
+      " Condition Record Item Long Texts
+      APPEND INITIAL LINE TO mt_cond_rec_item_long_texts ASSIGNING FIELD-SYMBOL(<ls_cond_rec_item_long_text>).
+      <ls_cond_rec_item_long_text>-condition_id = mv_condition_id.
+      <ls_cond_rec_item_long_text>-service      = <ls_cond_rec_item>-service.
+      <ls_cond_rec_item_long_text>-sub_service  = <ls_cond_rec_item>-sub_service.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD upload_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 05.01.2023 | 16257  : VAS condition record mass       *
+*              |            | DS4K938452                               *
+*----------------------------------------------------------------------*
+* GERTSVIK     | 14.08.2023 | 24103  : VAS condition record mass upl   *
+*              |            | DS4K960207                               *
+*----------------------------------------------------------------------*
+    DATA:
+      ls_v_condrecheaders           TYPE fsh_s_vas_hdr_int ##NEEDED,
+      ls_v_condrecheaders_extension TYPE fsh_s_vas_chg_hdr_extension,
+      lv_where                      TYPE string,
+      lv_table                      TYPE string,
+      lo_dyn_table                  TYPE REF TO data,
+      lt_return                     TYPE bapiret2_t,
+      lt_v_return                   TYPE bapiret2_t ##NEEDED.
+    FIELD-SYMBOLS:
+      <lt_dyn_table> TYPE STANDARD TABLE.
+
+    CLEAR mt_return.
+
+    LOOP AT mt_cond_rec_headers INTO DATA(ls_condrecheaders).
+
+      cl_fsh_vas_crm_handler=>map_header_ext_int(
+        EXPORTING
+          is_condrecheaders     = ls_condrecheaders
+        IMPORTING
+          es_condrecheaders_int = DATA(ls_condrecheaders_int) ).
+
+      ASSIGN COMPONENT 'KOTABNR' OF STRUCTURE ls_condrecheaders_int TO FIELD-SYMBOL(<lv_cond_table_id>).
+      CHECK sy-subrc = 0.
+
+      cl_fsh_crm_util=>validate_condition_records(
+        EXPORTING
+          iv_application                = cl_fsh_vas_crm_handler=>mc_applc
+          iv_usage                      = cl_fsh_vas_crm_handler=>mc_usage
+          is_condrecheaders_int         = ls_condrecheaders_int
+        IMPORTING
+          et_return                     = lt_v_return
+          es_v_condrecheaders           = ls_v_condrecheaders
+          es_v_condrecheaders_extension = ls_v_condrecheaders_extension ).
+
+      build_where_cond( EXPORTING is_condrecheaders_int       = ls_condrecheaders_int
+                                  is_condrecheaders_extension = ls_v_condrecheaders_extension
+                        CHANGING  cv_where                    = lv_where
+                                  cv_table                    = lv_table ).
+
+      CREATE DATA lo_dyn_table TYPE TABLE OF (lv_table).
+      ASSIGN lo_dyn_table->* TO <lt_dyn_table>.
+
+      SELECT * FROM (lv_table)
+        INTO TABLE <lt_dyn_table>
+        WHERE (lv_where).
+
+      IF sy-subrc NE 0.
+        create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                       IMPORTING et_return = lt_return  ).
+      ELSE.
+        change_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                                 it_table = <lt_dyn_table>
+                       IMPORTING et_return = lt_return  ).
+      ENDIF.
+
+      IF lt_return IS NOT INITIAL.
+        APPEND LINES OF lt_return TO mt_return.
+      ENDIF.
+    ENDLOOP.
+
+    IF line_exists(  mt_return[ type = 'E' ] ).
+      LOOP AT mt_return ASSIGNING FIELD-SYMBOL(<ls_log>) WHERE type = 'E'.
+        APPEND <ls_log> TO rt_log.
+      ENDLOOP.
+    ENDIF.
+
+    IF iv_is_simulation = abap_true.
+      ROLLBACK WORK.
+    ELSE.
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD validate_line.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 05.01.2023 | 16257  : VAS condition record mass       *
+*              |            | DS4K938452                               *
+*----------------------------------------------------------------------*
+    rt_return_tab = zcl_sd_vas_upl_validations=>validate_line( CHANGING cs_vas_cond = cs_vas_cond  ).
+  ENDMETHOD.
+
+
+  METHOD build_where_cond.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* GERTSVIK     | 14.08.2023 | 24103  : VAS condition record mass upl   *
+*              |            | DS4K960207                               *
+*----------------------------------------------------------------------*
+    DATA:
+      lv_and   TYPE char4 VALUE 'AND ',
+      lts_t681e TYPE /sapcnd/t681e_s_t.
+
+    ASSIGN COMPONENT 'KOTABNR' OF STRUCTURE is_condrecheaders_int TO FIELD-SYMBOL(<lv_cond_table_id>).
+    CHECK sy-subrc = 0.
+
+    cl_fsh_crm_util=>read_t681(
+      EXPORTING
+        iv_application   = cl_fsh_vas_crm_handler=>mc_applc
+        iv_usage         = cl_fsh_vas_crm_handler=>mc_usage
+        iv_cond_table_id = <lv_cond_table_id>
+      IMPORTING
+        es_t681          = DATA(ls_t681)
+        ev_subrc         = DATA(lv_subrc) ).
+    CHECK lv_subrc = 0.
+
+    cl_fsh_crm_util=>read_t681e(
+      EXPORTING
+        iv_application   = cl_fsh_vas_crm_handler=>mc_applc
+        iv_usage         = cl_fsh_vas_crm_handler=>mc_usage
+        iv_cond_table_id = <lv_cond_table_id>
+      IMPORTING
+        et_t681e         = lts_t681e
+        ev_subrc         = lv_subrc ).
+    CHECK lv_subrc = 0.
+
+    SELECT SINGLE abappackage
+         FROM i_abapobjectdirectoryentry
+         INTO @DATA(lv_devclass)
+        WHERE abapobjectcategory  = @mc_r3tr
+          AND abapobjecttype = @mc_tabl
+          AND abapobject = @ls_t681-kotab.
+    CHECK sy-subrc = 0.
+
+    cv_where = '( '.
+    LOOP AT lts_t681e INTO DATA(ls_t681e) WHERE keyflag = mc_charx. "#EC CI_SORTSEQ
+
+      ASSIGN COMPONENT ls_t681e-fieldname
+        OF STRUCTURE is_condrecheaders_int
+          TO FIELD-SYMBOL(<lv_field>).
+
+      IF sy-subrc = 0.
+        cv_where = |{ cv_where } { ls_t681e-fieldname }|.
+        cv_where = |{ cv_where } = IS_CONDRECHEADERS_INT-|.
+        cv_where = |{ cv_where }{ ls_t681e-fieldname }|.
+        cv_where = |{ cv_where } { lv_and }|.
+      ELSE.
+        ASSIGN COMPONENT ls_t681e-fieldname
+          OF STRUCTURE is_condrecheaders_extension
+            TO <lv_field>.
+        IF sy-subrc = 0.
+          cv_where = |{ cv_where } { ls_t681e-fieldname }|.
+          cv_where = |{ cv_where } = IS_CONDRECHEADERS_EXTENSION-|.
+          cv_where = |{ cv_where }{ ls_t681e-fieldname }|.
+          cv_where = |{ cv_where } { lv_and }|.
+        ENDIF.
+      ENDIF.
+      UNASSIGN <lv_field>.
+    ENDLOOP.
+
+    cv_where = condense( cv_where ).
+
+    "Append Condition For Validity Period
+    cv_where = '( '.
+    cv_where = |{ cv_where } AND ( KSCHL = IS_CONDRECHEADERS_INT-KSCHL )|.
+    cv_where = |{ cv_where } AND ( ( TIMESTAMP_FROM BETWEEN IS_CONDRECHEADERS_INT-TIMESTAMP_FROM AND IS_CONDRECHEADERS_INT-TIMESTAMP_TO ) |.
+    cv_where = |{ cv_where } OR ( TIMESTAMP_TO BETWEEN IS_CONDRECHEADERS_INT-TIMESTAMP_FROM AND IS_CONDRECHEADERS_INT-TIMESTAMP_TO )|.
+    cv_where = |{ cv_where } OR ( TIMESTAMP_FROM LE IS_CONDRECHEADERS_INT-TIMESTAMP_FROM AND TIMESTAMP_TO GE IS_CONDRECHEADERS_INT-TIMESTAMP_TO ) )|.
+    cv_where = |{ cv_where } AND ( RELEASE_STATUS EQ ' ' OR RELEASE_STATUS EQ 'D' ) )|.
+
+
+    IF <lv_cond_table_id> IS NOT INITIAL.
+
+      TRY.
+          cv_table = cl_abap_dyn_prg=>check_table_name_str( val = ls_t681-kotab
+                                                            packages = lv_devclass ).
+        CATCH cx_abap_not_a_table.
+          ASSERT CONDITION 1 = 2.
+        CATCH cx_abap_not_in_package.
+          ASSERT CONDITION 1 = 2.
+      ENDTRY.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD change_record.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* GERTSVIK     | 14.08.2023 | 24103  : VAS condition record mass upl   *
+*              |            | DS4K960207                               *
+*----------------------------------------------------------------------*
+    DATA:
+      lv_date_from             TYPE dats,
+      lv_date_to               TYPE dats,
+      lt_return                TYPE bapiret2_t,
+      ls_condrecheaders        TYPE  fsh_s_vas_hdr_ext,
+      lt_cond_rec_headers      TYPE  fsh_tt_vas_chg_hdr_ext,
+      lt_cond_rec_headers_ext  TYPE  fsh_tt_vas_chgx_hdr_ext,
+      lt_condrecitems          TYPE  fsh_tt_vas_chg_itm_ext,
+      lt_condrecitemsx         TYPE  fsh_tt_vas_chgx_itm_ext,
+      lt_condrecitemlongtexts  TYPE  fsh_tt_vas_chg_itm_txt_ext,
+      lt_condrecitemlongtextsx TYPE  fsh_tt_vas_chgx_itm_txt_ext.
+
+    LOOP AT it_table ASSIGNING FIELD-SYMBOL(<ls_table>).
+      ASSIGN COMPONENT mc_s_condrecheaders-timestamp_from OF STRUCTURE <ls_table> TO FIELD-SYMBOL(<lv_date_from>).
+      IF sy-subrc = 0.
+        lv_date_from = <lv_date_from>(8).
+      ENDIF.
+      ASSIGN COMPONENT mc_s_condrecheaders-timestamp_to OF STRUCTURE <ls_table> TO FIELD-SYMBOL(<lv_date_to>).
+      IF sy-subrc = 0.
+        lv_date_to = <lv_date_to>(8).
+      ENDIF.
+      IF is_condrecheaders-valid_from >= lv_date_from AND is_condrecheaders-valid_to >= lv_date_from.
+        CONTINUE.
+      ELSE.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    ASSIGN COMPONENT mc_s_condrecheaders-varnumh OF STRUCTURE <ls_table> TO FIELD-SYMBOL(<lv_field>).
+    CHECK sy-subrc = 0.
+
+    IF is_condrecheaders-valid_from < lv_date_from AND is_condrecheaders-valid_to = lv_date_from.
+
+      "create a new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = is_condrecheaders-valid_from.
+      ls_condrecheaders-valid_to = lv_date_from - 1.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+    ELSEIF is_condrecheaders-valid_from = lv_date_from AND is_condrecheaders-valid_to > lv_date_from.
+
+      "create a new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = lv_date_to + 1.
+      ls_condrecheaders-valid_to = is_condrecheaders-valid_to.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+    ELSEIF is_condrecheaders-valid_from < lv_date_from AND is_condrecheaders-valid_to < lv_date_from.
+
+      "create the 1st new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = is_condrecheaders-valid_from.
+      ls_condrecheaders-valid_to = lv_date_from - 1.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+      "change the existing record
+      APPEND INITIAL LINE TO lt_cond_rec_headers ASSIGNING FIELD-SYMBOL(<ls_cond_rec_headers>).
+      IF <lv_field> IS ASSIGNED.
+        <ls_cond_rec_headers>-cond_record_number = <lv_field>.
+      ENDIF.
+      <ls_cond_rec_headers>-maintenance_group = is_condrecheaders-maintenance_group.
+      <ls_cond_rec_headers>-condition_type = is_condrecheaders-condition_type.
+      <ls_cond_rec_headers>-condition_table = is_condrecheaders-condition_table.
+      <ls_cond_rec_headers>-valid_from = lv_date_from.
+      <ls_cond_rec_headers>-valid_to = is_condrecheaders-valid_from - 1.
+
+      APPEND INITIAL LINE TO lt_cond_rec_headers_ext ASSIGNING FIELD-SYMBOL(<ls_cond_rec_headers_ext>).
+      IF <lv_field> IS ASSIGNED.
+        <ls_cond_rec_headers_ext>-cond_record_number = <lv_field>.
+      ENDIF.
+      <ls_cond_rec_headers_ext>-valid_from = abap_true.
+      <ls_cond_rec_headers_ext>-valid_to = abap_true.
+
+      CALL FUNCTION 'ZSD_FM_VAS_CONDREC_CHANGE'
+        EXPORTING
+          condrecheaders        = lt_cond_rec_headers
+          condrecheadersx       = lt_cond_rec_headers_ext
+          condrecitems          = lt_condrecitems
+          condrecitemsx         = lt_condrecitemsx
+          condrecitemlongtexts  = lt_condrecitemlongtexts
+          condrecitemlongtextsx = lt_condrecitemlongtextsx
+        IMPORTING
+          return                = lt_return.
+      APPEND LINES OF lt_return TO et_return.
+
+      "create the 2nd new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = is_condrecheaders-valid_from.
+      ls_condrecheaders-valid_to = lv_date_to.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+    ELSEIF is_condrecheaders-valid_from > lv_date_from AND is_condrecheaders-valid_to > lv_date_from.
+
+      "change the existing record
+      APPEND INITIAL LINE TO lt_cond_rec_headers ASSIGNING <ls_cond_rec_headers>.
+      IF <lv_field> IS ASSIGNED.
+        <ls_cond_rec_headers>-cond_record_number = <lv_field>.
+      ENDIF.
+      <ls_cond_rec_headers>-maintenance_group = is_condrecheaders-maintenance_group.
+      <ls_cond_rec_headers>-condition_type = is_condrecheaders-condition_type.
+      <ls_cond_rec_headers>-condition_table = is_condrecheaders-condition_table.
+      <ls_cond_rec_headers>-valid_from = is_condrecheaders-valid_from.
+      <ls_cond_rec_headers>-valid_to = lv_date_to - 1.
+
+      APPEND INITIAL LINE TO lt_cond_rec_headers_ext ASSIGNING <ls_cond_rec_headers_ext>.
+      IF <lv_field> IS ASSIGNED.
+        <ls_cond_rec_headers_ext>-cond_record_number = <lv_field>.
+      ENDIF.
+      <ls_cond_rec_headers_ext>-valid_from = abap_true.
+      <ls_cond_rec_headers_ext>-valid_to = abap_true.
+
+      CALL FUNCTION 'ZSD_FM_VAS_CONDREC_CHANGE'
+        EXPORTING
+          condrecheaders        = lt_cond_rec_headers
+          condrecheadersx       = lt_cond_rec_headers_ext
+          condrecitems          = lt_condrecitems
+          condrecitemsx         = lt_condrecitemsx
+          condrecitemlongtexts  = lt_condrecitemlongtexts
+          condrecitemlongtextsx = lt_condrecitemlongtextsx
+        IMPORTING
+          return                = lt_return.
+      APPEND LINES OF lt_return TO et_return.
+
+      "create the 1st new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = lv_date_from.
+      ls_condrecheaders-valid_to = is_condrecheaders-valid_from - 1.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+      "create the 2nd new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = lv_date_to.
+      ls_condrecheaders-valid_to = is_condrecheaders-valid_to.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+    ELSEIF is_condrecheaders-valid_from > lv_date_from AND is_condrecheaders-valid_to < lv_date_from.
+
+      "change the existing record
+      APPEND INITIAL LINE TO lt_cond_rec_headers ASSIGNING <ls_cond_rec_headers>.
+      IF <lv_field> IS ASSIGNED.
+        <ls_cond_rec_headers>-cond_record_number = <lv_field>.
+      ENDIF.
+      <ls_cond_rec_headers>-maintenance_group = is_condrecheaders-maintenance_group.
+      <ls_cond_rec_headers>-condition_type = is_condrecheaders-condition_type.
+      <ls_cond_rec_headers>-condition_table = is_condrecheaders-condition_table.
+      <ls_cond_rec_headers>-valid_from = lv_date_from.
+      <ls_cond_rec_headers>-valid_to = is_condrecheaders-valid_from - 1.
+
+      APPEND INITIAL LINE TO lt_cond_rec_headers_ext ASSIGNING <ls_cond_rec_headers_ext>.
+      IF <lv_field> IS ASSIGNED.
+        <ls_cond_rec_headers_ext>-cond_record_number = <lv_field>.
+      ENDIF.
+      <ls_cond_rec_headers_ext>-valid_from = abap_true.
+      <ls_cond_rec_headers_ext>-valid_to = abap_true.
+
+      CALL FUNCTION 'ZSD_FM_VAS_CONDREC_CHANGE'
+        EXPORTING
+          condrecheaders        = lt_cond_rec_headers
+          condrecheadersx       = lt_cond_rec_headers_ext
+          condrecitems          = lt_condrecitems
+          condrecitemsx         = lt_condrecitemsx
+          condrecitemlongtexts  = lt_condrecitemlongtexts
+          condrecitemlongtextsx = lt_condrecitemlongtextsx
+        IMPORTING
+          return                = lt_return.
+      APPEND LINES OF lt_return TO et_return.
+
+      "create the 1st new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = is_condrecheaders-valid_from.
+      ls_condrecheaders-valid_to = is_condrecheaders-valid_to.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+      "create the 2nd new record
+      ls_condrecheaders = CORRESPONDING #( is_condrecheaders ).
+      ls_condrecheaders-valid_from = is_condrecheaders-valid_to + 1.
+      ls_condrecheaders-valid_to = lv_date_to.
+      create_record( EXPORTING is_condrecheaders = ls_condrecheaders
+                     IMPORTING et_return = lt_return  ).
+      APPEND LINES OF lt_return TO et_return.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD create_record.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* GERTSVIK     | 14.08.2023 | 24103  : VAS condition record mass upl   *
+*              |            | DS4K960207                               *
+*----------------------------------------------------------------------*
+    DATA: lt_cond_rec_headers TYPE fsh_tt_vas_hdr_ext.
+
+    APPEND INITIAL LINE TO lt_cond_rec_headers ASSIGNING FIELD-SYMBOL(<ls_cond_rec_headers>).
+    CHECK <ls_cond_rec_headers> IS ASSIGNED.
+
+    <ls_cond_rec_headers> = CORRESPONDING #( mt_cond_rec_headers[ condition_id = is_condrecheaders-condition_id ] ) ##OPERATOR[MT_COND_REC_HEADERS].
+    <ls_cond_rec_headers>-valid_from = is_condrecheaders-valid_from.
+    <ls_cond_rec_headers>-valid_to = is_condrecheaders-valid_to.
+
+    CALL FUNCTION 'FSH_API_VAS_CONDREC_CREATE'
+      EXPORTING
+        condrecheaders          = lt_cond_rec_headers
+        condrecheadersextension = mt_cond_rec_headers_ext
+        condrecitems            = mt_cond_rec_items
+        condrecitemlongtexts    = mt_cond_rec_item_long_texts
+      IMPORTING
+        return                  = et_return.
+  ENDMETHOD.
+ENDCLASS.

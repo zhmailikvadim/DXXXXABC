@@ -1,0 +1,167 @@
+class ZCL_FI_BALANCE_VALDATE definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_SADL_EXIT .
+  interfaces IF_SADL_EXIT_CALC_ELEMENT_READ .
+  PROTECTED SECTION.
+private section.
+
+  constants MC_RATE_M type KURST_CURR value 'M' ##NO_TEXT.
+  constants MC_CURR type BKK_ACCUR value 'EUR' ##NO_TEXT.
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_BALANCE_VALDATE IMPLEMENTATION.
+
+
+  METHOD IF_SADL_EXIT_CALC_ELEMENT_READ~CALCULATE.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 10.11.2022 | 13391: FI_BE BUILD - Limit Custom Report *
+*              |            | DS4K929386                               *
+*----------------------------------------------------------------------*
+
+    TYPES:
+      BEGIN OF ltyp_bank_area_acnum,
+        bkkrs     TYPE bkk9a-bkkrs,
+        partner   TYPE bkk45-partner,
+        acnum_int TYPE bkk9a-acnum_int,
+      END OF ltyp_bank_area_acnum.
+
+    DATA:
+      lv_bkkrs           TYPE  bkk9a-bkkrs,
+      lv_acnum_int       TYPE  bkk9a-acnum_int,
+      lv_value_date      TYPE  bkk91-date_post,
+      lt_bank_area_acnum TYPE STANDARD TABLE OF ltyp_bank_area_acnum,
+      lt_calculated_data TYPE STANDARD TABLE OF zfi_i_lim_rep,
+      lt_balance         TYPE bkkc_t_balance,
+      lv_local_amount    TYPE bkk9a-balance.
+
+    lt_calculated_data = CORRESPONDING #( it_original_data ).
+
+    IF lt_calculated_data IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SELECT
+      b42~bkkrs,
+      b45~partner,
+      b42~acnum_int
+      FROM bkk42 AS b42
+      JOIN bkk45 AS b45 ON b42~bkkrs = b42~bkkrs AND
+                           b42~acnum_int = b45~acnum_int
+      INTO CORRESPONDING FIELDS OF TABLE @lt_bank_area_acnum
+      FOR ALL ENTRIES IN @lt_calculated_data
+      WHERE b42~bkkrs = @lt_calculated_data-bankarea.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    SORT lt_bank_area_acnum BY bkkrs partner.
+
+    LOOP AT lt_calculated_data ASSIGNING FIELD-SYMBOL(<ls_calculated_data>). "#EC CI_NESTED
+
+      " Parallel cursor
+      READ TABLE lt_bank_area_acnum ASSIGNING FIELD-SYMBOL(<ls_bank_area_acnum>)
+        WITH KEY bkkrs   = <ls_calculated_data>-bankarea
+                 partner = <ls_calculated_data>-businesspartnernumber
+                 BINARY SEARCH.
+      IF sy-subrc = 0.
+        DATA(lv_tabix) = sy-tabix.
+
+        LOOP AT lt_bank_area_acnum ASSIGNING <ls_bank_area_acnum>
+          FROM lv_tabix.                                 "#EC CI_NESTED
+
+          IF <ls_bank_area_acnum>-bkkrs   <> <ls_calculated_data>-bankarea OR
+             <ls_bank_area_acnum>-partner <> <ls_calculated_data>-businesspartnernumber.
+            EXIT.
+          ENDIF.
+
+          lv_bkkrs        = <ls_bank_area_acnum>-bkkrs.
+          lv_acnum_int    = <ls_bank_area_acnum>-acnum_int.
+          lv_value_date = <ls_calculated_data>-currentdate.
+
+          CALL FUNCTION 'BKK_COND_BALANCE_VALDATE'
+            EXPORTING
+              i_bkkrs      = lv_bkkrs
+              i_acnum_int  = lv_acnum_int
+              i_value_date = lv_value_date
+              i_flag_sum   = abap_true
+            TABLES
+              e_t_balance  = lt_balance.
+
+          DATA(ls_balance) = VALUE #( lt_balance[ 1 ] OPTIONAL ).
+
+          IF ls_balance IS NOT INITIAL.
+            CALL FUNCTION 'CONVERT_TO_LOCAL_CURRENCY'
+              EXPORTING
+                date             = lv_value_date
+                foreign_amount   = ls_balance-balance
+                foreign_currency = ls_balance-curr
+                local_currency   = mc_curr
+                type_of_rate     = mc_rate_m
+              IMPORTING
+                local_amount     = lv_local_amount
+              EXCEPTIONS
+                no_rate_found    = 1
+                overflow         = 2
+                no_factors_found = 3
+                no_spread_found  = 4
+                derived_2_times  = 5
+                OTHERS           = 6.
+
+            IF sy-subrc = 0.
+              <ls_calculated_data>-balance += lv_local_amount.
+            ENDIF.
+
+          ENDIF.
+
+          CLEAR:
+           lv_bkkrs,
+           lv_acnum_int,
+           lv_value_date,
+           lv_local_amount,
+           ls_balance.
+
+        ENDLOOP.
+
+      ENDIF.
+
+    ENDLOOP.
+
+    ct_calculated_data = CORRESPONDING #( lt_calculated_data ).
+
+  ENDMETHOD.
+
+
+  METHOD IF_SADL_EXIT_CALC_ELEMENT_READ~GET_CALCULATION_INFO.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 10.11.2022 | 13391: FI_BE BUILD - Limit Custom Report *
+*              |            | DS4K929386                               *
+*----------------------------------------------------------------------*
+
+    CLEAR et_requested_orig_elements.
+
+    DATA: lv_field TYPE string.
+
+    IF line_exists( it_requested_calc_elements[ table_line = 'BALANCE' ] ).
+      lv_field = 'CURRENTDATE'.
+      INSERT lv_field INTO TABLE et_requested_orig_elements.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

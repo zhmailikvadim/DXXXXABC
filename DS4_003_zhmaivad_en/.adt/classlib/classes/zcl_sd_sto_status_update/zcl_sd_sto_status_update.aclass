@@ -1,0 +1,379 @@
+CLASS zcl_sd_sto_status_update DEFINITION
+  PUBLIC FINAL
+  CREATE PUBLIC
+  SHARED MEMORY ENABLED.
+
+  PUBLIC SECTION.
+    INTERFACES if_shm_build_instance.
+
+    TYPES gtyp_status TYPE zsd_sto_status_for_update.
+    TYPES gtyp_buffer TYPE zsd_tt_delivery_multiship_pgi.
+    TYPES:
+      BEGIN OF mtyp_s_hm_data,
+        order_reason_range TYPE RANGE OF zz1_zorderreason,
+      END OF mtyp_s_hm_data.
+
+    CONSTANTS:
+      BEGIN OF gc_sto_status,
+        confirmed TYPE gtyp_status VALUE 'CONF',
+        cancelled TYPE gtyp_status VALUE 'CANC',
+        shipped   TYPE gtyp_status VALUE 'SHIP',
+        received  TYPE gtyp_status VALUE 'RECP',
+      END OF gc_sto_status.
+    CONSTANTS gc_text_id TYPE tdid VALUE 'F02' ##NO_TEXT.
+
+    CLASS-DATA gs_hm_data TYPE mtyp_s_hm_data.
+
+    CONSTANTS gc_pgi_ucomm TYPE tcode VALUE 'WABU_T' ##NO_TEXT.
+
+    CLASS-METHODS get_instance
+      RETURNING VALUE(ro_instance) TYPE REF TO zcl_sd_sto_status_update.
+
+    CLASS-METHODS check_instance
+      RETURNING VALUE(rv_bound) TYPE abap_boolean.
+
+    METHODS set_buffer_data
+      IMPORTING it_buffer_data TYPE gtyp_buffer.
+
+    METHODS get_buffer_data
+      RETURNING VALUE(rt_buffer_data) TYPE gtyp_buffer.
+
+    CLASS-METHODS set_text_po_item
+      IMPORTING iv_po_number      TYPE ebeln
+                iv_po_item        TYPE ebelp
+                iv_status         TYPE gtyp_status
+      RETURNING VALUE(rv_success) TYPE abap_boolean.
+
+    CLASS-METHODS class_constructor.
+
+    CLASS-METHODS update_from_sto_rejetion
+      IMPORTING is_mepo_item   TYPE mepoitem
+      CHANGING  co_po_item_api TYPE REF TO cl_po_item_handle_mm.
+
+    CLASS-METHODS get_buffer_data_shared
+      RETURNING VALUE(rt_buffer_data) TYPE gtyp_buffer.
+
+    CLASS-METHODS set_buffer_data_shared
+      IMPORTING it_buffer_data TYPE gtyp_buffer.
+
+  PROTECTED SECTION.
+    DATA mth_messages TYPE finchdel_t.
+
+  PRIVATE SECTION.
+    CLASS-DATA go_instance TYPE REF TO zcl_sd_sto_status_update.
+
+    DATA mt_buffer_data TYPE gtyp_buffer.
+ENDCLASS.
+
+
+CLASS zcl_sd_sto_status_update IMPLEMENTATION.
+  METHOD set_text_po_item.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+
+    CONSTANTS lc_tcode  TYPE sy-tcode VALUE 'ME22N'.
+    CONSTANTS lc_update TYPE trtyp    VALUE 'V'.
+
+    DATA lt_models      TYPE mmpur_models.
+    DATA lo_po_api      TYPE REF TO cl_po_header_handle_mm.
+    DATA ls_document    TYPE mepo_document.
+    DATA lv_result      TYPE mmpur_bool.
+    DATA lo_po_item_api TYPE REF TO cl_po_item_handle_mm.
+    DATA ls_model       LIKE LINE OF lt_models.
+
+    SELECT SINGLE purchaseorder INTO @DATA(lv_document_number) ##NEEDED
+      FROM i_purchaseorderitemapi01
+      WHERE purchaseorder = @iv_po_number AND purchaseorderitem = @iv_po_item.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    lo_po_api = NEW #( iv_po_number ).
+    ls_document = VALUE #( process             = mmpur_po_process
+                           initiator-initiator = mmpur_initiator_call
+                           trtyp               = lc_update ).
+
+    ls_document-doc_key(10) = iv_po_number.
+    lo_po_api->set_state( im_state = cl_po_header_handle_mm=>c_available ).
+    lo_po_api->for_bapi = mmpur_yes.
+    lo_po_api->po_initialize( im_document = ls_document ).
+    lo_po_api->po_read( EXPORTING im_tcode     = lc_tcode
+                                  im_trtyp     = ls_document-trtyp
+                                  im_aktyp     = ls_document-trtyp
+                                  im_po_number = iv_po_number
+                                  im_document  = ls_document
+                        IMPORTING ex_result    = lv_result ).
+    IF lv_result = abap_true.
+      LOOP AT lo_po_api->if_purchase_order_mm~get_items( ) ASSIGNING FIELD-SYMBOL(<ls_po_item>).
+        lo_po_item_api ?= <ls_po_item>-item.
+        lo_po_item_api->get_data( IMPORTING ex_data = FINAL(ls_mepoitem) ).
+        IF ls_mepoitem-ebelp <> iv_po_item.
+          CONTINUE.
+        ENDIF.
+
+        lo_po_item_api->if_longtexts_mm~get_text( EXPORTING im_tdid      = zcl_sd_sto_status_update=>gc_text_id
+                                                  IMPORTING ex_textlines = FINAL(lt_textlines) ).
+        IF lt_textlines <> VALUE mmpur_t_textlines( ( tdline = iv_status ) ).
+          lo_po_item_api->if_longtexts_mm~set_text( im_tdid      = zcl_sd_sto_status_update=>gc_text_id
+                                                    im_textlines = VALUE mmpur_t_textlines( ( tdline = iv_status ) ) ).
+          lo_po_item_api->my_parent ?= lo_po_api.
+          ls_model-model ?= lo_po_item_api.
+          APPEND ls_model TO lt_models.
+        ENDIF.
+      ENDLOOP.
+      IF lt_models[] IS NOT INITIAL.
+        lo_po_api->if_flush_transport_mm~start( EXPORTING  im_models    = lt_models[]
+                                                EXCEPTIONS illegal_call = 1
+                                                           error        = 2
+                                                           OTHERS       = 3 ).
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+        lo_po_api->po_post( EXPORTING  im_uncomplete  = mmpur_no
+                                       im_no_commit   = mmpur_no
+                                       im_commit_wait = mmpur_yes
+                            EXCEPTIONS failure        = 1
+                                       OTHERS         = 2 ).
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+        lo_po_api->po_close( ).
+      ENDIF.
+    ENDIF.
+    rv_success = abap_true.
+  ENDMETHOD.
+
+  METHOD class_constructor.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+
+    CONSTANTS lc_dn_hardcode_id TYPE zpe_hm_id VALUE '2388'.
+    CONSTANTS lc_i              TYPE ddsign    VALUE 'I'.
+    CONSTANTS lc_eq             TYPE ddoption  VALUE 'EQ'.
+
+    TRY.
+        gs_hm_data-order_reason_range = VALUE #( FOR ls_item IN zcl_pe_hm_basic=>get_table( iv_id = lc_dn_hardcode_id )
+                                                 ( sign   = lc_i
+                                                   option = lc_eq
+                                                   low    = ls_item-field3 ) ).
+      CATCH zcx_pe_hm.
+        CLEAR gs_hm_data.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD update_from_sto_rejetion.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+    IF    is_mepo_item-zz1_abgru_pdi = '' OR sy-ucomm = gc_pgi_ucomm
+       OR co_po_item_api->if_purchase_order_item_mm~get_header( )->get_data( )-zz1_zorderreason_pdh
+       NOT IN zcl_sd_sto_status_update=>gs_hm_data-order_reason_range.
+      RETURN.
+    ENDIF.
+
+    co_po_item_api->get_data( IMPORTING ex_data = FINAL(ls_po_item) ).
+
+    SELECT @abap_true INTO TABLE @DATA(lt_issue_exist) ##NEEDED
+      FROM i_purordschedulelineapi01
+      WHERE purchaseorder = @ls_po_item-ebeln AND purchaseorderitem = @ls_po_item-ebelp AND schedulelineissuedquantity > 0.
+
+    IF sy-subrc <> 0.
+      co_po_item_api->if_longtexts_mm~get_text( EXPORTING im_tdid      = zcl_sd_sto_status_update=>gc_text_id
+                                                IMPORTING ex_textlines = FINAL(lt_textlines) ).
+      IF lt_textlines = VALUE mmpur_t_textlines( ( tdid     = VALUE #( lt_textlines[ 1 ]-tdid OPTIONAL )
+                                                   tdobject = VALUE #( lt_textlines[ 1 ]-tdobject OPTIONAL )
+                                                   tdline   = zcl_sd_sto_status_update=>gc_sto_status-confirmed ) ).
+        co_po_item_api->if_longtexts_mm~set_text(
+            im_tdid      = zcl_sd_sto_status_update=>gc_text_id
+            im_textlines = VALUE mmpur_t_textlines( ( tdline = zcl_sd_sto_status_update=>gc_sto_status-cancelled ) ) ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_instance.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+    IF go_instance IS NOT BOUND.
+      go_instance = NEW #( ).
+    ENDIF.
+
+    ro_instance = go_instance.
+  ENDMETHOD.
+
+  METHOD set_buffer_data.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+    mt_buffer_data = it_buffer_data.
+  ENDMETHOD.
+
+  METHOD get_buffer_data.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+    rt_buffer_data = mt_buffer_data.
+  ENDMETHOD.
+
+  METHOD check_instance.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+    IF go_instance IS BOUND.
+      rv_bound = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD if_shm_build_instance~build.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+
+    DATA lo_area        TYPE REF TO zcl_sd_shma_sto_statusupd_area.
+    DATA lo_excep       TYPE REF TO cx_root.
+    DATA lo_root        TYPE REF TO zcl_sd_sto_status_update.
+    DATA lt_buffer_data TYPE gtyp_buffer.
+
+    TRY.
+        lo_area = zcl_sd_shma_sto_statusupd_area=>attach_for_write( ).
+      CATCH cx_shm_error INTO lo_excep.
+        RAISE EXCEPTION NEW cx_shm_build_failed( previous = lo_excep ).
+    ENDTRY.
+    CREATE OBJECT lo_root AREA HANDLE lo_area.
+    lo_root->set_buffer_data( it_buffer_data = lt_buffer_data ).
+    lo_area->set_root( lo_root ).
+    lo_area->detach_commit( ).
+  ENDMETHOD.
+
+  METHOD get_buffer_data_shared.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+
+    DATA lo_area TYPE REF TO zcl_sd_shma_sto_statusupd_area.
+
+    TRY.
+        lo_area = zcl_sd_shma_sto_statusupd_area=>attach_for_read( ).
+      CATCH cx_shm_pending_lock_removed.
+        RETURN.
+      CATCH cx_shm_change_lock_active.
+        RETURN.
+      CATCH cx_shm_version_limit_exceeded.
+        RETURN.
+      CATCH cx_shm_exclusive_lock_active.
+        RETURN.
+      CATCH cx_shm_inconsistent.
+        RETURN.
+      CATCH cx_shm_no_active_version.
+        RETURN.
+      CATCH cx_shm_read_lock_active.
+        RETURN.
+    ENDTRY.
+
+    rt_buffer_data = lo_area->root->get_buffer_data( ).
+    lo_area->detach( ).
+  ENDMETHOD.
+
+  METHOD set_buffer_data_shared.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 09.10.2023 | 24101     : Feature - [PFE build] CNC ST -
+    "              |            | DS4K964057                               -
+    " ----------------------------------------------------------------------*
+
+    DATA lo_area TYPE REF TO zcl_sd_shma_sto_statusupd_area.
+    DATA lo_root TYPE REF TO zcl_sd_sto_status_update.
+
+    TRY.
+        zcl_sd_shma_sto_statusupd_area=>build( ).
+      CATCH cx_shma_not_configured.
+        RETURN.
+      CATCH cx_shm_inconsistent.
+        RETURN.
+      CATCH cx_shm_build_failed.
+        RETURN.
+    ENDTRY.
+    TRY.
+        lo_area = zcl_sd_shma_sto_statusupd_area=>attach_for_update( ).
+      CATCH cx_shm_pending_lock_removed.
+        RETURN.
+      CATCH cx_shm_change_lock_active.
+        RETURN.
+      CATCH cx_shm_version_limit_exceeded.
+        RETURN.
+      CATCH cx_shm_exclusive_lock_active.
+        RETURN.
+      CATCH cx_shm_inconsistent.
+        RETURN.
+      CATCH cx_shm_no_active_version.
+        RETURN.
+    ENDTRY.
+    lo_root ?= lo_area->get_root( ).
+    IF lo_root IS INITIAL.
+      CREATE OBJECT lo_root AREA HANDLE lo_area.
+    ENDIF.
+    lo_root->set_buffer_data( it_buffer_data = it_buffer_data ).
+    lo_area->set_root( lo_root ).
+    lo_area->detach_commit( ).
+  ENDMETHOD.
+ENDCLASS.

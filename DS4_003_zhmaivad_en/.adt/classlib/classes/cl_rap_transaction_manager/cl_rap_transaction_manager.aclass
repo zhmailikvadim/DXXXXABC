@@ -1,0 +1,735 @@
+CLASS cl_rap_transaction_manager DEFINITION
+PUBLIC
+INHERITING FROM cl_sadl_frwk_transact_manager
+FINAL
+CREATE PRIVATE.
+
+  PUBLIC SECTION.
+
+    INTERFACES if_sadl_changeset.
+    INTERFACES if_rap_transaction_addenda.
+
+    CLASS-METHODS get RETURNING VALUE(ro_transaction_manager) TYPE REF TO cl_rap_transaction_manager.
+    METHODS get_transaction_processor RETURNING VALUE(ro_transaction_processor) TYPE REF TO if_rap_transaction_processor.
+    METHODS get_eml_processor RETURNING VALUE(ro_eml_processor) TYPE REF TO if_rap_eml_processor.
+    METHODS get_legacy_transaction RETURNING VALUE(ro_legacy_transaction) TYPE REF TO if_rap_legacy_transaction.
+    METHODS register_ai_transaction.
+    METHODS register_bhv_transaction.
+    METHODS if_sadl_transaction_manager~discard_changes REDEFINITION .
+    METHODS if_sadl_transaction_manager~has_changes REDEFINITION .
+    METHODS if_sadl_transaction_manager~save REDEFINITION .
+
+    EVENTS before_modify_sadl  EXPORTING VALUE(creates) TYPE if_sadl_changeset=>tt_create
+                                         VALUE(updates) TYPE if_sadl_changeset=>tt_update
+                                         VALUE(deletes) TYPE if_sadl_changeset=>tt_delete
+                                         VALUE(actions) TYPE if_sadl_changeset=>tt_action.
+
+  PROTECTED SECTION.
+
+    METHODS _create_message_handler REDEFINITION.
+
+  PRIVATE SECTION.
+
+    TYPES BEGIN OF ENUM ty_save_exit_mode STRUCTURE co_save_exit_mode.
+    TYPES none.
+    TYPES at_point_of_no_return.
+    TYPES before_commit.
+    TYPES END OF ENUM ty_save_exit_mode STRUCTURE co_save_exit_mode.
+
+    CLASS-DATA go_instance TYPE REF TO cl_rap_transaction_manager.
+
+    DATA mo_bhv_transaction_processor TYPE REF TO if_rap_transaction_processor.
+    DATA mv_cid_counter TYPE i.
+
+    DATA mo_ai_transaction TYPE REF TO if_rap_ai_transaction.
+    DATA mo_ai_changeset TYPE REF TO if_sadl_changeset.
+    DATA mo_exception_handler TYPE REF TO if_sadl_exception_handler.
+    DATA mv_bhv_transaction_registered TYPE abap_bool VALUE abap_false.
+    DATA mo_trace TYPE REF TO if_sadl_trace.
+
+    METHODS constructor.
+
+    METHODS verify_no_precondition_present IMPORTING updates TYPE if_sadl_changeset=>tt_update
+                                                     deletes TYPE if_sadl_changeset=>tt_delete
+                                                     actions TYPE if_sadl_changeset=>tt_action
+                                           RAISING   cx_sadl_entity_no_precond_supp.
+
+    METHODS _process_save_sequence IMPORTING !iv_strict_handling_requested TYPE abap_bool
+                                             !iv_exit_mode                 TYPE ty_save_exit_mode
+                                   EXPORTING !ev_failed                    TYPE abap_bool
+                                             !ev_failure_reason            TYPE if_sadl_changeset~ty_failure_reason.
+    METHODS _save IMPORTING !iv_strict_handling_requested TYPE abap_bool DEFAULT abap_false
+                            !iv_exit_mode                 TYPE ty_save_exit_mode DEFAULT co_save_exit_mode-none
+                  EXPORTING !ev_failed                    TYPE abap_bool
+                            !ev_failure_reason            TYPE if_sadl_changeset~ty_failure_reason.
+    METHODS _cleanup.
+    METHODS _discard_changes.
+    METHODS _new_content_id RETURNING VALUE(rv_content_id) TYPE string.
+    METHODS _is_ai_provider IMPORTING !iv_entity_id            TYPE sadl_entity_id
+                            RETURNING VALUE(rv_is_ai_provider) TYPE abap_bool.
+    METHODS _prepare_create_operations IMPORTING !it_create     TYPE if_sadl_changeset=>tt_create
+                                       EXPORTING !et_create_bhv TYPE if_sadl_changeset=>tt_create
+                                                 !et_create_ai  TYPE if_sadl_changeset=>tt_create.
+    METHODS _check_cid_reference IMPORTING !iv_entity_id      TYPE sadl_entity_id
+                                           !iv_content_id     TYPE string
+                                           !it_allowed_create TYPE if_sadl_changeset=>tt_create
+                                           !it_foreign_create TYPE if_sadl_changeset=>tt_create
+                                           !it_allowed_action TYPE if_sadl_changeset=>tt_action
+                                           !it_foreign_action TYPE if_sadl_changeset=>tt_action.
+    METHODS _prepare_operations IMPORTING !it_create     TYPE if_sadl_changeset=>tt_create
+                                          !it_action     TYPE if_sadl_changeset=>tt_action
+                                          !it_update     TYPE if_sadl_changeset=>tt_update
+                                          !it_delete     TYPE if_sadl_changeset=>tt_delete
+                                EXPORTING !et_create_bhv TYPE if_sadl_changeset=>tt_create
+                                          !et_create_ai  TYPE if_sadl_changeset=>tt_create
+                                          !et_action_bhv TYPE if_sadl_changeset=>tt_action
+                                          !et_action_ai  TYPE if_sadl_changeset=>tt_action
+                                          !et_update_bhv TYPE if_sadl_changeset=>tt_update
+                                          !et_update_ai  TYPE if_sadl_changeset=>tt_update
+                                          !et_delete_bhv TYPE if_sadl_changeset=>tt_delete
+                                          !et_delete_ai  TYPE if_sadl_changeset=>tt_delete
+                                          !eo_act_ret_vk TYPE REF TO cl_sadl_action_ret_verkorxer.
+    METHODS _clone_data IMPORTING ir_original      TYPE REF TO data
+                        RETURNING VALUE(rr_cloned) TYPE REF TO data.
+
+    METHODS __after_set_upd_task_local IMPORTING iv_subrc         LIKE sy-subrc
+                                       RETURNING VALUE(rv_failed) TYPE abap_bool.
+
+ENDCLASS.
+
+
+
+CLASS CL_RAP_TRANSACTION_MANAGER IMPLEMENTATION.
+
+
+  METHOD _save.
+    CLEAR: ev_failed, ev_failure_reason.
+
+    IF mo_trace->is_active( ).
+      DATA(lo_task) = mo_trace->add_event( 'Process Save Sequence'
+        )->classified_as_consumer_info( )->with_automatic_message( )->as_task_begin( ) ##NO_TEXT.
+    ENDIF.
+
+    CALL FUNCTION 'RAP_RUNTIME_REGISTER_WATCHDOG'.
+    CALL FUNCTION 'RAP_RUNTIME_SET_WATCHDOG'.
+
+    TRY.
+        _process_save_sequence( EXPORTING iv_strict_handling_requested = iv_strict_handling_requested
+                                          iv_exit_mode                 = iv_exit_mode
+                                IMPORTING ev_failed                    = ev_failed
+                                          ev_failure_reason            = DATA(lv_failure_reason) ).
+      CLEANUP.
+        CALL FUNCTION 'RAP_RUNTIME_RECALL_WATCHDOG'.
+    ENDTRY.
+
+    IF ev_failed = abap_true.
+      ev_failure_reason = lv_failure_reason.
+    ELSEIF iv_exit_mode = co_save_exit_mode-none.
+      _cleanup( ). "TGPMBSA-5802: Cleanup after successful save
+    ENDIF.
+
+    IF lo_task IS BOUND.
+      IF ev_failed = abap_true.
+        lo_task->attaching(  name = `EXECUTION_FAILED` content = cl_sadl_traced=>business_failure_flag( ev_failed )
+        )->with_message( `Execution failed!` )->trace_end_of_task( ) ##NO_TEXT.
+      ELSE.
+        lo_task->with_no_message( )->trace_end_of_task( ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _process_save_sequence.
+    DATA lo_reporter TYPE REF TO cl_rap_reporter.
+
+    CLEAR: ev_failed, ev_failure_reason.
+
+    lo_reporter = NEW #( io_sadl_message_handler = _get_message_handler( )
+                         iv_strict_mode          = iv_strict_handling_requested ).
+
+    IF mo_ai_transaction IS BOUND.
+      DATA(lv_ai_involved) = mo_ai_transaction->has_changes( ).
+      get_legacy_transaction( )->set_ai_involved( lv_ai_involved ).
+      mo_ai_transaction->finalize( IMPORTING ev_rejected = ev_failed ).
+    ENDIF.
+    IF ev_failed = abap_false.
+      IF mv_bhv_transaction_registered = abap_true.
+        mo_bhv_transaction_processor->finalize( lo_reporter ).
+        ev_failed = lo_reporter->if_rap_reporter~is_failed( ).
+        IF ev_failed = abap_true.
+          ev_failure_reason = lo_reporter->get_failure_reason( ).
+        ENDIF.
+      ENDIF.
+      IF ev_failed = abap_false.
+        IF mo_ai_transaction IS BOUND.
+          mo_ai_transaction->check_before_save( IMPORTING ev_rejected = ev_failed ).
+        ENDIF.
+        IF ev_failed = abap_false AND mv_bhv_transaction_registered = abap_true.
+          mo_bhv_transaction_processor->check_before_save( lo_reporter ).
+          ev_failed = lo_reporter->if_rap_reporter~is_failed( ).
+          IF ev_failed = abap_true.
+            ev_failure_reason = lo_reporter->get_failure_reason( ).
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*----- failure during phase of potential save or simulation only: regular termination, cleanup save preparation
+    IF ev_failed = abap_true
+    OR iv_exit_mode = co_save_exit_mode-at_point_of_no_return.
+      IF mo_ai_transaction IS BOUND.
+        mo_ai_transaction->cleanup_finalization( ).
+      ENDIF.
+      IF mv_bhv_transaction_registered = abap_true.
+        mo_bhv_transaction_processor->cleanup_finalization( ).
+      ENDIF.
+      CALL FUNCTION 'RAP_RUNTIME_RECALL_WATCHDOG'.
+      RETURN.
+    ENDIF.
+
+***************************************************************************************************
+*                                   POINT OF NO RETURN                                            *
+*                                                                                                 *
+*   after this point, failures should only occur due to technical errors such as bugs or          *
+*                            or system resource failures                                          *
+***************************************************************************************************
+
+*------ update task
+    IF iv_exit_mode = co_save_exit_mode-none.
+      SET UPDATE TASK LOCAL.
+      DATA(lv_local_upd_task_failed) = __after_set_upd_task_local( sy-subrc ).
+    ENDIF.
+
+    DATA(lo_legacy_transaction) = get_legacy_transaction( ).
+    ASSERT lo_legacy_transaction->mv_abort = abap_false.
+
+    lo_reporter = NEW #( io_sadl_message_handler = _get_message_handler( )
+                         iv_failure_mode         = if_rap_failure_reporter=>co_failure_mode-forbidden
+                         iv_strict_mode          = iv_strict_handling_requested ).
+
+*------ late numbering
+    IF mo_ai_transaction IS BOUND.
+      mo_ai_transaction->adjust_numbers( ).
+    ENDIF.
+    IF mv_bhv_transaction_registered = abap_true.
+      mo_bhv_transaction_processor->adjust_numbers( lo_reporter ).
+    ENDIF.
+
+*----- save
+    IF lo_legacy_transaction->mv_abort = abap_false.
+      IF mo_ai_transaction IS BOUND.
+        mo_ai_transaction->save( ).
+      ENDIF.
+      IF mv_bhv_transaction_registered = abap_true.
+        mo_bhv_transaction_processor->save( lo_reporter ).
+      ENDIF.
+    ENDIF.
+
+*----- late abortion by legacy transaction
+    IF lo_legacy_transaction->mv_abort = abap_true.
+      CALL FUNCTION 'RAP_RUNTIME_RECALL_WATCHDOG'.
+      _discard_changes( ).
+      ev_failed = abap_true.
+      ev_failure_reason = lo_reporter->get_failure_reason( ).
+      RETURN.
+    ENDIF.
+
+    cl_rap_state_message_handler=>get_instance( )->save( ).
+
+*------ commit phase
+    CALL FUNCTION 'RAP_RUNTIME_RECALL_WATCHDOG'.
+    CALL FUNCTION 'RAP_RUNTIME_UPDATE_DUMMY' IN UPDATE TASK.
+
+*----- no COMMIT WORK if called from ABAP runtime (actually in COMMIT WORK)
+    IF iv_exit_mode = co_save_exit_mode-before_commit.
+      RETURN.
+    ENDIF.
+
+    IF lv_local_upd_task_failed = abap_true.
+      COMMIT WORK AND WAIT.
+    ELSE.
+      COMMIT WORK.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD _prepare_operations.
+    CLEAR:
+      et_create_ai, et_create_bhv, et_action_ai, et_action_bhv,
+      et_update_ai, et_update_bhv, et_delete_ai, et_delete_bhv,
+      eo_act_ret_vk.
+
+    _prepare_create_operations( EXPORTING it_create     = it_create
+                                IMPORTING et_create_bhv = et_create_bhv
+                                          et_create_ai  = et_create_ai ).
+
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      IF _is_ai_provider( <s_action>-entity_id ).
+        INSERT <s_action> INTO TABLE et_action_ai ASSIGNING FIELD-SYMBOL(<s_action_ai>).
+
+*----- be safe: action return handling for BOPF:
+*----- if we did not do it here, we would rely on BOPF calling SADL entity transaction-AL in MODIFY where it is also done
+        IF eo_act_ret_vk IS INITIAL. eo_act_ret_vk = NEW #( ). ENDIF.
+        <s_action_ai>-r_returning_parameters = eo_act_ret_vk->get_and_register_bopf_containr( <s_action>-r_returning_parameters ).
+
+        LOOP AT <s_action>-content_id_refs ASSIGNING FIELD-SYMBOL(<content_id>).
+          _check_cid_reference( iv_entity_id      = <s_action>-entity_id
+                                iv_content_id     = <content_id>
+                                it_allowed_create = et_create_ai
+                                it_foreign_create = et_create_bhv
+                                it_allowed_action = et_action_ai
+                                it_foreign_action = et_action_bhv ).
+        ENDLOOP.
+      ELSE.
+        INSERT <s_action> INTO TABLE et_action_bhv.
+        LOOP AT <s_action>-content_id_refs ASSIGNING <content_id>.
+          _check_cid_reference( iv_entity_id      = <s_action>-entity_id
+                                iv_content_id     = <content_id>
+                                it_allowed_create = et_create_bhv
+                                it_foreign_create = et_create_ai
+                                it_allowed_action = et_action_bhv
+                                it_foreign_action = et_action_ai ).
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update>).
+      IF _is_ai_provider( <s_update>-entity_id ).
+        INSERT <s_update> INTO TABLE et_update_ai.
+        IF NOT <s_update>-content_id_ref IS INITIAL.
+          _check_cid_reference( iv_entity_id      = <s_update>-entity_id
+                                iv_content_id     = <s_update>-content_id_ref
+                                it_allowed_create = et_create_ai
+                                it_foreign_create = et_create_bhv
+                                it_allowed_action = et_action_ai
+                                it_foreign_action = et_action_bhv ).
+        ENDIF.
+      ELSE.
+        INSERT <s_update> INTO TABLE et_update_bhv.
+        IF NOT <s_update>-content_id_ref IS INITIAL.
+          _check_cid_reference( iv_entity_id      = <s_update>-entity_id
+                                iv_content_id     = <s_update>-content_id_ref
+                                it_allowed_create = et_create_bhv
+                                it_foreign_create = et_create_ai
+                                it_allowed_action = et_action_bhv
+                                it_foreign_action = et_action_ai ).
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT it_delete ASSIGNING FIELD-SYMBOL(<s_delete>).
+      IF _is_ai_provider( <s_delete>-entity_id ).
+        INSERT <s_delete> INTO TABLE et_delete_ai.
+        IF NOT <s_delete>-content_id_ref IS INITIAL.
+          _check_cid_reference( iv_entity_id      = <s_delete>-entity_id
+                                iv_content_id     = <s_delete>-content_id_ref
+                                it_allowed_create = et_create_ai
+                                it_foreign_create = et_create_bhv
+                                it_allowed_action = et_action_ai
+                                it_foreign_action = et_action_bhv ).
+        ENDIF.
+      ELSE.
+        INSERT <s_delete> INTO TABLE et_delete_bhv.
+        IF NOT <s_delete>-content_id_ref IS INITIAL.
+          _check_cid_reference( iv_entity_id      = <s_delete>-entity_id
+                                iv_content_id     = <s_delete>-content_id_ref
+                                it_allowed_create = et_create_bhv
+                                it_foreign_create = et_create_ai
+                                it_allowed_action = et_action_bhv
+                                it_foreign_action = et_action_ai ).
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _prepare_create_operations.
+    TYPES:
+      BEGIN OF ty_content_id_reference,
+        content_id TYPE string,
+        reference  TYPE REF TO data,
+      END OF ty_content_id_reference.
+    TYPES:
+      BEGIN OF ty_index_map,
+        index     LIKE sy-tabix,
+        bhv_index LIKE sy-tabix,
+        ai_index  LIKE sy-tabix,
+      END OF ty_index_map.
+    DATA lt_content_id_reference TYPE SORTED TABLE OF ty_content_id_reference WITH UNIQUE KEY content_id.
+    DATA lt_index_map TYPE SORTED TABLE OF ty_index_map WITH UNIQUE KEY index.
+
+    CLEAR: et_create_ai, et_create_bhv.
+
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create>).
+      DATA(lv_index) = sy-tabix.
+      DATA(lv_is_ai_provider) = _is_ai_provider( <s_create>-entity_id ).
+      IF lv_is_ai_provider = abap_true.
+        APPEND <s_create> TO et_create_ai ASSIGNING FIELD-SYMBOL(<s_create_new>).
+        INSERT VALUE #( index = lv_index  ai_index = sy-tabix ) INTO TABLE lt_index_map.
+        IF NOT <s_create_new>-source-entity_id IS INITIAL.
+          IF _is_ai_provider( <s_create_new>-source-entity_id ) <> lv_is_ai_provider.
+            RAISE EXCEPTION cx_rap_cross_framework_cid_ref=>create(
+              iv_entity            = <s_create_new>-source-entity_id
+              iv_referenced_entity = <s_create_new>-entity_id ).
+          ENDIF.
+        ENDIF.
+        IF <s_create_new>-source-tabix > 0.
+          <s_create_new>-source-tabix = lt_index_map[ index = <s_create_new>-source-tabix ]-ai_index.
+        ENDIF.
+        CONTINUE.
+      ELSE.
+        APPEND <s_create> TO et_create_bhv ASSIGNING <s_create_new>.
+        INSERT VALUE #( index = lv_index  bhv_index = sy-tabix ) INTO TABLE lt_index_map.
+        IF <s_create_new>-source-tabix > 0.
+          <s_create_new>-source-tabix = lt_index_map[ index = <s_create_new>-source-tabix ]-bhv_index.
+        ENDIF.
+      ENDIF.
+      IF <s_create_new>-content_id IS INITIAL.
+        <s_create_new>-content_id = _new_content_id( ).
+      ENDIF.
+      INSERT VALUE #( content_id = <s_create_new>-content_id  reference = <s_create_new>-rs_entity_data )
+      INTO TABLE lt_content_id_reference.
+      IF sy-subrc <> 0. "content id must be unique!
+        RAISE EXCEPTION NEW cx_rap_ambiguous_cid( cid = <s_create_new>-content_id ).
+      ENDIF.
+      CHECK <s_create_new>-source-association_name IS NOT INITIAL.
+      IF <s_create_new>-source-content_id_ref IS NOT INITIAL.
+        <s_create_new>-source-rs_key_values = _clone_data( lt_content_id_reference[ content_id = <s_create_new>-source-content_id_ref ]-reference ).
+      ELSEIF <s_create_new>-source-tabix > 0.
+        ASSIGN et_create_bhv[ <s_create_new>-source-tabix ] TO FIELD-SYMBOL(<s_create_ref>).
+        ASSERT sy-subrc = 0.
+        <s_create_new>-source-rs_key_values = _clone_data( <s_create_ref>-rs_entity_data ).
+        <s_create_new>-source-content_id_ref = <s_create_ref>-content_id.
+      ELSE.
+        ASSERT <s_create_new>-source-rs_key_values IS BOUND.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _new_content_id.
+    ADD 1 TO mv_cid_counter.
+    rv_content_id = '%SADL_CID__' && CONV string( mv_cid_counter ).
+  ENDMETHOD.
+
+
+  METHOD _is_ai_provider.
+    DATA(lv_has_bdef) = cl_sadl_crud_runtime_util=>has_bdef( iv_entity_id ).
+    IF lv_has_bdef = abap_false.
+      rv_is_ai_provider = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _create_message_handler.
+    ro_message_handler = NEW cl_rap_rt_message_handler( ).
+  ENDMETHOD.
+
+
+  METHOD _clone_data.
+    ASSIGN ir_original->* TO FIELD-SYMBOL(<original>).
+    IF sy-subrc = 0.
+      CREATE DATA rr_cloned LIKE <original>.
+      ASSIGN rr_cloned->* TO FIELD-SYMBOL(<copy>).
+      ASSERT sy-subrc = 0.
+      <copy> = <original>.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _cleanup.
+    IF mo_ai_transaction IS BOUND.
+      IF get_legacy_transaction(  )->mv_abort = abap_true. "Avoid BOPF dump
+        ASSERT NOT mo_ai_transaction->has_changes( ).
+      ELSE.
+        mo_ai_transaction->cleanup( ).
+      ENDIF.
+    ENDIF.
+    IF mv_bhv_transaction_registered = abap_true.
+      mo_bhv_transaction_processor->cleanup( ).
+    ENDIF.
+    get_legacy_transaction( )->set_ai_involved( abap_false ).
+  ENDMETHOD.
+
+
+  METHOD _check_cid_reference.
+    CHECK NOT iv_content_id IS INITIAL.
+    CHECK NOT line_exists( it_allowed_create[ content_id = iv_content_id ] ).
+    LOOP AT it_allowed_action ASSIGNING FIELD-SYMBOL(<s_action>)
+      WHERE NOT content_ids IS INITIAL.
+      IF line_exists( <s_action>-content_ids[ table_line = iv_content_id ] ).
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+    ASSIGN it_foreign_create[ content_id = iv_content_id ]-entity_id TO FIELD-SYMBOL(<entity_ref>).
+    IF sy-subrc = 0.
+      RAISE EXCEPTION cx_rap_cross_framework_cid_ref=>create(
+        iv_entity            = iv_entity_id
+        iv_referenced_entity = <entity_ref> ).
+    ELSE.
+      LOOP AT it_foreign_action ASSIGNING <s_action>
+       WHERE NOT content_ids IS INITIAL.
+        IF line_exists( <s_action>-content_ids[ table_line = iv_content_id ] ).
+          RAISE EXCEPTION cx_rap_cross_framework_cid_ref=>create(
+            iv_entity            = iv_entity_id
+            iv_referenced_entity = <s_action>-entity_id ).
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+    RAISE EXCEPTION TYPE cx_rap_invalid_cid_ref EXPORTING cid_ref = iv_content_id.
+  ENDMETHOD.
+
+
+  METHOD verify_no_precondition_present.
+    LOOP AT updates ASSIGNING FIELD-SYMBOL(<update>) WHERE precondition-type <> if_sadl_changeset=>co_instance_precondition_type-none.
+      RAISE EXCEPTION cx_sadl_entity_no_precond_supp=>for_change_state_precondition( cds_entity = EXACT #( <update>-entity_id ) ).
+    ENDLOOP.
+    LOOP AT deletes ASSIGNING FIELD-SYMBOL(<delete>) WHERE precondition-type <> if_sadl_changeset=>co_instance_precondition_type-none.
+      RAISE EXCEPTION cx_sadl_entity_no_precond_supp=>for_change_state_precondition( cds_entity = EXACT #( <delete>-entity_id ) ).
+    ENDLOOP.
+    LOOP AT actions ASSIGNING FIELD-SYMBOL(<action>).
+      LOOP AT <action>-preconditions TRANSPORTING NO FIELDS WHERE type <> if_sadl_changeset=>co_instance_precondition_type-none.
+        RAISE EXCEPTION cx_sadl_entity_no_precond_supp=>for_change_state_precondition( cds_entity = EXACT #( <action>-entity_id ) ).
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD register_bhv_transaction.
+    mv_bhv_transaction_registered = abap_true.
+  ENDMETHOD.
+
+
+  METHOD register_ai_transaction.
+    CHECK mo_ai_transaction IS INITIAL.
+    mo_ai_transaction = /bobf/cl_sadl_handler_factory=>get_save_handler( _get_message_handler( ) ).
+    mo_ai_changeset = /bobf/cl_sadl_handler_factory=>get_modify_handler( _get_message_handler( ) ).
+    IF cl_sadl_trace_factory=>is_any_trace_active( ).
+      mo_ai_transaction = NEW lcl_ai_transaction_trace_wrap( mo_ai_transaction ).
+      mo_ai_changeset = cl_sadl_changeset_trace=>create_wrapper(
+                          io_changeset               = mo_ai_changeset
+                          io_message_handler         = _get_message_handler( )
+                          iv_object_name             = `AI/BOBF Modify Handler`
+                          iv_operation_context       = cl_sadl_changeset_trace=>co_operation_context-modify
+                          iv_is_visible_for_consumer = abap_true ) ##NO_TEXT.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~save.
+    get_legacy_transaction(  )->check_is_not_aborted( ).
+    _save( IMPORTING ev_failed = rv_failed ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~has_changes.
+    IF mv_bhv_transaction_registered = abap_true.
+      rv_has_changes = mo_bhv_transaction_processor->has_changes( ).
+    ENDIF.
+    IF rv_has_changes = abap_false AND mo_ai_transaction IS BOUND.
+      rv_has_changes = mo_ai_transaction->has_changes( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~discard_changes.
+    _discard_changes( ).
+    DATA(lo_legacy_transaction) = get_legacy_transaction( ).
+    CHECK lo_legacy_transaction->mv_abort = abap_true.
+    lo_legacy_transaction->resume_after_delayed_abortion( ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_changeset~modify.
+    DATA lo_reporter TYPE REF TO cl_rap_reporter.
+
+    CLEAR: ev_failed, ev_failure_reason.
+
+    cl_sadl_dev_assist=>log_if_doubles_are_inactive( ).
+    RAISE EVENT before_modify_sadl  EXPORTING creates = it_create
+                                              updates = it_update
+                                              deletes = it_delete
+                                              actions = it_action.
+
+    get_legacy_transaction(  )->check_is_not_aborted( abap_true ).
+
+    _prepare_operations( EXPORTING it_create     = it_create
+                                   it_action     = it_action
+                                   it_update     = it_update
+                                   it_delete     = it_delete
+                         IMPORTING et_create_bhv = DATA(lt_create_bhv)
+                                   et_create_ai  = DATA(lt_create_ai)
+                                   et_action_bhv = DATA(lt_action_bhv)
+                                   et_action_ai  = DATA(lt_action_ai)
+                                   et_update_bhv = DATA(lt_update_bhv)
+                                   et_update_ai  = DATA(lt_update_ai)
+                                   et_delete_bhv = DATA(lt_delete_bhv)
+                                   et_delete_ai  = DATA(lt_delete_ai)
+                                   eo_act_ret_vk = DATA(lo_act_ret_vk) ).
+
+    lo_reporter = NEW #( io_sadl_message_handler = _get_message_handler( )
+                         iv_strict_mode          = iv_strict_handling_requested ).
+
+    IF NOT lt_create_ai IS INITIAL OR NOT lt_update_ai IS INITIAL
+    OR NOT lt_delete_ai IS INITIAL OR NOT lt_action_ai IS INITIAL.
+      verify_no_precondition_present( updates = lt_update_ai
+                                      deletes = lt_delete_ai
+                                      actions = lt_action_ai ).
+      TRY.
+          mo_ai_changeset->modify( EXPORTING it_create                    = lt_create_ai
+                                             it_update                    = lt_update_ai
+                                             it_delete                    = lt_delete_ai
+                                             it_action                    = lt_action_ai
+                                             iv_is_sticky_session         = iv_is_sticky_session
+                                             iv_strict_handling_requested = iv_strict_handling_requested
+                                   IMPORTING ev_failed                    = ev_failed
+                                             ev_failure_reason            = ev_failure_reason ).
+        CATCH BEFORE UNWIND cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_transaction_error).
+          mo_exception_handler->handle( lx_transaction_error ).
+      ENDTRY.
+    ENDIF.
+    IF ev_failed = abap_false AND
+     ( NOT lt_create_bhv IS INITIAL OR NOT lt_update_bhv IS INITIAL OR
+       NOT lt_delete_bhv IS INITIAL OR NOT lt_action_bhv IS INITIAL ).
+      ASSERT mv_bhv_transaction_registered = abap_true.
+      mo_bhv_transaction_processor->modify( it_create            = lt_create_bhv
+                                            it_update            = lt_update_bhv
+                                            it_delete            = lt_delete_bhv
+                                            it_action            = lt_action_bhv
+                                            iv_is_sticky_session = iv_is_sticky_session
+                                            io_reporter          = lo_reporter ).
+      ev_failed = lo_reporter->if_rap_reporter~is_failed( ).
+      IF ev_failed = abap_true.
+        ev_failure_reason = lo_reporter->get_failure_reason( ).
+      ENDIF.
+    ENDIF.
+
+*----- save if not failed; for sticky session only for save action
+    IF ev_failed = abap_false
+    AND ( iv_is_sticky_session = abap_false OR
+          cl_sadl_crud_runtime_util=>sticky_session_save_requested( it_action ) ).
+      _save( EXPORTING iv_strict_handling_requested = iv_strict_handling_requested
+             IMPORTING ev_failed                    = ev_failed
+                       ev_failure_reason            = ev_failure_reason ).
+    ENDIF.
+
+*----- revert all changes in case of failure but not for sticky session
+    IF ev_failed = abap_true AND iv_is_sticky_session = abap_false.
+      ASSERT if_sadl_transaction_manager~discard_changes( ) = abap_false.
+    ENDIF.
+
+*----- be safe: action return handling for BOPF
+    IF lo_act_ret_vk IS BOUND.
+      lo_act_ret_vk->copy_bopf_data_to_return_data( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_addenda~simulate_save.
+    get_legacy_transaction(  )->check_is_not_aborted( ).
+    _save( EXPORTING iv_exit_mode = co_save_exit_mode-at_point_of_no_return
+           IMPORTING ev_failed    = rv_failed ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_addenda~save_without_commit.
+    get_legacy_transaction(  )->check_is_not_aborted( ).
+    _save( EXPORTING iv_exit_mode = co_save_exit_mode-before_commit
+           IMPORTING ev_failed    = rv_failed ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_addenda~cleanup.
+    _cleanup( ).
+  ENDMETHOD.
+
+
+  METHOD get_transaction_processor.
+    ro_transaction_processor = mo_bhv_transaction_processor.
+  ENDMETHOD.
+
+
+  METHOD get_legacy_transaction.
+    ro_legacy_transaction ?= mo_bhv_transaction_processor.
+  ENDMETHOD.
+
+
+  METHOD get_eml_processor.
+    ro_eml_processor ?= mo_bhv_transaction_processor.
+  ENDMETHOD.
+
+
+  METHOD get.
+    IF go_instance IS INITIAL.
+      go_instance = NEW #( ).
+    ENDIF.
+    ro_transaction_manager = go_instance.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    super->constructor( ).
+    mo_bhv_transaction_processor = cl_rap_bhv_processor=>create_instance( ).
+    mo_exception_handler = cl_sadl_exception_gatekeeper=>get( if_sadl_exception_handler=>for_transaction_manager ).
+    mo_trace = cl_sadl_trace_factory=>build_wrapper_pattern_tracer( )->for_runtime( )->create_for_object( `RAP Transaction Manager` ) ##NO_TEXT.
+  ENDMETHOD.
+
+
+  METHOD _discard_changes.
+    IF mo_trace->is_active( ).
+      DATA(lo_task) = mo_trace->add_event( 'Discard Changes'
+        )->classified_as_consumer_info( )->with_automatic_message( )->as_task_begin( ) ##NO_TEXT.
+    ENDIF.
+    _cleanup( ).
+    ROLLBACK WORK.
+    CALL FUNCTION 'DEQUEUE_ALL'.
+    IF lo_task IS BOUND.
+      lo_task->with_no_message( )->trace_end_of_task( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD __after_set_upd_task_local.
+    DATA xdata     TYPE xstring.
+    DATA hmac      TYPE hash512_base_64.
+    DATA lt_callstack TYPE abap_callstack.
+
+    CHECK iv_subrc <> 0.
+    DATA(lv_subrc) = iv_subrc.
+
+    rv_failed = abap_true.
+
+    DATA(lv_vbkey) = cl_system_transaction_state=>get_sap_luw_key( ).
+    SELECT vbfunc FROM vbmod WHERE vbkey = @lv_vbkey INTO TABLE @DATA(lt_vbfunction).
+
+    CALL FUNCTION 'SYSTEM_CALLSTACK'
+      IMPORTING
+        callstack = lt_callstack.
+
+    IF cl_sadl_feature_toggle=>are_2208_ic_features_active( )
+      AND 1 = 0. " invalid condition to be removed in 2208 after Renzo has analyzed findings
+      ASSERT
+*      SUBKEY `SADL_LOCAL_UPDATE_TASK_FAILED` && `: HMAC ` && hmac
+        FIELDS lt_vbfunction lt_callstack sy-mandt
+        CONDITION lv_subrc = 0.
+    ELSE.
+
+      EXPORT callstack = lt_callstack TO DATA BUFFER xdata.
+
+      CALL FUNCTION 'CALCULATE_HMAC_FOR_RAW'
+        EXPORTING
+          data       = xdata
+        IMPORTING
+          hmacbase64 = hmac
+        EXCEPTIONS
+          OTHERS     = 0.
+
+      ASSERT ID cc_stmt
+        SUBKEY `SADL_LOCAL_UPDATE_TASK_FAILED` && `: HMAC ` && hmac
+        FIELDS lt_vbfunction lt_callstack sy-mandt
+        CONDITION lv_subrc = 0.
+
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

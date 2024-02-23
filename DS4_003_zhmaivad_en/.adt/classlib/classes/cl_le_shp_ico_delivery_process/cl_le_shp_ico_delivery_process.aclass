@@ -1,0 +1,261 @@
+CLASS cl_le_shp_ico_delivery_process DEFINITION
+  PUBLIC
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES if_le_shp_ico_delivery_process .
+
+    METHODS constructor
+      IMPORTING
+        !io_le_shp_ico_util TYPE REF TO if_le_shp_ico_util OPTIONAL .
+  PROTECTED SECTION.
+
+    TYPES:
+      BEGIN OF gsty_likp_buffer,
+        vbeln           TYPE vbeln,
+        vbtyp           TYPE vbtypl,
+        spe_le_scenario TYPE /spe/le_scenario,
+      END OF gsty_likp_buffer .
+
+    DATA ms_likp_buffer TYPE gsty_likp_buffer .
+    DATA mo_ico_util TYPE REF TO if_le_shp_ico_util .
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS CL_LE_SHP_ICO_DELIVERY_PROCESS IMPLEMENTATION.
+
+
+  METHOD constructor.
+
+    IF io_le_shp_ico_util IS INITIAL.
+      mo_ico_util = cl_le_shp_ico_factory=>get( )->get_utility_instance( ).
+    ELSE.
+      mo_ico_util = io_le_shp_ico_util.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~check_quantiy_reduction.
+
+    quantity_reduced = abap_false.
+
+    CHECK vcm_chain_category = if_le_shp_ico_c=>vcm_chain_category-intercompany_stock_transfer.
+    CHECK vbtyp = if_sd_doc_category=>delivery_shipping_notif.
+    CHECK lfimg_after < ormng.
+    CHECK lfimg_after < lfimg_before.
+
+    quantity_reduced = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~fill_likp_buffer.
+
+    MOVE-CORRESPONDING is_likp TO ms_likp_buffer.
+
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~filter_irrelevant_items.
+    """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+    " Get List of VCM-relevant Delivery Document Items
+    """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+    result = VALUE #( FOR delivery_document_item
+                          IN delivery_document_items
+                          WHERE ( vgbel IS NOT INITIAL AND
+                                  vgpos IS NOT INITIAL AND
+                                  vcm_chain_uuid IS NOT INITIAL AND
+                                  ( vcm_chain_category EQ if_le_shp_ico_c=>vcm_chain_category-intercompany_sales_process OR
+                                    vcm_chain_category EQ if_le_shp_ico_c=>vcm_chain_category-sell_from_stock_with_vsit OR
+                                    vcm_chain_category EQ if_le_shp_ico_c=>vcm_chain_category-intercompany_stock_transfer ) )
+                          ( delivery_document_item ) ).
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~get_vcm_predecessor_status.
+    DATA: business_object_id      TYPE if_vcm_value_chain_item_read=>ty_bo_item-object_id,
+          business_object_item_id TYPE if_vcm_value_chain_item_read=>ty_bo_item-item_id.
+
+    CLEAR:  result,
+            business_object_id,
+            business_object_item_id.
+
+    IF business_object_type EQ if_le_shp_ico_c=>vcm_business_object-outbound_delivery.
+      business_object_id(10) = delivery_document_item-vgbel.
+      IF cl_sd_doc_category_util=>is_any_order( delivery_document_item-vgtyp ).
+        business_object_item_id(6)    = delivery_document_item-vgpos.
+      ELSEIF delivery_document_item-vgtyp EQ if_sd_doc_category=>purchase_order.
+        business_object_item_id(5)    = delivery_document_item-vgpos+1.
+      ENDIF.
+
+    ELSEIF business_object_type EQ if_le_shp_ico_c=>vcm_business_object-inbound_delivery.
+      DATA(inbound_delivery_header) = cl_sd_delivery_data=>get_current_delivery( delivery_document_item-vbeln )->get_delivery_header( ).
+      business_object_id(10)        = inbound_delivery_header-lifex.
+      business_object_item_id(6)    = delivery_document_item-lifexpos.
+    ENDIF.
+
+    TRY.
+        cl_system_uuid=>convert_uuid_c32_static(
+          EXPORTING
+            uuid     = delivery_document_item-vcm_chain_uuid
+          IMPORTING
+            uuid_x16 = DATA(value_chain_uuid_x16) ).
+
+        DATA(step_type) = SWITCH #( business_object_type WHEN if_le_shp_ico_c=>vcm_business_object-outbound_delivery
+                                                           THEN if_le_shp_ico_c=>vcm_step_type-outbound_delivery
+                                                         WHEN if_le_shp_ico_c=>vcm_business_object-inbound_delivery
+                                                          THEN if_le_shp_ico_c=>vcm_step_type-inbound_delivery ).
+
+        DATA(inbound_items) = cl_vcm_app_query=>get_instance( )->get_inbound_bundle_by_type(
+                                                                value_chain_guid = value_chain_uuid_x16
+                                                                step_type        = step_type ).
+
+        IF line_exists( inbound_items[ business_object_id      = business_object_id
+                                       business_object_item_id = business_object_item_id ] ).
+
+          result = inbound_items[ business_object_id      = business_object_id
+                                  business_object_item_id = business_object_item_id ]-process_status.
+        ENDIF.
+      CATCH cx_vcm_rt_not_exists cx_uuid_error.
+        CLEAR result.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~is_delivery_ic_relevant.
+
+    CLEAR ev_vbtyp.
+    rv_result = abap_false.
+
+    IF iv_delivery_id IS INITIAL AND
+       is_delivery_header-vbeln IS INITIAL.
+      RAISE EXCEPTION TYPE cx_le_shp_ico_dlvry_not_exists.
+    ENDIF.
+
+    IF is_delivery_header IS INITIAL.
+      IF iv_delivery_id <> ms_likp_buffer-vbeln.
+        SELECT SINGLE vbeln, vbtyp, spe_le_scenario FROM likp INTO @ms_likp_buffer WHERE vbeln = @iv_delivery_id.
+        IF sy-subrc NE 0.
+          CLEAR ms_likp_buffer.
+          RAISE EXCEPTION TYPE cx_le_shp_ico_dlvry_not_exists.
+        ENDIF.
+      ENDIF.
+    ELSE.
+      ms_likp_buffer-vbeln           = is_delivery_header-vbeln.
+      ms_likp_buffer-vbtyp           = is_delivery_header-vbtyp.
+      ms_likp_buffer-spe_le_scenario = is_delivery_header-spe_le_scenario.
+    ENDIF.
+
+    ev_vbeln = ms_likp_buffer-vbeln.
+    ev_vbtyp = ms_likp_buffer-vbtyp.
+
+    IF ms_likp_buffer-spe_le_scenario EQ if_le_shp_ico_c=>spe_le_scenario-intercompany_sales_process OR
+       ms_likp_buffer-spe_le_scenario EQ if_le_shp_ico_c=>spe_le_scenario-intercompany_stock_transfer OR
+       ms_likp_buffer-spe_le_scenario EQ if_le_shp_ico_c=>spe_le_scenario-sell_from_stock_with_vsit.
+      rv_result = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~is_registered_in_vcm.
+    TRY.
+        cl_system_uuid=>convert_uuid_c32_static(
+          EXPORTING
+            uuid     = delivery_document_item-vcm_chain_uuid
+          IMPORTING
+            uuid_x16 = DATA(value_chain_uuid_x16) ).
+
+        DATA(value_chain_type) = cl_vcm_app_query=>get_instance( )->get_value_chain_type( value_chain_guid = value_chain_uuid_x16 ).
+
+        DATA(steps) = cl_vcm_app_query=>get_instance( )->get_step_by_bo_item(
+                                                          business_object_id      = CONV #( delivery_document_item-vbeln )
+                                                          business_object_type    = business_object_type
+                                                          business_object_item_id = CONV #( delivery_document_item-posnr )
+                                                          value_chain_type        = value_chain_type ).
+
+        IF steps IS INITIAL.
+          result = abap_false.
+          RETURN.
+        ENDIF.
+
+        IF step_type IS NOT INITIAL.
+          result = xsdbool( line_exists( steps[ value_chain_ins_guid = value_chain_uuid_x16
+                                                step_type            = step_type ] ) ).
+        ELSE.
+          result = abap_true.
+        ENDIF.
+
+      CATCH cx_vcm_rt_not_exists cx_uuid_error.
+        CLEAR result.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~release_vcm_lock.
+
+    DATA lv_vbeln TYPE vbeln.
+    DATA lv_vbtyp TYPE vbtypl.
+
+    IF it_locked_vcm IS NOT INITIAL.
+      mo_ico_util->release_vcm_lock( EXPORTING it_locked_vcm = it_locked_vcm ).
+    ELSE.
+
+      "  Check if VCM locks must be released as well
+      TRY.
+          DATA(lv_is_ic_relevant) = me->if_le_shp_ico_delivery_process~is_delivery_ic_relevant(
+                                                                          EXPORTING iv_delivery_id     = iv_delivery_id
+                                                                                    is_delivery_header = is_delivery_header
+                                                                          IMPORTING ev_vbeln  = lv_vbeln
+                                                                                    ev_vbtyp  = lv_vbtyp ).
+        CATCH cx_le_shp_ico_dlvry_not_exists.
+          RETURN.
+      ENDTRY.
+
+      IF lv_is_ic_relevant = abap_true.
+        mo_ico_util->release_vcm_lock( iv_document_id     = lv_vbeln
+                                       iv_business_object =  SWITCH if_vcm_value_chain_item_read=>ty_bo_item-object_type(
+                                                                    lv_vbtyp WHEN if_sd_doc_category=>delivery " 'J'
+                                                                             THEN if_le_shp_ico_c=>vcm_business_object-outbound_delivery
+                                                                             ELSE if_le_shp_ico_c=>vcm_business_object-inbound_delivery ) ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_le_shp_ico_delivery_process~set_vcm_lock.
+
+    DATA lv_vbeln TYPE vbeln.
+    DATA lv_vbtyp TYPE vbtypl.
+
+    CLEAR ev_is_ic_relevant.
+    CLEAR et_locked_vcm.
+
+    " First lock the VCM value chain, if necessary
+    TRY.
+        ev_is_ic_relevant = me->if_le_shp_ico_delivery_process~is_delivery_ic_relevant(
+                                                                      EXPORTING iv_delivery_id     = iv_delivery_id
+                                                                                is_delivery_header = is_delivery_header
+                                                                      IMPORTING ev_vbeln  = lv_vbeln
+                                                                                ev_vbtyp  = lv_vbtyp ).
+      CATCH cx_le_shp_ico_dlvry_not_exists.
+        RETURN.
+        " Nothing to do
+    ENDTRY.
+
+    IF ev_is_ic_relevant = abap_true.
+      mo_ico_util->set_vcm_lock( EXPORTING iv_document_id     = lv_vbeln
+                                           iv_business_object =  SWITCH if_vcm_value_chain_item_read=>ty_bo_item-object_type(
+                                                                        lv_vbtyp WHEN if_sd_doc_category=>delivery " 'J'
+                                                                                  THEN if_le_shp_ico_c=>vcm_business_object-outbound_delivery
+                                                                                  ELSE if_le_shp_ico_c=>vcm_business_object-inbound_delivery )
+                                           iv_collect         = iv_collect
+                                 IMPORTING et_locked_vcm      = et_locked_vcm ).
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

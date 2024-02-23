@@ -1,0 +1,544 @@
+class ZCL_SD_UPDATE_ISEG_INV definition
+  public
+  final
+  create public .
+
+public section.
+
+  types:
+    gtyp_t_count_item TYPE STANDARD TABLE OF bapi_physinv_count_items .
+
+  data MT_BAPIRET type BAPIRET2_T .
+  data MT_COUNT_ITEM type GTYP_T_COUNT_ITEM .
+  data MV_INVNU type INVNU1 .
+
+  methods VALIDATE_INPUT
+    importing
+      !IS_INPUT_DATA type ZSD_S_AIF_INV_ISEG_HEADER .
+  methods PROCESS_UPDATE .
+protected section.
+private section.
+
+  types:
+    BEGIN OF gtyp_s_import_data,
+      werks TYPE werks_d,
+      datum TYPE dats,
+      lgort TYPE lgort_d,
+      ean11 TYPE ean11,
+      eantp TYPE numtp,
+      quant TYPE erfmg,
+    END OF gtyp_s_import_data .
+  types:
+    BEGIN OF gtyp_s_mean,
+      matnr TYPE matnr,
+      meinh TYPE meinh,
+      ean11 TYPE ean11,
+    END OF gtyp_s_mean .
+
+  data MV_IBLNR type IBLNR .
+  constants MC_NS type /AIF/NS value 'ZSD' ##NO_TEXT.
+  constants MC_IFNAME type /AIF/IFNAME value 'INVENTORY' ##NO_TEXT.
+  constants MC_IFVERSION type /AIF/IFVERSION value '1' ##NO_TEXT.
+  constants MC_UPTO_EAN type INT4 value 14 ##NO_TEXT.
+  constants MC_MAX_INV_LENTH type INT4 value 28 ##NO_TEXT.
+  constants MC_MIN_INV_LENTH type INT4 value 25 ##NO_TEXT.
+  constants MC_INV_NUM_LENTH type INT4 value 16 ##NO_TEXT.
+  constants MC_UPC_LENTH type INT4 value 12 ##NO_TEXT.
+  constants MC_LISTING_PROCEDURE type LSTVF value '02' ##NO_TEXT.
+  data MV_ASSORTMENT_ID type ASORT .
+  constants MC_BLANK_LENGTH type INT4 value 11 ##NO_TEXT.
+  constants MC_QUANT_LENGTH type INT4 value 5 ##NO_TEXT.
+
+  methods SEND_FIORI_NOTIFICATION
+    importing
+      !IV_NS type /AIF/NS
+      !IV_IFNAME type /AIF/IFNAME
+      !IV_IFVERSION type /AIF/IFVERSION
+      !IV_ERROR_TYPE type BAPI_MTYPE .
+  methods EXECUTE_LISTING
+    importing
+      !IV_LISTING_PROCEDURE type LSTVF
+      !IT_ASSORT_MATNRS type WRF_ASSORT_MATNR_TTY
+      !IV_FLG_COMMIT type XFELD optional
+      !IS_VALIDITY_DATES type WRF_DATE_INTERVAL_STY optional
+    exporting
+      !ET_RETURN type BAPIRETTAB
+      !ET_ASSORT_LISTED_MATNRS type WRF_ASSORT_MATNR_TTY .
+  methods COUNT_BLANK_SPACE
+    importing
+      !IV_STRING type STRING
+    returning
+      value(RV_COUNT) type INT4 .
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_UPDATE_ISEG_INV IMPLEMENTATION.
+
+
+  METHOD process_update.
+*----------------------------------------------------------------------*
+*  R E V I S I O N   H I S T O R Y                                     *
+*----------------------------------------------------------------------*
+* AUTHOR   | DATE     | CHANGE NUMBER & DESCRIPTION                    *
+*          |          | TRANSPORT REQUESTS                             *
+*----------------------------------------------------------------------*
+* DADABBEK |30.01.2023| 17032 : Upload on ISEG for Stock Take process  *
+*          |          | DS4K940837                                     *
+*----------------------------------------------------------------------*
+
+    DATA: lv_error_type TYPE bapi_mtype,
+          lt_return     TYPE bapiret2_t.
+
+    READ TABLE mt_bapiret TRANSPORTING NO FIELDS WITH KEY type = 'E' BINARY SEARCH.
+    IF sy-subrc NE 0 AND mt_count_item IS NOT INITIAL.
+      CALL FUNCTION 'BAPI_MATPHYSINV_COUNT'
+        EXPORTING
+          physinventory       = mv_iblnr
+          fiscalyear          = sy-datum+0(4)
+          percentage_variance = '000'
+          count_date          = sy-datum
+        TABLES
+          items               = mt_count_item
+          return              = lt_return.
+
+      IF line_exists( lt_return[ type = 'E' ] ) .        "#EC CI_STDSEQ
+        CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+      ELSE.
+        CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+          EXPORTING
+            wait = 'X'.
+      ENDIF.
+    ENDIF.
+
+    APPEND LINES OF lt_return TO mt_bapiret.
+
+    LOOP AT mt_bapiret ASSIGNING FIELD-SYMBOL(<ls_bapiret>) WHERE type CA 'AEW'. "#EC CI_STDSEQ
+      IF lv_error_type IS INITIAL.
+        lv_error_type = <ls_bapiret>-type.
+        " Alert notification
+        send_fiori_notification(
+            iv_ns         =  mc_ns                " Namespace
+            iv_ifname     =  mc_ifname            " Interface Name
+            iv_ifversion  =  mc_ifversion         " Interface Version
+            iv_error_type =  lv_error_type ).     " Message type: S Success, E Error, W Warning, I Info, A Abort
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD send_fiori_notification.
+*----------------------------------------------------------------------*
+*  R E V I S I O N   H I S T O R Y                                     *
+*----------------------------------------------------------------------*
+* AUTHOR   | DATE     | CHANGE NUMBER & DESCRIPTION                    *
+*          |          | TRANSPORT REQUESTS                             *
+*----------------------------------------------------------------------*
+* DADABBEK |30.01.2023| 17032 : Upload on ISEG for Stock Take process  *
+*          |          | DS4K940837                                     *
+*----------------------------------------------------------------------*
+
+    DATA:
+      lv_provider_id  TYPE /iwngw/notif_provider_id VALUE '/AIF/DEFAULT_NOTIF_PROVIDER',
+      lt_notif        TYPE /iwngw/if_notif_provider=>ty_t_notification,
+      ls_notif        LIKE LINE OF lt_notif,
+      lt_param_bundle TYPE /iwngw/if_notif_provider=>ty_t_notification_param_bundle,
+      ls_param_bundle LIKE LINE OF lt_param_bundle.
+
+    DATA(lt_recipient) = VALUE /iwngw/if_notif_provider=>ty_t_notification_recipient( ( id = sy-uname ) ).
+
+    DATA(lo_not_serv) = /aif/cl_notification_services=>get_instance( ).
+
+    DATA(lif_system_uuid) = cl_uuid_factory=>create_system_uuid( ).
+
+    TRY.
+        ls_notif-id = lif_system_uuid->create_uuid_x16( ).
+        ##NO_HANDLER
+      CATCH cx_uuid_error.
+    ENDTRY.
+
+    DATA(ls_type_id) = /aif/cl_notification_provider=>get_if_notification_type_id( ).
+    ls_param_bundle-language = 'E'.
+
+    ls_param_bundle-parameters = lo_not_serv->/aif/if_notification_services~get_if_notif_parameter(
+                                 iv_ns           = iv_ns
+                                 iv_ifname       = iv_ifname
+                                 iv_ifversion    = iv_ifversion
+                                 iv_msgguid      = CONV #( ls_notif-id )
+                                 it_log_messages =  mt_bapiret ).
+    APPEND ls_param_bundle TO lt_param_bundle.
+
+    lo_not_serv->/aif/if_notification_services~get_if_notification_nav(
+         EXPORTING
+           iv_ns           = iv_ns
+           iv_ifname       = iv_ifname
+           iv_ifversion    = iv_ifversion
+           iv_msgguid                  = CONV #( ls_notif-id )
+           it_log_messages             = mt_bapiret
+         IMPORTING
+           ev_navigation_target_object = DATA(lv_navigation_target_object)
+           ev_navigation_target_action = DATA(lv_navigation_target_action)
+           et_navigation_parameters    = DATA(lt_navigation_parameters) ).
+
+    lt_notif = VALUE #(  ( priority = COND #( WHEN iv_error_type EQ 'W' THEN /iwngw/if_notif_provider=>gcs_priorities-medium "#EC CI_CONV_OK
+                                              ELSE /iwngw/if_notif_provider=>gcs_priorities-high )
+                          type_key                 = ls_type_id-type_key
+                          type_version             = ls_type_id-version
+                          recipients               = lt_recipient
+                          navigation_target_object = lv_navigation_target_object
+                          navigation_target_action = lv_navigation_target_action
+                          navigation_parameters    = lt_navigation_parameters
+                          parameters               = lt_param_bundle ) ).
+
+    TRY.
+        /iwngw/cl_notification_api=>create_notifications( iv_provider_id = lv_provider_id
+                                                          it_notification = lt_notif ).
+        ##NO_HANDLER
+      CATCH /iwngw/cx_notification_api.
+    ENDTRY.
+
+    COMMIT WORK.
+
+  ENDMETHOD.
+
+
+  METHOD validate_input.
+*----------------------------------------------------------------------*
+*  R E V I S I O N   H I S T O R Y                                     *
+*----------------------------------------------------------------------*
+* AUTHOR   | DATE     | CHANGE NUMBER & DESCRIPTION                    *
+*          |          | TRANSPORT REQUESTS                             *
+*----------------------------------------------------------------------*
+* DADABBEK |30.01.2023| 17032 : Upload on ISEG for Stock Take process  *
+*          |          | DS4K940837                                     *
+*----------------------------------------------------------------------*
+
+    DATA:
+      lt_import_data TYPE STANDARD TABLE OF gtyp_s_import_data,
+      lt_mean        TYPE STANDARD TABLE OF gtyp_s_mean WITH EMPTY KEY,
+      lt_matnr       TYPE wrf_mapinb_matnr_tty.
+
+    LOOP AT is_input_data-input_data ASSIGNING FIELD-SYMBOL(<ls_data>).
+      " Fist line of input data should be Physical Inventory Number
+      IF sy-tabix EQ 1.
+        IF strlen( <ls_data>-invntry ) EQ mc_inv_num_lenth.
+          mv_invnu = <ls_data>-invntry.
+        ELSE.
+          MESSAGE e019(zsd_discount) INTO DATA(lv_message).
+          mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno message = lv_message ) ).
+        ENDIF.
+      ELSE.
+        " Validating number of blank spaces
+        IF mc_blank_length NE count_blank_space( CONV #( <ls_data>-invntry ) ).
+          MESSAGE e024(zsd_discount) INTO lv_message WITH sy-tabix.
+          mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 ) ).
+        ENDIF.
+        " Separating INV document and counted number
+        SPLIT <ls_data>-invntry AT space INTO DATA(lv_string) DATA(lv_quant).
+        IF sy-subrc EQ 0.
+          lv_quant = condense( lv_quant ).
+          IF strlen( lv_string ) < mc_max_inv_lenth AND strlen( lv_string ) > mc_min_inv_lenth AND strlen( lv_quant ) EQ mc_quant_length.
+            DATA(lv_length) = strlen( lv_string ) - mc_upto_ean.
+            " Converting to local structure
+            APPEND VALUE #( werks = lv_string+0(4)
+                            datum = CONV dats( sy-datum+0(2) && lv_string+8(2) && lv_string+6(2) && lv_string+4(2) )
+                            ean11 = lv_string+14(lv_length)
+                            eantp = COND #( WHEN lv_length EQ mc_upc_lenth THEN 'UC' ELSE 'HE' )
+                            quant = CONV #( lv_quant ) ) TO lt_import_data.
+          ELSE.
+            MESSAGE e025(zsd_discount) INTO lv_message WITH sy-tabix.
+            mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 ) ).
+          ENDIF.
+        ELSE.
+          MESSAGE e023(zsd_discount) INTO lv_message WITH sy-tabix.
+          mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 ) ).
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF lines( lt_import_data ) EQ 0.
+      RETURN.
+    ENDIF.
+    mv_assortment_id = lt_import_data[ 1 ]-werks.
+
+    SELECT mean~matnr, mean~meinh, mean~ean11
+      FROM mean
+      INTO TABLE @lt_mean
+      FOR ALL ENTRIES IN @lt_import_data
+      WHERE ean11 = @lt_import_data-ean11
+        AND eantp = @lt_import_data-eantp.
+
+    IF sy-subrc EQ 0.
+      SELECT item~physicalinventorydocument AS iblnr, item~physicalinventorydocumentitem AS zeili, item~material, item~plant
+        FROM i_physinvtrydocitem AS item
+        INNER JOIN i_physinvtrydocheader AS head
+        ON head~physicalinventorydocument = item~physicalinventorydocument
+        AND head~fiscalyear = item~fiscalyear
+        INNER JOIN @lt_mean AS mean
+        ON item~material = mean~matnr
+        WHERE head~physicalinventorynumber = @mv_invnu
+        INTO TABLE @DATA(lt_iseg).
+
+      IF sy-subrc EQ 0.
+        mv_iblnr = lt_iseg[ 1 ]-iblnr.
+      ELSE.
+        MESSAGE e021(zsd_discount) INTO lv_message WITH mv_invnu.
+        mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 ) ).
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+
+
+    " Listing Check
+    cl_listing_check=>find_listing_for_one_site(
+      EXPORTING
+        ip_locnr           = mv_assortment_id
+        ip_date_to_check   = sy-datum
+      IMPORTING
+        et_articles_listed = DATA(lt_articles_listed)
+      EXCEPTIONS
+        wrong_call         = 1
+        OTHERS             = 2 ).
+
+    IF sy-subrc <> 0.
+      mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno
+                                              message_v1 = sy-msgv1  message_v2 = sy-msgv2
+                                              message_v3 = sy-msgv3  message_v4 = sy-msgv4 ) ).
+    ENDIF.
+
+
+    " Check listing materials, if no listed then will prepare for listing
+    LOOP AT lt_import_data ASSIGNING FIELD-SYMBOL(<ls_import_data>).
+      READ TABLE lt_mean ASSIGNING FIELD-SYMBOL(<ls_mean>) WITH KEY ean11 = <ls_import_data>-ean11. "#EC CI_STDSEQ
+      CHECK sy-subrc EQ 0.
+      READ TABLE lt_articles_listed TRANSPORTING NO FIELDS WITH KEY artnr = <ls_mean>-matnr locnr = <ls_import_data>-werks listed = abap_true. "#EC CI_STDSEQ
+      IF sy-subrc NE 0.
+        APPEND VALUE #( matnr = <ls_mean>-matnr ) TO lt_matnr.
+      ENDIF.
+    ENDLOOP.
+
+    IF lines( lt_matnr ) > 0.
+      execute_listing(
+        EXPORTING
+          iv_listing_procedure    = mc_listing_procedure
+          it_assort_matnrs        = VALUE #( ( assortment_id = mv_assortment_id materials = lt_matnr ) )
+          iv_flg_commit           = abap_true
+        IMPORTING
+          et_return               = DATA(lt_return)
+          et_assort_listed_matnrs = DATA(lt_assort_listed_matnrs) ).
+
+      APPEND LINES OF lt_return TO mt_bapiret.
+    ENDIF.
+
+    " Preparing data for the BAPI
+    LOOP AT lt_import_data ASSIGNING <ls_import_data>.
+      READ TABLE lt_mean ASSIGNING <ls_mean> WITH KEY ean11 = <ls_import_data>-ean11. "#EC CI_STDSEQ
+      IF sy-subrc EQ 0.
+        IF line_exists( lt_articles_listed[ artnr = <ls_mean>-matnr locnr = <ls_import_data>-werks listed = abap_true ] ). "#EC CI_STDSEQ
+          READ TABLE lt_iseg ASSIGNING FIELD-SYMBOL(<ls_iseg>) WITH KEY material = <ls_mean>-matnr. "#EC CI_STDSEQ
+          CHECK sy-subrc EQ 0.
+          APPEND VALUE #( item = <ls_iseg>-zeili
+                          material = <ls_mean>-matnr
+                          entry_qnt = <ls_import_data>-quant
+                          entry_uom = <ls_mean>-meinh ) TO mt_count_item.
+        ELSEIF line_exists( lt_assort_listed_matnrs[ assortment_id = mv_assortment_id ]-materials[ matnr = <ls_mean>-matnr ] ). "#EC CI_STDSEQ
+          APPEND VALUE #( item = <ls_iseg>-zeili
+                          material = <ls_mean>-matnr
+                          entry_qnt = <ls_import_data>-quant
+                          entry_uom = <ls_mean>-meinh ) TO mt_count_item.
+        ELSE.
+          " Message in case auto-listing fails
+          MESSAGE e022(zsd_discount) INTO lv_message WITH <ls_mean>-matnr.
+          mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 message_v2 = sy-msgv2 ) ).
+        ENDIF.
+      ELSE.
+        MESSAGE e020(zsd_discount) INTO lv_message WITH <ls_import_data>-ean11.
+        mt_bapiret = VALUE #( BASE mt_bapiret ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 message_v2 = sy-msgv2 ) ).
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD count_blank_space.
+*----------------------------------------------------------------------*
+*  R E V I S I O N   H I S T O R Y                                     *
+*----------------------------------------------------------------------*
+* AUTHOR   | DATE     | CHANGE NUMBER & DESCRIPTION                    *
+*          |          | TRANSPORT REQUESTS                             *
+*----------------------------------------------------------------------*
+* DADABBEK |08.02.2023| 17032 : Upload on ISEG for Stock Take process  *
+*          |          | DS4K940837                                     *
+*----------------------------------------------------------------------*
+
+    DATA(lv_one_blank_string) = iv_string.
+    " Removing blank spaces in order to calculate number of blank spaces
+    lv_one_blank_string =  condense( lv_one_blank_string ).
+    " Calculating number of blank spaces with -1.
+    rv_count = strlen( iv_string ) - strlen( lv_one_blank_string ).
+
+  ENDMETHOD.
+
+
+  METHOD execute_listing.
+*----------------------------------------------------------------------*
+*  R E V I S I O N   H I S T O R Y                                     *
+*----------------------------------------------------------------------*
+* AUTHOR   | DATE     | CHANGE NUMBER & DESCRIPTION                    *
+*          |          | TRANSPORT REQUESTS                             *
+*----------------------------------------------------------------------*
+* DADABBEK |06.02.2023| 17032 : Upload on ISEG for Stock Take process  *
+*          |          | DS4K940837                                     *
+*----------------------------------------------------------------------*
+
+    DATA:
+      lt_materials     TYPE wrf_mapinb_matnr_tty,
+      lt_mara          TYPE mara_tab,
+      lt_variants      TYPE mara_tab,
+      lt_generics      TYPE mara_tab,
+      lt_matkl_assort  TYPE cl_wrf_assortment_listing=>tt_matkl_assort,
+      lt_assort_matnrs TYPE  wrf_assort_matnr_tty,
+      ls_matkl_assort  TYPE cl_wrf_assortment_listing=>ty_matkl_assort,
+      lv_date_from     TYPE datum,
+      lv_date_to       TYPE datum.
+
+    FIELD-SYMBOLS:
+      <ls_assort_matnrs> TYPE wrf_assort_matnr_sty,
+      <ls_mara>          TYPE mara,
+      <ls_material>      TYPE wrf_mapinb_matnr_sty.
+
+    CLEAR: et_return, et_assort_listed_matnrs.
+
+    IF it_assort_matnrs IS INITIAL.
+      MESSAGE e525(wm) INTO DATA(lv_message).
+* No material exists for these selection criteria
+      INSERT VALUE #( type = sy-msgty id = sy-msgid number = sy-msgno message = lv_message ) INTO TABLE et_return.
+      RETURN.
+    ENDIF.
+
+    LOOP AT it_assort_matnrs ASSIGNING <ls_assort_matnrs>.
+      INSERT LINES OF <ls_assort_matnrs>-materials INTO TABLE lt_materials.
+    ENDLOOP.
+
+    SORT lt_materials BY matnr.
+    DELETE ADJACENT DUPLICATES FROM lt_materials.
+
+    IF lt_materials IS INITIAL.
+      MESSAGE e525(wm) INTO lv_message.
+* No material exists for these selection criteria
+      INSERT VALUE #( type = sy-msgty id = sy-msgid number = sy-msgno ) INTO TABLE et_return.
+      RETURN.
+    ENDIF.
+
+    SELECT matnr satnr attyp matkl lvorm mlgut bwscl FROM mara
+      INTO CORRESPONDING FIELDS OF TABLE lt_mara ##TOO_MANY_ITAB_FIELDS
+      FOR ALL ENTRIES IN lt_materials
+         WHERE matnr = lt_materials-matnr
+           AND attyp NOT IN (cl_wrf_assortment_listing=>gc_material_category-material_group,
+                             cl_wrf_assortment_listing=>gc_material_category-hierarchy,
+                             cl_wrf_assortment_listing=>gc_material_category-group,
+                             cl_wrf_assortment_listing=>gc_material_category-reference)
+           AND lvorm = ''
+         ORDER BY PRIMARY KEY.                       "#EC CI_SEL_NESTED
+
+    IF sy-subrc <> 0.
+      MESSAGE e525(wm) INTO lv_message.
+* No material exists for these selection criteria
+      INSERT VALUE #( type = sy-msgty id = sy-msgid number = sy-msgno ) INTO TABLE et_return.
+      RETURN.
+    ENDIF.
+
+    DATA(lo_assortment_listing) = NEW cl_wrf_assortment_listing( ).
+
+    lo_assortment_listing->process_generic_articles(
+      EXPORTING
+        it_mara     = lt_mara
+      IMPORTING
+        et_variants = lt_variants
+        et_generics = lt_generics ).
+
+* Add all generics
+    INSERT LINES OF lt_generics INTO TABLE lt_mara.
+
+* Add variants
+    INSERT LINES OF lt_variants INTO TABLE lt_mara.
+
+    lt_assort_matnrs = it_assort_matnrs.                "#EC CI_CONV_OK
+
+    LOOP AT lt_variants ASSIGNING <ls_mara>.
+      LOOP AT lt_assort_matnrs ASSIGNING <ls_assort_matnrs>. "#EC CI_NESTED
+* Check to see if the variant is already assigned to the assortment
+        READ TABLE <ls_assort_matnrs>-materials TRANSPORTING NO FIELDS
+          WITH KEY matnr = <ls_mara>-matnr BINARY SEARCH.
+
+        CHECK sy-subrc <> 0.
+
+* Check to see if the variant's generic is assigned to the assortment
+        READ TABLE <ls_assort_matnrs>-materials TRANSPORTING NO FIELDS
+          WITH KEY matnr = <ls_mara>-satnr BINARY SEARCH.
+
+        CHECK sy-subrc = 0.
+
+        INSERT VALUE #( matnr = <ls_mara>-matnr ) INTO TABLE <ls_assort_matnrs>-materials.
+      ENDLOOP.
+    ENDLOOP.
+
+    SORT lt_mara BY matnr.
+    DELETE ADJACENT DUPLICATES FROM lt_mara COMPARING matnr. "#EC CI_SEL_DEL
+
+    LOOP AT it_assort_matnrs ASSIGNING <ls_assort_matnrs>.
+      LOOP AT <ls_assort_matnrs>-materials ASSIGNING <ls_material>. "#EC CI_NESTED
+        READ TABLE lt_mara ASSIGNING <ls_mara>
+          WITH KEY matnr = <ls_material>-matnr BINARY SEARCH.
+
+        CHECK sy-subrc = 0.
+
+        ls_matkl_assort-matkl = <ls_mara>-matkl.
+        ls_matkl_assort-asort = <ls_assort_matnrs>-assortment_id.
+
+        READ TABLE lt_matkl_assort TRANSPORTING NO FIELDS
+          WITH KEY matkl = ls_matkl_assort-matkl
+                   asort = ls_matkl_assort-asort.        "#EC CI_STDSEQ
+
+        IF sy-subrc <> 0.
+          INSERT ls_matkl_assort INTO TABLE lt_matkl_assort.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+
+    SORT lt_matkl_assort BY matkl asort.
+    SORT lt_mara BY matkl.
+
+    IF is_validity_dates-datab IS INITIAL.
+      lv_date_from = sy-datum.
+    ELSE.
+      lv_date_from = is_validity_dates-datab.
+    ENDIF.
+
+    IF is_validity_dates-datbi IS INITIAL.
+      lv_date_to = if_wrf_general_c=>gc_date_infinity.
+    ELSE.
+      lv_date_to = is_validity_dates-datbi.
+    ENDIF.
+
+    lo_assortment_listing->process_material_groups_bulk(
+      EXPORTING
+        it_matkl_assort         = lt_matkl_assort
+        it_mara                 = lt_mara
+        iv_date_from            = lv_date_from
+        iv_date_to              = lv_date_to
+        it_generics             = lt_generics
+        iv_listing_procedure    = iv_listing_procedure
+        it_assort_matnrs        = lt_assort_matnrs
+        iv_flg_sync             = abap_false
+        iv_flg_commit           = iv_flg_commit
+      IMPORTING
+        et_return               = et_return
+        et_assort_listed_matnrs = et_assort_listed_matnrs ).
+
+    DELETE et_return WHERE type <> 'E'.                  "#EC CI_STDSEQ
+  ENDMETHOD.
+ENDCLASS.

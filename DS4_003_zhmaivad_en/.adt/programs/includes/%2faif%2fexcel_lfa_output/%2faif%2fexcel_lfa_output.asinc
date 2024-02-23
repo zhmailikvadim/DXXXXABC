@@ -1,0 +1,1762 @@
+*&---------------------------------------------------------------------*
+*&  Include           /AIF/EXCEL_LFA_OUTPUT
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&  Include           ZHEW_EXCEL_OUTPUT
+*&---------------------------------------------------------------------*
+
+CLASS lcl_worksheet_edit DEFINITION DEFERRED.
+CLASS lcl_workbook_edit DEFINITION DEFERRED.
+CLASS lcl_xlsx_wrapper_edit DEFINITION DEFERRED.
+
+
+TYPES:
+  lty_sheet_data_cell_ref_t     TYPE STANDARD TABLE OF REF TO lty_sheet_data_cell_s WITH NON-UNIQUE DEFAULT KEY,
+  BEGIN OF lty_changed_cell_s,
+    row_index       TYPE lty_row_index,
+    cell_ref_t      TYPE lty_sheet_data_cell_ref_t,
+  END OF lty_changed_cell_s,
+  lty_changed_cell_t           TYPE SORTED TABLE OF lty_changed_cell_s WITH UNIQUE KEY row_index,
+
+  BEGIN OF lty_changed_sheet_s,
+    name        TYPE lty_sheetname,
+    index       TYPE i,
+    sheet       TYPE REF TO lcl_worksheet_edit,
+  END OF lty_changed_sheet_s,
+  lty_changed_sheet_t        TYPE SORTED TABLE OF lty_changed_sheet_s WITH UNIQUE KEY name.
+
+" lty_sheet_data_cell_s WITH NON-UNIQUE DEFAULT KEY.
+
+TYPES:
+  BEGIN OF lty_style_range_s,
+    min       TYPE i,
+    max       TYPE i,
+    style     TYPE string,
+  END OF lty_style_range_s,
+  lty_style_range_t          TYPE SORTED TABLE OF lty_style_range_s WITH NON-UNIQUE KEY min,
+
+  BEGIN OF lty_cell_insert_s,
+    cell        TYPE REF TO if_ixml_element,
+    cell_after  TYPE REF TO if_ixml_element,
+  END OF lty_cell_insert_s.
+*----------------------------------------------------------------------*
+*       CLASS lcl_xlsx_wrapper_edit DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_xlsx_wrapper_edit DEFINITION INHERITING FROM lcl_xlsx_wrapper.
+  PUBLIC SECTION.
+    CLASS-METHODS:
+      create_from_binary_data_edit
+        IMPORTING
+          iv_data                        TYPE xstring
+        RETURNING
+          value(rr_wrapper)              TYPE REF TO lcl_xlsx_wrapper_edit
+        RAISING
+          /aif/cx_lfa_map_error,
+      class_constructor.
+
+    METHODS:
+      update_files
+        IMPORTING
+          is_xmldocs                     TYPE lty_xmldocs_xstr.
+
+  PROTECTED SECTION.
+    METHODS:
+      get_content_root
+        RETURNING
+          value(rr_content_root)         TYPE REF TO if_ixml_element,
+      get_workbook_root
+        IMPORTING
+          ir_content_root                TYPE REF TO if_ixml_element
+        RETURNING
+          value(rr_workbook_root)        TYPE REF TO if_ixml_element,
+      get_workbook_rel_root
+        RETURNING
+          value(rr_workbook_rel_root)    TYPE REF TO if_ixml_element,
+      get_sheet_filename
+        IMPORTING
+          ir_content_root                TYPE REF TO if_ixml_element
+          ir_workbook_root               TYPE REF TO if_ixml_element
+          ir_workbook_rel_root           TYPE REF TO if_ixml_element
+          ir_sheet                       TYPE REF TO lty_sheetxml_xstr_s
+        RETURNING
+          value(rv_filename)             TYPE lty_filename,
+      get_shared_strings_filename
+        IMPORTING
+          ir_content_root                TYPE REF TO if_ixml_element
+        RETURNING
+          value(rv_filename)             TYPE lty_filename,
+      constructor.
+
+ENDCLASS.                    "lcl_xlsx_wrapper_edit DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_xlsx_wrapper_edit IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_xlsx_wrapper_edit IMPLEMENTATION.
+
+  METHOD create_from_binary_data_edit.
+    "IMPORTING
+    "  iv_data               TYPE xstring
+    "RETURNING
+    "  value(rr_wrapper)     TYPE REF TO lcl_xlsx_wrapper_edit,
+
+    DATA:
+      lv_tmp            TYPE string,
+      lr_root           TYPE REF TO cx_root.
+
+    TRY.
+        CREATE OBJECT rr_wrapper.
+        rr_wrapper->mr_zip->load( zip = iv_data ).
+      CATCH cx_root INTO lr_root.
+        MESSAGE e044(/aif/lfa_mes) INTO lv_tmp.
+        /aif/cx_lfa_map_error=>raise_message( iv_previous = lr_root ).
+    ENDTRY.
+
+  ENDMETHOD.                    "create_from_binary_data_edit
+
+  METHOD class_constructor.
+
+  ENDMETHOD.                    "class_constructor
+
+  METHOD constructor.
+
+    super->constructor( ).
+
+  ENDMETHOD.                    "constructor
+
+  METHOD update_files.
+    "IMPORTING
+    "  is_xmldocs                 TYPE lty_xmldocs_xstr.
+
+    DATA:
+      lr_sheet                TYPE REF TO lty_sheetxml_xstr_s,
+      lv_filename             TYPE lty_filename,
+      lr_workbook_root        TYPE REF TO if_ixml_element,
+      lr_workbook_rel_root    TYPE REF TO if_ixml_element,
+      lr_content_root         TYPE REF TO if_ixml_element.
+
+    TRY.
+        CLEAR lr_content_root.
+        lr_content_root = get_content_root( ).
+        IF lr_content_root IS NOT BOUND.
+          RETURN.
+        ENDIF.
+
+        "check shared strings.
+        IF is_xmldocs-shared_strings IS NOT INITIAL.
+
+          CLEAR lv_filename.
+          lv_filename = get_shared_strings_filename( ir_content_root = lr_content_root ).
+          IF lv_filename IS INITIAL.
+            RETURN.
+          ENDIF.
+
+          mr_zip->delete( name = lv_filename ).
+          mr_zip->add( name    = lv_filename
+                       content = is_xmldocs-shared_strings ).
+        ENDIF.
+
+        CLEAR lr_workbook_root.
+        lr_workbook_root = get_workbook_root( ir_content_root = lr_content_root ).
+        IF lr_workbook_root IS NOT BOUND.
+          RETURN.
+        ENDIF.
+        CLEAR lr_workbook_rel_root.
+        lr_workbook_rel_root = get_workbook_rel_root( ).
+        IF lr_workbook_rel_root IS NOT BOUND.
+          RETURN.
+        ENDIF.
+
+        LOOP AT is_xmldocs-sheets REFERENCE INTO lr_sheet.
+
+          IF lr_sheet->sheet IS NOT INITIAL.
+
+            CLEAR lv_filename.
+            lv_filename = get_sheet_filename( ir_content_root      = lr_content_root
+                                              ir_workbook_root     = lr_workbook_root
+                                              ir_workbook_rel_root = lr_workbook_rel_root
+                                              ir_sheet             = lr_sheet ).
+            IF lv_filename IS INITIAL.
+              RETURN.
+            ENDIF.
+            mr_zip->delete( name = lv_filename ).
+            mr_zip->add( name    = lv_filename
+                         content = lr_sheet->sheet ).
+          ENDIF.
+
+        ENDLOOP.
+
+      CATCH cx_root.
+    ENDTRY.
+
+  ENDMETHOD.                    "update_files
+
+  METHOD get_workbook_rel_root.
+    "returning
+    "  value(rr_workbook_rel_root)      type ref to if_ixml_element
+
+    DATA:
+      lv_filename           TYPE lty_filename,
+      lr_workbook_rel_xml   TYPE REF TO if_ixml_document,
+      lv_xml_data           TYPE xstring.
+
+    CLEAR lv_filename.
+    CLEAR lv_xml_data.
+    CONCATENATE lcl_default_xml=>mv_path_xl__rels '/' lcl_default_xml=>mv_fname_wb_rel INTO lv_filename.
+    mr_zip->get( EXPORTING
+                   name    = lv_filename
+                 IMPORTING
+                   content = lv_xml_data ).
+
+    CLEAR lr_workbook_rel_xml.
+    lr_workbook_rel_xml = create_xml_doc( iv_content = lv_xml_data ).
+    IF lr_workbook_rel_xml IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    rr_workbook_rel_root = lr_workbook_rel_xml->get_root_element( ).
+
+  ENDMETHOD.                    "get_workbook_rel_root
+
+  METHOD get_workbook_root.
+    "importing
+    "  ir_content_root              TYPE REF TO if_ixml_element
+    "returning
+    "  value(rr_workbook_root)      type ref to if_ixml_element
+
+    DATA:
+      lr_workbook_xml       TYPE REF TO if_ixml_document,
+      lv_xml_data           TYPE xstring,
+      lv_filename           TYPE lty_filename,
+      lv_len_node_list      TYPE i,
+      lv_index              TYPE i,
+      lv_cont_type          TYPE string,
+      lv_node_name          TYPE string,
+      lr_child_elem         TYPE REF TO if_ixml_element,
+      lr_node_list          TYPE REF TO if_ixml_node_list.
+
+    CLEAR lv_filename.
+    CLEAR lr_node_list.
+    lr_node_list = ir_content_root->get_children( ).
+    IF lr_node_list IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    lv_len_node_list = lr_node_list->get_length( ).
+    lv_index = 0.
+    WHILE lv_index < lv_len_node_list.
+
+      CLEAR lr_child_elem.
+      lr_child_elem ?= lr_node_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_child_elem IS INITIAL.
+        CONTINUE.
+      ENDIF.
+      CLEAR lv_node_name.
+      lv_node_name = lr_child_elem->get_name( ).
+      IF lv_node_name = 'Override'.
+        CLEAR lv_cont_type.
+        lv_cont_type = lr_child_elem->get_attribute( name = 'ContentType' ).
+        IF lv_cont_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'.
+          lv_filename = lr_child_elem->get_attribute( name = 'PartName' ).
+          SHIFT lv_filename BY 1 PLACES LEFT.
+          CLEAR lv_xml_data.
+          mr_zip->get( EXPORTING
+                         name    = lv_filename
+                       IMPORTING
+                         content = lv_xml_data ).
+
+          CLEAR lr_workbook_xml.
+          lr_workbook_xml = create_xml_doc( iv_content = lv_xml_data ).
+          IF lr_workbook_xml IS NOT BOUND.
+            RETURN.
+          ENDIF.
+
+          rr_workbook_root = lr_workbook_xml->get_root_element( ).
+
+        ENDIF.
+      ENDIF.
+
+    ENDWHILE.
+
+  ENDMETHOD.                    "get_content_root
+
+  METHOD get_sheet_filename.
+    "importing
+    "  ir_content_root        TYPE REF TO if_ixml_element
+    "  ir_workbook_root       type ref to if_ixml_element
+    "  ir_workbook_rel_root   type ref to if_ixml_element
+    "  ir_sheet               TYPE REF TO lty_sheetxml_xstr_s
+    "returning
+    "  value(rv_filename)     type lty_filename
+
+    DATA:
+      lv_tmp               TYPE string,
+      lv_tmp_id            TYPE string,
+      lr_sheets_element    TYPE REF TO if_ixml_element,
+      lv_filename_tmp      TYPE lty_filename,
+      lv_filename_test     TYPE lty_filename,
+      lv_path              TYPE string.
+
+    CLEAR rv_filename.
+    CLEAR lv_filename_tmp.
+    CLEAR lr_sheets_element.
+    CLEAR lv_path.
+    lv_path = '/workbook/sheets'.
+    "CONCATENATE '/workbook/sheets/sheet[@sheetId=''' lv_tmp ''']' INTO lv_path.
+    CONDENSE lv_path.
+    lr_sheets_element = ir_workbook_root->find_from_path( path = lv_path ).
+    IF lr_sheets_element IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+
+    DATA:
+      lv_len_node_list      TYPE i,
+      lv_index              TYPE i,
+      lv_cont_type          TYPE string,
+      lv_node_name          TYPE string,
+      lr_child_elem         TYPE REF TO if_ixml_element,
+      lr_node_list          TYPE REF TO if_ixml_node_list.
+
+    DATA:
+      lv_relid              TYPE string.
+
+    CLEAR lv_relid.
+    CLEAR lr_node_list.
+    lr_node_list = lr_sheets_element->get_children( ).
+    IF lr_node_list IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    lv_len_node_list = lr_node_list->get_length( ).
+    lv_index = 0.
+    WHILE lv_index < lv_len_node_list.
+
+      CLEAR lr_child_elem.
+      lr_child_elem ?= lr_node_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_child_elem IS INITIAL.
+        CONTINUE.
+      ENDIF.
+      lv_tmp = lr_child_elem->get_attribute_ns( name = 'sheetId' ).
+      CONDENSE lv_tmp.
+      CLEAR lv_tmp_id.
+      lv_tmp_id = ir_sheet->sheetid.
+      CONDENSE lv_tmp_id.
+      IF lv_tmp = lv_tmp_id.
+        CLEAR lv_relid.
+        lv_relid = lr_child_elem->get_attribute_ns( name = 'id'
+                                                    uri = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships' ).
+        EXIT.
+      ENDIF.
+
+    ENDWHILE.
+
+    IF lv_relid IS INITIAL.
+      RETURN.
+    ENDIF.
+
+
+    CLEAR lr_node_list.
+    lr_node_list = ir_workbook_rel_root->get_children( ).
+    IF lr_node_list IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    lv_len_node_list = lr_node_list->get_length( ).
+    lv_index = 0.
+    WHILE lv_index < lv_len_node_list.
+
+      CLEAR lr_child_elem.
+      lr_child_elem ?= lr_node_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_child_elem IS INITIAL.
+        CONTINUE.
+      ENDIF.
+      lv_tmp = lr_child_elem->get_attribute_ns( name = 'Id' ).
+      CONDENSE lv_tmp.
+      IF lv_tmp = lv_relid.
+        CLEAR lv_filename_tmp.
+        lv_filename_tmp = lr_child_elem->get_attribute_ns( name = 'Target' ).
+        CONDENSE lv_filename_tmp.
+        EXIT.
+      ENDIF.
+
+    ENDWHILE.
+
+    IF lv_filename_tmp IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CLEAR lr_node_list.
+    lr_node_list = ir_content_root->get_children( ).
+    IF lr_node_list IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    lv_len_node_list = lr_node_list->get_length( ).
+    lv_index = 0.
+    WHILE lv_index < lv_len_node_list.
+
+      CLEAR lr_child_elem.
+      lr_child_elem ?= lr_node_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_child_elem IS INITIAL.
+        CONTINUE.
+      ENDIF.
+      CLEAR lv_node_name.
+      lv_node_name = lr_child_elem->get_name( ).
+      IF lv_node_name = 'Override'.
+        CLEAR lv_cont_type.
+        lv_cont_type = lr_child_elem->get_attribute_ns( name = 'ContentType' ).
+        IF lv_cont_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'.
+          CLEAR lv_filename_test.
+          lv_filename_test = lr_child_elem->get_attribute( name = 'PartName' ).
+          CONDENSE lv_filename_test.
+          FIND FIRST OCCURRENCE OF SUBSTRING lv_filename_tmp IN lv_filename_test.
+          IF sy-subrc = 0.
+            SHIFT lv_filename_test BY 1 PLACES LEFT.
+            rv_filename = lv_filename_test.
+            RETURN.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    ENDWHILE.
+
+  ENDMETHOD.                    "get_sheet_filename
+
+  METHOD get_shared_strings_filename.
+    "importing
+    "  ir_content_root         TYPE REF TO if_ixml_element.
+    "returning
+    "  value(rv_filename)      type lty_filename
+
+    DATA:
+      lv_len_node_list      TYPE i,
+      lv_index              TYPE i,
+      lv_cont_type          TYPE string,
+      lv_node_name          TYPE string,
+      lr_child_elem         TYPE REF TO if_ixml_element,
+      lr_node_list          TYPE REF TO if_ixml_node_list.
+
+    CLEAR rv_filename.
+    CLEAR lr_node_list.
+    lr_node_list = ir_content_root->get_children( ).
+    IF lr_node_list IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    lv_len_node_list = lr_node_list->get_length( ).
+    lv_index = 0.
+    WHILE lv_index < lv_len_node_list.
+
+      CLEAR lr_child_elem.
+      lr_child_elem ?= lr_node_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_child_elem IS INITIAL.
+        CONTINUE.
+      ENDIF.
+      CLEAR lv_node_name.
+      lv_node_name = lr_child_elem->get_name( ).
+      IF lv_node_name = 'Override'.
+        CLEAR lv_cont_type.
+        lv_cont_type = lr_child_elem->get_attribute( name = 'ContentType' ).
+        IF lv_cont_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml'.
+          rv_filename = lr_child_elem->get_attribute( name = 'PartName' ).
+          SHIFT rv_filename BY 1 PLACES LEFT.
+          RETURN.
+        ENDIF.
+      ENDIF.
+
+    ENDWHILE.
+
+  ENDMETHOD.                    "get_shared_strings_filename
+
+  METHOD get_content_root.
+    "returning
+    "  value(rr_content_root)      type ref to if_ixml_element
+
+    DATA:
+      lr_content_xml        TYPE REF TO if_ixml_document,
+      lv_xml_data           TYPE xstring,
+      lv_filename           TYPE lty_filename.
+
+    CLEAR rr_content_root.
+    CLEAR lv_xml_data.
+    CLEAR lv_filename.
+    lv_filename = lcl_default_xml=>mv_fname_content_type.
+    mr_zip->get( EXPORTING
+                   name    = lv_filename
+                 IMPORTING
+                   content = lv_xml_data ).
+
+    CLEAR lr_content_xml.
+    lr_content_xml = create_xml_doc( iv_content = lv_xml_data ).
+    IF lr_content_xml IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    rr_content_root = lr_content_xml->get_root_element( ).
+
+  ENDMETHOD.                    "get_content_root
+
+ENDCLASS.                    "lcl_xlsx_wrapper_edit IMPLEMENTATION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_worksheet_edit DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_worksheet_edit DEFINITION INHERITING FROM lcl_worksheet FRIENDS lcl_workbook_edit.
+  PUBLIC SECTION.
+    METHODS:
+      get_excel_col
+        IMPORTING
+          iv_col_name           TYPE string
+          iv_row_index          TYPE lty_row_index
+        RETURNING
+          value(rv_excel_col)   TYPE lty_excel_col,
+      change_value
+        IMPORTING
+          iv_column             TYPE lty_excel_col
+          iv_row_index          TYPE lty_row_index
+          iv_value              TYPE any
+          is_conversion         TYPE /aif/lfa_fld_conversion_s,
+      save,
+      constructor
+        IMPORTING
+          ir_workbook           TYPE REF TO lcl_workbook_edit
+          iv_name               TYPE lty_sheetname.
+
+  PROTECTED SECTION.
+    TYPES:
+      BEGIN OF lty_edit_mask_s,
+        prefix              TYPE c LENGTH 2,
+        conversion_exit     TYPE convexit,
+      END OF lty_edit_mask_s,
+
+      BEGIN OF lty_conversion_s,
+        type                TYPE c LENGTH 1,
+        length              TYPE i,
+        output_length       TYPE i,
+        edit_mask           TYPE lty_edit_mask_s,
+      END OF lty_conversion_s.
+
+    METHODS:
+      convert_using_mask
+        IMPORTING
+          iv_val                TYPE any
+          is_conversion         TYPE lty_conversion_s
+        EXPORTING
+          ev_str_val            TYPE lty_cell_value,
+      convert_using_conversion_exit
+        IMPORTING
+          iv_val                TYPE any
+          iv_conversion_exit    TYPE convexit
+        EXPORTING
+          ev_str_val            TYPE lty_cell_value,
+     convert_val_to_str_conv
+       IMPORTING
+         iv_val                 TYPE any
+         is_conversion          TYPE /aif/lfa_fld_conversion_s
+       EXPORTING
+         ev_str_val             TYPE lty_cell_value.
+    DATA:
+      mt_changed_cells          TYPE lty_changed_cell_t,
+      mr_workbook               TYPE REF TO lcl_workbook_edit.
+
+ENDCLASS.                    "lcl_worksheet_edit DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_workbook_edit DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_workbook_edit DEFINITION INHERITING FROM lcl_workbook FRIENDS lcl_worksheet_edit.
+  PUBLIC SECTION.
+    METHODS:
+      add_worksheet REDEFINITION,
+      add_shared_strings_value
+        IMPORTING
+          iv_value                    TYPE lty_cell_value
+        RETURNING
+          value(rv_index)             TYPE i,
+      get_shared_strings_index
+        IMPORTING
+          iv_value                    TYPE lty_cell_value
+        RETURNING
+          value(rv_index)             TYPE i,
+      render_element
+        IMPORTING
+          ir_element                 TYPE REF TO if_ixml_element
+        RETURNING
+          value(rv_xml)              TYPE string,
+      save
+        EXPORTING
+          es_xmldocs                 TYPE lty_xmldocs_xstr,
+      constructor.
+
+  PROTECTED SECTION.
+    METHODS:
+      get_data_root
+        IMPORTING
+          ir_sheet_xml                TYPE REF TO if_ixml_document
+        RETURNING
+          value(rr_data_root)         TYPE REF TO if_ixml_element,
+      get_row_element
+        IMPORTING
+          ir_data_root                TYPE REF TO if_ixml_element
+          iv_row_index                TYPE i
+        RETURNING
+          value(rr_row_element)       TYPE REF TO if_ixml_element,
+      get_row_index
+        IMPORTING
+          ir_row_element              TYPE REF TO if_ixml_element
+        RETURNING
+          value(rv_row_index)         TYPE i,
+      get_cell_element
+        IMPORTING
+          ir_row_element              TYPE REF TO if_ixml_element
+          iv_excel_col                TYPE lty_excel_col
+        RETURNING
+          value(rr_cell_element)      TYPE REF TO if_ixml_element,
+      get_cell_element_for_insert
+        IMPORTING
+          ir_row_element              TYPE REF TO if_ixml_element
+          iv_excel_col                TYPE lty_excel_col
+        RETURNING
+          value(rs_cell_elements)     TYPE lty_cell_insert_s,
+      get_col_index
+        IMPORTING
+          ir_cell_element             TYPE REF TO if_ixml_element
+        RETURNING
+          value(rv_col_index)         TYPE string,
+      get_excel_col
+        IMPORTING
+          ir_cell_element             TYPE REF TO if_ixml_element
+        RETURNING
+          value(rv_excel_col)         TYPE lty_excel_col,
+      change_string_cell
+        IMPORTING
+          ir_document                 TYPE REF TO if_ixml_document
+          ir_cell_elem                TYPE REF TO if_ixml_element
+          ir_cell                     TYPE REF TO lty_sheet_data_cell_s,
+       create_string_cell_edit
+         IMPORTING
+           iv_row                     TYPE i
+           ir_document                TYPE REF TO if_ixml_document
+           ir_cell                    TYPE REF TO lty_sheet_data_cell_s
+           it_style_range             TYPE lty_style_range_t
+         RETURNING
+           value(rr_cell_element)     TYPE REF TO if_ixml_element,
+      sheet_changed
+        IMPORTING
+          ir_sheet_edit               TYPE REF TO lcl_worksheet_edit,
+      save_sheet
+        IMPORTING
+          ir_sheet                    TYPE REF TO lcl_worksheet_edit,
+       save_string_table,
+       create_xml_doc REDEFINITION,
+       get_style_range
+        IMPORTING
+          ir_sheet_xml                TYPE REF TO if_ixml_document
+        RETURNING
+          value(rt_style_range)       TYPE lty_style_range_t,
+       generate_shared_strings_table  REDEFINITION.
+
+    DATA:
+      mt_changed_sheets               TYPE lty_changed_sheet_t,
+      mv_strings_added                TYPE i,
+      mv_last_sh_str_index            TYPE i.
+ENDCLASS.                    "lcl_workbook_edit DEFINITION
+
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_worksheet_edit IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_worksheet_edit IMPLEMENTATION.
+
+  METHOD constructor.
+    "IMPORTING
+    "  ir_workbook           TYPE REF TO lcl_workbook_edit
+    "  iv_name             TYPE lty_sheetname.
+
+    super->constructor( iv_name = iv_name ).
+    CLEAR mr_workbook.
+    mr_workbook = ir_workbook.
+    CLEAR mt_changed_cells.
+
+  ENDMETHOD.                    "constructor
+
+  METHOD change_value.
+    "IMPORTING
+    " iv_column          TYPE lty_excel_col
+    " iv_row_index       TYPE lty_row_index
+    " iv_value           TYPE any,
+    " IS_CONVERSION       type /AIF/LFA_FLD_CONVERSION_S
+
+    DATA:
+      lr_datadescr        TYPE REF TO cl_abap_datadescr,
+      lr_changed_cells    TYPE REF TO lty_changed_cell_s,
+      ls_changed_cells    TYPE lty_changed_cell_s,
+      lr_cell_data        TYPE REF TO lty_sheet_data_cell_s,
+      ls_cell_data        TYPE lty_sheet_data_cell_s,
+      lv_col_index        TYPE lty_row_index,
+      lr_row_data         TYPE REF TO lty_sheet_data_s.
+
+    CLEAR lr_row_data.
+    lr_row_data = get_row_data(  iv_row  = iv_row_index ).
+    IF lr_row_data IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    "we can only add elementary data types as cell value.
+    TRY.
+
+        lr_datadescr ?= cl_abap_typedescr=>describe_by_data( p_data = iv_value ).
+        IF lr_datadescr->kind <> cl_abap_typedescr=>kind_elem.
+          RETURN.
+        ENDIF.
+
+      CATCH cx_root.
+
+    ENDTRY.
+
+    DATA:
+      lv_new_cell       TYPE abap_bool.
+
+    "get or create the cell to be updated.
+    lv_new_cell = abap_false.
+
+    CLEAR lv_col_index.
+    lv_col_index = lcl_excel_helper=>excelcol_to_index( iv_col = iv_column ).
+    CLEAR lr_cell_data.
+    READ TABLE lr_row_data->row_data WITH TABLE KEY col_index = lv_col_index REFERENCE INTO lr_cell_data.
+    IF sy-subrc <> 0.
+
+      CLEAR ls_cell_data.
+      ls_cell_data-col_index = lv_col_index.
+      ls_cell_data-col = iv_column.
+      ls_cell_data-type_kind = lr_datadescr->type_kind.
+      INSERT ls_cell_data INTO TABLE lr_row_data->row_data REFERENCE INTO lr_cell_data.
+      IF sy-subrc <> 0 .
+        RETURN.
+      ENDIF.
+      lv_new_cell = abap_true.
+
+    ELSE.
+
+      lr_cell_data->type_kind = lr_datadescr->type_kind.
+
+    ENDIF.
+
+    "convert the value and set type flag.
+    convert_val_to_str_conv( EXPORTING
+                               iv_val        = iv_value
+                               is_conversion = is_conversion
+                             IMPORTING
+                               ev_str_val    = lr_cell_data->value ).
+
+    DATA:
+      lv_index        TYPE i.
+
+    "check if value is in shared strings table, if necessary.
+    IF lv_new_cell = abap_true.
+
+      IF lr_cell_data->type_kind = cl_abap_typedescr=>typekind_char OR
+       lr_cell_data->type_kind = cl_abap_typedescr=>typekind_string OR
+       lr_cell_data->type_kind = cl_abap_typedescr=>typekind_csequence.
+
+      lv_index = 0.
+      lv_index = mr_workbook->add_shared_strings_value( iv_value = lr_cell_data->value ).
+      lr_cell_data->t = 's'.
+        lr_cell_data->sh_str_index = lv_index.
+
+      ENDIF.
+
+    ELSE.
+      "handle shared strings in update case.
+
+      IF lr_cell_data->t = 's'.
+
+        lv_index = 0.
+        lv_index = mr_workbook->add_shared_strings_value( iv_value = lr_cell_data->value ).
+        lr_cell_data->sh_str_index = lv_index.
+
+      ENDIF.
+
+    ENDIF.
+
+
+    READ TABLE mt_changed_cells WITH TABLE KEY row_index = lr_row_data->row_index REFERENCE INTO lr_changed_cells.
+    IF sy-subrc <> 0.
+      CLEAR ls_changed_cells.
+      ls_changed_cells-row_index = lr_row_data->row_index.
+      INSERT ls_changed_cells INTO TABLE mt_changed_cells REFERENCE INTO lr_changed_cells.
+    ENDIF.
+    READ TABLE lr_changed_cells->cell_ref_t WITH KEY table_line = lr_cell_data TRANSPORTING NO FIELDS.
+    IF sy-subrc <> 0.
+      APPEND lr_cell_data TO lr_changed_cells->cell_ref_t.
+    ENDIF.
+
+    mr_workbook->sheet_changed( ir_sheet_edit = me ).
+    "lr_cell_data->value = iv_value.
+
+  ENDMETHOD.                    "change_value
+
+  METHOD get_excel_col.
+    "importing
+    "  iv_col_name           type string
+    "  iv_row_index          TYPE lty_row_index
+    "returning
+    "  value(rv_excel_col)   type lty_excel_col,
+
+    DATA:
+      lr_cell           TYPE REF TO lty_sheet_data_cell_s,
+      lr_row            TYPE REF TO lty_sheet_data_s.
+
+    CLEAR rv_excel_col.
+    CLEAR lr_row.
+    lr_row = get_row_data( iv_row = iv_row_index ).
+    IF lr_row IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CLEAR lr_cell.
+    READ TABLE lr_row->row_data WITH KEY value = iv_col_name REFERENCE INTO lr_cell.
+    IF lr_cell IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    rv_excel_col = lr_cell->col.
+
+  ENDMETHOD.                    "get_excel_col
+
+  METHOD save.
+
+    mr_workbook->save_sheet( ir_sheet = me ).
+
+  ENDMETHOD.                    "save
+
+  METHOD convert_val_to_str_conv.
+    "IMPORTING
+    "  iv_val                 TYPE any
+    "  is_conversion          TYPE /aif/lfa_fld_conversion_s
+    "EXPORTING
+    "  ev_str_val             TYPE lty_cell_value.
+    DATA:
+      lr_root                 TYPE REF TO cx_root,
+      lv_tmp                  TYPE string,
+      ls_convert              TYPE lty_conversion_s.
+
+    TRY.
+        CLEAR ev_str_val.
+        CLEAR ls_convert.
+
+        IF is_conversion-convexit IS NOT INITIAL.
+          convert_using_conversion_exit( EXPORTING
+                                           iv_val             = iv_val
+                                           iv_conversion_exit = is_conversion-convexit
+                                         IMPORTING
+                                           ev_str_val         = ev_str_val ).
+          RETURN.
+        ENDIF.
+
+        IF is_conversion-use_field_exit = abap_true.
+          DESCRIBE FIELD iv_val TYPE          ls_convert-type
+                                LENGTH        ls_convert-length
+                                IN CHARACTER MODE
+                                OUTPUT-LENGTH ls_convert-output_length
+                                EDIT MASK     ls_convert-edit_mask.
+          IF ls_convert-edit_mask-prefix = '=='.
+            convert_using_conversion_exit( EXPORTING
+                                             iv_val             = iv_val
+                                             iv_conversion_exit = ls_convert-edit_mask-conversion_exit
+                                           IMPORTING
+                                             ev_str_val         = ev_str_val ).
+          ELSE.
+            convert_using_mask( EXPORTING
+                                  iv_val        = iv_val
+                                  is_conversion = ls_convert
+                                IMPORTING
+                                  ev_str_val    = ev_str_val ).
+          ENDIF.
+          RETURN.
+        ENDIF.
+
+        convert_val_to_str( EXPORTING
+                              iv_val     = iv_val
+                            IMPORTING
+                              ev_str_val = ev_str_val ).
+
+      CATCH cx_root INTO lr_root.
+        ev_str_val = iv_val.
+    ENDTRY.
+
+  ENDMETHOD.                    "convert_val_to_str_conv
+
+  METHOD convert_using_mask.
+    "IMPORTING
+    "  iv_val                 TYPE any
+    "  is_conversion          TYPE lty_conversion_s
+    "EXPORTING
+    "  ev_str_val             TYPE lty_cell_value,´
+
+    FIELD-SYMBOLS:
+      <fs_str>                TYPE csequence.
+
+    DATA:
+      lr_buffer               TYPE REF TO data,
+      lr_root                 TYPE REF TO cx_root.
+
+    TRY.
+        CLEAR ev_str_val.
+        CLEAR lr_buffer.
+        CREATE DATA lr_buffer TYPE c LENGTH is_conversion-output_length.
+        UNASSIGN <fs_str>.
+        ASSIGN lr_buffer->* TO <fs_str>.
+        IF <fs_str> IS ASSIGNED.
+          IF is_conversion-edit_mask IS NOT INITIAL.
+            WRITE iv_val USING EDIT MASK is_conversion-edit_mask TO <fs_str>.
+          ELSE.
+            WRITE iv_val TO <fs_str>.
+          ENDIF.
+          ev_str_val = <fs_str>.
+        ENDIF.
+      CATCH cx_root INTO lr_root.
+        ev_str_val = iv_val.
+    ENDTRY.
+
+  ENDMETHOD.                    "convert_using_mask
+
+  METHOD convert_using_conversion_exit.
+    "IMPORTING
+    "  iv_val                TYPE any
+    "  iv_conversion_exit    TYPE convexit
+    "EXPORTING
+    "  ev_str_val            TYPE lty_cell_value,
+
+    DATA:
+      lr_root                 TYPE REF TO cx_root,
+      lv_function             TYPE rs38l_fnam.
+
+    TRY.
+        CLEAR ev_str_val.
+        CLEAR lv_function.
+        CONCATENATE 'CONVERSION_EXIT_' iv_conversion_exit '_OUTPUT' INTO lv_function.
+        CONDENSE lv_function.
+        CALL FUNCTION lv_function
+          EXPORTING
+            input  = iv_val
+          IMPORTING
+            output = ev_str_val.
+
+      CATCH cx_root INTO lr_root.
+        ev_str_val = iv_val.
+    ENDTRY.
+
+  ENDMETHOD.                    "convert_using_conversion_exit
+
+ENDCLASS.                    "lcl_worksheet_edit IMPLEMENTATION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_workbook_edit IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_workbook_edit IMPLEMENTATION.
+
+  METHOD constructor.
+
+    super->constructor( ).
+    mv_last_sh_str_index = -1.
+    mv_strings_added = 0.
+    CLEAR mt_changed_sheets.
+
+  ENDMETHOD.                    "constructor
+
+  METHOD generate_shared_strings_table.
+
+    super->generate_shared_strings_table( ).
+    DESCRIBE TABLE mt_shared_strings LINES mv_last_sh_str_index.
+
+  ENDMETHOD.                    "generate_shared_strings_table
+
+  METHOD add_worksheet.
+    "importing
+    "  iv_index                type i
+    "  iv_sheetname            type lty_sheetname
+    "returning
+    "  value(rr_sheet)         type ref to lcl_worksheet,
+
+    DATA:
+      ls_sheet      TYPE lty_sheet_s.
+
+    CLEAR rr_sheet.
+    READ TABLE mt_sheets WITH TABLE KEY name = iv_sheetname TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0.
+      RETURN.
+    ENDIF.
+
+    CLEAR ls_sheet.
+    ls_sheet-name = iv_sheetname.
+    ls_sheet-index = iv_index.
+    CREATE OBJECT ls_sheet-sheet
+      TYPE
+        lcl_worksheet_edit
+      EXPORTING
+        ir_workbook        = me
+        iv_name            = iv_sheetname.
+    INSERT ls_sheet INTO TABLE mt_sheets.
+    rr_sheet = ls_sheet-sheet.
+
+  ENDMETHOD.                    "add_worksheet
+
+  METHOD get_shared_strings_index.
+    "IMPORTING
+    "  iv_value              TYPE lty_cell_value
+    "RETURNING
+    "  value(rv_index)       TYPE i,
+
+    rv_index = 0.
+    IF iv_value IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    READ TABLE mt_shared_strings WITH KEY table_line = iv_value TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0.
+      rv_index = sy-tabix.
+    ENDIF.
+
+  ENDMETHOD.                    "get_shared_strings_index
+
+  METHOD add_shared_strings_value.
+    "IMPORTING
+    "  iv_value              TYPE lty_cell_value
+    "RETURNING
+    "  value(rv_index)       TYPE i,
+
+    rv_index = 0.
+    IF iv_value IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    mv_strings_added = mv_strings_added + 1.
+    rv_index = get_shared_strings_index( iv_value = iv_value ).
+    IF rv_index <= 0.
+      APPEND iv_value TO mt_shared_strings.
+      IF sy-subrc = 0.
+        rv_index = sy-tabix.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.                    "add_shared_strings_value
+
+*  METHOD change_value.
+*    "IMPORTING
+*    " iv_sheet_name      TYPE lty_sheetname
+*    " iv_column          TYPE lty_excel_col
+*    " iv_row_index       TYPE lty_row_index
+*    " iv_value           TYPE lty_cell_value,
+*
+*    DATA:
+*      ls_changed_sheet  TYPE lty_changed_sheet_s,
+*      lr_sheet_edit     TYPE REF TO lcl_worksheet_edit.
+*
+*    CLEAR lr_sheet_edit.
+*    lr_sheet_edit ?= get_worksheet( iv_sheetname = iv_sheet_name ).
+*    IF lr_sheet_edit IS INITIAL.
+*      RETURN.
+*    ENDIF.
+*
+*    lr_sheet_edit->change_value( iv_column    = iv_column
+*                                 iv_row_index = iv_row_index
+*                                 iv_value     = iv_value ).
+*
+*    READ TABLE mt_changed_sheets WITH TABLE KEY name = iv_sheet_name TRANSPORTING NO FIELDS.
+*    IF sy-subrc <> 0.
+*      CLEAR ls_changed_sheet.
+*      ls_changed_sheet-name = lr_sheet_edit->mv_name.
+*      "ls_changed_sheet-index = .
+*      ls_changed_sheet-sheet = lr_sheet_edit.
+*      INSERT ls_changed_sheet INTO TABLE mt_changed_sheets.
+*    ENDIF.
+*
+*  ENDMETHOD.                    "change_value
+
+  METHOD sheet_changed.
+    "importing
+    "  ir_sheet_edit     type ref to lcl_worksheet_edit
+
+    DATA:
+      ls_changed_sheet  TYPE lty_changed_sheet_s.
+
+    READ TABLE mt_changed_sheets WITH TABLE KEY name = ir_sheet_edit->mv_name TRANSPORTING NO FIELDS.
+    IF sy-subrc <> 0.
+      CLEAR ls_changed_sheet.
+      ls_changed_sheet-name = ir_sheet_edit->mv_name.
+      "ls_changed_sheet-index = .
+      ls_changed_sheet-sheet = ir_sheet_edit.
+      INSERT ls_changed_sheet INTO TABLE mt_changed_sheets.
+    ENDIF.
+
+  ENDMETHOD.                    "sheet_changed
+
+  METHOD save.
+    "EXPORTING
+    "  es_xmldocs                 TYPE lty_xmldocs_xstr,
+
+    "at first save string table.
+    DATA:
+      lv_num_shared_strings       TYPE i.
+
+    CLEAR es_xmldocs.
+
+    lv_num_shared_strings = 0.
+    DESCRIBE TABLE mt_shared_strings LINES lv_num_shared_strings.
+    IF lv_num_shared_strings > mv_last_sh_str_index.
+      save_string_table( ).
+      es_xmldocs-shared_strings = create_raw_data( ir_document = ms_xmldocs-shared_strings ).
+    ENDIF.
+
+    "generate binary for xml files, which were changed.
+    DATA:
+      lr_sheet                TYPE REF TO lty_xmlsheet_s,
+      lr_changed_sheet        TYPE REF TO lty_changed_sheet_s,
+      ls_sheetxml_xstr        TYPE lty_sheetxml_xstr_s.
+
+    LOOP AT mt_changed_sheets REFERENCE INTO lr_changed_sheet.
+
+      "find corresponding xml-document.
+      READ TABLE ms_xmldocs-sheets WITH KEY name = lr_changed_sheet->name REFERENCE INTO lr_sheet.
+
+      CLEAR ls_sheetxml_xstr.
+      ls_sheetxml_xstr-sheetid = lr_sheet->sheetid.
+      ls_sheetxml_xstr-filename = lr_sheet->filename.
+      ls_sheetxml_xstr-sheet = create_raw_data( ir_document = lr_sheet->sheet ).
+      INSERT ls_sheetxml_xstr INTO TABLE es_xmldocs-sheets.
+
+    ENDLOOP.
+
+
+  ENDMETHOD.                    "save
+
+  METHOD save_string_table.
+
+    DATA:
+      lv_start_index                 TYPE i,
+      lv_lines                       TYPE i,
+      lv_count                       TYPE i,
+      lv_tmp                         TYPE string,
+      lr_root_element                TYPE REF TO if_ixml_element,
+      lr_child_si                    TYPE REF TO if_ixml_element,
+      lr_child_t                     TYPE REF TO if_ixml_element,
+      lr_shared_strings_doc          TYPE REF TO if_ixml_document.
+
+    CLEAR lr_shared_strings_doc.
+    lr_shared_strings_doc = ms_xmldocs-shared_strings.
+    IF lr_shared_strings_doc IS BOUND.
+
+      lv_start_index = 0.
+      lv_start_index = mv_last_sh_str_index + 1.
+      CLEAR lr_root_element.
+      lr_root_element = lr_shared_strings_doc->get_root_element( ).
+      IF lr_root_element IS BOUND.
+
+        LOOP AT mt_shared_strings INTO lv_tmp FROM lv_start_index.
+
+          CONDENSE lv_tmp.
+          CLEAR lr_child_si.
+          lr_child_si = lr_shared_strings_doc->create_element_ns( name = 'si' ).
+          lr_root_element->append_child( new_child = lr_child_si ).
+          lr_child_t = lr_shared_strings_doc->create_element_ns( name = 't' ).
+          lr_child_t->set_value( value = lv_tmp ).
+          lr_child_si->append_child( new_child = lr_child_t ).
+
+        ENDLOOP.
+
+        DESCRIBE TABLE mt_shared_strings LINES lv_lines.
+        CLEAR lv_tmp.
+        lv_tmp = lv_lines.
+        CONDENSE lv_tmp.
+        lr_root_element->set_attribute_ns( name = 'uniqueCount' value = lv_tmp ).
+
+
+        "add count to mv_strings_added.
+        CLEAR lv_tmp.
+        lv_tmp = lr_root_element->get_attribute_ns( name = 'count' ).
+        CONDENSE lv_tmp.
+        lv_count = lv_tmp.
+        lv_count = lv_count + mv_strings_added.
+        CLEAR lv_tmp.
+        lv_tmp = lv_count.
+        CONDENSE lv_tmp.
+        lr_root_element->set_attribute_ns( name = 'count' value = lv_tmp ).
+
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.                    "save_string_table
+
+  METHOD get_data_root.
+    "importing
+    "  ir_sheet_xml           TYPE REF TO if_ixml_document
+    "returning
+    "  value(rr_data_root)    TYPE REF TO if_ixml_element
+
+    DATA:
+      lv_path               TYPE string,
+      lr_root               TYPE REF TO if_ixml_element.
+
+    CLEAR lr_root.
+    lr_root = ir_sheet_xml->get_root_element( ).
+
+    CLEAR lv_path.
+    lv_path = '/worksheet/sheetData'.
+    CLEAR rr_data_root.
+    rr_data_root = lr_root->find_from_path( path = lv_path ).
+
+  ENDMETHOD.                    "get_data_root
+
+  METHOD get_row_index.
+    "importing
+    "  ir_row_element           TYPE REF TO if_ixml_element
+    "returning
+    "  value(rv_row_index)      type i
+
+    DATA:
+      lv_tmp_val            TYPE string.
+
+    rv_row_index = 0.
+    CLEAR lv_tmp_val.
+    lv_tmp_val = ir_row_element->get_attribute_ns( name = 'r' ).
+    rv_row_index = lv_tmp_val.
+
+  ENDMETHOD.                    "get_row_index
+
+  METHOD get_row_element.
+    "importing
+    "  ir_data_root             TYPE REF TO if_ixml_element
+    "  iv_row_index             type i
+    "returning
+    "  value(rr_row_element)    TYPE REF TO if_ixml_element
+
+    DATA:
+      lv_len                TYPE i,
+      lv_index              TYPE i,
+      lv_tmp_row_index      TYPE i,
+      lr_row_element        TYPE REF TO if_ixml_element,
+      lr_row_list           TYPE REF TO if_ixml_node_list.
+
+    CLEAR rr_row_element.
+    CLEAR lr_row_list.
+    lr_row_list = ir_data_root->get_children( ).
+    IF lr_row_list IS NOT BOUND.
+      RETURN.
+    ENDIF.
+    lv_len = 0.
+    lv_len = lr_row_list->get_length( ).
+
+    CLEAR rr_row_element.
+    IF iv_row_index < 0 OR iv_row_index > lv_len.
+      RETURN.
+    ENDIF.
+
+    lv_index = 0.
+    WHILE lv_index < lv_len.
+
+      CLEAR lr_row_element.
+      lr_row_element ?= lr_row_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_row_element IS BOUND.
+
+        lv_tmp_row_index = 0.
+        lv_tmp_row_index = get_row_index( ir_row_element = lr_row_element ).
+        IF lv_tmp_row_index = iv_row_index.
+          rr_row_element = lr_row_element.
+          RETURN.
+        ELSEIF lv_tmp_row_index > iv_row_index.
+          RETURN.
+        ENDIF.
+
+      ENDIF.
+
+    ENDWHILE.
+
+
+  ENDMETHOD.                    "get_row_element
+
+  METHOD get_col_index.
+    "importing
+    "  ir_cell_element          TYPE REF TO if_ixml_element
+    "returning
+    "  value(rv_col_index)      type string
+
+
+    CLEAR rv_col_index.
+    rv_col_index = ir_cell_element->get_attribute_ns( name = 'r' ).
+
+  ENDMETHOD.                    "get_col_index
+
+  METHOD get_excel_col.
+    "importing
+    "  ir_cell_element          TYPE REF TO if_ixml_element
+    "returning
+    "  value(rv_excel_col)      type lty_excel_col
+
+    CONSTANTS:
+      cv_numeric            TYPE c LENGTH 10 VALUE '0123456789'.
+
+    DATA:
+      lv_test               TYPE c LENGTH 1,
+      lv_pos                TYPE i,
+      lv_len                TYPE i,
+      lv_tmp_val            TYPE string.
+
+    CLEAR rv_excel_col.
+    CLEAR lv_tmp_val.
+    lv_tmp_val = get_col_index( ir_cell_element = ir_cell_element ).
+    CONDENSE lv_tmp_val.
+    lv_len = 0.
+    lv_len = NUMOFCHAR( lv_tmp_val ).
+    lv_pos = 0.
+    WHILE lv_pos < lv_len.
+
+      lv_test = lv_tmp_val+lv_pos(1).
+      IF lv_test CA cv_numeric.
+        rv_excel_col = lv_tmp_val(lv_pos).
+        RETURN.
+      ENDIF.
+      lv_pos = lv_pos + 1.
+
+    ENDWHILE.
+  ENDMETHOD.                    "get_excel_col
+
+  METHOD get_cell_element.
+    "importing
+    "  ir_row_element           TYPE REF TO if_ixml_element
+    "  iv_excel_col             type lty_excel_col
+    "returning
+    "  value(rr_col_element)    TYPE REF TO if_ixml_element
+
+    DATA:
+      lv_tmp_index_i        TYPE i,
+      lv_col_index_i        TYPE i,
+      lv_len                TYPE i,
+      lv_index              TYPE i,
+      lv_tmp_excel_col      TYPE lty_excel_col,
+      lv_col_index          TYPE string,
+      lv_tmp_row_index      TYPE i,
+      lv_tmp_col_index      TYPE string,
+      lr_cell_element       TYPE REF TO if_ixml_element,
+      lr_col_list           TYPE REF TO if_ixml_node_list.
+
+    CLEAR rr_cell_element.
+    lv_tmp_row_index = 0.
+    lv_tmp_row_index = get_row_index( ir_row_element = ir_row_element ).
+    lv_col_index = lv_tmp_row_index.
+    CONDENSE lv_col_index.
+    CONCATENATE iv_excel_col lv_col_index INTO lv_col_index.
+    CONDENSE lv_col_index.
+
+    lv_col_index_i = 0.
+    lv_col_index_i = lcl_excel_helper=>excelcol_to_index( iv_col = iv_excel_col ).
+    CLEAR lr_col_list.
+    lr_col_list = ir_row_element->get_children( ).
+    IF lr_col_list IS NOT BOUND.
+      RETURN.
+    ENDIF.
+    lv_len = 0.
+    lv_len = lr_col_list->get_length( ).
+
+    lv_index = 0.
+    WHILE lv_index < lv_len.
+
+      CLEAR lr_cell_element.
+      lr_cell_element ?= lr_col_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_cell_element IS BOUND.
+
+        CLEAR lv_tmp_col_index.
+        lv_tmp_col_index = get_col_index( ir_cell_element = lr_cell_element ).
+        IF lv_tmp_col_index = lv_col_index.
+          rr_cell_element = lr_cell_element.
+          RETURN.
+        ELSE.
+          lv_tmp_index_i = 0.
+          CLEAR lv_tmp_excel_col.
+          lv_tmp_excel_col = get_excel_col( ir_cell_element = lr_cell_element ).
+          lv_tmp_index_i = lcl_excel_helper=>excelcol_to_index( iv_col = lv_tmp_excel_col ).
+          IF lv_col_index_i < lv_tmp_index_i.
+            RETURN.
+          ENDIF.
+        ENDIF.
+
+      ENDIF.
+
+    ENDWHILE.
+
+  ENDMETHOD.                    "get_cell_element
+
+  METHOD get_cell_element_for_insert.
+    "IMPORTING
+    "  ir_row_element              TYPE REF TO if_ixml_element
+    "  iv_excel_col                TYPE lty_excel_col
+    "RETURNING
+    "  value(rs_cell_elements)     TYPE lty_cell_insert_s,
+    DATA:
+      lv_tmp_index_i        TYPE i,
+      lv_col_index_i        TYPE i,
+      lv_len                TYPE i,
+      lv_index              TYPE i,
+      lv_tmp_excel_col      TYPE lty_excel_col,
+      lv_col_index          TYPE string,
+      lv_tmp_row_index      TYPE i,
+      lv_tmp_col_index      TYPE string,
+      lr_cell_element       TYPE REF TO if_ixml_element,
+      lr_col_list           TYPE REF TO if_ixml_node_list.
+
+    CLEAR rs_cell_elements.
+    lv_tmp_row_index = 0.
+    lv_tmp_row_index = get_row_index( ir_row_element = ir_row_element ).
+    lv_col_index = lv_tmp_row_index.
+    CONDENSE lv_col_index.
+    CONCATENATE iv_excel_col lv_col_index INTO lv_col_index.
+    CONDENSE lv_col_index.
+
+    lv_col_index_i = 0.
+    lv_col_index_i = lcl_excel_helper=>excelcol_to_index( iv_col = iv_excel_col ).
+    CLEAR lr_col_list.
+    lr_col_list = ir_row_element->get_children( ).
+    IF lr_col_list IS NOT BOUND.
+      RETURN.
+    ENDIF.
+    lv_len = 0.
+    lv_len = lr_col_list->get_length( ).
+
+    lv_index = 0.
+    WHILE lv_index < lv_len.
+
+      CLEAR lr_cell_element.
+      lr_cell_element ?= lr_col_list->get_item( index = lv_index ).
+      lv_index = lv_index + 1.
+      IF lr_cell_element IS BOUND.
+
+        CLEAR lv_tmp_col_index.
+        lv_tmp_col_index = get_col_index( ir_cell_element = lr_cell_element ).
+        IF lv_tmp_col_index = lv_col_index.
+          rs_cell_elements-cell = lr_cell_element.
+          RETURN.
+        ELSE.
+          lv_tmp_index_i = 0.
+          CLEAR lv_tmp_excel_col.
+          lv_tmp_excel_col = get_excel_col( ir_cell_element = lr_cell_element ).
+          lv_tmp_index_i = lcl_excel_helper=>excelcol_to_index( iv_col = lv_tmp_excel_col ).
+          IF lv_col_index_i < lv_tmp_index_i.
+            rs_cell_elements-cell_after = lr_cell_element.
+            RETURN.
+          ENDIF.
+        ENDIF.
+
+      ENDIF.
+
+    ENDWHILE.
+
+  ENDMETHOD.                    "get_cell_element_for_insert
+
+  METHOD change_string_cell.
+    "importing
+    "  ir_document            TYPE REF TO if_ixml_document
+    "  ir_cell_elem           type ref to if_ixml_element
+    "  ir_cell                type ref to lty_sheet_data_cell_s
+
+    DATA:
+      lv_tmp                  TYPE string,
+      lv_strval               TYPE string,
+      lr_value_elem           TYPE REF TO if_ixml_element.
+
+
+    ir_cell_elem->set_attribute_ns( name = 't' value = 's' ).
+    CLEAR lr_value_elem.
+    lr_value_elem ?= ir_cell_elem->get_first_child( ).
+    IF lr_value_elem IS NOT BOUND.
+      lr_value_elem = ir_document->create_element_ns( name = 'v' ).
+      ir_cell_elem->append_child( new_child = lr_value_elem ).
+    ENDIF.
+
+    CLEAR lv_tmp.
+    lv_tmp = ir_cell->sh_str_index - 1.
+    CONDENSE lv_tmp.
+    lr_value_elem->set_value( value = lv_tmp ).
+
+  ENDMETHOD.                    "create_string_cell
+
+  METHOD create_string_cell_edit.
+    "importing
+    "  iv_row                     TYPE i
+    "  ir_document                type REF TO if_ixml_document
+    "  ir_cell                    type ref to lty_sheet_data_cell_s
+    "  it_style_range             TYPE lty_style_range_t
+    "RETURNING
+    "  value(rr_cell_element)     TYPE REF TO if_ixml_element,
+
+    DATA:
+      lv_tmp                  TYPE string,
+      lv_strval               TYPE string,
+      lv_col_index            TYPE i,
+      lr_style_range          TYPE REF TO lty_style_range_s,
+      lr_value_elem           TYPE REF TO if_ixml_element.
+
+    CLEAR rr_cell_element.
+    rr_cell_element = ir_document->create_element_ns( name = 'c' ).
+    CLEAR lv_tmp.
+    lv_tmp = iv_row.
+    CONCATENATE ir_cell->col lv_tmp INTO lv_tmp.
+    CONDENSE lv_tmp.
+    rr_cell_element->set_attribute_ns( name = 'r' value = lv_tmp ).
+    rr_cell_element->set_attribute_ns( name = 't' value = 's' ).
+
+    lv_col_index = lcl_excel_helper=>excelcol_to_index( iv_col = ir_cell->col ).
+    "check for style attribute.
+    LOOP AT it_style_range REFERENCE INTO lr_style_range WHERE min <= lv_col_index.
+
+      IF lr_style_range->max >= lv_col_index.
+        rr_cell_element->set_attribute_ns( name = 's' value = lr_style_range->style ).
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    lr_value_elem = ir_document->create_element_ns( name = 'v' ).
+
+    lv_tmp = ir_cell->sh_str_index - 1.
+    CONDENSE lv_tmp.
+    lr_value_elem->set_value( value = lv_tmp ).
+    rr_cell_element->append_child( new_child = lr_value_elem ).
+
+  ENDMETHOD.                    "create_string_cell
+
+  METHOD create_xml_doc.
+    "IMPORTING
+    "  iv_content            TYPE xstring
+    "RETURNING
+    "  value(rr_document)    TYPE REF TO if_ixml_document,
+
+    DATA:
+      lr_stream           TYPE REF TO if_ixml_istream,
+      lr_parser           TYPE REF TO if_ixml_parser.
+
+    CLEAR rr_document.
+    CLEAR lr_stream.
+    lr_stream = mr_stream_factory->create_istream_xstring( string = iv_content ).
+    rr_document = mr_ixml->create_document( ).
+    lr_parser = mr_ixml->create_parser( document       = rr_document
+                                        istream        = lr_stream
+                                        stream_factory = mr_stream_factory ).
+    lr_parser->set_normalizing( is_normalizing = abap_true ).
+    DATA:
+      lv_mode     TYPE i.
+    lv_mode = -1.
+    lv_mode = lr_parser->get_namespace_mode( ).
+    IF lr_parser->parse( ) <> 0.
+      CLEAR rr_document.
+      RETURN.
+    ENDIF.
+
+  ENDMETHOD.                    "create_xml_doc
+
+  METHOD get_style_range.
+    "IMPORTING
+    "  ir_sheet_xml                TYPE REF TO if_ixml_document
+    "RETURNING
+    "  value(rt_style_range)       TYPE lty_style_range_t,
+
+    DATA:
+      lv_len                  TYPE i,
+      lv_index                TYPE i,
+      lr_col_element          TYPE REF TO if_ixml_element,
+      lv_style                TYPE string,
+*      lr_root_element         TYPE REF TO if_ixml_element,
+*      lv_path                 TYPE string,
+*      lv_uri                  TYPE string,
+*      lv_tmp_excel_col        TYPE lty_excel_col,
+*      lv_col_index            TYPE string,
+*      lv_tmp_row_index        TYPE i,
+*      lv_tmp_col_index        TYPE string,
+*      lr_cell_element         TYPE REF TO if_ixml_element,
+      lr_col_list             TYPE REF TO if_ixml_node_collection,
+      ls_style_range          TYPE lty_style_range_s.
+
+    CLEAR lr_col_list.
+    lr_col_list = ir_sheet_xml->get_elements_by_tag_name( name = 'col' ).
+    IF lr_col_list IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    lv_len = 0.
+    lv_len = lr_col_list->get_length( ).
+    lv_index = 0.
+    WHILE lv_index < lv_len.
+
+      CLEAR lr_col_element.
+      lr_col_element ?= lr_col_list->get_item( index = lv_index ).
+      IF lr_col_element IS NOT BOUND.
+        CONTINUE.
+      ENDIF.
+      lv_index = lv_index + 1.
+      CLEAR lv_style.
+      lv_style = lr_col_element->get_attribute_ns( name = 'style' ).
+      CONDENSE lv_style.
+      IF lv_style IS NOT INITIAL.
+
+        CLEAR ls_style_range.
+        ls_style_range-min = lr_col_element->get_attribute_ns( name = 'min' ).
+        ls_style_range-max = lr_col_element->get_attribute_ns( name = 'max' ).
+        ls_style_range-style = lv_style.
+        INSERT ls_style_range INTO TABLE rt_style_range.
+
+      ENDIF.
+
+    ENDWHILE.
+
+  ENDMETHOD.                    "get_style_range
+
+  METHOD save_sheet.
+    "importing
+    "  ir_sheet              type ref to lcl_worksheet_edit,
+
+    DATA:
+      lr_data_root           TYPE REF TO if_ixml_element,
+      lr_sheet_xml           TYPE REF TO if_ixml_document,
+      lr_sheet               TYPE REF TO lty_xmlsheet_s.
+
+    "find corresponding xml-document.
+    IF ir_sheet IS NOT BOUND.
+      RETURN.
+    ENDIF.
+    READ TABLE ms_xmldocs-sheets WITH KEY name = ir_sheet->mv_name REFERENCE INTO lr_sheet.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+    CLEAR lr_sheet_xml.
+    lr_sheet_xml = lr_sheet->sheet.
+    IF lr_sheet_xml IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    "build cell-style collections for defaulting style for new cells.
+    DATA:
+      lt_style_range        TYPE lty_style_range_t.
+
+    CLEAR lt_style_range.
+    lt_style_range = get_style_range( ir_sheet_xml = lr_sheet_xml ).
+
+    TRY.
+        "update xml with the new/changed data from the sheet.
+        DATA:
+          lr_changed_cell       TYPE REF TO lty_changed_cell_s,
+          lr_cell_data          TYPE REF TO lty_sheet_data_cell_s.
+
+        DATA:
+          ls_cell_elements      TYPE lty_cell_insert_s,
+          lv_path               TYPE string,
+          lv_len                TYPE i,
+          lv_tmp_index          TYPE i,
+          lv_tmp_val            TYPE string,
+          lr_row_list           TYPE REF TO if_ixml_node_list,
+          lv_col_tmp_index      TYPE i,
+          lv_col_len            TYPE i,
+          lr_column_list        TYPE REF TO if_ixml_node_list,
+          lr_attribute          TYPE REF TO if_ixml_attribute,
+          lr_row_element        TYPE REF TO if_ixml_element,
+          lr_cell_element       TYPE REF TO if_ixml_element,
+          lr_root               TYPE REF TO if_ixml_element.
+
+        CLEAR lr_data_root.
+        lr_data_root = get_data_root( ir_sheet_xml = lr_sheet_xml ).
+        IF lr_data_root IS NOT BOUND.
+          RETURN.
+        ENDIF.
+
+        LOOP AT ir_sheet->mt_changed_cells REFERENCE INTO lr_changed_cell.
+
+          "get row element
+          CLEAR lr_row_element.
+          lr_row_element = get_row_element( ir_data_root = lr_data_root
+                                            iv_row_index = lr_changed_cell->row_index ).
+          IF lr_row_element IS BOUND.
+
+*            DATA:
+*              lv_value_test     TYPE string.
+*            CLEAR lv_value_test.
+*            lv_value_test = render_element( ir_element = lr_row_element ).
+
+            LOOP AT lr_changed_cell->cell_ref_t INTO lr_cell_data.
+              CLEAR ls_cell_elements.
+              ls_cell_elements = get_cell_element_for_insert( ir_row_element  = lr_row_element
+                                                              iv_excel_col    = lr_cell_data->col ).
+              IF ls_cell_elements-cell IS BOUND.
+                IF lr_cell_data->t = 's'.
+                  change_string_cell( ir_document  = lr_sheet_xml
+                                      ir_cell_elem = ls_cell_elements-cell
+                                      ir_cell      = lr_cell_data ).
+                ELSE.
+                  "change_cell( ).
+                ENDIF.
+
+              ELSE.
+
+                IF lr_cell_data->t = 's'.
+                  "create new string cell.
+                  ls_cell_elements-cell = create_string_cell_edit( iv_row         = lr_changed_cell->row_index
+                                                                   ir_document    = lr_sheet_xml
+                                                                   ir_cell        = lr_cell_data
+                                                                   it_style_range = lt_style_range ).
+                  IF ls_cell_elements-cell IS BOUND.
+                    lr_row_element->insert_child( new_child = ls_cell_elements-cell
+                                                  ref_child = ls_cell_elements-cell_after ).
+                  ENDIF.
+                ELSE.
+                  "change_cell( ).
+                ENDIF.
+
+              ENDIF.
+
+            ENDLOOP.
+
+          ENDIF.
+
+        ENDLOOP.
+
+      CATCH cx_root.
+    ENDTRY.
+
+  ENDMETHOD.                    "save_sheet
+
+  METHOD render_element.
+    "importing
+    "  ir_element                  type ref to if_ixml_element
+    "returning
+    "  value(rv_xml)               type string.
+
+    DATA:
+      lr_ostream          TYPE REF TO if_ixml_ostream.
+
+    CLEAR rv_xml.
+    IF ir_element IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    lr_ostream = mr_stream_factory->create_ostream_cstring( string = rv_xml ).
+    ir_element->render( ostream = lr_ostream ).
+
+  ENDMETHOD.                    "render_element
+
+ENDCLASS.                    "lcl_workbook_edit IMPLEMENTATION

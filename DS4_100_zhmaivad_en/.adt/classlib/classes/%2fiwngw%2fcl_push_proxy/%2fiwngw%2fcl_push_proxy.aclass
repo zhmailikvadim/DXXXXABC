@@ -1,0 +1,205 @@
+class /IWNGW/CL_PUSH_PROXY definition
+  public
+  final
+  create public .
+
+public section.
+
+  class-methods CREATE_NOTIFICATIONS
+    importing
+      !IV_PROVIDER_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_S_PROVIDER-ID
+      !IT_NOTIFICATION type /IWNGW/IF_NOTIF_PROVIDER=>TY_T_NOTIFICATION
+      !IT_NOTIFICATION_PROP type /IWNGW/T_BEP_IN_NPROP_RESOLVE optional
+    raising
+      /IWNGW/CX_NOTIFICATION_API .
+  class-methods DELETE_NOTIFICATIONS
+    importing
+      !IV_PROVIDER_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_S_PROVIDER-ID
+      !IT_NOTIFICATION_ID type /IWNGW/IF_NOTIF_PROVIDER=>TY_T_NOTIFICATION_ID
+    raising
+      /IWNGW/CX_NOTIFICATION_API .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS /IWNGW/CL_PUSH_PROXY IMPLEMENTATION.
+
+
+  METHOD create_notifications.
+    DATA ls_notif     LIKE LINE OF it_notification.
+    DATA lt_notif_out TYPE /iwngw/t_bep_out_notif.
+    DATA ls_notif_out LIKE LINE OF lt_notif_out.
+
+    DATA ls_nrecip     TYPE /iwngw/if_notif_provider=>ty_s_notification_recipient.
+    DATA ls_nrecip_out TYPE /iwngw/s_bep_out_nrecip.
+
+    DATA ls_nav_param     TYPE /iwngw/if_notif_provider=>ty_s_navigation_parameter.
+    DATA ls_nav_param_out TYPE /iwngw/s_bep_out_nav_param.
+
+    DATA ls_nprop_resolved LIKE LINE OF it_notification_prop.
+    DATA lt_nprop          TYPE /iwngw/t_bep_out_nprop.
+    DATA ls_nprop          LIKE LINE OF lt_nprop.
+    DATA lt_nprop_filtered TYPE /iwngw/t_bep_out_nprop.
+    DATA ls_nprop_inline   TYPE /iwngw/s_bep_out_nprop.
+
+    DATA lv_destination TYPE rfcdest.
+    DATA lv_sap_origin TYPE /iwngw/hub_med_sap_origin.
+    DATA lx_bep_out_pr_rfc TYPE REF TO /iwngw/cx_bep_out_pr_rfc.
+    DATA: lo_log       TYPE REF TO /iwngw/cl_nc_logger.
+
+    " Getting instance of the logger class
+    lo_log = /iwngw/cl_nc_logger=>get_logger( ).
+
+    /iwngw/cl_hub_cof_settings=>get_bep_sap_origin(
+      IMPORTING
+        ev_sap_origin = lv_sap_origin ).
+
+    " Copy to outbound table structure
+    LOOP AT it_notification_prop INTO ls_nprop_resolved.
+      MOVE-CORRESPONDING ls_nprop_resolved TO ls_nprop ##ENH_OK.
+      APPEND ls_nprop TO lt_nprop.
+    ENDLOOP.
+
+    " Adjust the input to fit the HUB interface
+    LOOP AT it_notification INTO ls_notif.
+      ls_notif_out-sap_origin         = lv_sap_origin.
+      ls_notif_out-provider_id        = iv_provider_id.
+      ls_notif_out-source_id          = ls_notif-id.
+      ls_notif_out-type_key           = ls_notif-type_key.
+      ls_notif_out-type_version       = ls_notif-type_version.
+      ls_notif_out-priority	          = ls_notif-priority.
+      ls_notif_out-actor_id	          = ls_notif-actor_id.
+      ls_notif_out-actor_type	        = ls_notif-actor_type.
+      ls_notif_out-actor_display_text = ls_notif-actor_display_text.
+      ls_notif_out-actor_image_url    = ls_notif-actor_image_url.
+      ls_notif_out-nav_target_obj     = ls_notif-navigation_target_object.
+      ls_notif_out-nav_target_action  = ls_notif-navigation_target_action.
+
+      CLEAR ls_notif_out-recipients.
+      LOOP AT ls_notif-recipients INTO ls_nrecip.
+        MOVE-CORRESPONDING ls_nrecip TO ls_nrecip_out.
+        APPEND ls_nrecip_out TO ls_notif_out-recipients.
+      ENDLOOP.
+
+      CLEAR ls_notif_out-nav_params.
+      LOOP AT ls_notif-navigation_parameters INTO ls_nav_param.
+        MOVE-CORRESPONDING ls_nav_param TO ls_nav_param_out.
+        APPEND ls_nav_param_out TO ls_notif_out-nav_params.
+      ENDLOOP.
+
+      " Add the notification properties
+      CLEAR ls_notif_out-properties.
+      lt_nprop_filtered = lt_nprop.
+      DELETE lt_nprop_filtered WHERE source_id <> ls_notif-id.
+      LOOP AT lt_nprop_filtered INTO ls_nprop.
+        MOVE-CORRESPONDING ls_nprop TO ls_nprop_inline.
+        APPEND ls_nprop_inline TO ls_notif_out-properties.
+      ENDLOOP.
+
+      APPEND ls_notif_out TO lt_notif_out.
+    ENDLOOP.
+
+    " call outbound proxy
+    /iwngw/cl_hub_cof_settings=>get_hub_destination(
+      IMPORTING
+        ev_destination = lv_destination ).
+
+    TRY.
+        " call outbound proxy
+        /iwngw/cl_bep_out_pr_rfc=>create_notifications(
+          EXPORTING
+            iv_destination = lv_destination
+            iv_provider_id = iv_provider_id
+            it_notification = lt_notif_out ).
+
+        lo_log->log_message(
+          EXPORTING
+            iv_msg_type = 'S'
+            iv_msg_id = '/IWNGW/CM_BEP_RT'
+            iv_msg_number = '020' ).
+
+      CATCH /iwngw/cx_bep_out_pr_rfc INTO lx_bep_out_pr_rfc.
+        lo_log->log_exception( io_exception =  lx_bep_out_pr_rfc ).
+        lo_log->log_message(
+          EXPORTING
+           iv_msg_type = 'E'
+           iv_msg_id = '/IWNGW/CM_BEP_RT'
+           iv_msg_number = '032'
+           iv_exception = 'X').
+        lo_log->save_log( ).
+        RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+          EXPORTING
+            textid   = /iwngw/cx_notification_api=>outbound_failure
+            previous = lx_bep_out_pr_rfc.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD delete_notifications.
+    DATA ls_notif_id LIKE LINE OF it_notification_id.
+    DATA lt_notif_id_out TYPE /iwngw/t_bep_out_notif_id.
+    DATA lt_invalid_source_id TYPE /iwngw/if_notif_provider=>ty_t_notification_id.
+    DATA ls_notif_id_out LIKE LINE OF lt_notif_id_out.
+    DATA ls_invalid_source_id TYPE /iwngw/if_notif_provider=>ty_s_notification_id.
+
+    DATA lv_destination TYPE rfcdest.
+    DATA lv_sap_origin TYPE /iwngw/hub_med_sap_origin.
+    DATA lx_bep_out_pr_rfc TYPE REF TO /iwngw/cx_bep_out_pr_rfc.
+    DATA: lo_log TYPE REF TO /iwngw/cl_nc_logger.
+    lo_log = /iwngw/cl_nc_logger=>get_logger( ).
+
+    /iwngw/cl_hub_cof_settings=>get_bep_sap_origin(
+      IMPORTING
+        ev_sap_origin = lv_sap_origin ).
+
+    " Adjust the input to fit the RFC interface
+    LOOP AT it_notification_id INTO ls_notif_id.
+      ls_notif_id_out-sap_origin   = lv_sap_origin.
+      ls_notif_id_out-provider_id  = iv_provider_id.
+      ls_notif_id_out-source_id    = ls_notif_id-id.
+      ls_notif_id_out-type_key     = ls_notif_id-type_key.
+      ls_notif_id_out-type_version = ls_notif_id-type_version.
+      APPEND ls_notif_id_out TO lt_notif_id_out.
+    ENDLOOP.
+
+    " call outbound proxy
+    /iwngw/cl_hub_cof_settings=>get_hub_destination(
+      IMPORTING
+        ev_destination = lv_destination ).
+
+    TRY.
+        /iwngw/cl_bep_out_pr_rfc=>delete_notifications(
+          EXPORTING
+            iv_destination          = lv_destination
+            iv_provider_id          = iv_provider_id
+            it_notification_id      = lt_notif_id_out ).
+
+        lo_log->log_message(
+          EXPORTING
+            iv_msg_type = 'I'
+            iv_msg_id = '/IWNGW/CM_BEP_RT'
+            iv_msg_number = '031' ).
+      CATCH /iwngw/cx_bep_out_pr_rfc INTO lx_bep_out_pr_rfc.
+        lo_log->log_exception( io_exception =  lx_bep_out_pr_rfc ).
+        lo_log->save_log( ).
+        " Passing the invalid source IDs
+        DATA(lt_notif_id_invalid)  = lx_bep_out_pr_rfc->invalid_source_id_list.
+        LOOP AT lt_notif_id_invalid INTO DATA(ls_notif_id_invalid) .
+          ls_invalid_source_id-id           = ls_notif_id_invalid-source_id.
+          ls_invalid_source_id-type_key     = ls_notif_id_invalid-type_key.
+          ls_invalid_source_id-type_version = ls_notif_id_invalid-type_version.
+          APPEND ls_invalid_source_id TO lt_invalid_source_id.
+          CLEAR ls_invalid_source_id.
+        ENDLOOP.
+        RAISE EXCEPTION TYPE /iwngw/cx_notification_api
+          EXPORTING
+            textid         = /iwngw/cx_notification_api=>outbound_failure
+            previous       = lx_bep_out_pr_rfc
+            source_id_list = lt_invalid_source_id.
+
+    ENDTRY.
+
+  ENDMETHOD.
+ENDCLASS.

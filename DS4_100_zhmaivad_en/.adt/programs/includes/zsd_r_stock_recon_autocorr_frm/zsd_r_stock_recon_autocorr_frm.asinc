@@ -1,0 +1,78 @@
+" -----------------------------------------------------------------------
+"  R E V I S I O N   H I S T O R Y                                     -
+" -----------------------------------------------------------------------
+" AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+"              |            | TRANSPORT REQUESTS                       -
+" -----------------------------------------------------------------------
+" NAGARSOW     | 12.07.2023 | 22859 Stock reconciliation -  interface  -
+"              |            | DS4K958577                               -
+" -----------------------------------------------------------------------
+FORM process_data.
+  SELECT MAX( wmssnapshotdate ) INTO @DATA(lv_max_data) FROM zsd_i_stock_diff_autocorr_fin.
+  SELECT wmssnapshotdate,
+         plant,
+         storagelocation,
+         article,
+         salesordernumber,
+         salesorderitem
+    FROM zsd_i_stock_diff_autocorr_fin
+    WHERE plant           IN @s_plant
+      AND storagelocation IN @s_storg
+      AND wmssnapshotdate = @lv_max_data
+    INTO TABLE @FINAL(lt_std_data)
+    UP TO 20 ROWS. " delete--------------------------#todo
+
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  MODIFY ENTITIES OF zsd_i_stock_difference_report
+         ENTITY stockdifference
+         EXECUTE readyforstockcorrectionautocor FROM CORRESPONDING #( lt_std_data )
+         RESULT FINAL(lt_keys_for_correction).
+  COMMIT ENTITIES.
+
+  IF lt_keys_for_correction IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  MODIFY ENTITIES OF zsd_i_stock_corr_rprt
+         ENTITY stockcorrection
+         EXECUTE clearupadjustment FROM VALUE #(  FOR ls_item IN lt_keys_for_correction
+                                                 ( uuid = ls_item-%param-uuid ) ).
+  COMMIT ENTITIES.
+
+  SELECT historyuuid,                                "#EC CI_SEL_NESTED
+         stockcorrectionuuid,
+         status,
+         materialdocument
+    FROM zsd_i_stock_correction_history
+    FOR ALL ENTRIES IN @lt_keys_for_correction
+    WHERE stockcorrectionuuid = @lt_keys_for_correction-%param-uuid
+    INTO TABLE @FINAL(lt_history).
+
+  SELECT erroruuid,                                "#EC CI_NO_TRANSFORM
+         stockcorrectionuuid,
+         messagetype,
+         message
+    FROM zsd_i_stock_correction_errors
+    FOR ALL ENTRIES IN @lt_keys_for_correction
+    WHERE stockcorrectionuuid = @lt_keys_for_correction-%param-uuid
+    ORDER BY PRIMARY KEY
+    INTO TABLE @FINAL(lt_error).
+
+  IF sy-subrc <> 0.
+    MESSAGE i006(zcm_sd_stcock_snapsh).
+  ENDIF.
+
+  LOOP AT lt_history ASSIGNING FIELD-SYMBOL(<ls_history>).
+    IF <ls_history>-status = zcl_sd_stock_recon_base=>gc_stock_corr_status_complete.
+      MESSAGE i005(zcm_sd_stcock_snapsh) WITH <ls_history>-materialdocument.
+    ELSEIF <ls_history>-status = zcl_sd_stock_recon_base=>gc_stock_corr_status_error.
+      READ TABLE lt_error WITH KEY stockcorrectionuuid = <ls_history>-stockcorrectionuuid ASSIGNING FIELD-SYMBOL(<ls_error>) BINARY SEARCH.
+      IF sy-subrc = 0.
+        MESSAGE i007(zcm_sd_stcock_snapsh) WITH <ls_error>-message.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.

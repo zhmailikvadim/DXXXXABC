@@ -1,0 +1,978 @@
+" -----------------------------------------------------------------------
+"  R E V I S I O N   H I S T O R Y                                     -
+" -----------------------------------------------------------------------
+" AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+"              |            | TRANSPORT REQUESTS                       -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 19.12.2022 | 16311     : [Feature] [Build] - Stock re -
+"              |            | DS4K938447                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 19.03.2023 | 18988     : [Build] - Stock reconciliation -
+"              |            | DS4K946765                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 14.04.2023 | 19610     : FB_19610_SD_Feature - DEFECT - Stock Reconciliation -
+"              |            | DS4K949060                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 17.04.2023 | 19611     : [Build] - Stock reconciliation -
+"              |            | DS4K950069                               -
+" ----------------------------------------------------------------------
+" ZHMAIVAD     | 06.06.2023 | 20960     : [Build] - Stock reconciliation -
+"              |            | DS4K951475                               -
+" ----------------------------------------------------------------------*
+" ZHMAIVAD     | 13.07.2023 | 22859     : [Build] - Stock reconciliation -
+"              |            | DS4K957133                               -
+" ----------------------------------------------------------------------*
+" NAGARSOW     | 31.08.2023 | 22859     : [Build] - Stock reconciliation -
+"              |            | DS4K957133                               -
+" ----------------------------------------------------------------------*
+" ZHMAIVAD     | 20.09.2023 | 22859     : [Build] - Stock reconciliation -
+"              |            | DS4K957133                               -
+" ----------------------------------------------------------------------*/
+CLASS lcl_buffer DEFINITION FINAL CREATE PRIVATE.
+
+  PUBLIC SECTION.
+    CLASS-METHODS get_instance
+      RETURNING VALUE(ro_instance) TYPE REF TO lcl_buffer.
+
+    CLASS-METHODS check_instance
+      RETURNING VALUE(rv_bound) TYPE abap_boolean.
+
+    METHODS set_buffer_data
+      IMPORTING it_buffer_data TYPE zsd_tt_stock_difference_keys.
+
+    METHODS get_background_difference_keys
+      RETURNING VALUE(rt_buffer_data) TYPE zsd_tt_stock_difference_keys.
+
+    METHODS set_stock_correction_keys
+      IMPORTING it_keys TYPE zsd_tt_stock_corr_auto_result.
+
+    METHODS get_stock_correction_keys
+      RETURNING VALUE(rt_keys) TYPE zsd_tt_stock_corr_auto_result.
+
+    METHODS set_background_flag
+      IMPORTING iv_background_flag TYPE abap_boolean.
+
+    METHODS get_background_flag
+      RETURNING VALUE(rv_background_flag) TYPE abap_boolean.
+
+    METHODS set_foreground_flag_auto_corr
+      IMPORTING iv_foreground_flag TYPE abap_boolean.
+
+    METHODS get_foreground_flag_auto_corr
+      RETURNING VALUE(rv_foreground_flag) TYPE abap_boolean.
+
+  PRIVATE SECTION.
+    CLASS-DATA go_instance TYPE REF TO lcl_buffer.
+
+    DATA mt_buffer_data            TYPE zsd_tt_stock_snapshot_keys.
+    DATA mt_correction_result_keys TYPE zsd_tt_stock_corr_auto_result.
+    DATA mv_run_in_background      TYPE abap_boolean.
+    DATA mv_run_in_foreground      TYPE abap_boolean.
+ENDCLASS.
+
+
+CLASS lcl_buffer IMPLEMENTATION.
+  METHOD get_instance.
+    IF go_instance IS NOT BOUND.
+      go_instance = NEW #( ).
+    ENDIF.
+
+    ro_instance = go_instance.
+  ENDMETHOD.
+
+  METHOD set_buffer_data.
+    mt_buffer_data = it_buffer_data.
+  ENDMETHOD.
+
+  METHOD get_background_difference_keys.
+    rt_buffer_data = mt_buffer_data.
+  ENDMETHOD.
+
+  METHOD check_instance.
+    IF go_instance IS BOUND.
+      rv_bound = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_background_flag.
+    rv_background_flag = mv_run_in_background.
+  ENDMETHOD.
+
+  METHOD set_background_flag.
+    mv_run_in_background = iv_background_flag.
+  ENDMETHOD.
+
+  METHOD get_foreground_flag_auto_corr.
+    rv_foreground_flag = mv_run_in_foreground.
+  ENDMETHOD.
+
+  METHOD set_foreground_flag_auto_corr.
+    mv_run_in_foreground = iv_foreground_flag.
+  ENDMETHOD.
+
+  METHOD get_stock_correction_keys.
+    rt_keys = mt_correction_result_keys.
+  ENDMETHOD.
+
+  METHOD set_stock_correction_keys.
+    mt_correction_result_keys = it_keys.
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS lhc_stockdifference DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  CONSTANTS gc_fiori_consumption_cds TYPE char29 VALUE 'ZSD_C_STOCK_DIFFERENCE_REPORT'.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF mtyp_filters_fe,
+             status                    TYPE zpe_tt_selectall_fe_filter,
+             plant                     TYPE zpe_tt_selectall_fe_filter,
+             storagelocation           TYPE zpe_tt_selectall_fe_filter,
+             wmssnapshotdate           TYPE zpe_tt_selectall_fe_filter,
+             article                   TYPE zpe_tt_selectall_fe_filter,
+             genericarticle            TYPE zpe_tt_selectall_fe_filter,
+             materialtype              TYPE zpe_tt_selectall_fe_filter,
+             articlegroup              TYPE zpe_tt_selectall_fe_filter,
+             hasdifference             TYPE zpe_tt_selectall_fe_filter,
+             interfaceerrorsexist      TYPE zpe_tt_selectall_fe_filter,
+             articleexistinbothsystems TYPE zpe_tt_selectall_fe_filter,
+           END OF mtyp_filters_fe.
+    TYPES: BEGIN OF mtyp_filters_be,
+             status                    TYPE if_rap_query_filter=>tt_range_option,
+             plant                     TYPE if_rap_query_filter=>tt_range_option,
+             storagelocation           TYPE if_rap_query_filter=>tt_range_option,
+             wmssnapshotdate           TYPE if_rap_query_filter=>tt_range_option,
+             article                   TYPE if_rap_query_filter=>tt_range_option,
+             genericarticle            TYPE if_rap_query_filter=>tt_range_option,
+             materialtype              TYPE if_rap_query_filter=>tt_range_option,
+             articlegroup              TYPE if_rap_query_filter=>tt_range_option,
+             hasdifference             TYPE if_rap_query_filter=>tt_range_option,
+             interfaceerrorsexist      TYPE if_rap_query_filter=>tt_range_option,
+             articleexistinbothsystems TYPE if_rap_query_filter=>tt_range_option,
+           END OF mtyp_filters_be.
+    TYPES: BEGIN OF  mtyp_difference_rows,
+             wmssnapshotdate  TYPE zsd_i_stock_corr_rprt-wmssnapshotdate,
+             plant            TYPE zsd_i_stock_corr_rprt-plant,
+             storagelocation  TYPE zsd_i_stock_corr_rprt-storagelocation,
+             article          TYPE zsd_i_stock_corr_rprt-article,
+             salesordernumber TYPE zsd_i_stock_corr_rprt-salesordernumber,
+             salesorderitem   TYPE zsd_i_stock_corr_rprt-salesordernumber,
+             adjustmentqty    TYPE zsd_i_stock_corr_rprt-adjustmentqty,
+             transferqty      TYPE zsd_i_stock_corr_rprt-adjustmentqty,
+             transferto       TYPE zsd_i_stock_corr_rprt-transferto,
+             stocktype        TYPE zsd_i_stock_corr_rprt-stocktype,
+             difference       TYPE zsd_i_stock_corr_rprt-difference,
+             status           TYPE zsd_i_stock_corr_rprt-status,
+             movetypegroup    TYPE zsd_snapshot_move_types_group,
+           END OF mtyp_difference_rows,
+           mtyp_t_difference_rows TYPE STANDARD TABLE OF mtyp_difference_rows.
+
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys REQUEST requested_features FOR stockdifference RESULT result ##NEEDED.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys REQUEST requested_authorizations FOR stockdifference RESULT result.
+
+    METHODS read FOR READ
+      IMPORTING keys FOR READ stockdifference RESULT result ##NEEDED.
+
+    METHODS lock FOR LOCK
+      IMPORTING keys FOR LOCK stockdifference ##NEEDED.
+
+    METHODS readyforstockcorrection FOR MODIFY
+      IMPORTING keys FOR ACTION stockdifference~readyforstockcorrection RESULT result ##NEEDED.
+
+    METHODS storediffandallerrors FOR MODIFY
+      IMPORTING keys FOR ACTION stockdifference~storediffandallerrors.
+
+    METHODS updateinterfaceerrors FOR MODIFY
+      IMPORTING keys FOR ACTION stockdifference~updateinterfaceerrors.
+
+    METHODS readyforstockcorrectionall FOR MODIFY
+      IMPORTING keys FOR ACTION stockdifference~readyforstockcorrectionall.
+
+    METHODS readyforstockcorrectionautocor FOR MODIFY
+      IMPORTING keys FOR ACTION stockdifference~readyforstockcorrectionautocor RESULT result.
+
+    METHODS calculate_qnt_for_move_types CHANGING ct_create_for_stock_correction TYPE mtyp_t_difference_rows.
+
+    METHODS is_readyforcorrection_granted
+      IMPORTING iv_plant           TYPE zsd_i_stock_corr_rprt-plant
+                iv_storagelocation TYPE zsd_i_stock_corr_rprt-storagelocation
+      RETURNING VALUE(rv_granted)  TYPE abap_bool.
+ENDCLASS.
+
+
+CLASS lhc_stockdifference IMPLEMENTATION.
+  METHOD readyforstockcorrection.
+    DATA ls_create_correction           TYPE mtyp_difference_rows.
+    DATA lt_create_correction           TYPE mtyp_t_difference_rows.
+    DATA lt_create_for_stock_correction TYPE TABLE FOR CREATE zsd_i_stock_corr_rprt ##NEEDED.
+
+    CHECK keys IS NOT INITIAL.
+
+    IF zcl_sd_stock_recon_base=>get_is_hardcode_populated( ) = abap_false.
+      APPEND VALUE #( %tky = keys[ 1 ]-%tky
+                      %msg = NEW zcl_sd_stock_corr_messages(
+                                     iv_textid   = zcl_sd_stock_recon_messages=>settings_not_found
+                                     iv_severity = if_abap_behv_message=>severity-error ) ) TO reported-stockdifference.
+      RETURN.
+    ENDIF.
+
+    IF     lcl_buffer=>get_instance( )->get_foreground_flag_auto_corr( ) = abap_false
+       AND (        lines( keys )  > zcl_sd_stock_recon_base=>get_general_setting( )-fiori_max_rows_foreground_proc
+                AND sy-xprog      CS gc_fiori_consumption_cds
+             OR lcl_buffer=>get_instance( )->get_background_flag( ) = abap_true ).
+
+      FINAL(lt_keys) = CORRESPONDING zsd_tt_stock_difference_keys( keys ).
+      lcl_buffer=>get_instance( )->set_buffer_data( lt_keys ).
+
+      IF lcl_buffer=>get_instance( )->get_background_flag( ) = abap_false.
+        APPEND VALUE #( %tky = keys[ 1 ]-%tky
+                        %msg = NEW zcl_sd_stock_corr_messages(
+                                       iv_textid   = zcl_sd_stock_differ_messages=>run_in_background
+                                       iv_severity = if_abap_behv_message=>severity-success ) ) TO reported-stockdifference.
+      ELSE.
+        lcl_buffer=>get_instance( )->set_background_flag( abap_false ).
+      ENDIF.
+
+      READ ENTITIES OF zsd_i_stock_difference_report IN LOCAL MODE
+           ENTITY stockdifference
+           ALL FIELDS WITH CORRESPONDING #( keys )
+           RESULT FINAL(lt_stockcorrection).
+
+      result = VALUE #( FOR ls_stockcorrdata IN lt_stockcorrection
+                        ( %tky   = ls_stockcorrdata-%tky
+                          %param = ls_stockcorrdata ) ).
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF zsd_i_stock_difference_report IN LOCAL MODE
+         ENTITY stockdifference
+         ALL FIELDS
+         WITH CORRESPONDING #( keys )
+         RESULT DATA(lt_stock_difference).
+
+    DELETE lt_stock_difference WHERE status <> space AND hasdifference IS INITIAL.
+
+    IF lt_stock_difference IS INITIAL.
+      APPEND VALUE #( %msg = NEW zcl_sd_stock_corr_messages( iv_textid   = zcl_sd_stock_differ_messages=>data_is_empty
+                                                             iv_severity = if_abap_behv_message=>severity-warning ) )
+             TO reported-stockdifference.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_stock_difference ASSIGNING FIELD-SYMBOL(<ls_stock_difference>).
+      CLEAR ls_create_correction.
+      ls_create_correction = CORRESPONDING #( <ls_stock_difference> MAPPING adjustmentqty = unrectricteddifferenceqty
+                                                                            difference    = unrectricteddifferenceqty ).
+      ls_create_correction-stocktype = zcl_sd_stock_recon_base=>gc_stock_type_unrestricted.
+      APPEND ls_create_correction TO lt_create_correction.
+      ls_create_correction = CORRESPONDING #( <ls_stock_difference> MAPPING adjustmentqty = inqualityinspdifferenceqty
+                                                                            difference    = inqualityinspdifferenceqty ).
+      ls_create_correction-stocktype = zcl_sd_stock_recon_base=>gc_stock_type_in_quality.
+      APPEND ls_create_correction TO lt_create_correction.
+      ls_create_correction = CORRESPONDING #( <ls_stock_difference> MAPPING adjustmentqty = blockeddifferenceqty
+                                                                            difference    = blockeddifferenceqty ).
+      ls_create_correction-stocktype = zcl_sd_stock_recon_base=>gc_stock_type_blocked.
+      APPEND ls_create_correction TO lt_create_correction.
+    ENDLOOP.
+
+    calculate_qnt_for_move_types( CHANGING ct_create_for_stock_correction = lt_create_correction ).
+
+    lt_create_for_stock_correction = CORRESPONDING #( lt_create_correction ).
+
+    MODIFY ENTITIES OF zsd_i_stock_corr_rprt
+           ENTITY stockcorrection
+           CREATE AUTO FILL CID FIELDS (
+                          wmssnapshotdate
+                          plant
+                          storagelocation
+                          article
+                          salesordernumber
+                          salesorderitem
+                          stocktype
+                          difference
+                          transferto
+                          adjustmentqty
+                          movetypegroup )
+           WITH lt_create_for_stock_correction
+           MAPPED FINAL(ls_mapped)
+           " TODO: variable is assigned but never used (ABAP cleaner)
+           FAILED   FINAL(ls_failed).
+
+    lcl_buffer=>get_instance( )->set_stock_correction_keys( VALUE #( FOR ls_item IN ls_mapped-stockcorrection
+                                                                     ( CORRESPONDING #( ls_item ) ) ) ).
+    READ ENTITIES OF zsd_i_stock_difference_report IN LOCAL MODE
+         ENTITY stockdifference
+         ALL FIELDS WITH CORRESPONDING #( keys )
+         RESULT FINAL(lt_stockcorrection_end).
+
+    result = VALUE #( FOR ls_stockcorrdata IN lt_stockcorrection_end
+                      ( %tky   = ls_stockcorrdata-%tky
+                        %param = ls_stockcorrdata ) ).
+    TRY.
+        IF sy-xprog NS gc_fiori_consumption_cds.
+          zcl_sd_stock_reconciliat_notif=>send_notification(
+              iv_type_key     = zcl_sd_stock_reconciliat_notif=>gc_process_param-type_key_success
+              iv_type_version = '01'
+              it_recipient    = VALUE #( ( id = sy-uname  ) ) ).
+        ENDIF.
+      CATCH cx_uuid_error ##NO_HANDLER.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD calculate_qnt_for_move_types.
+    DATA lt_create_for_st_transfer_from TYPE mtyp_t_difference_rows.
+    DATA lt_create_for_stock_correction TYPE mtyp_t_difference_rows.
+
+    DATA(lt_unique_keys) = ct_create_for_stock_correction.
+
+    SORT lt_unique_keys BY wmssnapshotdate
+                           plant
+                           storagelocation
+                           salesordernumber
+                           salesorderitem
+                           article.
+    DELETE ADJACENT DUPLICATES FROM lt_unique_keys COMPARING wmssnapshotdate plant storagelocation salesordernumber salesorderitem article.
+
+    SORT ct_create_for_stock_correction BY adjustmentqty.
+
+    LOOP AT lt_unique_keys ASSIGNING FIELD-SYMBOL(<ls_unique_keys>).
+      DO 3 TIMES.                                        "#EC CI_NESTED
+        FINAL(lv_stock_type) = COND #( WHEN sy-index = 1 THEN zcl_sd_stock_recon_base=>gc_stock_type_unrestricted
+                                       WHEN sy-index = 2 THEN zcl_sd_stock_recon_base=>gc_stock_type_in_quality
+                                       WHEN sy-index = 3 THEN zcl_sd_stock_recon_base=>gc_stock_type_blocked ).
+
+        ASSIGN ct_create_for_stock_correction[ stocktype        = lv_stock_type
+                                               article          = <ls_unique_keys>-article
+                                               plant            = <ls_unique_keys>-plant
+                                               storagelocation  = <ls_unique_keys>-storagelocation
+                                               salesordernumber = <ls_unique_keys>-salesordernumber
+                                               salesorderitem   = <ls_unique_keys>-salesorderitem ]
+               TO FIELD-SYMBOL(<ls_stock_selected>).     "#EC CI_STDSEQ
+
+        IF sy-subrc = 0.
+          IF <ls_stock_selected>-adjustmentqty >= 0.
+            CONTINUE.
+          ENDIF.
+        ELSE.
+          CONTINUE.
+        ENDIF.
+
+        LOOP AT ct_create_for_stock_correction ASSIGNING FIELD-SYMBOL(<ls_create_for_stock_corr>) "#EC CI_STDSEQ "#EC CI_NESTED
+             WHERE     wmssnapshotdate   = <ls_unique_keys>-wmssnapshotdate
+                   AND plant             = <ls_unique_keys>-plant
+                   AND storagelocation   = <ls_unique_keys>-storagelocation
+                   AND salesordernumber  = <ls_unique_keys>-salesordernumber
+                   AND salesorderitem    = <ls_unique_keys>-salesorderitem
+                   AND article           = <ls_unique_keys>-article
+                   AND stocktype        <> lv_stock_type.
+
+          IF <ls_create_for_stock_corr>-adjustmentqty <= 0 OR <ls_stock_selected>-adjustmentqty >= 0.
+            CONTINUE.
+          ENDIF.
+
+          IF abs( <ls_stock_selected>-adjustmentqty ) >= <ls_create_for_stock_corr>-adjustmentqty.
+            <ls_stock_selected>-adjustmentqty += <ls_create_for_stock_corr>-adjustmentqty.
+            <ls_stock_selected>-transferqty   -= <ls_create_for_stock_corr>-adjustmentqty.
+            <ls_create_for_stock_corr>-transferqty += <ls_create_for_stock_corr>-adjustmentqty.
+            <ls_stock_selected>-transferto = <ls_create_for_stock_corr>-stocktype.
+            <ls_create_for_stock_corr>-adjustmentqty = 0.
+          ELSE.
+            <ls_create_for_stock_corr>-adjustmentqty += <ls_stock_selected>-adjustmentqty.
+            <ls_stock_selected>-transferqty += <ls_stock_selected>-adjustmentqty.
+            <ls_create_for_stock_corr>-transferqty -= <ls_stock_selected>-adjustmentqty.
+            <ls_stock_selected>-transferto    = <ls_create_for_stock_corr>-stocktype.
+            <ls_stock_selected>-adjustmentqty = 0.
+          ENDIF.
+
+          APPEND <ls_stock_selected> TO lt_create_for_st_transfer_from.
+
+          LOOP AT lt_create_for_st_transfer_from ASSIGNING FIELD-SYMBOL(<ls_create_for_st_transfer_fr>). "#EC CI_NESTED
+            <ls_create_for_st_transfer_fr>-adjustmentqty = <ls_stock_selected>-adjustmentqty.
+          ENDLOOP.
+
+          CLEAR: <ls_stock_selected>-transferqty,
+                 <ls_stock_selected>-transferto.
+        ENDLOOP.
+
+        UNASSIGN <ls_stock_selected>.
+      ENDDO.
+    ENDLOOP.
+
+    APPEND LINES OF lt_create_for_st_transfer_from TO ct_create_for_stock_correction.
+
+    LOOP AT ct_create_for_stock_correction ASSIGNING <ls_create_for_stock_corr> WHERE transferqty <> 0. "#EC CI_STDSEQ
+      <ls_create_for_stock_corr>-movetypegroup = zcl_sd_stock_recon_base=>gc_move_type_group_adjustment.
+
+      DATA(ls_create_for_stock_corr) = <ls_create_for_stock_corr>.
+
+      ls_create_for_stock_corr-adjustmentqty = ls_create_for_stock_corr-transferqty.
+      CLEAR: <ls_create_for_stock_corr>-transferqty,
+             ls_create_for_stock_corr-transferqty,
+             <ls_create_for_stock_corr>-transferto.
+      ls_create_for_stock_corr-movetypegroup = zcl_sd_stock_recon_base=>gc_move_type_group_transfer.
+
+      APPEND ls_create_for_stock_corr TO lt_create_for_stock_correction.
+    ENDLOOP.
+
+    APPEND LINES OF lt_create_for_stock_correction TO ct_create_for_stock_correction.
+
+    DELETE ct_create_for_stock_correction
+           WHERE    ( adjustmentqty = 0 )                "#EC CI_STDSEQ
+                 OR (     adjustmentqty > 0 AND transferto IS INITIAL
+                      AND movetypegroup = zcl_sd_stock_recon_base=>gc_move_type_group_transfer ).
+
+    IF lcl_buffer=>get_instance( )->get_foreground_flag_auto_corr( ) = abap_true.
+      DELETE ct_create_for_stock_correction WHERE movetypegroup <> zcl_sd_stock_recon_base=>gc_move_type_group_transfer.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_instance_features.
+    READ ENTITIES OF zsd_i_stock_difference_report IN LOCAL MODE
+         ENTITY stockdifference
+         FIELDS ( hasdifference status interfaceerrorsexist )
+         WITH CORRESPONDING #( keys )
+         RESULT FINAL(lt_stock_difference).
+
+    SELECT wmssnapshotdate
+      UP TO 1 ROWS
+      FROM zsd_i_date_value_help
+      INTO TABLE @DATA(lt_wmsnewestdate)
+      ORDER BY wmssnapshotdate DESCENDING.              "#EC CI_NOWHERE
+    IF sy-subrc = 0.
+      FINAL(lv_newestdate) = lt_wmsnewestdate[ 1 ]-wmssnapshotdate.
+    ENDIF.
+
+    result = VALUE #(
+        FOR ls_item IN lt_stock_difference
+        ( %tky                                      = ls_item-%tky
+          %features-%action-readyforstockcorrection = COND #( WHEN ls_item-hasdifference         = space
+                                                                OR ls_item-status               <> space
+                                                                OR ls_item-interfaceerrorsexist <> space
+                                                                OR ls_item-wmssnapshotdate       < lv_newestdate
+                                                              THEN if_abap_behv=>fc-o-disabled
+                                                              ELSE if_abap_behv=>fc-o-enabled ) ) ).
+  ENDMETHOD.
+
+  METHOD get_instance_authorizations.
+    DATA lv_readyforstockcorr_requested TYPE abap_bool.
+    DATA lv_readyforstockcorr_granted   TYPE abap_bool.
+
+    READ ENTITIES OF zsd_i_stock_difference_report IN LOCAL MODE
+         ENTITY stockdifference
+         ALL FIELDS
+         WITH CORRESPONDING #( keys )
+         RESULT FINAL(lt_stockdifference).
+
+    lv_readyforstockcorr_requested = COND #( WHEN requested_authorizations-%action-readyforstockcorrection = if_abap_behv=>mk-on
+                                             THEN abap_true
+                                             ELSE abap_false ).
+
+    IF lv_readyforstockcorr_requested = abap_false.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_stockdifference ASSIGNING FIELD-SYMBOL(<ls_stockdifference>).
+      lv_readyforstockcorr_granted = is_readyforcorrection_granted(
+                                         iv_plant           = <ls_stockdifference>-plant
+                                         iv_storagelocation = <ls_stockdifference>-storagelocation ).
+
+      APPEND VALUE #( LET lv_upd_auth = COND #( WHEN lv_readyforstockcorr_granted = abap_true
+                                                THEN if_abap_behv=>auth-allowed
+                                                ELSE if_abap_behv=>auth-unauthorized )
+                      IN  %tky                            = <ls_stockdifference>-%tky
+                          %action-readyforstockcorrection = lv_upd_auth )
+             TO result.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD read.
+    SELECT * FROM zsd_i_stock_difference_report
+      FOR ALL ENTRIES IN @keys                  "#EC CI_FAE_NO_LINES_OK
+      WHERE wmssnapshotdate  = @keys-wmssnapshotdate
+        AND plant            = @keys-plant
+        AND storagelocation  = @keys-storagelocation
+        AND article          = @keys-article
+        AND salesordernumber = @keys-salesordernumber
+        AND salesorderitem   = @keys-salesorderitem
+      INTO CORRESPONDING FIELDS OF TABLE @result.         "#EC CI_SUBRC
+  ENDMETHOD.
+
+  METHOD lock ##NEEDED.
+  ENDMETHOD.
+
+  METHOD is_readyforcorrection_granted.
+    AUTHORITY-CHECK OBJECT zcl_sd_stock_recon_base=>gc_authority_object_setting-object
+                    ID zcl_sd_stock_recon_base=>gc_authority_object_setting-id_plant FIELD iv_plant
+                    ID zcl_sd_stock_recon_base=>gc_authority_object_setting-id_storagelocation FIELD iv_storagelocation
+                    ID zcl_sd_stock_recon_base=>gc_authority_object_setting-id_actvt FIELD zcl_sd_stock_recon_base=>gc_authority_object_setting-actvt_value.
+    IF sy-subrc = 0.
+      rv_granted = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD storediffandallerrors.
+    DATA lt_date_range              TYPE RANGE OF datum.
+    DATA lt_plant_range             TYPE RANGE OF i_storagelocation-plant.
+    DATA lt_storage_location_range  TYPE RANGE OF i_storagelocation-storagelocation.
+    DATA lt_snapshot_for_update_eml TYPE TABLE FOR UPDATE zsd_i_sap_snapshot.
+    DATA lt_snapshot_for_create_eml TYPE TABLE FOR CREATE zsd_i_sap_snapshot.
+
+    CHECK keys IS NOT INITIAL.
+
+    LOOP AT keys ASSIGNING FIELD-SYMBOL(<ls_key>).
+      IF <ls_key>-%param-zdate IS NOT INITIAL.
+        APPEND VALUE #( low    = <ls_key>-%param-zdate
+                        sign   = 'I'
+                        option = 'EQ' )
+               TO lt_date_range.
+      ENDIF.
+      IF <ls_key>-%param-plant IS NOT INITIAL.
+        APPEND VALUE #( low    = <ls_key>-%param-plant
+                        sign   = 'I'
+                        option = 'EQ' )
+               TO lt_plant_range.
+      ENDIF.
+      IF <ls_key>-%param-storage_location IS NOT INITIAL.
+        APPEND VALUE #( low    = <ls_key>-%param-storage_location
+                        sign   = 'I'
+                        option = 'EQ' )
+               TO lt_storage_location_range.
+      ENDIF.
+    ENDLOOP.
+
+    SELECT * FROM zsd_i_stock_difference_calc
+      WHERE wmssnapshotdate IN @lt_date_range
+        AND plant           IN @lt_plant_range
+        AND storagelocation IN @lt_storage_location_range
+      INTO TABLE @DATA(lt_difference_calc_items).
+
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    IF sy-datum IN lt_date_range.
+      SELECT * FROM zsd_i_bw_stock_difference_base
+        INTO TABLE @DATA(lt_bw_stock_difference_base)
+        WHERE wmssnapshotdate IN @lt_date_range
+          AND saptimestamp     > 0
+          AND wmstimestamp     > 0
+          AND errorschangedon  > 0
+          AND plant           IN @lt_plant_range
+          AND storagelocation IN @lt_storage_location_range.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      LOOP AT lt_difference_calc_items ASSIGNING FIELD-SYMBOL(<ls_difference_calc_item>).
+        TRY.
+            FINAL(ls_difference_calc_item) = <ls_difference_calc_item>.
+            <ls_difference_calc_item> = CORRESPONDING #( lt_bw_stock_difference_base[
+                                                             wmssnapshotdate  = <ls_difference_calc_item>-wmssnapshotdate
+                                                             plant            = <ls_difference_calc_item>-plant
+                                                             storagelocation  = <ls_difference_calc_item>-storagelocation
+                                                             article          = <ls_difference_calc_item>-article
+                                                             salesordernumber = <ls_difference_calc_item>-salesordernumber
+                                                             salesorderitem   = <ls_difference_calc_item>-salesorderitem ] ).
+
+            <ls_difference_calc_item>-errorsgiecom                  = ls_difference_calc_item-errorsgiecom.
+            <ls_difference_calc_item>-errorsgoodsissuequantity      = ls_difference_calc_item-errorsgoodsissuequantity.
+            <ls_difference_calc_item>-errorsgoodsreceiptblquantity  = ls_difference_calc_item-errorsgoodsreceiptblquantity.
+            <ls_difference_calc_item>-errorsgoodsreceiptqiquantity  = ls_difference_calc_item-errorsgoodsreceiptqiquantity.
+            <ls_difference_calc_item>-errorsgoodsreceiptuuquantity  = ls_difference_calc_item-errorsgoodsreceiptuuquantity.
+            <ls_difference_calc_item>-errorsgrecom                  = ls_difference_calc_item-errorsgrecom.
+            <ls_difference_calc_item>-errorsinventorypostingblqty   = ls_difference_calc_item-errorsinventorypostingblqty.
+            <ls_difference_calc_item>-errorsinventorypostingqiqty   = ls_difference_calc_item-errorsinventorypostingqiqty.
+            <ls_difference_calc_item>-errorsinventorypostingunqty   = ls_difference_calc_item-errorsinventorypostingunqty.
+            <ls_difference_calc_item>-blockedtimingadjustment       = ls_difference_calc_item-blockedtimingadjustment.
+            <ls_difference_calc_item>-inqualityinsptimingadjustment = ls_difference_calc_item-inqualityinsptimingadjustment.
+            <ls_difference_calc_item>-unrectrictedtimingadjustment  = ls_difference_calc_item-unrectrictedtimingadjustment.
+          CATCH cx_sy_itab_line_not_found.
+            CONTINUE.
+        ENDTRY.
+      ENDLOOP.
+    ENDIF.
+
+    SELECT sapsnapshotdate, plant, storagelocation, article, salesordernumber, salesorderitem
+      FROM zsd_i_sap_snapshot
+      INTO TABLE @DATA(lt_sap_snapshot)
+      WHERE sapsnapshotdate IN @lt_date_range
+        AND plant           IN @lt_plant_range
+        AND storagelocation IN @lt_storage_location_range.
+
+    IF sy-subrc = 0.
+      LOOP AT lt_sap_snapshot ASSIGNING FIELD-SYMBOL(<ls_sap_snapshot>).
+        TRY.
+            FINAL(ls_difference_calc) = lt_difference_calc_items[ wmssnapshotdate  = <ls_sap_snapshot>-sapsnapshotdate
+                                                                  plant            = <ls_sap_snapshot>-plant
+                                                                  storagelocation  = <ls_sap_snapshot>-storagelocation
+                                                                  article          = <ls_sap_snapshot>-article
+                                                                  salesordernumber = <ls_sap_snapshot>-salesordernumber
+                                                                  salesorderitem   = <ls_sap_snapshot>-salesorderitem ].
+            APPEND CORRESPONDING #( ls_difference_calc
+                                          MAPPING
+                                           sapsnapshotdate    = wmssnapshotdate
+                                           saptimestamp       = saptimestamp
+                                           errorsuutiming     = unrectrictedtimingadjustment
+                                           errorsbltiming     = blockedtimingadjustment
+                                           errorsqitiming     = inqualityinsptimingadjustment
+                                           errorsgruuqty      = errorsgoodsreceiptuuquantity
+                                           errorsgrqiqty      = errorsgoodsreceiptqiquantity
+                                           errorsgrblqty      = errorsgoodsreceiptblquantity
+                                           errorsgiuuqty      = errorsgoodsissuequantity
+                                           errorgrecom        = errorsgrecom
+                                           errorgiecom        = errorsgiecom
+                                           errorsinvpostuuqty = errorsinventorypostingunqty
+                                           errorsinvpostblqty = errorsinventorypostingblqty
+                                           errorsinvpostqiqty = errorsinventorypostingqiqty
+                                           uuqty              = unrectrictedsapstockquantity
+                                           uudiff             = unrectricteddifferenceqty
+                                           uudiffvalue        = unrectricteddifferencevalue
+                                           uurealdiff         = bwunrectricteddifferenceqty
+                                           blqty              = blockedsapstockquantity
+                                           bldiff             = blockeddifferenceqty
+                                           bldiffvalue        = blockeddifferencevalue
+                                           blrealdiff         = bwblockeddifferenceqty
+                                           qiqty              = inqualityinspsapstockquantity
+                                           qidiff             = inqualityinspdifferenceqty
+                                           qidiffvalue        = inqualityinspdifferencevalue
+                                           qirealdiff         = bwinqualityinspdifferenceqty
+                                           totalnetdiff       = differenceqty
+                                           totalnetdiffabs    = absolutedifferenceqty
+                                           totaldiffvalue     = differencevalue
+                                           totaldiffvalueabs  = absolutedifferencevalue
+                                           hasdifference      = hasdifference
+                                           price              = price
+                                           currency           = currencycode
+                                           unitofmeasure      = meins )
+                   TO lt_snapshot_for_update_eml.
+
+            DELETE lt_difference_calc_items WHERE     wmssnapshotdate  = ls_difference_calc-wmssnapshotdate
+                                                  AND plant            = ls_difference_calc-plant
+                                                  AND storagelocation  = ls_difference_calc-storagelocation
+                                                  AND article          = ls_difference_calc-article
+                                                  AND salesordernumber = ls_difference_calc-salesordernumber
+                                                  AND salesorderitem   = ls_difference_calc-salesorderitem. "#EC CI_STDSEQ
+          CATCH cx_sy_itab_line_not_found.
+            CONTINUE.
+        ENDTRY.
+      ENDLOOP.
+    ENDIF.
+
+    IF lines( lt_difference_calc_items ) > 0.
+      lt_snapshot_for_create_eml = CORRESPONDING #( lt_difference_calc_items
+                                    MAPPING
+                                         sapsnapshotdate    = wmssnapshotdate
+                                         saptimestamp       = saptimestamp
+                                         errorsuutiming     = unrectrictedtimingadjustment
+                                         errorsbltiming     = blockedtimingadjustment
+                                         errorsqitiming     = inqualityinsptimingadjustment
+                                         errorsgruuqty      = errorsgoodsreceiptuuquantity
+                                         errorsgrqiqty      = errorsgoodsreceiptqiquantity
+                                         errorsgrblqty      = errorsgoodsreceiptblquantity
+                                         errorsgiuuqty      = errorsgoodsissuequantity
+                                         errorgrecom        = errorsgrecom
+                                         errorgiecom        = errorsgiecom
+                                         errorsinvpostuuqty = errorsinventorypostingunqty
+                                         errorsinvpostblqty = errorsinventorypostingblqty
+                                         errorsinvpostqiqty = errorsinventorypostingqiqty
+                                         uuqty              = unrectrictedsapstockquantity
+                                         uudiff             = unrectricteddifferenceqty
+                                         uudiffvalue        = unrectricteddifferencevalue
+                                         uurealdiff         = bwunrectricteddifferenceqty
+                                         blqty              = blockedsapstockquantity
+                                         bldiff             = blockeddifferenceqty
+                                         bldiffvalue        = blockeddifferencevalue
+                                         blrealdiff         = bwblockeddifferenceqty
+                                         qiqty              = inqualityinspsapstockquantity
+                                         qidiff             = inqualityinspdifferenceqty
+                                         qidiffvalue        = inqualityinspdifferencevalue
+                                         qirealdiff         = bwinqualityinspdifferenceqty
+                                         totalnetdiff       = differenceqty
+                                         totalnetdiffabs    = absolutedifferenceqty
+                                         totaldiffvalue     = differencevalue
+                                         totaldiffvalueabs  = absolutedifferencevalue
+                                         hasdifference      = hasdifference
+                                         price              = price
+                                         currency           = currencycode
+                                         unitofmeasure      = meins ).
+      LOOP AT lt_snapshot_for_create_eml ASSIGNING FIELD-SYMBOL(<ls_snapshot_for_create_eml>).
+        GET TIME STAMP FIELD <ls_snapshot_for_create_eml>-errorschangedon.
+        <ls_snapshot_for_create_eml>-errorschangedby = sy-uname.
+      ENDLOOP.
+
+      MODIFY ENTITIES OF zsd_i_sap_snapshot
+             ENTITY sapsnapshot
+             CREATE AUTO FILL CID FIELDS ( sapsnapshotdate
+                                           plant
+                                           storagelocation
+                                           salesordernumber
+                                           salesorderitem
+                                           article
+                                           saptimestamp
+                                           uuqty
+                                           blqty
+                                           qiqty
+                                           uudiff
+                                           bldiff
+                                           qidiff
+                                           uurealdiff
+                                           blrealdiff
+                                           qirealdiff
+                                           uudiffvalue
+                                           bldiffvalue
+                                           qidiffvalue
+                                           errorsuutiming
+                                           errorsbltiming
+                                           errorsqitiming
+                                           errorsgruuqty
+                                           errorsgrqiqty
+                                           errorsgrblqty
+                                           errorsgiuuqty
+                                           errorgrecom
+                                           errorgiecom
+                                           errorsinvpostuuqty
+                                           errorsinvpostblqty
+                                           errorsinvpostqiqty
+                                           totalnetdiff
+                                           totalnetdiffabs
+                                           totaldiffvalue
+                                           totaldiffvalueabs
+                                           hasdifference
+                                           price
+                                           currency
+                                           unitofmeasure
+                                           errorschangedon
+                                           errorschangedby
+                                           createdon
+                                           createdby
+                                           changedon
+                                           changedby )
+             WITH lt_snapshot_for_create_eml
+             " TODO: variable is assigned but never used (ABAP cleaner)
+             REPORTED FINAL(ls_create_reported)
+             " TODO: variable is assigned but never used (ABAP cleaner)
+             MAPPED FINAL(ls_create_mapped)
+             FAILED FINAL(ls_create_failed).
+    ENDIF.
+
+    IF lines( lt_snapshot_for_update_eml ) > 0.
+      LOOP AT lt_snapshot_for_update_eml ASSIGNING FIELD-SYMBOL(<ls_snapshot_for_update_eml>).
+        GET TIME STAMP FIELD <ls_snapshot_for_update_eml>-errorschangedon.
+        <ls_snapshot_for_update_eml>-errorschangedby = sy-uname.
+      ENDLOOP.
+
+      MODIFY ENTITIES OF zsd_i_sap_snapshot
+             ENTITY sapsnapshot
+             UPDATE FIELDS ( sapsnapshotdate
+                             plant
+                             storagelocation
+                             salesordernumber
+                             salesorderitem
+                             article
+                             saptimestamp
+                             uuqty
+                             blqty
+                             qiqty
+                             uudiff
+                             bldiff
+                             qidiff
+                             uurealdiff
+                             blrealdiff
+                             qirealdiff
+                             uudiffvalue
+                             bldiffvalue
+                             qidiffvalue
+                             errorsuutiming
+                             errorsbltiming
+                             errorsqitiming
+                             errorsgruuqty
+                             errorsgrqiqty
+                             errorsgrblqty
+                             errorsgiuuqty
+                             errorgrecom
+                             errorgiecom
+                             errorsinvpostuuqty
+                             errorsinvpostblqty
+                             errorsinvpostqiqty
+                             totalnetdiff
+                             totalnetdiffabs
+                             totaldiffvalue
+                             totaldiffvalueabs
+                             hasdifference
+                             price
+                             currency
+                             unitofmeasure
+                             errorschangedon
+                             errorschangedby
+                             createdon
+                             createdby
+                             changedon
+                             changedby )
+             WITH lt_snapshot_for_update_eml
+             " TODO: variable is assigned but never used (ABAP cleaner)
+             REPORTED FINAL(ls_update_reported)
+             " TODO: variable is assigned but never used (ABAP cleaner)
+             MAPPED FINAL(ls_update_mapped)
+             " TODO: variable is assigned but never used (ABAP cleaner)
+             FAILED FINAL(ls_update_failed).
+    ENDIF.
+    failed-stockdifference = CORRESPONDING #( ls_create_failed-sapsnapshot MAPPING wmssnapshotdate = sapsnapshotdate ).
+  ENDMETHOD.
+
+  METHOD updateinterfaceerrors.
+    DATA lt_snapshot_update TYPE TABLE FOR UPDATE zsd_i_sap_snapshot.
+
+    CHECK keys IS NOT INITIAL.
+
+    READ ENTITIES OF zsd_i_stock_difference_report IN LOCAL MODE
+         ENTITY stockdifference
+         ALL FIELDS
+         WITH CORRESPONDING #( keys )
+         RESULT FINAL(lt_difference_selected_items).
+
+    IF lt_difference_selected_items IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    GET TIME STAMP FIELD FINAL(lv_timestamp).
+
+    lt_snapshot_update = VALUE #(
+        FOR ls_item IN lt_difference_selected_items
+        ( CORRESPONDING #( BASE ( VALUE #( errorschangedon = lv_timestamp
+                                           errorschangedby = sy-uname ) )
+                                    ls_item MAPPING sapsnapshotdate = wmssnapshotdate
+                                                    errorsuutiming = unrectrictedtimingadjustment
+                                                    errorsbltiming = blockedtimingadjustment
+                                                    errorsqitiming = inqualityinsptimingadjustment
+                                                    errorsgruuqty = errorsgoodsreceiptuuquantity
+                                                    errorsgrqiqty = errorsgoodsreceiptqiquantity
+                                                    errorsgrblqty = errorsgoodsreceiptblquantity
+                                                    errorsgiuuqty =   errorsgoodsissuequantity
+                                                    errorgrecom   = errorsgrecom
+                                                    errorgiecom   = errorsgiecom
+                                                    errorsinvpostuuqty = errorsinventorypostingunqty
+                                                    errorsinvpostblqty = errorsinventorypostingblqty
+                                                    errorsinvpostqiqty = errorsinventorypostingqiqty
+                                                    uudiff = unrectricteddifferenceqty
+                                                    uudiffvalue = unrectricteddifferencevalue
+                                                    uurealdiff = bwunrectricteddifferenceqty
+                                                    bldiff = blockeddifferenceqty
+                                                    bldiffvalue = blockeddifferencevalue
+                                                    blrealdiff = blockeddifferenceqty
+                                                    qidiff = inqualityinspdifferenceqty
+                                                    qidiffvalue = inqualityinspdifferencevalue
+                                                    qirealdiff = inqualityinspdifferenceqty
+                                                    totalnetdiff = differenceqty
+                                                    totalnetdiffabs = absolutedifferenceqty
+                                                    totaldiffvalue = differencevalue
+                                                    totaldiffvalueabs = absolutedifferencevalue
+                                                    hasdifference = hasdifference
+                                                    price = price
+                                                    currency = currencycode
+                                                    unitofmeasure = sapuom )  ) ).
+
+    MODIFY ENTITIES OF zsd_i_sap_snapshot
+           ENTITY sapsnapshot
+           UPDATE FIELDS ( errorsuutiming
+                           errorsbltiming
+                           errorsqitiming
+                           errorsgruuqty
+                           errorsgrqiqty
+                           errorsgrblqty
+                           errorsgiuuqty
+                           errorgrecom
+                           errorgiecom
+                           errorsinvpostuuqty
+                           errorsinvpostblqty
+                           errorsinvpostqiqty
+                           errorschangedon
+                           errorschangedby )
+           WITH lt_snapshot_update
+           " TODO: variable is assigned but never used (ABAP cleaner)
+           MAPPED FINAL(ls_mapped)
+           " TODO: variable is assigned but never used (ABAP cleaner)
+           FAILED FINAL(ls_failed).
+  ENDMETHOD.
+
+  METHOD readyforstockcorrectionall.
+    DATA ls_filters_fe       TYPE mtyp_filters_fe.
+    DATA ls_filters_be       TYPE mtyp_filters_be.
+    DATA ls_stock_difference TYPE zsd_i_stock_difference_report.
+
+    zcl_sd_stock_recon_base=>convert_filter_fe_to_be(
+      EXPORTING iv_fe_filter_string = VALUE #( keys[ 1 ]-%param-filters OPTIONAL )
+      CHANGING  cs_filters_fe       = ls_filters_fe
+                cs_filters_be       = ls_filters_be
+                cs_entity           = ls_stock_difference ).
+
+    IF ls_filters_be-wmssnapshotdate IS INITIAL OR ls_filters_be-plant IS INITIAL OR ls_filters_be-storagelocation IS INITIAL.
+      APPEND VALUE #( %msg = NEW zcl_sd_stock_corr_messages(
+                                     iv_textid   = zcl_sd_stock_corr_messages=>propulate_mandatory_parameters
+                                     iv_severity = if_abap_behv_message=>severity-error ) )
+             TO reported-stockdifference.
+    ENDIF.
+
+    SELECT wmssnapshotdate, plant, storagelocation, article, salesordernumber,salesorderitem
+      FROM zsd_i_stock_difference_report
+      WHERE upper( status )            = @space
+        AND plant IN @ls_filters_be-plant
+        AND storagelocation           IN @ls_filters_be-storagelocation
+        AND wmssnapshotdate           IN @ls_filters_be-wmssnapshotdate
+        AND article                   IN @ls_filters_be-article
+        AND genericarticle            IN @ls_filters_be-genericarticle
+        AND materialtype              IN @ls_filters_be-materialtype
+        AND articlegroup              IN @ls_filters_be-articlegroup
+        AND hasdifference             IN @ls_filters_be-hasdifference
+        AND interfaceerrorsexist      IN @ls_filters_be-interfaceerrorsexist
+        AND articleexistinbothsystems IN @ls_filters_be-articleexistinbothsystems
+      INTO TABLE @FINAL(lt_stock_difference_keys).
+    IF sy-subrc = 0.
+      lcl_buffer=>get_instance( )->set_background_flag( abap_true ).
+      readyforstockcorrection( keys = CORRESPONDING #( lt_stock_difference_keys ) ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD readyforstockcorrectionautocor.
+    lcl_buffer=>get_instance( )->set_foreground_flag_auto_corr( abap_true ).
+    readyforstockcorrection( keys = CORRESPONDING #( keys ) ).
+    FINAL(lt_result) = lcl_buffer=>get_instance( )->get_stock_correction_keys( ).
+    result = VALUE #( FOR ls_item IN lt_result
+                      ( %param-uuid = ls_item-uuid ) ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS lsc_zsd_i_stock_difference_rep DEFINITION INHERITING FROM cl_abap_behavior_saver FINAL.
+  PROTECTED SECTION.
+    METHODS finalize          REDEFINITION ##NEEDED.
+    METHODS check_before_save REDEFINITION ##NEEDED.
+    METHODS save              REDEFINITION ##NEEDED.
+    METHODS cleanup           REDEFINITION ##NEEDED.
+    METHODS cleanup_finalize  REDEFINITION ##NEEDED.
+ENDCLASS.
+
+
+CLASS lsc_zsd_i_stock_difference_rep IMPLEMENTATION.
+  METHOD finalize ##NEEDED.
+  ENDMETHOD.
+
+  METHOD check_before_save ##NEEDED.
+  ENDMETHOD.
+
+  METHOD save ##NEEDED.
+    IF lcl_buffer=>get_instance( )->get_background_difference_keys( ) IS NOT INITIAL.
+      CALL FUNCTION 'ZSD_FM_STOCK_DIFF_READY_F_CORR' IN BACKGROUND TASK
+        EXPORTING
+          it_keys = CORRESPONDING
+                    zsd_tt_stock_difference_keys( lcl_buffer=>get_instance( )->get_background_difference_keys( ) ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD cleanup ##NEEDED.
+  ENDMETHOD.
+
+  METHOD cleanup_finalize ##NEEDED.
+  ENDMETHOD.
+ENDCLASS.

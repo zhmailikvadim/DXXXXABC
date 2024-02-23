@@ -1,0 +1,574 @@
+class /AIF/CL_ENABLER_XML definition
+  public
+  inheriting from /AIF/CL_ENABLER_BASE
+  final
+  create public .
+
+*"* public components of class /AIF/CL_ENABLER_XML
+*"* do not include other source files here!!!
+public section.
+
+  methods CONSTRUCTOR
+    importing
+      !IV_MSGGUID type GUID_32 optional
+      !IV_DIRECTION type CHAR01 optional
+      !IV_PID type SXMSPID optional
+      !IV_NS type /AIF/NS
+      !IV_IFNAME type /AIF/IFNAME
+      !IV_IFVERSION type /AIF/IFVERSION
+    raising
+      /AIF/CX_ENABLER_BASE .
+  class-methods TRANSFER_TO_AIF
+    importing
+      !IS_ANY_STRUCTURE type ANY
+      !IV_CUST_NS type /AIF/NS optional
+      !IV_CUST_TYPE type /AIF/CUST_INT_TYPE_ID optional
+      !IV_QUEUE_NS type /AIF/PERS_RTCFGR_NS optional
+      !IV_QUEUE_NAME type /AIF/PERS_RTCFGR_NAME optional
+      !IV_SAVE type ABAP_BOOL default 'X'
+      !IV_USE_BUFFER type ABAP_BOOL default ''
+      !IV_CREATE_RUN type ABAP_BOOL default 'X'
+    exporting
+      !EV_MSGGUID type /AIF/SXMSSMGUID
+    changing
+      value(CR_PERS_QUEUE) type ref to /AIF/CL_PERS_QUEUE optional
+    raising
+      /AIF/CX_INF_DET_BASE
+      /AIF/CX_ENABLER_BASE
+      /AIF/CX_AIF_ENGINE_NOT_FOUND
+      /AIF/CX_ERROR_HANDLING_GENERAL
+      /AIF/CX_AIF_ENGINE_BASE .
+  class-methods TRANSFER_TO_AIF_MULT
+    importing
+      !IT_ANY_STRUCTURE type TABLE
+      !IV_CUST_NS type /AIF/NS optional
+      !IV_CUST_TYPE type /AIF/CUST_INT_TYPE_ID optional
+      !IV_QUEUE_NS type /AIF/PERS_RTCFGR_NS optional
+      !IV_QUEUE_NAME type /AIF/PERS_RTCFGR_NAME optional
+      !IV_USE_BUFFER type ABAP_BOOL default 'X'
+    raising
+      /AIF/CX_ENABLER_BASE .
+  class-methods TRANSFER_TO_AIF_SAVE
+    importing
+      !IR_PERS_QUEUE type ref to /AIF/CL_PERS_QUEUE .
+protected section.
+
+*"* protected components of class /AIF/CL_ENABLER_XML
+*"* do not include other source files here!!!
+  data GV_IN_OR_OUT type CHAR01 value 'I' ##NO_TEXT.
+
+  methods CHANGE_PASSPORT_DATA
+    redefinition .
+  methods DETERMINE_INB_OUTB
+    redefinition .
+  methods SUPPORTS_PASSPORT_DATA
+    redefinition .
+private section.
+
+*"* private components of class /AIF/CL_ENABLER_XML
+*"* do not include other source files here!!!
+  methods CLOSE_LOG .
+  "! In case run creation failed, we should not return the error to the caller as the messages have already be stored on the database and sending them again is not necessary.
+  "! As the messages could not be processed in AIF, the error needs to be recored in AIF, therefore the status of the queue's current messages and the log are updated.
+  "! In addition the queue's message buffer is cleared
+  class-methods HANDLE_RUN_CREATION_ERROR
+    importing
+      !IO_PERS_QUEUE type ref to /AIF/CL_PERS_QUEUE
+      !IS_SYS type SYST
+    raising
+      /AIF/CX_ENABLER_BASE .
+    "! transfers the content of a sy-msgno sy-msgid etc. to a table of log messages so that it can be passed to the update method of the enabler
+    "! In addition it fills date and time in the BAL_CONTEXT, so that it can be displayed in the application log
+  class-methods ADD_SY_MSG_TO_LOG_MSGS_TAB
+    importing
+      !IS_SYS type SYST
+    returning
+      value(RT_LOG_MESSAGES) type /AIF/BAL_T_MSG .
+ENDCLASS.
+
+
+
+CLASS /AIF/CL_ENABLER_XML IMPLEMENTATION.
+
+
+  METHOD add_sy_msg_to_log_msgs_tab.
+
+    APPEND INITIAL LINE TO rt_log_messages ASSIGNING FIELD-SYMBOL(<ls_log_message>).
+    <ls_log_message>-msgid = is_sys-msgid.
+    <ls_log_message>-msgno = is_sys-msgno.
+    <ls_log_message>-msgty = is_sys-msgty.
+    <ls_log_message>-msgv1 = is_sys-msgv1.
+    <ls_log_message>-msgv2 = is_sys-msgv2.
+    <ls_log_message>-msgv3 = is_sys-msgv3.
+    <ls_log_message>-msgv4 = is_sys-msgv4.
+    <ls_log_message>-context-tabname = '/AIF/BAL_CONTEXT'.
+    DATA(lr_bal_context) = NEW /aif/bal_context( sydate = sy-datum sytime = sy-uzeit ).
+    <ls_log_message>-context-value = lr_bal_context->*.
+
+  ENDMETHOD.
+
+
+  METHOD change_passport_data.
+
+    TRY.
+        super->change_passport_data( EXPORTING
+                                       iv_msgguid    = iv_msgguid
+                                       is_ifkeys     = is_ifkeys
+                                       is_sidx_entry = is_sidx_entry
+                                       iv_update     = iv_update
+                                     CHANGING
+                                       cs_appl_data  = cs_appl_data ).
+        cs_appl_data-technology = /aif/cl_passport_service=>mc_category_id-xml_runtime.
+        cs_appl_data-source_id = iv_msgguid.
+      CATCH cx_root INTO DATA(lr_root).
+        MESSAGE w043(/aif/enabler_base) INTO /aif/cx_passport_general=>mv_dummy.
+        add_sy_message( ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD close_log.
+    gr_log_strategy->close_log( ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    CALL METHOD super->constructor
+      EXPORTING
+        iv_msgguid          = iv_msgguid
+        iv_pid              = iv_pid
+        iv_ns               = iv_ns
+        iv_ifname           = iv_ifname
+        iv_ifversion        = iv_ifversion
+        iv_force_create_log = abap_false.
+    gv_in_or_out = iv_direction.
+  ENDMETHOD.
+
+
+  METHOD determine_inb_outb.
+    rv_inb_or_outb = 'I'.
+  ENDMETHOD.
+
+
+  METHOD handle_run_creation_error.
+
+    DATA: lt_log_messages TYPE /aif/bal_t_msg,
+          lt_messages     TYPE /aif/pers_t_qmsg.
+    IF is_sys-msgid IS NOT INITIAL.
+      lt_log_messages = add_sy_msg_to_log_msgs_tab( is_sys ).
+    ENDIF.
+
+    lt_messages =  io_pers_queue->get_messages( ).
+    LOOP AT lt_messages ASSIGNING FIELD-SYMBOL(<ls_message>).
+      DATA(lo_enabler_xml) = NEW /aif/cl_enabler_xml( iv_msgguid = <ls_message>-msgguid iv_ns = <ls_message>-ns iv_ifname = <ls_message>-ifname iv_ifversion = <ls_message>-ifversion ).
+
+      lo_enabler_xml->/aif/if_enabler_base~update(
+        iv_message_status_flag  = /aif/if_globals=>gc_eh_file_status-technical_error
+        iv_message_aif_location = /aif/if_globals=>gc_message_location-before_aif
+        it_log_messages         = lt_log_messages
+        iv_user_name            = cl_abap_syst=>get_user_name( )
+        iv_create_date          = sy-datum
+        iv_create_time          = sy-uzeit
+        iv_do_commit            = 'X'  "We need to do a commit here as SAVE_MESSAGES is doing a DB_COMMIT. The messages should have the latest status
+        ).
+
+    ENDLOOP.
+*usually the queue's message buffer is cleared after the run is created, however if run creation failed we will exit before clearing the buffer
+*we cannot clear the buffer in /aif/cl_pers_queue as we need it to update the messages. We should not call the enabler from within /aif/cl_pers_queue!
+    io_pers_queue->clear_message_buffer( ).
+  ENDMETHOD.
+
+
+  METHOD supports_passport_data.
+
+    rv_supports = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD transfer_to_aif.
+
+    DATA:
+      lr_appl_engine       TYPE REF TO /aif/if_application_engine,
+      lr_if_det_engine_xml TYPE REF TO /aif/cl_inf_det_engine_xml,
+      lr_enabler_xml       TYPE REF TO /aif/cl_enabler_xml,
+      lr_xmlparse          TYPE REF TO data,
+      ls_finf              TYPE /aif/t_finf,
+      ls_xmlparse          TYPE /aif/xmlparse_data,
+      lv_name              TYPE /aif/lfieldname_infdet,
+      lv_msgguid_32        TYPE guid_32,
+      lv_subkey            TYPE string.
+
+    DATA: lr_err_general        TYPE REF TO /aif/cx_error_handling_general,
+          lr_exception          TYPE REF TO cx_root,
+          ls_textid             TYPE scx_t100key,
+          lr_selection_engine   TYPE REF TO /aif/if_selection_engine,
+          lr_index_table_buffer TYPE REF TO /aif/if_index_table_buffer.
+
+    FIELD-SYMBOLS: <ls_sidx_entry> TYPE any.
+
+* Serialization in AIF
+    DATA: lr_sidx_entry    TYPE REF TO data,
+          lt_midx_entries  TYPE /aif/index_table_entries_tt,
+          lr_dba_mgr       TYPE REF TO /aif/cl_dba_reader_mgr,
+          lr_dba_inf_kflds TYPE REF TO /aif/if_dba_inf_kflds,
+          ls_inf_kflds_out TYPE /aif/t_inf_kflds,
+          lt_inf_keyfields TYPE /aif/t_inf_kflds_t.
+
+    CLEAR ev_msgguid.
+*     -- interface determination ---------------------------------------
+    lr_if_det_engine_xml ?= /aif/cl_aif_engine_factory=>get_inf_det_engine(
+        iv_type           = /aif/cl_pers_config=>c_if_type_xml
+        iv_cust_ns        = iv_cust_ns
+        iv_cust_type      = iv_cust_type
+    ).
+
+    CALL METHOD lr_if_det_engine_xml->get_typename
+      EXPORTING
+        iv_input = is_any_structure
+      IMPORTING
+        ev_name1 = lv_name.
+
+    CALL METHOD lr_if_det_engine_xml->/aif/if_inf_det_engine~determine_inf
+      EXPORTING
+        iv_name1   = lv_name
+        iv_name2   = space
+        iv_input   = is_any_structure
+        iv_msgguid = space
+      IMPORTING
+        es_finf    = ls_finf.
+
+    CALL METHOD /aif/cl_aif_engine_factory=>get_engine
+      EXPORTING
+        iv_ns            = ls_finf-ns
+        iv_ifname        = ls_finf-ifname
+        iv_ifversion     = ls_finf-ifversion
+      RECEIVING
+        rref_appl_engine = lr_appl_engine.
+
+    TRY.
+        ls_xmlparse-msgguid  = cl_system_uuid=>create_uuid_x16_static( ).
+      CATCH cx_uuid_error.
+    ENDTRY.
+
+* Serialization in AIF: Write index table entries
+    lv_msgguid_32 = ls_xmlparse-msgguid.
+    ev_msgguid = ls_xmlparse-msgguid.
+    CREATE OBJECT lr_enabler_xml
+      EXPORTING
+        iv_msgguid   = lv_msgguid_32
+        iv_direction = 'I'
+        iv_ns        = ls_finf-ns
+        iv_ifname    = ls_finf-ifname
+        iv_ifversion = ls_finf-ifversion.
+
+    CALL METHOD lr_enabler_xml->/aif/if_enabler_base~update
+      EXPORTING
+        iv_message_status_flag = 'I'
+        iv_sub_status          = /aif/if_globals=>gc_in_process_sub_status-waiting "Sub-status of In-Process status for XML&STRU Engine
+        is_raw_structure       = is_any_structure
+        iv_user_name           = cl_abap_syst=>get_user_name( )
+        iv_create_date         = sy-datum
+        iv_create_time         = sy-uzeit.
+
+    ls_xmlparse-ns = ls_finf-ns.
+    ls_xmlparse-ifname = ls_finf-ifname.
+    ls_xmlparse-ifver = ls_finf-ifversion.
+
+    GET REFERENCE OF is_any_structure INTO ls_xmlparse-xi_data.
+    GET REFERENCE OF ls_xmlparse INTO lr_xmlparse.
+
+    TRY.
+        CALL METHOD lr_appl_engine->persist_message_data
+          EXPORTING
+            iv_use_buffer = iv_use_buffer
+          CHANGING
+            cr_xmlparse   = lr_xmlparse.
+
+      CATCH /aif/cx_error_handling_general INTO lr_err_general.
+        CONCATENATE 'Message not persisted: ' lv_msgguid_32 '01' INTO lv_subkey.
+        LOG-POINT ID /aif/runtime SUBKEY lv_subkey FIELDS ls_finf-ns ls_finf-ifname ls_finf-ifversion iv_queue_ns iv_queue_name.
+        IF 1 = 2. MESSAGE s010(/aif/enabler_base) WITH ls_finf-ns ls_finf-ifname ls_finf-ifversion.  ENDIF."Where used list
+        ls_textid-msgid = '/AIF/ENABLER_BASE'.
+        ls_textid-msgno = '010'.
+        ls_textid-attr1 = ls_finf-ns.
+        ls_textid-attr2 = ls_finf-ifname.
+        ls_textid-attr3 = ls_finf-ifversion.
+        IF iv_use_buffer = abap_true.
+          CALL METHOD lr_appl_engine->save_buffered_messages( ). "Save buffered persistence
+        ENDIF.
+        "Sub-status of In-Process status for XML&STRU Engine begin
+        TRY.
+            CALL METHOD /aif/cl_aif_global_tools=>upd_sub_status
+              EXPORTING
+                iv_msgguid    = lv_msgguid_32
+                iv_ns         = ls_finf-ns
+                iv_ifname     = ls_finf-ifname
+                iv_ifver      = ls_finf-ifversion
+                iv_sub_status = /aif/if_globals=>gc_in_process_sub_status-processing.
+          CATCH /aif/cx_message_statistics ##NO_HANDLER.
+          CATCH /aif/cx_error_handling_general ##NO_HANDLER.
+        ENDTRY.
+        "Sub-status of In-Process status for XML&STRU Engine end
+        RAISE EXCEPTION TYPE /aif/cx_error_handling_general
+          EXPORTING
+            previous = lr_err_general
+            textid   = ls_textid.
+    ENDTRY.
+
+*     -- serialization: write serialization entry (if needed) ----------
+    lr_selection_engine = /aif/cl_aif_engine_factory=>get_selection_engine(
+        iv_selection_engine_id       = ls_finf-sel_engine_id
+        iv_cust_namespace            = ls_finf-cust_ns_sel
+        iv_cust_sel_engine_id        = ls_finf-cust_sel_eng_id ).
+
+    lr_dba_mgr = /aif/cl_dba_reader_mgr=>get_instance( ).
+    lr_dba_inf_kflds = lr_dba_mgr->get_dba_inf_kflds( ).
+
+    ls_inf_kflds_out-ns = ls_finf-ns.
+    ls_inf_kflds_out-ifname = ls_finf-ifname.
+    ls_inf_kflds_out-ifver  = ls_finf-ifversion.
+    TRY.
+        lt_inf_keyfields = lr_dba_inf_kflds->read_table( is_key = ls_inf_kflds_out ).
+      CATCH /aif/cx_dba_reader.
+        CLEAR lt_inf_keyfields.
+    ENDTRY.
+    lr_index_table_buffer = lr_selection_engine->get_index_table_buffer_for_msg( iv_msgguid      = lv_msgguid_32
+                                                                                 iv_ns           = ls_finf-ns
+                                                                                 iv_ifname       = ls_finf-ifname
+                                                                                 iv_ifversion    = ls_finf-ifversion ).
+
+    " read single idx
+    lr_sidx_entry = lr_index_table_buffer->get_single_idx_entry( ).
+    ASSIGN lr_sidx_entry->* TO <ls_sidx_entry>.
+
+    " read multi idx
+    lt_midx_entries = lr_index_table_buffer->get_multi_idx_entries( ).
+
+    " write serialization entry
+    TRY.
+        /aif/cl_serialization=>write_serialization_tab_entry( is_source_data       = is_any_structure
+                                                              it_inf_keyfields     = lt_inf_keyfields
+                                                              it_idx_table_entries = lt_midx_entries
+                                                              is_sidx_table_entry  = <ls_sidx_entry> ).
+
+        DATA lr_serial_no_lock TYPE REF TO /aif/cx_aif_serial_no_lock.
+        DATA lr_serial_config_err TYPE REF TO /aif/cx_aif_serial_config_err.
+        DATA lr_pre TYPE REF TO cx_root.
+        DATA lr_no_lock_pre TYPE REF TO /aif/cx_aif_serial_no_lock.
+        DATA lr_config_err_pre TYPE REF TO /aif/cx_aif_serial_config_err.
+      CATCH /aif/cx_aif_serial_no_lock  INTO lr_serial_no_lock.
+        lr_pre ?= lr_serial_no_lock.
+        DO.
+          IF lr_pre->previous IS INITIAL.
+            EXIT.
+          ENDIF.
+          lr_pre ?= lr_pre->previous.
+        ENDDO.
+        lr_no_lock_pre ?= lr_pre.
+        lr_enabler_xml->add_single_log_message(
+            iv_msg_type                  = 'E'
+            iv_msg_id                    = lr_no_lock_pre->if_t100_message~t100key-msgid
+            iv_msg_number                = lr_no_lock_pre->if_t100_message~t100key-msgno
+            iv_msg_message_v1            = lr_no_lock_pre->if_t100_message~t100key-attr1
+            iv_msg_message_v2            = lr_no_lock_pre->if_t100_message~t100key-attr2
+            iv_msg_message_v3            = lr_no_lock_pre->if_t100_message~t100key-attr3
+            iv_msg_message_v4            = lr_no_lock_pre->if_t100_message~t100key-attr4
+            iv_msg_source                = /aif/if_globals=>gc_eh_msg_source-framework
+            iv_ignore_trace_level        = abap_true ).
+        lr_enabler_xml->/aif/if_enabler_base~update(
+            iv_message_status_flag = 'E'
+            iv_user_name           = sy-uname
+            iv_create_date         = sy-datum
+            iv_create_time         = sy-uzeit ).
+        IF iv_use_buffer = abap_true.
+          CALL METHOD lr_appl_engine->save_buffered_messages( ). "Save buffered persistence
+        ENDIF.
+        RAISE EXCEPTION TYPE /aif/cx_enabler_base EXPORTING previous = lr_no_lock_pre.
+
+      CATCH  /aif/cx_aif_serial_config_err INTO lr_serial_config_err.
+        lr_pre ?= lr_serial_config_err.
+        DO.
+          IF lr_pre->previous IS INITIAL.
+            EXIT.
+          ENDIF.
+          lr_pre ?= lr_pre->previous.
+        ENDDO.
+        lr_config_err_pre ?= lr_pre.
+        lr_enabler_xml->add_single_log_message(
+            iv_msg_type                  = 'E'
+            iv_msg_id                    = lr_config_err_pre->if_t100_message~t100key-msgid
+            iv_msg_number                = lr_config_err_pre->if_t100_message~t100key-msgno
+            iv_msg_message_v1            = lr_config_err_pre->if_t100_message~t100key-attr1
+            iv_msg_message_v2            = lr_config_err_pre->if_t100_message~t100key-attr2
+            iv_msg_message_v3            = lr_config_err_pre->if_t100_message~t100key-attr3
+            iv_msg_message_v4            = lr_config_err_pre->if_t100_message~t100key-attr4
+            iv_msg_source                = /aif/if_globals=>gc_eh_msg_source-framework
+            iv_ignore_trace_level        = abap_true ).
+        lr_enabler_xml->/aif/if_enabler_base~update(
+            iv_message_status_flag = 'E'
+            iv_user_name           = sy-uname
+            iv_create_date         = sy-datum
+            iv_create_time         = sy-uzeit ).
+        IF iv_use_buffer = abap_true.
+          CALL METHOD lr_appl_engine->save_buffered_messages( ). "Save buffered persistence
+        ENDIF.
+        RAISE EXCEPTION TYPE /aif/cx_enabler_base EXPORTING previous = lr_config_err_pre.
+    ENDTRY.
+
+*     -- schedule/execute run ------------------------------------------
+    IF NOT cr_pers_queue IS BOUND.
+
+      CREATE OBJECT cr_pers_queue
+        EXPORTING
+          iv_queue_ns   = iv_queue_ns
+          iv_queue_name = iv_queue_name
+        EXCEPTIONS
+          not_exists    = 1
+          OTHERS        = 2.
+      IF sy-subrc <> 0.
+        CONCATENATE 'Runtime Config. Group does not exist: ' lv_msgguid_32 '02' INTO lv_subkey.
+        LOG-POINT ID /aif/runtime SUBKEY lv_subkey FIELDS ls_finf-ns ls_finf-ifname ls_finf-ifversion iv_queue_ns iv_queue_name.
+        IF 1 = 2. MESSAGE e006(/aif/runtime) WITH iv_queue_ns iv_queue_name. ENDIF. "Where-used list
+        ls_textid-msgid = '/AIF/RUNTIME'.
+        ls_textid-msgno = 006.
+        ls_textid-attr1 = iv_queue_ns.
+        ls_textid-attr2 = iv_queue_name.
+        IF iv_use_buffer = abap_true.
+          CALL METHOD lr_appl_engine->save_buffered_messages( ). "Save buffered persistence
+        ENDIF.
+        RAISE EXCEPTION TYPE /aif/cx_enabler_base EXPORTING textid = ls_textid. "TODO: Check if we should not create an own exception...
+      ENDIF.
+
+    ENDIF.
+
+* -- save messages still in queue buffer -------------------------------
+    IF cr_pers_queue IS BOUND.
+      lv_msgguid_32 = ls_xmlparse-msgguid.
+      cr_pers_queue->add_message(
+          EXPORTING
+            msgguid           = lv_msgguid_32
+            ns                = ls_finf-ns
+            ifname            = ls_finf-ifname
+            ifversion         = ls_finf-ifversion
+          EXCEPTIONS
+            lock_failed         = 1
+            already_exist       = 2
+            run_creation_failed = 3
+      ).
+      IF sy-subrc = 0.
+        IF NOT iv_save IS INITIAL.
+          CALL METHOD cr_pers_queue->save_messages
+            EXPORTING
+              iv_flg_create_run   = iv_create_run
+            EXCEPTIONS
+              run_creation_failed = 1.
+          IF sy-subrc <> 0.
+*          the messages are already committed to the database, before we try to create the run. Therefore, don't throw an exception here.
+*           Instead add a corresponding message to the message's application log
+            IF iv_use_buffer = abap_true.
+              CALL METHOD lr_appl_engine->save_buffered_messages( ). "Save buffered persistence
+            ENDIF.
+            handle_run_creation_error( io_pers_queue = cr_pers_queue is_sys = sy ).
+          ENDIF.
+        ENDIF.
+      ELSEIF sy-subrc = 3.
+*       the messages are already committed to the database, before we try to create the run. Therefore, don't throw an exception here.
+*       Instead add a corresponding message to the message's application log
+        IF iv_use_buffer = abap_true.
+          CALL METHOD lr_appl_engine->save_buffered_messages( ). "Save buffered persistence
+        ENDIF.
+        handle_run_creation_error( io_pers_queue = cr_pers_queue is_sys = sy ).
+      ELSE.
+        ls_textid-msgid = sy-msgid.
+        ls_textid-msgno = sy-msgno.
+        ls_textid-attr1 = sy-msgv1.
+        ls_textid-attr2 = sy-msgv2.
+        ls_textid-attr3 = sy-msgv3.
+        ls_textid-attr4 = sy-msgv4.
+        IF iv_use_buffer = abap_true.
+          CALL METHOD lr_appl_engine->save_buffered_messages( ). "Save buffered persistence
+        ENDIF.
+        RAISE EXCEPTION TYPE /aif/cx_enabler_base EXPORTING textid = ls_textid.
+      ENDIF.
+    ENDIF.
+
+* -- close log ---------------------------------------------------------
+    lr_enabler_xml->close_log( ).
+
+  ENDMETHOD.
+
+
+  METHOD transfer_to_aif_mult.
+
+    DATA:
+      lr_pers_queue                TYPE REF TO /aif/cl_pers_queue,
+      lr_cx_inf_det_base           TYPE REF TO /aif/cx_inf_det_base,
+      lr_cx_enabler_base           TYPE REF TO /aif/cx_enabler_base,
+      lr_cx_aif_engine_not_found   TYPE REF TO /aif/cx_aif_engine_not_found,
+      lr_cx_error_handling_general TYPE REF TO /aif/cx_error_handling_general,
+      lr_cx_aif_engine_base        TYPE REF TO /aif/cx_aif_engine_base.
+
+    FIELD-SYMBOLS:
+      <tabline>                 TYPE any.
+
+
+    LOOP AT it_any_structure[] ASSIGNING <tabline>.
+
+      TRY.
+          CALL METHOD /aif/cl_enabler_xml=>transfer_to_aif
+            EXPORTING
+              is_any_structure = <tabline>
+              iv_cust_ns       = iv_cust_ns
+              iv_cust_type     = iv_cust_type
+              iv_queue_ns      = iv_queue_ns
+              iv_queue_name    = iv_queue_name
+              iv_save          = ''
+              iv_use_buffer    = iv_use_buffer
+            CHANGING
+              cr_pers_queue    = lr_pers_queue.
+
+* raise exception to inform the caller about the error.
+        CATCH /aif/cx_inf_det_base INTO lr_cx_inf_det_base.
+          RAISE EXCEPTION TYPE /aif/cx_enabler_base
+            EXPORTING
+              previous = lr_cx_inf_det_base.
+        CATCH /aif/cx_enabler_base INTO lr_cx_enabler_base.
+          RAISE EXCEPTION TYPE /aif/cx_enabler_base
+            EXPORTING
+              previous = lr_cx_enabler_base.
+        CATCH /aif/cx_aif_engine_not_found INTO lr_cx_aif_engine_not_found.
+          RAISE EXCEPTION TYPE /aif/cx_enabler_base
+            EXPORTING
+              previous = lr_cx_aif_engine_not_found.
+        CATCH /aif/cx_error_handling_general INTO lr_cx_error_handling_general.
+          RAISE EXCEPTION TYPE /aif/cx_enabler_base
+            EXPORTING
+              previous = lr_cx_error_handling_general.
+        CATCH /aif/cx_aif_engine_base INTO lr_cx_aif_engine_base.
+          RAISE EXCEPTION TYPE /aif/cx_enabler_base
+            EXPORTING
+              previous = lr_cx_aif_engine_base.
+      ENDTRY.
+
+    ENDLOOP.
+    IF NOT lr_pers_queue IS INITIAL.
+      transfer_to_aif_save( lr_pers_queue ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD transfer_to_aif_save.
+
+    ir_pers_queue->save_messages( EXPORTING iv_flg_create_run = abap_true EXCEPTIONS run_creation_failed = 1 ).
+    IF sy-subrc = 1.
+      TRY.
+          handle_run_creation_error( io_pers_queue = ir_pers_queue is_sys = sy ).
+        CATCH /aif/cx_enabler_base.
+*      Do not forward this exception as only the run creation failed. Data content, index tables etc. have already been saved, it is not necessary that the messages are send again.
+      ENDTRY.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

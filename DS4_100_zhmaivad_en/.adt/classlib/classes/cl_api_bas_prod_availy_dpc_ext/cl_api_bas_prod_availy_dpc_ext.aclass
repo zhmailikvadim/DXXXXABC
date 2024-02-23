@@ -1,0 +1,259 @@
+class CL_API_BAS_PROD_AVAILY_DPC_EXT definition
+  public
+  inheriting from CL_API_BAS_PROD_AVAILY_DPC
+  create public .
+
+public section.
+
+  methods /IWBEP/IF_MGW_APPL_SRV_RUNTIME~EXECUTE_ACTION
+    redefinition .
+protected section.
+
+  types:
+    BEGIN OF TS_REQ_QTY_FUNCTION_PARAM,
+      requested_quantity TYPE bs_atp_req_qty,
+    END OF ts_req_qty_function_param .
+  types:
+    BEGIN OF ts_req_date_function_param,
+      requested_date TYPE timestamp,
+    END OF ts_req_date_function_param .
+  types:
+    BEGIN OF ts_common_function_param,
+      material        TYPE matnr,
+      supplying_plant TYPE werks_d,
+      checking_rule   TYPE prreg,
+    END OF ts_common_function_param .
+
+  constants:
+    BEGIN OF c_function_imports,
+      determine_availability_at   TYPE /iwbep/mgw_tech_name VALUE 'DetermineAvailabilityAt',
+      determine_availability_of   TYPE /iwbep/mgw_tech_name VALUE 'DetermineAvailabilityOf',
+      calculate_availy_timeseries TYPE /iwbep/mgw_tech_name VALUE 'CalculateAvailabilityTimeseries',
+    END OF c_function_imports .
+
+  methods EXPOSE_MESSAGES
+    importing
+      !IT_MESSAGE type IF_ATP_INFO_RAW_REQ=>TT_MESSAGE .
+
+  METHODS:
+    assert_reqd_qty_not_negative
+      IMPORTING
+        iv_requested_quantity TYPE bs_atp_req_qty
+      RAISING
+        /iwbep/cx_mgw_busi_exception.
+private section.
+ENDCLASS.
+
+
+
+CLASS CL_API_BAS_PROD_AVAILY_DPC_EXT IMPLEMENTATION.
+
+
+METHOD /iwbep/if_mgw_appl_srv_runtime~execute_action.
+
+  DATA: lo_raw_request_factory TYPE REF TO cl_atp_info_raw_req_factory,
+        lo_raw_request         TYPE REF TO if_atp_info_raw_req,
+        lo_controller          TYPE REF TO cl_atp_info_controller.
+
+  DATA: ls_availability TYPE atp_info_res_availy_record,
+        lt_availability TYPE tbl_atp_info_res_availy_record.
+
+  DATA: lt_message       TYPE if_atp_info_raw_req=>tt_message,
+        lv_error_occured TYPE abap_bool.
+
+  DATA: lv_function_import_name     TYPE string,
+        ls_common_function_param    TYPE ts_common_function_param,
+        ls_requested_quantity_param TYPE ts_req_qty_function_param,
+        ls_requested_date_param     TYPE ts_req_date_function_param.
+
+
+  FIELD-SYMBOLS: <la_result> TYPE any.
+
+
+
+  lv_function_import_name  = io_tech_request_context->get_function_import_name( ).
+  IF lv_function_import_name <> c_function_imports-determine_availability_at AND
+     lv_function_import_name <> c_function_imports-determine_availability_of AND
+     lv_function_import_name <> c_function_imports-calculate_availy_timeseries.
+
+    super->/iwbep/if_mgw_appl_srv_runtime~execute_action(
+      EXPORTING
+        iv_action_name               = iv_action_name
+        it_parameter                 = it_parameter
+        io_tech_request_context      = io_tech_request_context
+      IMPORTING
+        er_data                      = er_data
+    ).
+
+  ENDIF.
+
+
+
+
+  CREATE OBJECT lo_controller.
+  CREATE OBJECT lo_raw_request_factory.
+
+
+  io_tech_request_context->get_converted_parameters(
+    IMPORTING
+      es_parameter_values = ls_common_function_param
+  ).
+
+  lo_raw_request = lo_raw_request_factory->create_for_material_plant(
+    EXPORTING
+      it_material_plant = VALUE #( ( material = ls_common_function_param-material supplying_plant = ls_common_function_param-supplying_plant ) )
+      iv_checking_rule  = ls_common_function_param-checking_rule
+  ).
+
+
+
+  CASE iv_action_name.
+    WHEN c_function_imports-determine_availability_at.
+
+      io_tech_request_context->get_converted_parameters(
+        IMPORTING
+          es_parameter_values = ls_requested_date_param
+      ).
+
+      lo_controller->determine_availability_at(
+        EXPORTING
+          io_raw_request         = lo_raw_request
+          iv_requested_date      = ls_requested_date_param-requested_date
+        IMPORTING
+          es_availability_record = ls_availability
+          et_message             = lt_message
+      ).
+
+      ASSIGN ls_availability TO <la_result>.
+
+
+    WHEN c_function_imports-determine_availability_of.
+
+      io_tech_request_context->get_converted_parameters(
+        IMPORTING
+          es_parameter_values = ls_requested_quantity_param
+      ).
+
+      me->assert_reqd_qty_not_negative(
+        EXPORTING
+          iv_requested_quantity = ls_requested_quantity_param-requested_quantity
+      ).
+
+      lo_controller->determine_availability_of(
+        EXPORTING
+          io_raw_request         = lo_raw_request
+          iv_requested_quantity  = ls_requested_quantity_param-requested_quantity
+        IMPORTING
+          es_availability_record = ls_availability
+          et_message             = lt_message
+      ).
+
+      ASSIGN ls_availability TO <la_result>.
+
+    WHEN c_function_imports-calculate_availy_timeseries.
+
+      lo_controller->calculate_availy_timeseries(
+        EXPORTING
+          io_raw_request             = lo_raw_request
+        IMPORTING
+          et_availability_timeseries = lt_availability
+          et_message                 = lt_message
+      ).
+
+      ASSIGN lt_availability TO <la_result>.
+
+
+    WHEN OTHERS.
+      ASSERT 1 = 0.
+  ENDCASE.
+
+
+  me->expose_messages(
+    EXPORTING
+      it_message = lt_message
+  ).
+
+  lv_error_occured = xsdbool(
+    lv_error_occured = abap_true             OR
+    line_exists( lt_message[ msgty = 'E' ] ) OR
+    line_exists( lt_message[ msgty = 'A' ] ) OR
+    line_exists( lt_message[ msgty = 'X' ] )
+  ).
+
+
+
+  IF lv_error_occured = abap_true.
+    RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+      EXPORTING
+        message_container = mo_context->get_message_container( )
+        http_status_code  = 404.
+  ENDIF.
+
+
+
+
+  me->copy_data_to_ref(
+    EXPORTING
+      is_data = <la_result>
+    CHANGING
+      cr_data = er_data
+  ).
+ENDMETHOD.
+
+
+  METHOD assert_reqd_qty_not_negative.
+
+    DATA: lt_message TYPE STANDARD TABLE OF symsg.
+
+
+    IF iv_requested_quantity < 0.
+
+      MESSAGE ID 'AG' TYPE 'E' NUMBER 151 INTO DATA(lv_dummy).
+      INSERT CORRESPONDING #( sy ) INTO TABLE lt_message.
+
+      me->expose_messages(
+        EXPORTING
+          it_message = lt_message
+      ).
+
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          message_container = mo_context->get_message_container( )
+          http_status_code  = /iwbep/cx_mgw_busi_exception=>gcs_http_status_codes-bad_request.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+METHOD expose_messages.
+
+  DATA: lo_message_container     TYPE REF TO /iwbep/if_message_container,
+        lv_leading_message_added TYPE abap_bool VALUE abap_false.
+
+
+  lo_message_container = mo_context->get_message_container( ).
+
+
+  LOOP AT it_message ASSIGNING FIELD-SYMBOL(<ls_message>).
+
+    lo_message_container->add_message(
+      EXPORTING
+        iv_msg_type               = <ls_message>-msgty
+        iv_msg_id                 = <ls_message>-msgid
+        iv_msg_number             = <ls_message>-msgno
+        iv_msg_v1                 = <ls_message>-msgv1
+        iv_msg_v2                 = <ls_message>-msgv2
+        iv_msg_v3                 = <ls_message>-msgv3
+        iv_msg_v4                 = <ls_message>-msgv4
+        iv_is_leading_message     = xsdbool( lv_leading_message_added = abap_false )
+        iv_add_to_response_header = abap_true
+        iv_is_transition_message  = abap_false
+    ).
+
+    lv_leading_message_added = abap_true.
+
+  ENDLOOP.
+
+ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,248 @@
+CLASS zcl_sd_stock_recon_base DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    TYPES mtyp_range_plant              TYPE RANGE OF i_storagelocation-plant.
+    TYPES mtyp_range_storage_location   TYPE RANGE OF i_storagelocation-storagelocation.
+    TYPES mtyp_goodsmovement_parameters   TYPE SORTED TABLE OF zsd_s_move_codes WITH NON-UNIQUE KEY move_type move_code.
+    TYPES: BEGIN OF  mtyp_authority_object_setting,
+             object    TYPE c LENGTH 12,
+             id1       TYPE c LENGTH 12,
+             id2       TYPE c LENGTH 12,
+             id3       TYPE c LENGTH 12,
+             id3_value TYPE c LENGTH 12,
+           END OF mtyp_authority_object_setting,
+           BEGIN OF  mtyp_difference_rows,
+             wmssnapshotdate  TYPE zsd_i_stock_corr_rprt-wmssnapshotdate,
+             plant            TYPE zsd_i_stock_corr_rprt-plant,
+             storagelocation  TYPE zsd_i_stock_corr_rprt-storagelocation,
+             article          TYPE zsd_i_stock_corr_rprt-article,
+             salesordernumber TYPE zsd_i_stock_corr_rprt-salesordernumber,
+             salesorderitem   TYPE zsd_i_stock_corr_rprt-salesordernumber,
+             adjustmentqty    TYPE zsd_i_stock_corr_rprt-adjustmentqty,
+             transferqty      TYPE zsd_i_stock_corr_rprt-adjustmentqty,
+             transferto       TYPE zsd_i_stock_corr_rprt-transferto,
+             stocktype        TYPE zsd_i_stock_corr_rprt-stocktype,
+             difference       TYPE zsd_i_stock_corr_rprt-difference,
+             status           TYPE zsd_i_stock_corr_rprt-status,
+             movetypegroup    TYPE zsd_snapshot_move_types_group,
+           END OF mtyp_difference_rows.
+
+    CONSTANTS gc_move_type_group_adjustment TYPE zsd_snapshot_move_types_group VALUE 0.
+    CONSTANTS gc_move_type_group_transfer   TYPE zsd_snapshot_move_types_group VALUE 1.
+    CONSTANTS gc_fm_repeat_attempts         TYPE i                             VALUE 3.
+    CONSTANTS gc_stock_corr_status_open     TYPE zsd_snapshot_status           VALUE 'Open' ##NO_TEXT.
+    CONSTANTS gc_stock_corr_status_complete TYPE zsd_snapshot_status           VALUE 'Complete' ##NO_TEXT.
+    CONSTANTS gc_stock_corr_status_error    TYPE zsd_snapshot_status           VALUE 'Error' ##NO_TEXT.
+    CONSTANTS gc_stock_type_unrestricted    TYPE zsd_snapshot_stock_type       VALUE 'UU' ##NO_TEXT.
+    CONSTANTS gc_stock_type_in_quality      TYPE zsd_snapshot_stock_type       VALUE 'QI' ##NO_TEXT.
+    CONSTANTS gc_stock_type_blocked         TYPE zsd_snapshot_stock_type       VALUE 'BL' ##NO_TEXT.
+    CONSTANTS: BEGIN OF gc_authority_object_setting,
+                 object             TYPE c LENGTH 12 VALUE 'M_BEST_LGO',
+                 id_plant           TYPE c LENGTH 12 VALUE 'WERKS',
+                 id_storagelocation TYPE c LENGTH 12 VALUE 'LGORT',
+                 id_actvt           TYPE c LENGTH 12 VALUE 'ACTVT',
+                 actvt_value        TYPE c LENGTH 12 VALUE '03',
+               END OF gc_authority_object_setting.
+    CONSTANTS gc_fiori_bckgr_delay_befo_strt TYPE int1 VALUE 10.
+
+    CLASS-METHODS class_constructor.
+    CLASS-METHODS get_general_setting RETURNING VALUE(rs_return) TYPE zsd_s_stock_recon_settings.
+
+    CLASS-METHODS get_goods_movement_code IMPORTING iv_move_type     TYPE zsd_s_move_codes-move_type
+                                          RETURNING VALUE(rv_return) TYPE zsd_s_move_codes-move_code.
+
+    CLASS-METHODS get_reason_for_movement IMPORTING iv_move_type     TYPE zsd_s_move_codes-move_type
+                                          RETURNING VALUE(rv_return) TYPE t157d-grund.
+
+    CLASS-METHODS get_is_hardcode_populated RETURNING VALUE(rv_result) TYPE abap_boolean.
+
+    CLASS-EVENTS posting_finished EXPORTING VALUE(et_posting_finished) TYPE zsd_tt_correction_history_keys.
+
+    CLASS-METHODS set_posting_finished IMPORTING it_stock_corr_history TYPE zsd_tt_correction_history_keys OPTIONAL.
+
+    CLASS-METHODS convert_filter_fe_to_be
+      IMPORTING iv_fe_filter_string TYPE string
+      CHANGING  cs_filters_fe       TYPE any
+                cs_filters_be       TYPE any
+                cs_entity           TYPE any.
+
+    CLASS-DATA gt_correction_history_keys TYPE zsd_tt_correction_history_keys.
+
+  PRIVATE SECTION.
+    CLASS-DATA gts_goodsmovement_parameters   TYPE mtyp_goodsmovement_parameters.
+    CLASS-DATA gs_stock_recon_common_settings TYPE zsd_s_stock_recon_settings.
+    CLASS-DATA gv_is_hardcode_populated       TYPE abap_boolean.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_STOCK_RECON_BASE IMPLEMENTATION.
+
+
+  METHOD class_constructor.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 14.05.2023 | 19611     : [Feature] [Build] - Stock re -
+    "              |            | DS4K950069                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 06.06.2023 | 20960     : [Build] - Stock reconciliati -
+    "              |            | DS4K951475                               -
+    " ----------------------------------------------------------------------
+    " ZHMAIVAD     | 29.09.2023 | 22859     : [Build] - Stock reconciliati -
+    "              |            | DS4K957133                               -
+    " ----------------------------------------------------------------------*/
+
+    DATA lt_stock_recon_settings TYPE TABLE OF zsd_s_stock_recon_settings.
+
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDDBACDFD1590D21F59'
+                                                iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-names
+                                      IMPORTING et_table        = lt_stock_recon_settings ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDDA39DC05C40201F59'
+                                                iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-data_elements
+                                      IMPORTING et_table        = gts_goodsmovement_parameters ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+    TRY.
+        gs_stock_recon_common_settings = lt_stock_recon_settings[ 1 ].
+      CATCH cx_sy_itab_line_not_found.
+        RETURN.
+    ENDTRY.
+    gv_is_hardcode_populated = abap_true.
+  ENDMETHOD.
+
+
+  METHOD get_general_setting.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 16.06.2023 | 20960     : [Feature] [Build] - Stock re -
+    "              |            | DS4K951475                               -
+    " -----------------------------------------------------------------------
+    rs_return = gs_stock_recon_common_settings.
+  ENDMETHOD.
+
+
+  METHOD get_goods_movement_code.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 16.06.2023 | 20960     : [Feature] [Build] - Stock re -
+    "              |            | DS4K951475                               -
+    " -----------------------------------------------------------------------
+    rv_return = VALUE #( gts_goodsmovement_parameters[ move_type = iv_move_type ]-move_code OPTIONAL ).
+  ENDMETHOD.
+
+
+  METHOD get_is_hardcode_populated.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 16.06.2023 | 20960     : [Feature] [Build] - Stock re -
+    "              |            | DS4K951475                               -
+    " -----------------------------------------------------------------------
+    rv_result = gv_is_hardcode_populated.
+  ENDMETHOD.
+
+
+  METHOD get_reason_for_movement.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 16.06.2023 | 20960     : [Feature] [Build] - Stock re -
+    "              |            | DS4K951475                               -
+    " -----------------------------------------------------------------------
+
+    rv_return = VALUE #( gts_goodsmovement_parameters[ move_type = iv_move_type ]-move_reason OPTIONAL ).
+  ENDMETHOD.
+
+
+  METHOD set_posting_finished.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 27.07.2023 | 22859     : [Feature] [Build] - Stock re -
+    "              |            | DS4K957133                               -
+    " -----------------------------------------------------------------------
+    gt_correction_history_keys = it_stock_corr_history.
+  ENDMETHOD.
+
+
+  METHOD convert_filter_fe_to_be.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 29.09.2023 | 22859     : [Build] - Stock reconciliati -
+    "              |            | DS4K957133                               -
+    " ----------------------------------------------------------------------*/
+    DATA(lv_fe_filter_string) = to_upper( iv_fe_filter_string ).
+    FIND PCRE 'TRUE|\[\]' IN lv_fe_filter_string.
+    IF sy-subrc = 0.
+      REPLACE ALL OCCURRENCES OF PCRE 'TRUE' IN lv_fe_filter_string WITH '"X"'.
+      REPLACE ALL OCCURRENCES OF PCRE '\[\]' IN lv_fe_filter_string WITH '[" "]'.
+    ENDIF.
+
+    /ui2/cl_json=>deserialize( EXPORTING json        = lv_fe_filter_string
+                                         pretty_name = /ui2/cl_json=>pretty_mode-camel_case
+                               CHANGING  data        = cs_filters_fe ).
+    DATA(lt_component) = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_data( cs_filters_be ) )->get_components( ).
+
+    LOOP AT lt_component ASSIGNING FIELD-SYMBOL(<ls_component>).
+      ASSIGN COMPONENT <ls_component>-name OF STRUCTURE cs_filters_fe
+             TO FIELD-SYMBOL(<lt_filter_fe>).
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+      ASSIGN COMPONENT <ls_component>-name OF STRUCTURE cs_filters_be
+             TO FIELD-SYMBOL(<lt_filter_be>).
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+      ASSIGN COMPONENT <ls_component>-name OF STRUCTURE cs_entity TO FIELD-SYMBOL(<ls_field>).
+      IF sy-subrc = 0.
+        TRY.
+            DESCRIBE FIELD <ls_field> TYPE FINAL(lv_field_type).
+            CASE lv_field_type.
+              WHEN cl_abap_typedescr=>typekind_date.
+                <lt_filter_be> = NEW zcl_pe_fe2be_conversor( )->get_be_daterange( <lt_filter_fe> ).
+              WHEN OTHERS.
+                <lt_filter_be> = NEW zcl_pe_fe2be_conversor( )->get_be_range( <lt_filter_fe> ).
+            ENDCASE.
+          CATCH zcx_pe_fe2be_conversor.
+            CONTINUE.
+        ENDTRY.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.

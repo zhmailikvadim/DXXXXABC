@@ -1,0 +1,192 @@
+CLASS cl_atp_sup_charc_value_vh DEFINITION
+  PUBLIC
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    INTERFACES if_rap_query_provider.
+
+    METHODS constructor
+      IMPORTING sup_pac_catalog_dba TYPE REF TO cl_atp_sup_pac_catalog_dba OPTIONAL
+                charc_utility       TYPE REF TO cl_atp_charc_value_utility OPTIONAL
+                  PREFERRED PARAMETER sup_pac_catalog_dba.
+
+    METHODS check_charc_value
+      IMPORTING
+        characteristic_uuid     TYPE sup_charc_catalog_path_uuid
+        charc_value             TYPE string
+      EXPORTING
+        vh_value_found          TYPE abap_boolean
+        vh_existence_check_type TYPE charcvalexistencechecktype.
+
+  PROTECTED SECTION.
+    CONSTANTS filtername_path_uuid  TYPE string VALUE 'SUPPROTCHARCCTLGPATHUUID' ##NO_TEXT.
+    CONSTANTS filtername_value      TYPE string VALUE 'CHARCVALUE' ##NO_TEXT.
+    CONSTANTS filtername_value_desc TYPE string VALUE 'CHARCVALUEDESCRIPTION' ##NO_TEXT.
+
+    TYPES charc_values_vh_entries TYPE STANDARD TABLE OF c_supprotcharcvaluevh.
+
+    METHODS update_filter_range
+      EXPORTING
+        charc_value_sel_opt      TYPE /iwbep/t_cod_select_options
+        charc_value_desc_sel_opt TYPE /iwbep/t_cod_select_options
+      CHANGING
+        filter_range             TYPE if_rap_query_filter=>tt_name_range_pairs.
+
+    METHODS get_main_catalog_path
+      IMPORTING
+        catalog_paths       TYPE pactlg_path_tab
+      RETURNING
+        VALUE(catalog_path) TYPE pactlg_path.
+
+  PRIVATE SECTION.
+    DATA:
+      sup_pac_catalog_dba TYPE REF TO cl_atp_sup_pac_catalog_dba,
+      charc_utility       TYPE REF TO cl_atp_charc_value_utility.
+
+ENDCLASS.
+
+
+
+CLASS CL_ATP_SUP_CHARC_VALUE_VH IMPLEMENTATION.
+
+
+  METHOD check_charc_value.
+
+    vh_value_found = abap_false.
+
+    DATA(charc_value_filter)     = VALUE /iwbep/t_cod_select_options( ( sign = 'I' option = 'EQ' low = charc_value ) ).
+    DATA(charc_path_uuid_filter) = VALUE /iwbep/t_cod_select_options( ( sign = 'I' option = 'EQ' low = characteristic_uuid ) ).
+
+    DATA(filter_range) = VALUE if_rap_query_filter=>tt_name_range_pairs( ( name   = filtername_path_uuid
+                                                                           range = charc_path_uuid_filter ) ).
+    update_filter_range( CHANGING  filter_range = filter_range ).
+
+    DATA(filter_options) = CORRESPONDING /iwbep/t_mgw_select_option( filter_range MAPPING property       = name
+                                                                                          select_options = range ).
+
+    charc_utility->get_charc_value_help_path( EXPORTING it_filter_select_options = filter_options
+                                              IMPORTING et_catalog_path          = DATA(catalog_paths) ).
+
+    DATA(catalog_path) = get_main_catalog_path( catalog_paths ).
+
+    charc_utility->get_charc_value_help_data( EXPORTING is_catalog_path  = catalog_path                          " Table type for prod alloc characteristic catalog path
+                                                        is_paging        = VALUE #( top  = 1 )
+                                                        it_id_selopt     = CORRESPONDING #( charc_value_filter ) " Select Options for Characteristic ID
+                                                        iv_has_count     = abap_false                            " Data element for domain BOOLE: TRUE (='X') and FALSE (=' ')
+                                                        iv_selopt_and    = abap_true                             " Combine select options for IDs and Descrs. with AND logic
+                                                        iv_no_conversion = abap_true
+                                              IMPORTING et_value         = DATA(value_results) ).
+
+
+    vh_existence_check_type = catalog_path-charcvalexistencechecktype.
+    " if iv_no_conversion will be set to abap_false set "vh_value_found" always to abap_true if value_results is filled
+    LOOP AT value_results REFERENCE INTO DATA(result).
+      IF xsdbool( result->prodalloccharc EQ charc_value_filter[ 1 ]-low ) EQ abap_true.
+        vh_value_found = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    me->sup_pac_catalog_dba = COND #( WHEN sup_pac_catalog_dba IS BOUND THEN sup_pac_catalog_dba
+                                                                        ELSE NEW #( ) ).
+    me->charc_utility       = COND #( WHEN charc_utility IS BOUND THEN charc_utility
+                                                                  ELSE NEW #( ) ).
+
+  ENDMETHOD.
+
+
+  METHOD get_main_catalog_path.
+
+    CHECK catalog_paths IS NOT INITIAL.
+
+    IF lines( catalog_paths ) = 1.
+      catalog_path = catalog_paths[ 1 ].
+    ELSE.
+
+      DATA(pathref_main_catalog) = sup_pac_catalog_dba->read_pathref_main_catalog( catalog_paths[ prodalloccharccatalogtype = '99' ]-prodalloccharcctlgpathuuid ).
+
+      catalog_path = catalog_paths[ prodalloccharcctlgpathuuid = pathref_main_catalog-basecharccatalogpathuuid ].
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_rap_query_provider~select.
+
+    IF    io_request->is_total_numb_of_rec_requested( )
+       OR io_request->is_data_requested( ).
+
+      io_request->get_sort_elements( ).
+
+      DATA(page_size) = io_request->get_paging( )->get_page_size( ).
+      DATA(page_offset) = io_request->get_paging( )->get_offset( ).
+
+      TRY.
+          DATA(filter_range) = io_request->get_filter( )->get_as_ranges( ).
+        CATCH cx_rap_query_filter_no_range.
+          DATA empty_results TYPE charc_values_vh_entries.
+          io_response->set_data( empty_results ).
+          io_response->set_total_number_of_records( 0 ).
+          RETURN.
+      ENDTRY.
+
+
+      update_filter_range( IMPORTING charc_value_sel_opt      = DATA(charc_value_filter)
+                                     charc_value_desc_sel_opt = DATA(charc_value_desc_filter)
+                           CHANGING  filter_range             = filter_range ).
+
+      DATA(filter_options) = CORRESPONDING /iwbep/t_mgw_select_option( filter_range MAPPING property       = name
+                                                                                            select_options = range ).
+
+      charc_utility->get_charc_value_help_path( EXPORTING it_filter_select_options = filter_options
+                                                IMPORTING et_catalog_path          = DATA(catalog_paths) ).
+
+
+
+      charc_utility->get_charc_value_help_data( EXPORTING is_catalog_path  = get_main_catalog_path( catalog_paths )     " Table type for prod alloc characteristic catalog path
+                                                          is_paging        = VALUE #( top  = page_size
+                                                                                      skip = page_offset )
+                                                          it_id_selopt     = CORRESPONDING #( charc_value_filter )      " Select Options for Characteristic ID
+                                                          it_desc_selopt   = CORRESPONDING #( charc_value_desc_filter ) " Select Options for Characteristic Description
+                                                          iv_has_count     = abap_true                                 " Data element for domain BOOLE: TRUE (='X') and FALSE (=' ')
+                                                          iv_selopt_and    = abap_true                                  " Combine select options for IDs and Descrs. with AND logic
+                                                          iv_no_conversion = abap_true
+                                                IMPORTING et_value         = DATA(value_results)
+                                                          ev_count         = DATA(total_no_of_hits) ).
+    ENDIF.
+
+
+    DATA(results) = CORRESPONDING charc_values_vh_entries( value_results MAPPING charcvalue            = prodalloccharc
+                                                                                 charcvaluedescription = prodalloccharcdesc ).
+
+    io_response->set_data( results ).
+
+    IF io_request->is_total_numb_of_rec_requested( ).
+      io_response->set_total_number_of_records( conv #( total_no_of_hits ) ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD update_filter_range.
+
+    LOOP AT filter_range REFERENCE INTO DATA(filter_range_entry).
+      READ TABLE filter_range_entry->range INTO DATA(range_entry) INDEX 1.
+      CASE filter_range_entry->name.
+        WHEN filtername_path_uuid.
+          filter_range_entry->name = 'ProdAllocCharcCtlgPathUUID'.
+        WHEN filtername_value.
+          charc_value_sel_opt = filter_range_entry->range.
+        WHEN filtername_value_desc.
+          charc_value_desc_sel_opt = filter_range_entry->range.
+        WHEN OTHERS.
+      ENDCASE.
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

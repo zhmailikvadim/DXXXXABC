@@ -1,0 +1,116 @@
+*"* use this source file for the definition and implementation of
+*"* local helper classes, interface definitions and type
+*"* declarations
+
+class cx_failed definition inheriting from cx_static_check final.
+  public section.
+    methods constructor
+      importing
+        textid   like textid optional
+        previous like previous optional.
+endclass.
+class cx_failed implementation.
+  method constructor.
+    super->constructor( textid = textid previous = previous ).
+  endmethod.
+endclass.
+
+class so_reader definition final.
+  public section.
+
+    methods get_exceptions  changing p_exceptions type cl_abap_behv_auth_cc_except_so=>tt_exception
+                           raising
+                                    cx_failed.
+
+  private section.
+    types c1 type c length 1.
+
+    methods get_exceptions_ changing p_exceptions type cl_abap_behv_auth_cc_except_so=>tt_exception
+                                     p_timestamp  type timestamp
+                                     p_location   type c1
+                            raising
+                                     cx_failed.
+    methods create_exceptions
+      raising
+        cx_shm_attach_error
+        cx_failed.
+endclass.
+
+class so_reader implementation.
+
+   method get_exceptions.
+    data loc type c1.
+    data tarea type timestamp.
+
+    get_exceptions_(
+      changing
+        p_exceptions = p_exceptions
+        p_timestamp  = tarea
+        p_location   = loc ).
+* unneeded as performed by SHMMA configuration
+*    if loc = 'S'.
+*      data tnow type timestamp.
+*      get time stamp field tnow.
+*      data(tdiff) = cl_abap_tstmp=>subtract( exporting tstmp1 = tnow tstmp2 = tarea ).
+*      if tdiff > 330 ##number_ok. "5 min 30 sec
+*        try.
+*            create_exceptions( ). "i.e write a new version
+*            get_exceptions_(
+*              changing
+*                p_exceptions = p_exceptions
+*                p_timestamp = tarea
+*                p_location       = loc ).
+*          catch cx_shm_attach_error.
+*            data backup_so type ref to zwgb_su21_excep_so.
+*            create object backup_so.
+*            backup_so->fill_list( ).
+*            p_exceptions[] = backup_so->exceptions[].
+*        endtry.
+*      endif.
+*    endif.
+  endmethod.
+
+  method get_exceptions_.
+    clear: p_location, p_timestamp.
+    data backup_so type ref to cl_abap_behv_auth_cc_except_so.
+    data area_handle type ref to cl_abap_behv_auth_cc_exception.
+    try.
+        area_handle = cl_abap_behv_auth_cc_exception=>attach_for_read( ).
+      catch cx_shm_attach_error.
+        try.
+            me->create_exceptions( ).
+            area_handle = cl_abap_behv_auth_cc_exception=>attach_for_read( ).
+          catch cx_shm_attach_error.
+            create object backup_so.
+            backup_so->fill_exception_list( ).
+        endtry.
+    endtry.
+    if area_handle is not initial.
+      p_exceptions[] = area_handle->root->exceptions[].
+      p_timestamp = area_handle->root->timestamp.
+      area_handle->detach_area( ).
+      p_location = 'S'.
+    elseif backup_so is not initial.
+      p_exceptions[] = backup_so->exceptions[].
+      p_location = 'L'.
+    else.
+      raise exception type cx_failed.
+    endif.
+  endmethod.
+
+  method create_exceptions.
+    "shm does not exist => fill it
+    data: so      type ref to cl_abap_behv_auth_cc_except_so,
+          exc_ref type ref to cx_failed.
+    data(area_handle) = cl_abap_behv_auth_cc_exception=>attach_for_write( ).
+    create object so area handle area_handle.
+    area_handle->set_root( so ).
+    try.
+        so->fill_exception_list( ).
+      catch cx_failed into exc_ref.
+        area_handle->detach_rollback( ).
+        raise exception exc_ref.
+    endtry.
+    area_handle->detach_commit( ).
+  endmethod.
+endclass.

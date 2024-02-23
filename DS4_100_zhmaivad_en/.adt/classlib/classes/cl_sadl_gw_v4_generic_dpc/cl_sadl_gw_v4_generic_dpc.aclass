@@ -1,0 +1,1985 @@
+CLASS cl_sadl_gw_v4_generic_dpc DEFINITION PUBLIC FINAL CREATE PUBLIC .
+  PUBLIC SECTION.
+    INTERFACES: if_sadl_gw_v4_generic_dpc.
+    INTERFACES: if_sadl_gw_v4_exceptn_context.
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF ty_update_with_msg_flag,
+             update             TYPE if_sadl_gw_v4_generic_dpc=>ty_update,
+             messages_requested TYPE abap_bool,
+           END OF ty_update_with_msg_flag,
+           tt_update_with_msg_flag TYPE STANDARD TABLE OF ty_update_with_msg_flag WITH EMPTY KEY.
+    TYPES: BEGIN OF ty_create_with_msg_flag,
+             create             TYPE if_sadl_gw_v4_generic_dpc=>ty_create,
+             messages_requested TYPE abap_bool,
+           END OF ty_create_with_msg_flag,
+           tt_create_with_msg_flag TYPE STANDARD TABLE OF ty_create_with_msg_flag WITH EMPTY KEY.
+
+    TYPES tt_messages_requested TYPE STANDARD TABLE OF sytabix WITH DEFAULT KEY.
+
+*    TYPES: BEGIN OF ty_expand_step_with_msg_flag,
+*             expand_step        TYPE if_sadl_gw_v4_generic_dpc=>ty_expand_step,
+*             messages_requested TYPE abap_bool,
+*           END OF ty_expand_step_with_msg_flag,
+*           tt_expand_step_with_msg_flag TYPE STANDARD TABLE OF ty_expand_step_with_msg_flag WITH EMPTY KEY.
+
+    TYPES: BEGIN OF ty_function,
+             entity_id               TYPE sadl_entity_id,
+             "! name of the function
+             name                    TYPE sadl_entity_action,
+             "! reference to the importing parameters. The data this reference points to are filled by the caller of the method.
+             rs_importing_parameters TYPE REF TO data,
+             "! reference to the returning parameters. The data this reference points to are filled by the implementation.
+             r_returning_parameters  TYPE REF TO data,
+             message_target          TYPE REF TO if_sadl_gw_dpc_message_target,
+             messages_requested      TYPE abap_bool,
+             operation_messages      TYPE REF TO if_sadl_v4_operation_messages,
+           END OF ty_function.
+
+    TYPES: BEGIN OF ty_action_function,
+             entity_id        TYPE sadl_entity_id,
+             name             TYPE sadl_entity_action,
+             rt_key_values    TYPE REF TO data,
+             navigation_steps TYPE if_sadl_gw_v4_generic_dpc=>tt_navigation_step,
+           END OF ty_action_function.
+
+    TYPES tt_gw_messages TYPE STANDARD TABLE OF /iwbep/s_v4_message WITH DEFAULT KEY.
+
+    CONSTANTS co_fieldname_sap_messages TYPE string VALUE if_sadl_special_field_names=>sap__messages.
+    CONSTANTS co_message_lifetime LIKE if_sadl_message_handler=>co_lifetime VALUE if_sadl_message_handler=>co_lifetime.
+    CONSTANTS co_includename_data TYPE string VALUE '%SADL_DATA_CONTAINER'.
+*    CONSTANTS co_value_control LIKE /iwbep/if_v4_runtime_types=>gcs_value_control VALUE /iwbep/if_v4_runtime_types=>gcs_value_control.
+
+    DATA mo_mdp TYPE REF TO if_sadl_metadata_provider.
+    DATA mo_sadl_api TYPE REF TO if_sadl_entity_api.
+    DATA mo_odata_runtime TYPE REF TO if_sadl_gw_odata_runtime.
+    DATA mv_use_vcs TYPE abap_bool.
+
+    METHODS _get_query_options_entity_set IMPORTING iv_entity_name             TYPE string
+                                                    is_requested               TYPE if_sadl_query_engine_types=>ty_requested
+                                                    is_paging                  TYPE if_sadl_gw_v4_generic_dpc=>ty_paging
+                                                    it_sort_element            TYPE if_sadl_query_engine_types=>tt_sort_elements OPTIONAL
+                                                    io_filter_condition        TYPE REF TO if_sadl_condition_provider OPTIONAL
+                                                    io_having_filter_condition TYPE REF TO if_sadl_condition_provider OPTIONAL
+                                                    it_navigation_step         TYPE if_sadl_gw_v4_generic_dpc=>tt_navigation_step OPTIONAL
+                                                    is_aggregation             TYPE if_sadl_query_engine_types=>ty_aggregation OPTIONAL
+                                                    is_text_search             TYPE if_sadl_gw_v4_generic_dpc=>ty_text_search OPTIONAL
+                                                    it_parameters              TYPE if_sadl_public_types=>tt_entity_parameters OPTIONAL
+                                                    iv_is_sticky_session       TYPE abap_bool
+                                          RETURNING VALUE(ro_query_options)    TYPE REF TO cl_sadl_gw_query_options
+                                          RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS _get_query_options_entity IMPORTING iv_entity_name          TYPE string
+                                                is_requested            TYPE if_sadl_query_engine_types=>ty_requested
+                                                ir_key                  TYPE REF TO data
+                                                it_navigation_step      TYPE if_sadl_gw_v4_generic_dpc=>tt_navigation_step
+                                                iv_is_sticky_session    TYPE abap_bool
+                                      RETURNING VALUE(ro_query_options) TYPE REF TO cl_sadl_gw_query_options
+                                      RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS _get_all_elems_except_sap_msgs IMPORTING iv_entity_name TYPE string
+                                           EXPORTING et_elements    TYPE if_sadl_query_engine_types=>tt_requested_elements
+                                           RAISING   cx_sadl_contract_violation.
+
+    METHODS _reject_hidden_elements IMPORTING iv_entity_id         TYPE sadl_entity_id
+                                              it_provided_elements TYPE if_sadl_entity_transactional=>tt_element_names OPTIONAL
+*                                    CHANGING  ct_requested_elements TYPE if_sadl_entity_transactional=>tt_element_names OPTIONAL
+                                    RAISING   cx_sadl_gw_contract_violation.
+
+    METHODS _adapt_requested_elements IMPORTING is_requested     TYPE if_sadl_query_engine_types=>ty_requested
+                                                io_query_options TYPE REF TO cl_sadl_gw_query_options
+                                                iv_entity_name   TYPE string
+                                      RAISING   cx_sadl_contract_violation.
+*                                      RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS _get_entity_path IMPORTING iv_entity_name        TYPE string
+                                       it_navigation_step    TYPE if_sadl_gw_v4_generic_dpc=>tt_navigation_step
+                             RETURNING VALUE(rs_entity_path) TYPE if_sadl_gw_types_int=>ts_entity_path
+                             RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS _get_key_values IMPORTING iv_entity_name       TYPE string
+                                      ir_data              TYPE data
+                            RETURNING VALUE(rt_key_values) TYPE /iwbep/t_mgw_tech_pairs
+                            RAISING   cx_sadl_contract_violation
+                                      cx_sadl_static .
+
+    METHODS _get_primary_key_elem IMPORTING iv_entity_name             TYPE string
+                                  RETURNING VALUE(rt_primary_key_elem) TYPE stringtab
+                                  RAISING   cx_sadl_contract_violation.
+
+    METHODS _preprocess_expand IMPORTING iv_entity_name    TYPE string
+                                         it_expand_step    TYPE if_sadl_gw_v4_generic_dpc=>tt_expand_step
+                                         io_query_options  TYPE REF TO cl_sadl_gw_query_options
+                                         io_message_target TYPE REF TO if_sadl_gw_dpc_message_target
+                               RETURNING VALUE(ro_expand)  TYPE REF TO cl_sadl_gw_expand_level.
+*                               RAISING   cx_sadl_static.
+
+    METHODS _process_expand IMPORTING io_expand                 TYPE REF TO cl_sadl_gw_expand_level
+                                      it_requested_src_elements TYPE if_sadl_public_types=>tt_requested_elements
+                                      ir_data                   TYPE REF TO data
+                            RAISING   cx_sadl_static.
+
+    METHODS _get_and_clear_messages RETURNING VALUE(rt_message)  TYPE if_sadl_message_handler=>tt_messages.
+
+    METHODS _get_transact_runtime IMPORTING iv_name           TYPE string
+                                  RETURNING VALUE(ro_runtime) TYPE REF TO if_sadl_entity_runtime
+                                  RAISING   cx_sadl_contract_violation.
+
+    METHODS _get_transaction IMPORTING iv_name               TYPE string
+                             RETURNING VALUE(ro_transaction) TYPE REF TO if_sadl_entity_transactional
+                             RAISING   cx_sadl_contract_violation.
+
+    METHODS _get_mdp RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider.
+
+    METHODS _get_entity_metadata IMPORTING iv_name          TYPE string
+                                 RETURNING VALUE(ro_entity) TYPE REF TO if_sadl_entity
+                                 RAISING   cx_sadl_contract_violation.
+
+    METHODS _get_entity_name_for_read IMPORTING iv_entity_name        TYPE string
+                                      RETURNING VALUE(rv_entity_name) TYPE string.
+    METHODS _clone IMPORTING i_sadl_action_return_data TYPE data
+*                                                  iv_gw_return_data_type    TYPE string
+*                                                  iv_gw_return_is_structure TYPE abap_bool
+*                                                  is_action                 TYPE if_sadl_entity=>ty_action
+                   RETURNING VALUE(rr_gw_return_data)  TYPE REF TO data.
+    METHODS _register_read_actual_ent_data IMPORTING iv_entity_name           TYPE string
+                                                     iv_return_cardinality    TYPE if_sadl_entity=>ty_action-return_cardinality
+                                                     io_dpc_batch             TYPE REF TO cl_sadl_gw_dpc_batch OPTIONAL
+                                                     iv_messages_requested    TYPE abap_bool
+                                                     it_requested_elements    TYPE if_sadl_entity_transactional=>tt_element_names
+                                                     it_expand_steps          TYPE if_sadl_gw_v4_generic_dpc=>tt_expand_step
+                                           CHANGING  ct_action_return_data    TYPE INDEX TABLE
+                                           RETURNING VALUE(rr_gw_return_data) TYPE REF TO data
+                                           RAISING   cx_sadl_contract_violation
+                                                     cx_sadl_static.
+
+    METHODS _check_aggregation IMPORTING is_aggregation TYPE if_sadl_query_engine_types=>ty_aggregation
+                                         is_requested   TYPE if_sadl_query_engine_types=>ty_requested
+                                         ir_entity_load TYPE REF TO if_sadl_load=>ty_entity_load
+                               RAISING   cx_sadl_gw_missing_dimension
+                                         cx_sadl_gw_missing_ref_prop .
+    METHODS _prepare_actions CHANGING  ct_action         TYPE if_sadl_gw_v4_generic_dpc=>tt_action "if_sadl_changeset=>tt_action
+                             RETURNING VALUE(rt_actions) TYPE if_sadl_entity=>tt_actions
+                             RAISING   cx_sadl_contract_violation
+                                       cx_sadl_static.
+    METHODS _check_cr_nav_path_and_add_src  IMPORTING iv_is_sticky_session TYPE abap_bool
+                                            CHANGING  cs_create            TYPE if_sadl_gw_v4_generic_dpc=>ty_create
+                                            RAISING   cx_sadl_contract_violation
+                                                      cx_sadl_static.
+    METHODS _check_op_nav_path_and_add_src  IMPORTING iv_is_sticky_session TYPE abap_bool
+                                            CHANGING  cs_action_function   TYPE ty_action_function
+                                            RAISING   cx_sadl_contract_violation
+                                                      cx_sadl_static.
+*    METHODS _get_data_line_container IMPORTING iv_entity_name                TYPE string OPTIONAL
+*                                     RETURNING VALUE(rr_data_line_container) TYPE REF TO data
+*                                     RAISING   cx_sadl_contract_violation cx_sadl_static.
+
+    METHODS _postprocess_changeset IMPORTING it_create               TYPE tt_create_with_msg_flag
+                                             it_update               TYPE tt_update_with_msg_flag
+                                             iv_is_sticky_session    TYPE abap_bool
+                                             it_action_message_flags TYPE tt_messages_requested
+                                   CHANGING  ct_action               TYPE if_sadl_gw_v4_generic_dpc=>tt_action
+                                   RAISING   cx_sadl_static.
+    TYPES: BEGIN OF ts_expand,
+             o_expand               TYPE REF TO cl_sadl_gw_expand_level,
+             o_query_options        TYPE REF TO cl_sadl_gw_query_options,
+             r_returning_parameters TYPE REF TO data,
+           END OF ts_expand,
+           tt_expand TYPE STANDARD TABLE OF ts_expand WITH EMPTY KEY.
+
+
+    METHODS _postprocess_action IMPORTING iv_is_sticky_session  TYPE abap_bool
+                                          io_dpc_batch          TYPE REF TO cl_sadl_gw_dpc_batch
+                                          iv_messages_requested TYPE abap_bool
+                                CHANGING  cs_action             TYPE if_sadl_gw_v4_generic_dpc=>ty_action
+                                          ct_expand             TYPE tt_expand OPTIONAL
+                                RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS _is_static_action_function IMPORTING iv_entity_name             TYPE string
+                                                 iv_action_function_name    TYPE sadl_entity_action
+                                       RETURNING VALUE(rv_is_static_action) TYPE abap_bool.
+    METHODS _update_actfct_message_table IMPORTING ir_data               TYPE REF TO data
+                                                   iv_entity_name        TYPE string
+                                                   io_message_target     TYPE REF TO if_sadl_gw_dpc_message_target
+                                                   io_operation_messages TYPE REF TO if_sadl_v4_operation_messages OPTIONAL
+                                                   iv_fill_gw_messages   TYPE abap_bool OPTIONAL
+*                                         EXPORTING et_gw_messages        TYPE tt_gw_messages
+                                         CHANGING  ct_message            TYPE if_sadl_message_handler=>tt_messages.
+    METHODS _update_message_table IMPORTING ir_data                        TYPE REF TO data
+                                            iv_entity_name                 TYPE string
+                                            io_message_target              TYPE REF TO if_sadl_gw_dpc_message_target
+                                            iv_fill_gw_messages            TYPE abap_bool OPTIONAL
+                                            iv_message_target_w_source_key TYPE abap_bool OPTIONAL
+                                  EXPORTING et_gw_messages                 TYPE tt_gw_messages
+                                  CHANGING  ct_message                     TYPE if_sadl_message_handler=>tt_messages.
+
+    METHODS _find_matching_path_segment IMPORTING it_path                             TYPE if_sadl_message_handler=>tt_location_path
+                                                  iv_entity_name                      TYPE string
+                                                  it_key_values                       TYPE /iwbep/t_mgw_tech_pairs
+                                        RETURNING VALUE(rv_tabix_of_matching_segment) TYPE sytabix.
+    METHODS _does_path_contain_entity_name IMPORTING it_path                             TYPE if_sadl_message_handler=>tt_location_path
+                                                     iv_entity_name                      TYPE string
+                                           RETURNING VALUE(rv_path_contains_entity_name) TYPE abap_bool.
+    METHODS _calc_message_targets IMPORTING is_location              TYPE if_sadl_message_handler=>ty_location
+                                            it_key_values            TYPE /iwbep/t_mgw_tech_pairs
+                                            iv_entity_name           TYPE string
+                                            io_message_target        TYPE REF TO if_sadl_gw_dpc_message_target
+                                            iv_start_with_source_key TYPE abap_bool
+                                  EXPORTING ev_key_found_in_location TYPE abap_bool
+                                            et_targets               TYPE /iwbep/t_v4_target.
+    METHODS _process_messages IMPORTING it_create                    TYPE tt_create_with_msg_flag OPTIONAL
+                                        it_update                    TYPE tt_update_with_msg_flag OPTIONAL
+                                        it_action                    TYPE if_sadl_gw_v4_generic_dpc=>tt_action OPTIONAL
+                                        it_action_messages_requested TYPE tt_messages_requested OPTIONAL
+*                                        is_function                  TYPE ty_function OPTIONAL  " currently not used
+                              CHANGING  !ct_messages                 TYPE if_sadl_message_handler=>tt_messages
+                              RAISING   cx_sadl_static.
+    METHODS _process_function_messages IMPORTING is_function TYPE ty_function OPTIONAL
+                                       CHANGING  ct_messages TYPE if_sadl_message_handler=>tt_messages
+                                       RAISING   cx_sadl_static.
+    METHODS _add_missing_keys_to_request IMPORTING iv_entity_name        TYPE string
+                                         CHANGING  ct_requested_elements TYPE if_sadl_public_types=>tt_requested_elements.
+    METHODS _check_sort_or_filter_w_msg IMPORTING it_sort_elements     TYPE if_sadl_query_engine_types=>tt_sort_elements OPTIONAL
+                                                  it_complex_condition TYPE if_sadl_public_types=>tt_complex_condition  OPTIONAL
+                                        RAISING   cx_sadl_contract_violation.
+    METHODS _get_entity_path_and_param IMPORTING iv_entity_name        TYPE string
+                                                 ir_key                TYPE REF TO data
+                                                 it_navigation_step    TYPE if_sadl_gw_v4_generic_dpc=>tt_navigation_step
+                                       EXPORTING et_parameters         TYPE if_sadl_query_engine_types=>tt_entity_parameters
+                                       RETURNING VALUE(rs_entity_path) TYPE if_sadl_gw_types_int=>ts_entity_path
+                                       RAISING   cx_sadl_contract_violation
+                                                 cx_sadl_static .
+    METHODS _add_gw_messages_to_operation IMPORTING io_operation_messages   TYPE REF TO if_sadl_v4_operation_messages
+                                                    iv_target_value_control TYPE /iwbep/if_v4_runtime_types=>ty_value_control_value DEFAULT /iwbep/if_v4_runtime_types=>gcs_value_control-indicate_value
+                                                    it_gw_messages          TYPE cl_sadl_gw_v4_generic_dpc=>tt_gw_messages.
+
+    METHODS _check_privileged_association IMPORTING iv_source_entity_id        TYPE sadl_entity_id
+                                                    iv_source_association_name TYPE sadl_entity_association
+                                          RETURNING VALUE(rv_is_privileged)    TYPE abap_bool.
+
+    METHODS _get_structdescr_with_val_ctrl IMPORTING iv_entity_name            TYPE string
+                                           RETURNING VALUE(ro_structure_descr) TYPE REF TO cl_abap_structdescr
+                                           RAISING   cx_sadl_contract_violation.
+
+    METHODS _get_vcp_struct_descriptor IMPORTING iv_entity_name        TYPE string
+                                       RETURNING VALUE(ro_substrdescr) TYPE REF TO cl_abap_structdescr
+                                       RAISING   cx_sadl_contract_violation.
+
+    METHODS _create_data_line_container IMPORTING iv_entity_name TYPE string
+                                        RETURNING VALUE(rr_data) TYPE REF TO data
+                                        RAISING   cx_sadl_contract_violation.
+
+    METHODS _get_action_return_ref IMPORTING is_sadl_action TYPE if_sadl_entity=>ty_action
+                                   EXPORTING er_return_data TYPE REF TO data
+                                   RAISING   cx_sadl_contract_violation cx_sadl_static.
+
+    METHODS _add_vcs_to_data_container RETURNING VALUE(rv_add_value_ctrl) TYPE abap_bool.
+ENDCLASS.
+
+
+
+CLASS CL_SADL_GW_V4_GENERIC_DPC IMPLEMENTATION.
+
+
+  METHOD _get_all_elems_except_sap_msgs.
+    CONSTANTS co_names LIKE if_sadl_special_struct_names=>co_internal_names VALUE if_sadl_special_struct_names=>co_internal_names.
+
+    CLEAR et_elements.
+    DATA(lr_entity_load) = mo_mdp->get_entity_load( _get_entity_name_for_read( iv_entity_name ) ).
+    _get_entity_metadata( iv_entity_name )->get_elements( IMPORTING et_elements = DATA(lt_element) ).
+    LOOP AT lt_element REFERENCE INTO DATA(lr_element).
+      IF cl_sadl_dev_prototypes=>nvi_refactoring( ).
+        IF cl_sadl_dev_prototypes=>mimetype_nvi_v4( ).
+          CHECK ( NOT line_exists( lr_entity_load->consumption_hidden_elements[ table_line = lr_element->name ] ) "exclude hidden elements
+                  OR ( line_exists( lr_entity_load->consumption_hidden_elements[ table_line = lr_element->name ] )
+                 AND line_exists( lr_entity_load->stream_properties[ null_value_ind_element = lr_element->name ] ) ) ). "exclude hidden elements
+        ELSE.
+          CHECK ( NOT line_exists( lr_entity_load->consumption_hidden_elements[ table_line = lr_element->name ] ) "exclude hidden elements
+                 OR ( line_exists( lr_entity_load->consumption_hidden_elements[ table_line = lr_element->name ] )
+                  AND line_exists( lr_entity_load->null_value_indicators[ indicator_name = lr_element->name ] ) ) ). "exclude hidden elements
+        ENDIF.
+      ELSE.
+       CHECK NOT line_exists( lr_entity_load->consumption_hidden_elements[ table_line = lr_element->name ] ). "exclude hidden elements
+      ENDIF.
+      APPEND lr_element->name TO et_elements.
+    ENDLOOP.
+    LOOP AT lr_entity_load->dynamic_controls ASSIGNING FIELD-SYMBOL(<s_feature_control>)
+      WHERE dynamic_control_type <> if_sadl_load=>co_dynamic_control_type-element_create_value_provided.
+      CASE <s_feature_control>-dynamic_control_type.
+        WHEN if_sadl_load=>co_dynamic_control_type-element.
+          APPEND co_names-field_control-complex_property_name                 && `-` && <s_feature_control>-controlled_subject_sadl_name TO et_elements.
+        WHEN if_sadl_load=>co_dynamic_control_type-action.
+          APPEND co_names-operation_control-complex_property_name             && `-` && <s_feature_control>-controlled_subject_sadl_name TO et_elements.
+        WHEN if_sadl_load=>co_dynamic_control_type-create_by_association.
+          APPEND co_names-create_by_association_control-complex_property_name && `-` && <s_feature_control>-controlled_subject_sadl_name TO et_elements.
+        WHEN if_sadl_load=>co_dynamic_control_type-update_entity.
+          APPEND co_names-entity_control-complex_property_name                && `-` && co_names-entity_control-updatable_property_name TO et_elements.
+        WHEN if_sadl_load=>co_dynamic_control_type-delete_entity.
+          APPEND co_names-entity_control-complex_property_name                && `-` && co_names-entity_control-deletable_property_name TO et_elements.
+      ENDCASE.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _get_and_clear_messages.
+    DATA(lo_message_handler) = cl_sadl_changeset_factory=>get_sadl_message_handler( ).
+    lo_message_handler->get_messages( IMPORTING et_messages = rt_message ).
+    lo_message_handler->clear( ).
+  ENDMETHOD.
+
+
+  METHOD _get_entity_metadata.
+    ro_entity = mo_sadl_api->get_entity( _get_entity_name_for_read( iv_name ) ).
+  ENDMETHOD.
+
+
+  METHOD _get_entity_path.
+
+    IF it_navigation_step IS INITIAL.
+      rs_entity_path-entity_name = _get_entity_name_for_read( iv_entity_name ).
+    ELSE.
+      LOOP AT it_navigation_step ASSIGNING FIELD-SYMBOL(<s_navi_step>).
+        DATA(lv_source_entity)       = _get_entity_name_for_read( <s_navi_step>-source_entity_name ).
+        DATA(lv_is_parameter_entity) = cl_sadl_gw_v4_provider_info=>is_parameter_entity( <s_navi_step>-source_entity_name ).
+        DATA(lt_source_keys) = _get_key_values( ir_data = <s_navi_step>-source_key
+                                                iv_entity_name = <s_navi_step>-source_entity_name ).
+        APPEND VALUE #( association             = <s_navi_step>-nav_prop
+                        entity_name             = lv_source_entity
+                        keys                    = lt_source_keys
+                        entity_is_parameter_set = lv_is_parameter_entity )
+        TO rs_entity_path-navigation_steps.
+      ENDLOOP.
+*      rs_entity_path-entity_name = _get_entity_name( <s_navi_step>-target_entity_name ).
+      rs_entity_path-entity_name = iv_entity_name.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD _get_entity_path_and_param.
+    rs_entity_path  = _get_entity_path( iv_entity_name     = iv_entity_name
+                                        it_navigation_step = it_navigation_step ).
+    rs_entity_path-keys = _get_key_values( iv_entity_name = iv_entity_name
+                                           ir_data        = ir_key ).
+    cl_sadl_gw_navigation_util=>convert_path_and_extract_param( EXPORTING io_sadl_api          = mo_sadl_api
+                                                                IMPORTING et_entity_parameters = et_parameters
+                                                                CHANGING  xs_entity_path       = rs_entity_path ).
+  ENDMETHOD.
+
+
+  METHOD _get_key_values.
+    DATA lt_key_elements TYPE stringtab.
+
+    CHECK ir_data IS BOUND.
+
+    DATA(lo_entity) = _get_entity_metadata( cl_sadl_gw_v4_provider_info=>get_entity_name( iv_entity_name ) ).
+    IF cl_sadl_gw_v4_provider_info=>is_parameter_entity( iv_entity_name ).
+      lo_entity->get_parameters( IMPORTING et_parameters = DATA(lt_parameters) ).
+      LOOP AT lt_parameters ASSIGNING FIELD-SYMBOL(<s_parameter>).
+        APPEND <s_parameter>-name TO lt_key_elements.
+      ENDLOOP.
+    ELSE.
+      lo_entity->get_primary_key_elements( IMPORTING et_primary_key_elements = lt_key_elements ).
+    ENDIF.
+
+    ASSIGN ir_data->* TO FIELD-SYMBOL(<s_data>).
+    LOOP AT lt_key_elements ASSIGNING FIELD-SYMBOL(<v_key_element>).
+      ASSIGN COMPONENT <v_key_element> OF STRUCTURE <s_data> TO FIELD-SYMBOL(<v_key_value>).
+      IF sy-subrc = 0.
+        APPEND VALUE #( name = <v_key_element> value = <v_key_value> ) TO rt_key_values.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD _get_mdp.
+    ro_mdp = mo_mdp.
+  ENDMETHOD.
+
+
+  METHOD _get_primary_key_elem.
+    DATA(lo_entity) = _get_entity_metadata( cl_sadl_gw_v4_provider_info=>get_entity_name( iv_entity_name ) ).
+    IF cl_sadl_gw_v4_provider_info=>is_parameter_entity( iv_entity_name ).
+      lo_entity->get_parameters( IMPORTING et_parameters = DATA(lt_parameters) ).
+      LOOP AT lt_parameters ASSIGNING FIELD-SYMBOL(<s_parameter>).
+        APPEND <s_parameter>-name TO rt_primary_key_elem.
+      ENDLOOP.
+    ELSE.
+      lo_entity->get_primary_key_elements( IMPORTING et_primary_key_elements = rt_primary_key_elem ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_query_options_entity.
+    DATA ls_entity_path TYPE if_sadl_gw_types_int=>ts_entity_path.
+    DATA lt_parameters  TYPE if_sadl_query_engine_types=>tt_entity_parameters.
+
+    ls_entity_path = _get_entity_path_and_param( EXPORTING iv_entity_name     = iv_entity_name
+                                                           ir_key             = ir_key
+                                                           it_navigation_step = it_navigation_step
+                                                 IMPORTING et_parameters      = lt_parameters ).
+
+    ro_query_options = NEW cl_sadl_gw_query_options( ).
+    DATA(lr_entity_load) = _get_mdp( )->get_entity_load( ls_entity_path-entity_name ).
+    DATA(ls_query_options) = lr_entity_load->query_options.
+
+    ro_query_options->if_sadl_gw_query_options~set_count_field_name( ls_query_options-aggregation-count_alias ).
+
+    ro_query_options->set_exposure_type( ls_query_options-exposure ).
+    ro_query_options->set_analytical_type( abap_false ).
+    IF ls_query_options-exposure = abap_true.
+      ro_query_options->if_sadl_gw_query_options~set_business_key_for_analytics( ls_query_options-business_key ).
+    ENDIF.
+
+    _adapt_requested_elements( is_requested     = is_requested
+                               io_query_options = ro_query_options
+                               iv_entity_name   = ls_entity_path-entity_name ).
+*    cl_sadl_gw_navigation_util=>convert_path_and_extract_param( EXPORTING io_sadl_api          = mo_sadl_api         "call moved to _get_entity_path_and_param
+*                                                                IMPORTING et_entity_parameters = DATA(lt_parameters)
+*                                                                CHANGING  xs_entity_path       = ls_entity_path ).
+    ro_query_options->set_entity_path( ls_entity_path ).
+    IF NOT lt_parameters IS INITIAL.
+      ro_query_options->set_entity_parameters( lt_parameters ).
+    ENDIF.
+    ro_query_options->set_sticky_session_active( iv_is_sticky_session ).
+  ENDMETHOD.
+
+
+  METHOD _get_query_options_entity_set.
+    DATA ls_entity_path TYPE if_sadl_gw_types_int=>ts_entity_path.
+    DATA lt_parameters  TYPE if_sadl_query_engine_types=>tt_entity_parameters.
+
+    ls_entity_path = _get_entity_path_and_param( EXPORTING iv_entity_name     = iv_entity_name
+                                                           ir_key             = VALUE #( )
+                                                           it_navigation_step = it_navigation_step
+                                                 IMPORTING et_parameters      = lt_parameters ).
+
+*----- default query options
+    ro_query_options = NEW cl_sadl_gw_query_options( ).
+    DATA(lr_entity_load) = _get_mdp( )->get_entity_load( ls_entity_path-entity_name ).
+    DATA(ls_query_options) = lr_entity_load->query_options.
+
+    ro_query_options->set_text_search_scope( ls_query_options-search_scope ).
+    ro_query_options->set_text_search_scope_details( ls_query_options-search_scope_details ).
+    ro_query_options->set_text_search_ranked( ls_query_options-search_ranked ).
+
+    ro_query_options->set_exposure_type( ls_query_options-exposure ).
+    ro_query_options->set_analytical_type( abap_false ).
+
+    ro_query_options->set_cds_db_hints( ls_query_options-hdb_hints ).
+    ro_query_options->set_dimensions( it_dimension_properties = ls_query_options-dimension_properties ).
+    ro_query_options->if_sadl_gw_query_options~set_business_key_for_analytics( ls_query_options-business_key ).
+
+*----- request evaluation
+    ro_query_options->set_entity_parameters( it_parameters ).
+
+    IF NOT is_text_search-search_term IS INITIAL.
+      ro_query_options->set_text_search_term( is_text_search-search_term ).
+    ENDIF.
+    ro_query_options->set_paging( iv_skip = is_paging-skip
+                                  iv_top  = is_paging-top ).
+    ro_query_options->if_sadl_gw_query_options~set_sort_elements( it_sort_element ).
+    IF io_filter_condition IS BOUND.
+      ro_query_options->add_condition_provider( io_filter_condition ).
+    ENDIF.
+    IF io_having_filter_condition IS BOUND.
+      ro_query_options->add_condition_provider( io_having_filter_condition ).
+    ENDIF.
+
+    _adapt_requested_elements( is_requested     = is_requested
+                               io_query_options = ro_query_options
+                               iv_entity_name   = ls_entity_path-entity_name ).
+
+    IF is_aggregation IS NOT INITIAL.
+      _check_aggregation( is_aggregation = is_aggregation
+                          is_requested   = is_requested
+                          ir_entity_load = lr_entity_load ).
+      " fill aggregation type for default aggregation
+      DATA(ls_aggregation) = is_aggregation.
+      LOOP AT ls_aggregation-elements ASSIGNING FIELD-SYMBOL(<s_aggregation>) WHERE type IS INITIAL.
+        ASSIGN ls_query_options-aggregation-elements[ alias = <s_aggregation>-alias ] TO FIELD-SYMBOL(<s_default_aggregation>).
+        IF sy-subrc <> 0.
+          DELETE ls_aggregation-elements.
+        ELSE.
+          <s_aggregation>-type = <s_default_aggregation>-type.
+        ENDIF.
+      ENDLOOP.
+      ro_query_options->set_aggregation_options( ls_aggregation ).
+    ENDIF.
+*    cl_sadl_gw_navigation_util=>convert_path_and_extract_param( EXPORTING io_sadl_api          = mo_sadl_api " moved to _get_entity_path_and_param
+*                                                                IMPORTING et_entity_parameters = DATA(lt_parameters)
+*                                                                CHANGING  xs_entity_path       = ls_entity_path ).
+    ro_query_options->set_entity_path( ls_entity_path ).
+    IF NOT lt_parameters IS INITIAL.
+      ro_query_options->set_entity_parameters( lt_parameters ).
+    ENDIF.
+
+    ro_query_options->set_sticky_session_active( iv_is_sticky_session ).
+  ENDMETHOD.
+
+
+  METHOD _get_transaction.
+    ro_transaction = _get_transact_runtime( iv_name ).
+  ENDMETHOD.
+
+
+  METHOD _get_transact_runtime.
+    ro_runtime = mo_sadl_api->get_runtime( _get_entity_name_for_read( iv_name ) ).
+  ENDMETHOD.
+
+
+  METHOD _is_static_action_function.
+    DATA(lr_load) = mo_mdp->get_entity_load( iv_entity_name ).
+    rv_is_static_action = lr_load->sadl_entity-actions[ name = iv_action_function_name ]-static.
+  ENDMETHOD.
+
+
+  METHOD _postprocess_action.
+    FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+    ASSIGN cs_action-r_returning_parameters->* TO <t_data>.
+    " mapping of return data: refer to IF_SADL_GW_V4_GENERIC_DPC~EXECUTE_ACTION
+    IF <t_data> IS ASSIGNED.
+      DATA(lo_sadl_entity) = _get_entity_metadata( CONV #( cs_action-entity_id ) ).
+      DATA(ls_sadl_action) = lo_sadl_entity->get_action( cs_action-name ).
+      IF ls_sadl_action-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+        DATA(lv_return_entity_name) = substring_after( val = ls_sadl_action-return_entity_id
+                                                       sub = '~' ).
+
+        IF cs_action-expand_steps IS NOT INITIAL.
+          " For the expand condition we may need a source field that is not yet part of the requested elements
+          DATA(lo_query_options) = _get_query_options_entity_set( iv_entity_name       = lv_return_entity_name
+                                                                  is_requested         = VALUE #( fill_data = abap_true
+                                                                                                  elements  = cs_action-requested_elements )
+                                                                  is_paging            = VALUE #( )
+                                                                  iv_is_sticky_session = iv_is_sticky_session ).
+          DATA(lo_expand) = _preprocess_expand( iv_entity_name    = lv_return_entity_name
+                                                it_expand_step    = cs_action-expand_steps
+                                                io_query_options  = lo_query_options
+                                                io_message_target = cs_action-message_target ).
+          lo_query_options->get_requested_elements( IMPORTING et_elements = DATA(lt_req_elements) ).
+        ELSE.
+          lt_req_elements = cs_action-requested_elements.
+        ENDIF.
+
+        " GO: We can have an action at the end of a navigation chain. The last navigation step may be a PRIVILEGED association.
+        " We may need to consider this when the action returns $self AND it returns the same instance as it was called for.
+        " For the time being we do not consider this very special case.
+
+        cs_action-r_returning_parameters = _register_read_actual_ent_data( EXPORTING iv_entity_name        = lv_return_entity_name
+                                                                                     iv_return_cardinality = ls_sadl_action-return_cardinality
+                                                                                     io_dpc_batch          = io_dpc_batch
+                                                                                     iv_messages_requested = iv_messages_requested
+                                                                                     it_requested_elements = CONV #( lt_req_elements )
+                                                                                     it_expand_steps       = cs_action-expand_steps
+                                                                           CHANGING  ct_action_return_data = <t_data> ).
+
+        IF cs_action-expand_steps IS NOT INITIAL.
+          APPEND VALUE #( o_expand               = lo_expand
+                          o_query_options        = lo_query_options
+                          r_returning_parameters = cs_action-r_returning_parameters ) TO ct_expand.
+        ENDIF.
+      ELSE.
+        READ TABLE <t_data> ASSIGNING FIELD-SYMBOL(<s_data>) INDEX 1.
+        IF <s_data> IS ASSIGNED.
+          cs_action-r_returning_parameters = _clone( i_sadl_action_return_data = <s_data> ).
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _postprocess_changeset.
+    DATA lt_expand TYPE tt_expand.
+
+    DATA lv_entity_name TYPE string.
+
+    IF mv_use_vcs = abap_true.
+      DATA(lo_stream_value_mapper) = NEW cl_sadl_gw_v4_stream_prop_map( io_mdp = mo_mdp ).
+      DATA(lo_null_value_mapper) = NEW cl_sadl_gw_v4_null_val_ind_map( io_mdp = mo_mdp ).
+    ENDIF.
+
+    IF cl_sadl_dev_prototypes=>mimetype_nvi_v4(  ).
+      DATA(lo_dpc_batch) = NEW cl_sadl_gw_dpc_batch( io_dpc                = NEW lcl_dpc_for_batch( io_dpc               = me
+                                                                                                    iv_is_sticky_session = iv_is_sticky_session )
+                                                     io_stream_prop_mapper = lo_stream_value_mapper ).
+    ELSE.
+      lo_dpc_batch = NEW cl_sadl_gw_dpc_batch( io_dpc               = NEW lcl_dpc_for_batch( io_dpc               = me
+                                                                                             iv_is_sticky_session = iv_is_sticky_session )
+                                               io_null_value_mapper = lo_null_value_mapper ).
+    ENDIF.
+
+
+
+    LOOP AT ct_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      DATA(lv_tabix) = sy-tabix.
+      DATA(lv_messages_requested) = xsdbool( line_exists( it_action_message_flags[ table_line = lv_tabix ] ) ).
+
+      " register read for action post processing
+      _postprocess_action( EXPORTING iv_is_sticky_session  = iv_is_sticky_session
+                                     io_dpc_batch          = lo_dpc_batch
+                                     iv_messages_requested = lv_messages_requested
+                            CHANGING cs_action             = <s_action>
+                                     ct_expand             = lt_expand ).
+    ENDLOOP.
+
+    " re-read entities after update
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update_row>).
+      ASSIGN <s_update_row>-update TO FIELD-SYMBOL(<s_update>) .
+      lv_entity_name = <s_update>-entity_id.
+      IF <s_update>-fill_data = abap_true.
+        IF <s_update>-expand_steps IS INITIAL.
+          DATA(lt_requested_elements) = CONV if_sadl_public_types=>tt_requested_elements( <s_update>-requested_elements ).
+        ELSE.
+          " For the expand condition we may need a source field that is not yet part of the requested elements
+          DATA(lo_query_options) = _get_query_options_entity_set( iv_entity_name       = CONV #( <s_update>-entity_id )
+                                                                  is_requested         = VALUE #( fill_data = abap_true
+                                                                                                  elements  = <s_update>-requested_elements )
+                                                                  is_paging            = VALUE #( )
+                                                                  iv_is_sticky_session = iv_is_sticky_session ).
+          DATA(lo_expand) = _preprocess_expand( iv_entity_name    = CONV #( <s_update>-entity_id )
+                                                it_expand_step    = <s_update>-expand_steps
+                                                io_query_options  = lo_query_options
+                                                io_message_target = <s_update>-message_target ).
+          lo_query_options->get_requested_elements( IMPORTING et_elements = lt_requested_elements ).
+        ENDIF.
+        lo_dpc_batch->register_entity_for_read( iv_entity_set         = lv_entity_name
+                                                ir_data_line          = <s_update>-rs_entity_data
+                                                it_key_names          = _get_key_values( iv_entity_name = lv_entity_name  ir_data = <s_update>-rs_entity_data )
+                                                it_requested_elements = CONV #( lt_requested_elements )
+                                                iv_is_structure       = abap_true
+                                                iv_message_mode       = COND #( WHEN <s_update_row>-messages_requested = abap_true
+                                                                                THEN if_sadl_message_options=>co_mode-all
+                                                                                ELSE if_sadl_message_options=>co_mode-none ) ).
+        IF <s_update>-expand_steps IS NOT INITIAL.
+          APPEND VALUE #( o_expand               = lo_expand
+                          o_query_options        = lo_query_options
+                          r_returning_parameters = <s_update>-rs_entity_data ) TO lt_expand.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    " re-read entities after creation
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create_row>).
+      ASSIGN <s_create_row>-create TO FIELD-SYMBOL(<s_create>) .
+      lv_entity_name = <s_create>-entity_id.
+      IF <s_create>-fill_data = abap_true.
+        DATA(lv_read_privileged) = _check_privileged_association( iv_source_entity_id        = <s_create>-source-entity_id
+                                                                  iv_source_association_name = <s_create>-source-association_name ).
+        DATA(lr_entity_data) = <s_create>-rs_entity_data.
+        lo_dpc_batch->register_entity_for_read( iv_entity_set         = lv_entity_name
+                                                ir_data_line          = lr_entity_data
+                                                it_key_names          = _get_key_values( iv_entity_name = lv_entity_name
+                                                                                         ir_data        = lr_entity_data )
+                                                it_requested_elements = <s_create>-requested_elements
+                                                iv_is_structure       = abap_true
+                                                iv_message_mode       = COND #( WHEN <s_create_row>-messages_requested = abap_true
+                                                                          THEN if_sadl_message_options=>co_mode-all
+                                                                          ELSE if_sadl_message_options=>co_mode-none )
+                                                iv_is_privileged      = lv_read_privileged ).
+      ENDIF.
+    ENDLOOP.
+
+    " bulk read registered entities
+    TRY.
+        lo_dpc_batch->read_modified_entities( io_sadl_gw_odata_runtime  = mo_odata_runtime
+                                              io_sadl_metadata_provider = mo_mdp ).
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception INTO DATA(lx_gw).
+        RAISE EXCEPTION TYPE cx_sadl_static EXPORTING previous = lx_gw.
+    ENDTRY.
+
+    LOOP AT lt_expand ASSIGNING FIELD-SYMBOL(<s_expand>).
+      <s_expand>-o_query_options->get_requested_elements( IMPORTING et_elements = lt_requested_elements ).
+      _process_expand( io_expand                 = <s_expand>-o_expand
+                       it_requested_src_elements = lt_requested_elements
+                       ir_data                   = <s_expand>-r_returning_parameters ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _prepare_actions.
+    " prepare container for actions' returning parameters and determine change state handling
+    LOOP AT ct_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      DATA(lo_sadl_entity) = _get_entity_metadata( EXACT #( <s_action>-entity_id ) ).
+      READ TABLE rt_actions INTO DATA(ls_entity_action) WITH KEY name = <s_action>-name.
+      IF sy-subrc <> 0.
+        ls_entity_action = lo_sadl_entity->get_action( <s_action>-name ).
+        INSERT ls_entity_action INTO TABLE rt_actions.
+      ENDIF.
+
+*      <s_action>-r_returning_parameters = mo_odata_runtime->get_action_return_data_ref( is_action = ls_entity_action
+*                                                                                        io_mdp    = mo_mdp ).
+      _get_action_return_ref( EXPORTING is_sadl_action = ls_entity_action
+                              IMPORTING er_return_data = <s_action>-r_returning_parameters ).
+
+**** Since Guru's SalesOrder is not yet capable of eTags for actions, change state checks are (temporarily!) deactivated
+*      <s_action>-change_state_exposed = _is_change_state_handled( EXACT #( <s_action>-entity_id ) ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _preprocess_expand.
+    DATA(lo_mdp) = _get_mdp( ).
+    io_query_options->get_entity_parameters( IMPORTING et_parameters = DATA(lt_parameters) ).
+
+    DATA(lt_expand_step) = it_expand_step.
+    LOOP AT lt_expand_step ASSIGNING FIELD-SYMBOL(<s_expand_step>).
+      LOOP AT <s_expand_step>-requested_fields ASSIGNING FIELD-SYMBOL(<s_requested_element>) WHERE table_line = co_fieldname_sap_messages.
+        IF cl_sadl_dev_prototypes=>v4_message_lower_expand_level( ).
+          <s_expand_step>-sap__messages_requested = abap_true.
+          DELETE <s_expand_step>-requested_fields.
+        ELSE.
+          RAISE EXCEPTION TYPE cx_sadl_gw_not_implemented EXPORTING textid = cx_sadl_gw_not_implemented=>message_target_path_for_expand.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+    DATA(lo_callback) = NEW lcl_expand_callback( io_dpc               = me
+                                                 it_parameters        = lt_parameters
+                                                 iv_is_sticky_session = io_query_options->is_sticky_session_active( ) ).
+    ro_expand = cl_sadl_gw_expand_level=>get_next_v4( it_expand_step        = lt_expand_step
+                                                      iv_source_entity_name = iv_entity_name
+                                                      io_dpc                = lo_callback
+                                                      io_mdp                = lo_mdp
+                                                      io_message_target     = io_message_target ).
+    IF ro_expand IS BOUND.
+      ro_expand->add_foreign_keys_to_reqested( io_query_options ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _process_expand.
+    DATA lr_table TYPE REF TO data.
+    FIELD-SYMBOLS <t_data> TYPE ANY TABLE.
+    FIELD-SYMBOLS  <s_data> TYPE data.
+
+    IF io_expand IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    DATA(lo_rtti) = cl_abap_typedescr=>describe_by_data_ref( ir_data ).
+    IF lo_rtti->kind = lo_rtti->kind_table.
+      ASSIGN ir_data->* TO <t_data>.
+      IF <t_data> IS INITIAL.
+        RETURN.
+      ENDIF.
+    ELSE.
+      ASSIGN ir_data->* TO <s_data>.
+      CREATE DATA lr_table LIKE STANDARD TABLE OF <s_data> WITH DEFAULT KEY.
+      ASSIGN lr_table->* TO <t_data>.
+      INSERT <s_data> INTO TABLE <t_data>.
+    ENDIF.
+
+    io_expand->read_data( ir_source_data                 = REF #( <t_data> )
+                          is_explicit_root_entity_params = VALUE #( ) "ms_entity_params_for_expand
+                          it_requested_src_elements      = it_requested_src_elements ).
+
+    IF lo_rtti->kind = lo_rtti->kind_table.
+      io_expand->merge_data_into_result_table( CHANGING ct_result = <t_data> ).
+    ELSE.
+      io_expand->merge_data_into_result_record( CHANGING cs_result = <s_data> ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _process_function_messages.
+    IF is_function-name IS NOT INITIAL AND is_function-messages_requested = abap_true.
+      DATA(lo_sadl_entity) = _get_entity_metadata( CONV #( is_function-entity_id ) ).
+      DATA(ls_function) = lo_sadl_entity->get_action( is_function-name ).
+      IF ls_function-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+        _update_actfct_message_table( EXPORTING ir_data           = is_function-r_returning_parameters
+                                                iv_entity_name    = cl_sadl_entity_util=>get_entity_name( CONV #( ls_function-return_entity_id ) )
+                                                io_message_target = is_function-message_target
+                                      CHANGING  ct_message        = ct_messages ).
+      ENDIF.
+    ENDIF.
+
+    IF  is_function-name IS NOT INITIAL
+    AND is_function-messages_requested = abap_false
+    AND is_function-operation_messages IS BOUND.
+      lo_sadl_entity = _get_entity_metadata( CONV #( is_function-entity_id ) ).
+      ls_function = lo_sadl_entity->get_action( is_function-name ).
+      IF ls_function-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+        _update_actfct_message_table( EXPORTING ir_data               = is_function-r_returning_parameters
+                                                iv_entity_name        = cl_sadl_entity_util=>get_entity_name( CONV #( ls_function-return_entity_id ) )
+                                                io_message_target     = is_function-message_target
+                                                io_operation_messages = is_function-operation_messages
+                                                iv_fill_gw_messages   = abap_true
+                                      CHANGING  ct_message            = ct_messages ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _process_messages.
+    CHECK ct_messages IS NOT INITIAL.
+
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update>) WHERE messages_requested = abap_true.
+      _update_message_table( EXPORTING ir_data           = <s_update>-update-rs_entity_data
+                                       iv_entity_name    = CONV #( <s_update>-update-entity_id )
+                                       io_message_target = <s_update>-update-message_target
+                             CHANGING  ct_message        = ct_messages ).
+    ENDLOOP.
+
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create>) WHERE messages_requested = abap_true.
+      _update_message_table( EXPORTING ir_data           = <s_create>-create-rs_entity_data
+                                       iv_entity_name    = CONV #( <s_create>-create-entity_id )
+                                       io_message_target = <s_create>-create-message_target
+                             CHANGING  ct_message        = ct_messages ).
+    ENDLOOP.
+
+    LOOP AT it_action_messages_requested INTO DATA(lv_tabix).
+      ASSIGN it_action[ lv_tabix ] TO FIELD-SYMBOL(<s_action>).
+      DATA(lo_sadl_entity) = _get_entity_metadata( CONV #( <s_action>-entity_id ) ).
+      DATA(ls_action) = lo_sadl_entity->get_action( <s_action>-name ).
+      IF ls_action-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+        _update_actfct_message_table( EXPORTING ir_data           = <s_action>-r_returning_parameters
+                                                iv_entity_name    = cl_sadl_entity_util=>get_entity_name( CONV #( ls_action-return_entity_id ) )
+                                                io_message_target = <s_action>-message_target
+                                      CHANGING  ct_message        = ct_messages ).
+      ENDIF.
+    ENDLOOP.
+
+    DELETE ct_messages WHERE NOT locations IS INITIAL
+                         AND NOT lifetime = co_message_lifetime-transition.
+
+    LOOP AT it_update ASSIGNING <s_update> WHERE messages_requested = abap_false.
+      IF <s_update>-update-operation_messages IS BOUND.
+        _update_message_table( EXPORTING ir_data             = <s_update>-update-rs_entity_data
+                                         iv_entity_name      = CONV #( <s_update>-update-entity_id )
+                                         io_message_target   = <s_update>-update-message_target
+                                         iv_fill_gw_messages = abap_true
+                               IMPORTING et_gw_messages      = DATA(lt_gw_messages)
+                               CHANGING  ct_message          = ct_messages ).
+        IF lt_gw_messages IS NOT INITIAL.
+          _add_gw_messages_to_operation( io_operation_messages = <s_update>-update-operation_messages
+                                         it_gw_messages        = lt_gw_messages ).
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT it_create ASSIGNING <s_create> WHERE messages_requested = abap_false.
+      IF <s_create>-create-operation_messages IS BOUND.
+        _update_message_table( EXPORTING ir_data             = <s_create>-create-rs_entity_data
+                                         iv_entity_name      = CONV #( <s_create>-create-entity_id )
+                                         io_message_target   = <s_create>-create-message_target
+                                         iv_fill_gw_messages = abap_true
+                               IMPORTING et_gw_messages      = lt_gw_messages
+                               CHANGING  ct_message          = ct_messages ).
+        IF lt_gw_messages IS NOT INITIAL.
+          _add_gw_messages_to_operation( EXPORTING io_operation_messages = <s_create>-create-operation_messages
+                                                   it_gw_messages        = lt_gw_messages ).
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+*
+    LOOP AT it_action ASSIGNING <s_action>.
+      IF line_exists( it_action_messages_requested[ table_line = sy-tabix ] ).
+        CONTINUE.
+      ENDIF.
+      IF <s_action>-operation_messages IS BOUND.
+        lo_sadl_entity = _get_entity_metadata( CONV #( <s_action>-entity_id ) ).
+        ls_action = lo_sadl_entity->get_action( <s_action>-name ).
+        IF ls_action-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+          _update_actfct_message_table( EXPORTING ir_data               = <s_action>-r_returning_parameters
+                                                  iv_entity_name        = cl_sadl_entity_util=>get_entity_name( CONV #( ls_action-return_entity_id ) )
+                                                  io_message_target     = <s_action>-message_target
+                                                  io_operation_messages = <s_action>-operation_messages
+                                                  iv_fill_gw_messages   = abap_true
+                                        CHANGING  ct_message            = ct_messages ).
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _register_read_actual_ent_data.
+    " data already mapped e.g. from BO view to consumption view in CL_SADL_ENTITY_RUNTIME->map_entity_to_sadl_data
+    " now already mapped return data are registered for re-read in order to fill de-normalized and non-transactional fields
+
+    IF iv_return_cardinality = if_sadl_entity=>co_action_return_cardinality-zero OR iv_return_cardinality = if_sadl_entity=>co_action_return_cardinality-unknown.
+      cx_sadl_unexpected_state=>raise_because( |Unexpected return cardinality { iv_return_cardinality }| ) ##NO_TEXT ##TYPE.
+    ENDIF.
+
+    FIELD-SYMBOLS <t_return_data> TYPE INDEX TABLE.
+    ASSIGN ct_action_return_data TO <t_return_data>.
+    IF lines( <t_return_data> ) <> 1.
+      cx_sadl_unexpected_state=>raise_because( |Unexpected return multiplicity { lines( <t_return_data> ) }| ) ##NO_TEXT.
+    ENDIF.
+
+    IF iv_return_cardinality <> if_sadl_entity=>co_action_return_cardinality-one.
+      ASSIGN <t_return_data>[ 1 ] TO <t_return_data>.
+    ENDIF.
+
+    rr_gw_return_data = SWITCH #( iv_return_cardinality
+      WHEN if_sadl_entity=>co_action_return_cardinality-one THEN if_sadl_gw_v4_generic_dpc~create_data_structure_ref( iv_entity_name )
+                                                            ELSE if_sadl_gw_v4_generic_dpc~create_data_table_ref( iv_entity_name ) ).
+    IF it_expand_steps IS NOT INITIAL.
+      rr_gw_return_data = NEW cl_sadl_gw_v4_dpc_expand_cont( me )->extend_container_for_expand( ir_data_container = rr_gw_return_data
+                                                                                                it_expand_step    = it_expand_steps ).
+    ENDIF.
+
+    LOOP AT <t_return_data> ASSIGNING FIELD-SYMBOL(<s_return_data>).
+      io_dpc_batch->register_entity_for_read( iv_entity_set         = iv_entity_name
+                                              ir_data_line          = REF #( <s_return_data> )
+                                              it_key_names          = _get_key_values( iv_entity_name = iv_entity_name
+                                                                                       ir_data        = REF #( <s_return_data> ) )
+                                              iv_is_structure       = xsdbool( iv_return_cardinality = if_sadl_entity=>co_action_return_cardinality-one )
+                                              it_requested_elements = it_requested_elements
+                                              iv_message_mode       = COND #( WHEN iv_messages_requested = abap_true
+                                                                              THEN if_sadl_message_options=>co_mode-all
+                                                                              ELSE if_sadl_message_options=>co_mode-none )
+                                              ir_return_data        = rr_gw_return_data ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _reject_hidden_elements.
+    DATA(lr_entity_load) = mo_mdp->get_entity_load( EXACT #( iv_entity_id ) ).
+    LOOP AT lr_entity_load->consumption_hidden_elements ASSIGNING FIELD-SYMBOL(<lv_hidden_elem>).
+      IF line_exists( it_provided_elements[ table_line = <lv_hidden_elem> ] ).
+        IF cl_sadl_dev_prototypes=>mimetype_nvi_v4( ) AND ( line_exists( lr_entity_load->stream_properties[ mimetype_element = <lv_hidden_elem> ] ) OR
+                                                            line_exists( lr_entity_load->stream_properties[ null_value_ind_element = <lv_hidden_elem> ] ) ).
+*        MIMETYPE OR NVI FOR STREAMs ALLOWED
+        ELSEIF cl_sadl_dev_prototypes=>nvi_refactoring( ) AND line_exists( lr_entity_load->null_value_indicators[ indicator_name = <lv_hidden_elem> ] ) .
+*        NVI FOR STREAMs ALLOWED
+        ELSE.
+          RAISE EXCEPTION TYPE cx_sadl_gw_contract_violation
+            EXPORTING
+              textid           = cx_sadl_gw_contract_violation=>cx_invalid_name
+              name             = <lv_hidden_elem>
+              http_status_code = /iwbep/cx_mgw_busi_exception=>gcs_http_status_codes-bad_request.
+        ENDIF.
+      ENDIF.
+*    don't reject hidden selected elements (like readEntity and compatible with v2)
+      " don't change the flag data_requested even if the last attribute was removed. That's an unrealistic case, since GW always requests keys,
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _update_actfct_message_table.
+    DATA lt_all_gw_messages TYPE tt_gw_messages.
+    DATA lr_data TYPE REF TO data.
+    FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+
+    DATA(lo_rtti) = cl_abap_typedescr=>describe_by_data_ref( ir_data ).
+    IF lo_rtti->kind = lo_rtti->kind_table.
+      ASSIGN ir_data->* TO <t_data>.
+      IF <t_data> IS INITIAL.
+        RETURN.
+      ENDIF.
+      LOOP AT <t_data> REFERENCE INTO lr_data.
+        _update_message_table( EXPORTING ir_data                        = lr_data
+                                         iv_entity_name                 = iv_entity_name
+                                         io_message_target              = io_message_target
+                                         iv_fill_gw_messages            = iv_fill_gw_messages
+                                         iv_message_target_w_source_key = iv_fill_gw_messages
+                               IMPORTING et_gw_messages                 = DATA(lt_gw_messages)
+                               CHANGING  ct_message                     = ct_message ).
+        APPEND LINES OF lt_gw_messages TO lt_all_gw_messages .
+      ENDLOOP.
+    ELSE.
+      _update_message_table( EXPORTING ir_data             = ir_data
+                                       iv_entity_name      = iv_entity_name
+                                       io_message_target   = io_message_target
+                                       iv_fill_gw_messages = iv_fill_gw_messages
+                             IMPORTING et_gw_messages      = lt_all_gw_messages
+                             CHANGING  ct_message          = ct_message ).
+    ENDIF.
+
+    IF iv_fill_gw_messages = abap_true AND lt_all_gw_messages IS NOT INITIAL.
+      _add_gw_messages_to_operation( io_operation_messages   = io_operation_messages
+                                     iv_target_value_control = /iwbep/if_v4_runtime_types=>gcs_value_control-indicate_value
+                                     it_gw_messages          = lt_all_gw_messages  ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _update_message_table.
+    FIELD-SYMBOLS <t_gw_messages> TYPE tt_gw_messages.
+    DATA lv_key_values_done TYPE abap_bool.
+
+    CLEAR et_gw_messages.
+    ASSIGN ir_data->* TO FIELD-SYMBOL(<s_data>).
+    IF iv_fill_gw_messages = abap_true.
+      ASSIGN et_gw_messages TO <t_gw_messages> ##SUBRC_READ.
+    ELSE.
+      ASSIGN COMPONENT co_fieldname_sap_messages OF STRUCTURE <s_data> TO <t_gw_messages>.
+    ENDIF.
+    CHECK sy-subrc = 0 .
+
+    LOOP AT ct_message ASSIGNING FIELD-SYMBOL(<s_message>).
+      LOOP AT <s_message>-locations ASSIGNING FIELD-SYMBOL(<s_location>).
+        IF <s_location>-path IS INITIAL.
+          DATA(lv_entity_name) = CONV string( <s_location>-entity_id ).
+          CHECK cl_sadl_entity_util=>get_entity_name( CONV #( lv_entity_name ) ) = iv_entity_name.
+        ELSE.
+          CHECK _does_path_contain_entity_name( it_path        = <s_location>-path
+                                                iv_entity_name = iv_entity_name ).
+        ENDIF.
+
+        IF lv_key_values_done IS INITIAL. " always the same entity and ir_data -> do this only once for all messages
+          TRY.
+              DATA(lt_key_values) = _get_key_values( iv_entity_name = iv_entity_name  ir_data  = ir_data ).
+              lv_key_values_done = abap_true.
+            CATCH cx_sadl_static. " INTO DATA(lx_gw).
+              RETURN.
+          ENDTRY.
+        ENDIF.
+
+        CHECK lt_key_values IS NOT INITIAL.
+
+        _calc_message_targets( EXPORTING is_location              = <s_location>
+                                         it_key_values            = lt_key_values
+                                         iv_entity_name           = iv_entity_name
+                                         io_message_target        = io_message_target
+                                         iv_start_with_source_key = iv_message_target_w_source_key
+                               IMPORTING ev_key_found_in_location = DATA(lv_key_found)
+*                                         ev_target                = DATA(lv_target)
+                                         et_targets               = DATA(lt_targets) ).
+        CHECK lv_key_found = abap_true.
+
+        cl_sadl_entity_util=>extract_converted_t100_msgvs( EXPORTING io_t100_message = <s_message>-message
+                                                           IMPORTING ev_msgv1        = DATA(lv_msgv1)
+                                                                     ev_msgv2        = DATA(lv_msgv2)
+                                                                     ev_msgv3        = DATA(lv_msgv3)
+                                                                     ev_msgv4        = DATA(lv_msgv4) ).
+        APPEND VALUE #( msgid                 = <s_message>-message->t100key-msgid
+                        msgno                 = <s_message>-message->t100key-msgno
+*                        target                = lv_target
+                        targets               = lt_targets
+                        msgv1                 = lv_msgv1
+                        msgv2                 = lv_msgv2
+                        msgv3                 = lv_msgv3
+                        msgv4                 = lv_msgv4
+                        is_transition_message = boolc( <s_message>-lifetime = co_message_lifetime-transition )
+                        severity              = SWITCH #( <s_message>-severity
+                                                          WHEN if_sadl_message_handler=>co_severity-error THEN CONV #( if_rap_message_handler=>error )
+                                                          WHEN if_sadl_message_handler=>co_severity-warning THEN CONV #( if_rap_message_handler=>warning )
+                                                          WHEN if_sadl_message_handler=>co_severity-information THEN CONV #( if_rap_message_handler=>info )
+                                                          WHEN if_sadl_message_handler=>co_severity-success THEN CONV #( if_rap_message_handler=>success )
+                      )                                 ) TO <t_gw_messages>.
+        DELETE <s_message>-locations.
+      ENDLOOP.
+      IF sy-subrc = 0 AND <s_message>-locations IS INITIAL. "all transferred
+        DELETE ct_message.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_exceptn_context~get_parset_for_entity.
+    rv_set_name = _get_mdp(  )->odata_v2_get_parset_for_entity( iv_sadl_entity_name ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_action_param_struct_ref.
+    DATA(lo_entity_metadata) = _get_entity_metadata( iv_entity_name ).
+    IF lo_entity_metadata->is_draft_enabled( )
+    AND lo_entity_metadata->get_action( iv_action )-kind = if_sadl_entity=>co_action_kind-factory.
+      DATA(lv_has_implicit_param) = abap_true.
+    ENDIF.
+
+    TRY.
+        rr_param = _get_transaction( iv_entity_name )->create_action_parameter_ref( iv_action ).
+        IF lv_has_implicit_param = abap_true.
+          DATA(lo_parameter_type) = CAST cl_abap_datadescr( cl_abap_typedescr=>describe_by_data_ref( rr_param ) ).
+          DATA(lt_component) = VALUE cl_abap_structdescr=>component_table( ( name       = '%PARAMETER'
+                                                                             as_include = abap_true
+                                                                             type       = lo_parameter_type ) ).
+        ELSE.
+          RETURN.
+        ENDIF.
+      CATCH cx_sadl_contract_violation INTO DATA(lx_contract).
+        IF lv_has_implicit_param <> abap_true.
+          RAISE EXCEPTION lx_contract.
+        ENDIF.
+    ENDTRY.
+
+    APPEND VALUE #( name = if_sadl_special_field_names=>result_is_active_entity
+                    type = CAST cl_abap_datadescr( cl_abap_structdescr=>describe_by_name( 'ABAP_BOOL') ) )
+    TO lt_component.
+    lo_parameter_type = cl_abap_structdescr=>get( p_components = lt_component
+                                                  p_strict     = abap_false ).
+    CREATE DATA rr_param TYPE HANDLE lo_parameter_type.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_data_structure_ref.
+    IF _add_vcs_to_data_container( ).
+      rr_data = if_sadl_gw_v4_generic_dpc~create_data_struct_ref_with_vc( iv_entity_name ).
+    ELSE.
+      rr_data = _create_data_line_container( iv_entity_name ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_data_table_ref.
+    IF _add_vcs_to_data_container( ).
+      rr_data = if_sadl_gw_v4_generic_dpc~create_data_table_ref_with_vc( iv_entity_name ).
+    ELSE.
+      rr_data = _get_mdp( )->create_data_table_container( iv_entity_name ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_entity.
+    if_sadl_gw_v4_generic_dpc~process_change_set(
+       EXPORTING it_create                      = VALUE #( ( entity_id          = iv_entity_name
+                                                             rs_entity_data     = ir_data
+                                                             provided_elements  = it_provided_elements
+                                                             requested_elements = it_requested_elements
+                                                             fill_data          = iv_fill_data
+                                                             navigation_steps   = it_navigation_steps
+                                                             message_target     = io_message_target
+                                                             operation_messages = io_operation_messages ) )
+                 iv_is_sticky_session           = iv_is_sticky_session
+                 iv_success_ends_sticky_session = abap_false
+                 iv_strict_handling_requested   = iv_strict_handling_requested
+       IMPORTING et_message                     = et_message
+                 ev_failure_reason              = ev_failure_reason
+                 ev_failed                      = ev_failed ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_key_structure_ref.
+
+    IF cl_sadl_gw_v4_provider_info=>is_parameter_entity( iv_entity_name ).
+      cl_sadl_entity_util=>get_explicit_parameters(
+        EXPORTING
+          io_entity                  = _get_entity_metadata( iv_entity_name )
+       IMPORTING
+          et_explicit_parameters     = DATA(lt_params) ).
+      IF lt_params IS INITIAL.
+        RAISE EXCEPTION TYPE cx_sadl_contract_violation.
+      ENDIF.
+      DATA lt_comp TYPE cl_abap_structdescr=>component_table.
+      LOOP AT lt_params ASSIGNING FIELD-SYMBOL(<s_param>).
+        APPEND VALUE #( name = <s_param>-name type = CAST cl_abap_datadescr( cl_abap_typedescr=>describe_by_name( <s_param>-type ) ) ) TO lt_comp.
+      ENDLOOP.
+      DATA(lo_param_struct) = cl_abap_structdescr=>get( lt_comp ).
+      CREATE DATA rr_key TYPE HANDLE lo_param_struct.
+    ELSE.
+      rr_key = _get_transaction( iv_entity_name )->create_entity_key_struct_ref( ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_key_table_ref.
+    rr_key = _get_transaction( iv_entity_name )->create_entity_key_table_ref( ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~delete_entity.
+    if_sadl_gw_v4_generic_dpc~process_change_set(
+       EXPORTING it_delete                      = VALUE #( ( entity_id            = iv_entity_name
+                                                             rs_key_values        = ir_key
+                                                             precondition         = is_precondition ) )
+                 iv_is_sticky_session           = iv_is_sticky_session
+                 iv_success_ends_sticky_session = abap_false
+                 iv_strict_handling_requested   = iv_strict_handling_requested
+       IMPORTING et_message                     = et_message
+                 ev_failure_reason              = ev_failure_reason
+                 ev_failed                      = ev_failed ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~execute_function.
+    FIELD-SYMBOLS <t_keys> TYPE INDEX TABLE.
+    FIELD-SYMBOLS <t_return_data> TYPE INDEX TABLE.
+
+    CLEAR: er_data, et_message, ev_failed, ev_failure_reason.
+
+    IF line_exists( it_requested_element[ table_line = co_fieldname_sap_messages ] ).
+      DATA(lv_messages_requested) = abap_true.
+    ENDIF.
+
+    DATA(lo_transaction) = _get_transaction( iv_entity_name ).
+    IF ir_key IS BOUND.
+      DATA(lr_keys) = if_sadl_gw_v4_generic_dpc~create_key_table_ref( iv_entity_name ).
+      ASSIGN lr_keys->* TO <t_keys>.
+      DATA(lr_key) = if_sadl_gw_v4_generic_dpc~create_key_structure_ref( iv_entity_name ).
+      ASSIGN lr_key->* TO FIELD-SYMBOL(<s_key>).
+      ASSIGN ir_key->* TO FIELD-SYMBOL(<s_key_in>).
+      <s_key> = CORRESPONDING #( <s_key_in> ) .
+      INSERT <s_key> INTO TABLE <t_keys>.
+    ENDIF.
+
+    DATA(ls_action_function) = VALUE ty_action_function( entity_id        = iv_entity_name
+                                                         name             = iv_function
+                                                         rt_key_values    = lr_keys
+                                                         navigation_steps = it_navigation_steps ).
+    _check_op_nav_path_and_add_src( EXPORTING iv_is_sticky_session = iv_is_sticky_session
+                                    CHANGING  cs_action_function   = ls_action_function ).
+
+    DATA(lo_sadl_entity) = _get_entity_metadata( iv_entity_name ).
+    DATA(ls_sadl_action) = lo_sadl_entity->get_action( iv_function ).
+
+    DATA(lt_req_elements) = mo_odata_runtime->get_operation_requested_elems( is_operation             = ls_sadl_action
+                                                                             io_sadl_api              = mo_sadl_api
+                                                                             it_elems_req_by_consumer = it_requested_element ).
+
+*    DATA(lr_return_data) = mo_odata_runtime->get_action_return_data_ref( is_action = ls_sadl_action
+*                                                                         io_mdp    = mo_mdp ).
+    _get_action_return_ref( EXPORTING is_sadl_action = ls_sadl_action
+                            IMPORTING er_return_data = DATA(lr_return_data)  ).
+
+
+    ASSIGN lr_return_data->* TO <t_return_data>.
+
+    IF ls_action_function-rt_key_values IS BOUND. " bound functions
+      ASSIGN ls_action_function-rt_key_values->* TO <t_keys>.
+      IF ir_params IS INITIAL.
+        lo_transaction->execute( EXPORTING iv_action_name          = iv_function
+                                           it_key_values           = <t_keys>
+                                           it_requested_elements   = lt_req_elements
+                                 IMPORTING et_data                 = <t_return_data>
+                                           et_failed               = DATA(lt_failed)
+                                           ev_static_action_failed = ev_failed
+                                           ev_failure_reason       = DATA(lv_failure_reason) ).
+      ELSE.
+        ASSIGN ir_params->* TO FIELD-SYMBOL(<s_params>).
+        lo_transaction->execute( EXPORTING iv_action_name          = iv_function
+                                           i_action_parameters     = <s_params>
+                                           it_key_values           = <t_keys>
+                                           it_requested_elements   = lt_req_elements
+                                 IMPORTING et_data                 = <t_return_data>
+                                           et_failed               = lt_failed
+                                           ev_static_action_failed = ev_failed
+                                           ev_failure_reason       = lv_failure_reason ).
+      ENDIF.
+    ELSE. " static functions
+      IF ir_params IS INITIAL.
+        lo_transaction->execute( EXPORTING iv_action_name          = iv_function
+                                           it_requested_elements   = lt_req_elements
+                                 IMPORTING et_data                 = <t_return_data>
+                                           et_failed               = lt_failed
+                                           ev_static_action_failed = ev_failed
+                                           ev_failure_reason       = lv_failure_reason ).
+      ELSE.
+        ASSIGN ir_params->* TO <s_params>.
+        lo_transaction->execute( EXPORTING iv_action_name          = iv_function
+                                           i_action_parameters     = <s_params>
+                                           it_requested_elements   = lt_req_elements
+                                 IMPORTING et_data                 = <t_return_data>
+                                           et_failed               = lt_failed
+                                           ev_static_action_failed = ev_failed
+                                           ev_failure_reason       = lv_failure_reason ).
+      ENDIF.
+    ENDIF.
+    et_message = _get_and_clear_messages( ). " transition + (if failed) session state messages
+
+    IF ls_sadl_action-static = abap_true AND ev_failed = abap_true
+        OR lt_failed IS NOT INITIAL.
+      ev_failed = abap_true.
+      ev_failure_reason = lv_failure_reason.
+
+    ELSE.    " success
+      IF mv_use_vcs = abap_true.
+        DATA(lo_stream_value_mapper) = NEW cl_sadl_gw_v4_stream_prop_map( io_mdp = mo_mdp ).
+        DATA(lo_null_value_mapper) = NEW cl_sadl_gw_v4_null_val_ind_map( io_mdp = mo_mdp ).
+      ENDIF.
+      IF cl_sadl_dev_prototypes=>mimetype_nvi_v4(  ) = abap_false.
+        DATA(lo_dpc_batch) = NEW cl_sadl_gw_dpc_batch( io_dpc = NEW lcl_dpc_for_batch( io_dpc               = me
+                                                                                       iv_is_sticky_session = iv_is_sticky_session )
+                                                       io_null_value_mapper = lo_null_value_mapper ).
+      ELSE.
+        lo_dpc_batch = NEW cl_sadl_gw_dpc_batch( io_dpc = NEW lcl_dpc_for_batch( io_dpc               = me
+                                                                                 iv_is_sticky_session = iv_is_sticky_session )
+                                                 io_stream_prop_mapper = lo_stream_value_mapper ).
+      ENDIF.
+      DATA(ls_action) = VALUE if_sadl_gw_v4_generic_dpc=>ty_action( entity_id               = iv_entity_name
+                                                                    name                    = iv_function
+                                                                    rs_importing_parameters = ir_params
+                                                                    r_returning_parameters  = lr_return_data
+                                                                    message_target          = io_message_target
+                                                                    requested_elements      = it_requested_element
+                                                                    operation_messages      = io_operation_messages ).
+      " register read for action post processing
+      _postprocess_action( EXPORTING iv_is_sticky_session  = iv_is_sticky_session
+                                     io_dpc_batch          = lo_dpc_batch
+                                     iv_messages_requested = lv_messages_requested
+                           CHANGING  cs_action             = ls_action ).
+      TRY.
+          " re-read data (if return type = entity) in order to fill de-normalized projection fields and control fields
+          lo_dpc_batch->read_modified_entities( io_sadl_gw_odata_runtime  = mo_odata_runtime
+                                                io_sadl_metadata_provider = mo_mdp ).
+        CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception INTO DATA(lx_gw).
+          RAISE EXCEPTION TYPE cx_sadl_static EXPORTING previous = lx_gw.
+      ENDTRY.
+
+      CREATE DATA er_data LIKE LINE OF <t_return_data>.
+      ASSIGN er_data->* TO FIELD-SYMBOL(<s_return>).
+      <s_return> = <t_return_data>[ 1 ].
+
+      DATA(lt_state_msgs) = _get_and_clear_messages( ). " state messages
+      INSERT LINES OF lt_state_msgs INTO TABLE et_message.
+
+      _process_function_messages( EXPORTING is_function = VALUE #( entity_id               = iv_entity_name
+                                                                   name                    = iv_function
+                                                                   rs_importing_parameters = ir_params
+                                                                   r_returning_parameters  = er_data
+                                                                   message_target          = io_message_target
+                                                                   operation_messages      = io_operation_messages
+                                                                   messages_requested      = lv_messages_requested )
+                                  CHANGING  ct_messages = et_message ).
+      " Return transition messages without target in the header if SAP_Messages are not requested
+      LOOP AT et_message ASSIGNING FIELD-SYMBOL(<s_message>) WHERE NOT locations IS INITIAL
+                                                                   AND lifetime = co_message_lifetime-transition.
+        CLEAR <s_message>-locations.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~initialize.
+    mo_odata_runtime = cl_sadl_gw_odata_runtime_fct=>create( ).
+    mv_use_vcs = iv_use_vcs.
+    IF io_sadl_api IS BOUND.
+      mo_sadl_api = io_sadl_api.
+    ELSE.
+      mo_mdp = io_mdp.
+      mo_sadl_api = cl_sadl_entity_int_api_factory=>create( io_mdp ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~process_change_set.
+    CLEAR: et_message, ev_failed, ev_failure_reason.
+    DATA lv_return_messages TYPE abap_bool VALUE abap_false.
+    DATA lt_update_with_msg_flag TYPE tt_update_with_msg_flag.
+    DATA lt_create_with_msg_flag TYPE tt_create_with_msg_flag.
+    DATA lt_action_msg_requested TYPE tt_messages_requested.
+    DATA lt_action_cs TYPE if_sadl_changeset=>tt_action.
+
+    _prepare_actions( CHANGING ct_action = ct_action ).
+
+    " execute batch processing
+    DATA(lo_changeset) = cl_sadl_changeset_factory=>create_changeset_processor( mo_sadl_api ).
+
+    DATA(lt_update_w_req_msg_removed) = it_update.
+    LOOP AT lt_update_w_req_msg_removed ASSIGNING FIELD-SYMBOL(<s_update>).
+      DELETE TABLE <s_update>-requested_elements FROM co_fieldname_sap_messages.
+      lv_return_messages = boolc( sy-subrc = 0 ).
+      _reject_hidden_elements( EXPORTING iv_entity_id          = <s_update>-entity_id
+                                         it_provided_elements  = <s_update>-updated_elements ).
+*                               CHANGING  ct_requested_elements = <s_update>-requested_elements ).
+      APPEND VALUE #( update = <s_update>  messages_requested = lv_return_messages ) TO lt_update_with_msg_flag.  " true: state messages are read during (after save) reread of entities
+      IF lv_return_messages = abap_true.
+        DATA(lv_get_state_messages) = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+    DATA(lt_create_w_req_msg_removed) = it_create.
+    LOOP AT lt_create_w_req_msg_removed ASSIGNING FIELD-SYMBOL(<s_create>).
+      _check_cr_nav_path_and_add_src( EXPORTING iv_is_sticky_session = iv_is_sticky_session
+                                      CHANGING  cs_create            = <s_create> ).
+      DELETE TABLE <s_create>-requested_elements FROM co_fieldname_sap_messages.
+      lv_return_messages = boolc( sy-subrc = 0 ).
+      _reject_hidden_elements( EXPORTING iv_entity_id          = <s_create>-entity_id
+                                         it_provided_elements  = <s_create>-provided_elements ).
+*                               CHANGING  ct_requested_elements = <s_create>-requested_elements ).
+      APPEND VALUE #( create = <s_create>  messages_requested = lv_return_messages ) TO lt_create_with_msg_flag.
+      IF lv_return_messages = abap_true.
+        lv_get_state_messages = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT ct_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      DATA(ls_action_function) = CORRESPONDING ty_action_function( <s_action> ).
+      _check_op_nav_path_and_add_src( EXPORTING iv_is_sticky_session = iv_is_sticky_session
+                                      CHANGING  cs_action_function   = ls_action_function ).
+      MOVE-CORRESPONDING ls_action_function TO <s_action>.
+      APPEND CORRESPONDING #( <s_action> ) TO lt_action_cs ASSIGNING FIELD-SYMBOL(<s_action_cs>).
+      DATA(ls_sadl_action) = _get_entity_metadata( EXACT #( <s_action>-entity_id ) )->get_action( <s_action>-name ).
+      <s_action_cs>-requested_elements = mo_odata_runtime->get_operation_requested_elems( is_operation             = ls_sadl_action
+                                                                                          io_sadl_api              = mo_sadl_api
+                                                                                          it_elems_req_by_consumer = <s_action_cs>-requested_elements ).
+    ENDLOOP.
+
+    lo_changeset->modify( EXPORTING it_create                    = CORRESPONDING #( lt_create_w_req_msg_removed )
+                                    it_update                    = CORRESPONDING #( lt_update_w_req_msg_removed )
+                                    it_delete                    = CORRESPONDING #( it_delete )
+                                    it_action                    = lt_action_cs
+                                    iv_is_sticky_session         = iv_is_sticky_session
+                                    iv_strict_handling_requested = iv_strict_handling_requested
+                          IMPORTING ev_failed                    = ev_failed
+                                    ev_failure_reason            = ev_failure_reason ).
+
+    et_message = _get_and_clear_messages( ). " transition + (if failed) session state messages
+
+    LOOP AT ct_action ASSIGNING <s_action>.
+      DATA(lv_tabix) = sy-tabix.
+      DELETE TABLE <s_action>-requested_elements FROM co_fieldname_sap_messages.
+      lv_return_messages = boolc( sy-subrc = 0 ).
+      IF lv_return_messages = abap_true.
+        APPEND lv_tabix TO lt_action_msg_requested.
+        lv_get_state_messages = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+    IF ev_failed <> abap_true. " success
+      _postprocess_changeset( EXPORTING it_create               = lt_create_with_msg_flag
+                                        it_update               = lt_update_with_msg_flag
+                                        iv_is_sticky_session    = COND #( WHEN iv_is_sticky_session = abap_true
+                                                                          AND  iv_success_ends_sticky_session <> abap_true
+                                                                          THEN abap_true ELSE abap_false )
+                                        it_action_message_flags = lt_action_msg_requested
+                              CHANGING  ct_action               = ct_action ).
+
+      IF lv_get_state_messages = abap_true.
+*       state messages have been read from DB into the message handler during data re-read within _postprocess_changeset.
+*       Now we get them from the message handler.
+        INSERT LINES OF _get_and_clear_messages( ) INTO TABLE et_message.
+      ENDIF.
+      _process_messages( EXPORTING it_update                    = lt_update_with_msg_flag
+                                   it_create                    = lt_create_with_msg_flag
+                                   it_action                    = ct_action
+                                   it_action_messages_requested = lt_action_msg_requested
+                         CHANGING  ct_messages                  = et_message ).
+
+    ENDIF.
+
+    cl_sadl_changeset_factory=>get_sadl_message_handler( )->clear( ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~read_entity.
+    er_data = NEW cl_sadl_gw_v4_dpc_expand_cont( me )->extend_container_for_expand( ir_data_container = if_sadl_gw_v4_generic_dpc~create_data_structure_ref( iv_entity_name )
+                                                                                    it_expand_step    = it_expand_step ).
+    ASSIGN er_data->* TO FIELD-SYMBOL(<s_data>).
+
+    DATA(lo_query_options) = _get_query_options_entity( iv_entity_name       = iv_entity_name
+                                                        is_requested         = is_requested
+                                                        ir_key               = ir_key
+                                                        it_navigation_step   = it_navigation_step
+                                                        iv_is_sticky_session = iv_is_sticky_session ).
+    DATA(lo_expand) = _preprocess_expand( iv_entity_name    = iv_entity_name
+                                          it_expand_step    = it_expand_step
+                                          io_query_options  = lo_query_options
+                                          io_message_target = io_message_target ).
+
+    DATA(lo_sadl_runtime) = _get_transact_runtime( iv_entity_name ).
+    DATA(lo_mdp) = _get_mdp( ).
+    cl_sadl_gw_feat_toggle_reduct=>apply_to_query_options( io_mdp           = lo_mdp
+                                                           io_sadl_entity   = _get_entity_metadata( iv_entity_name )
+                                                           io_query_options = lo_query_options ).
+    mo_odata_runtime->get_entity( EXPORTING io_query_options = lo_query_options
+                                            io_sadl_rt       = lo_sadl_runtime
+                                            io_mdp           = lo_mdp
+                                  IMPORTING es_data          = <s_data>
+                                            ev_count         = DATA(lv_count) ).
+
+    IF _add_vcs_to_data_container( ).
+      IF cl_sadl_dev_prototypes=>mimetype_nvi_v4(  ).
+        NEW cl_sadl_gw_v4_stream_prop_map( lo_mdp )->map_outbound_stream_to_vcp_str( EXPORTING io_query_options = lo_query_options
+                                                                                     CHANGING  cs_data          = <s_data> ).
+      ELSE.
+        NEW cl_sadl_gw_v4_null_val_ind_map( lo_mdp )->map_outbound_nvi_to_vcp_str( EXPORTING io_query_options = lo_query_options
+                                                                                   CHANGING  cs_data          = <s_data> ).
+      ENDIF.
+    ENDIF.
+
+    IF lv_count = 0.
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation
+        EXPORTING
+          textid = cx_sadl_contract_violation=>resource_not_found_for_entity
+          name   = iv_entity_name.
+    ELSEIF lv_count > 1.
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation
+        EXPORTING
+          textid = cx_sadl_contract_violation=>missing_source_key
+          name   = 'PRIMARY_KEY'.
+    ENDIF.
+
+    DATA(lo_message_handler) = cl_sadl_changeset_factory=>get_sadl_message_handler( ).
+    IF lo_query_options->is_sap_messages_requested( ).
+*      DATA(lt_messages) = _get_and_clear_messages( cl_rap_runtime_factory=>get_sadl_message_handler( ) ).
+      lo_message_handler->get_messages( IMPORTING et_messages =  DATA(lt_messages) ).
+      IF lt_messages IS NOT INITIAL.
+        _update_message_table( EXPORTING ir_data           = er_data
+                                         io_message_target = io_message_target
+                                         iv_entity_name    = iv_entity_name
+                                CHANGING ct_message        = lt_messages ).
+      ENDIF.
+    ENDIF.
+
+*    DATA(ls_requested) = is_requested.
+    lo_query_options->get_requested_elements( IMPORTING et_elements = DATA(lt_source_elements) ).
+*    lo_query_options->get_entity_parameters( IMPORTING et_parameters = DATA(lt_parameters) ).
+    _process_expand( io_expand                 = lo_expand
+                     it_requested_src_elements = lt_source_elements
+                     ir_data                   = er_data ).
+
+    lo_message_handler->clear( ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~read_entity_list.
+    DATA lr_data TYPE REF TO data.
+    FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+
+    er_data = NEW cl_sadl_gw_v4_dpc_expand_cont( me )->extend_container_for_expand( ir_data_container   = if_sadl_gw_v4_generic_dpc~create_data_table_ref( iv_entity_name )
+                                                                                    it_expand_step      = it_expand_step
+                                                                                    it_dynamic_property = it_dynamic_property ).
+
+    ASSIGN er_data->* TO <t_data>.
+
+    IF io_filter_provider IS BOUND.
+      io_filter_provider->get_condition( IMPORTING et_sadl_condition = DATA(lt_complex_condition) ).
+      _check_sort_or_filter_w_msg( EXPORTING it_sort_elements     = it_sort_element
+                                             it_complex_condition = lt_complex_condition ).
+
+    ENDIF.
+    DATA(lo_query_options) = _get_query_options_entity_set(
+                               iv_entity_name             = iv_entity_name
+                               is_requested               = is_requested
+                               is_paging                  = is_paging
+                               it_sort_element            = it_sort_element
+                               io_filter_condition        = io_filter_provider
+                               io_having_filter_condition = io_aggregation_filter_provider
+                               it_navigation_step         = it_navigation_step
+                               is_aggregation             = is_aggregation
+                               is_text_search             = is_text_search
+                               it_parameters              = VALUE #( )
+                               iv_is_sticky_session       = iv_is_sticky_session ).
+
+    DATA(lo_expand) = _preprocess_expand( iv_entity_name    = iv_entity_name
+                                          it_expand_step    = it_expand_step
+                                          io_query_options  = lo_query_options
+                                          io_message_target = io_message_target ).
+
+    DATA(lo_sadl_runtime) = _get_transact_runtime( iv_entity_name ).
+    DATA(lo_mdp) = _get_mdp( ).
+    cl_sadl_gw_feat_toggle_reduct=>apply_to_query_options( io_mdp           = lo_mdp
+                                                           io_sadl_entity   = _get_entity_metadata( iv_entity_name )
+                                                           io_query_options = lo_query_options ).
+    mo_odata_runtime->get_entity_set( EXPORTING io_query_options = lo_query_options
+                                                io_sadl_rt       = lo_sadl_runtime
+                                                io_mdp           = lo_mdp
+                                      IMPORTING et_data          = <t_data>
+                                                ev_count         = ev_count ).
+
+    IF _add_vcs_to_data_container( ).
+      IF cl_sadl_dev_prototypes=>mimetype_nvi_v4(  ).
+        NEW cl_sadl_gw_v4_stream_prop_map( lo_mdp )->map_outbound_stream_to_vcp_tab( EXPORTING io_query_options = lo_query_options
+                                                                                     CHANGING  ct_data          = <t_data> ).
+      ELSE.
+        NEW cl_sadl_gw_v4_null_val_ind_map( lo_mdp )->map_outbound_nvi_to_vcp_tab( EXPORTING io_query_options = lo_query_options
+                                                                                   CHANGING  ct_data          = <t_data> ).
+      ENDIF.
+    ENDIF.
+
+    DATA(lo_message_handler) = cl_sadl_changeset_factory=>get_sadl_message_handler( ).
+    IF lo_query_options->is_sap_messages_requested( ).
+*      DATA(lt_messages) = _get_and_clear_messages( cl_rap_runtime_factory=>get_sadl_message_handler( ) ).
+      lo_message_handler->get_messages( IMPORTING et_messages = DATA(lt_messages) ).
+      IF lt_messages IS NOT INITIAL.
+        LOOP AT <t_data> REFERENCE INTO lr_data.
+*            TODO: Data type filtering missing
+          _update_message_table( EXPORTING ir_data           = lr_data
+                                           iv_entity_name    = iv_entity_name
+                                           io_message_target = io_message_target
+                                 CHANGING  ct_message        = lt_messages ).
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+    lo_query_options->get_requested_elements( IMPORTING et_elements = DATA(lt_requested_src_elements) ).
+    _process_expand( io_expand                 = lo_expand
+                     it_requested_src_elements = lt_requested_src_elements
+                     ir_data                   = er_data ).
+    lo_message_handler->clear( ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~update_entity.
+    if_sadl_gw_v4_generic_dpc~process_change_set( EXPORTING it_update                      = VALUE #( ( entity_id            = iv_entity_name
+                                                                                                        rs_entity_data       = ir_data
+                                                                                                        fill_data            = iv_fill_data
+                                                                                                        requested_elements   = it_requested_element
+                                                                                                        updated_elements     = it_updated_element
+                                                                                                        precondition         = is_precondition
+                                                                                                        message_target       = io_message_target
+                                                                                                        operation_messages   = io_operation_messages
+                                                                                                        expand_steps         = it_expand_step ) )
+                                                            iv_is_sticky_session           = iv_is_sticky_session
+                                                            iv_success_ends_sticky_session = abap_false
+                                                            iv_strict_handling_requested   = iv_strict_handling_requested
+                                                  IMPORTING et_message                     = et_message
+                                                            ev_failed                      = ev_failed
+                                                            ev_failure_reason              = ev_failure_reason ).
+  ENDMETHOD.
+
+
+  METHOD _adapt_requested_elements.
+    DATA(ls_requested) = is_requested.
+    DATA(lv_message_mode) = if_sadl_message_options=>co_mode-none.
+
+    IF ls_requested-elements IS INITIAL.
+      _get_all_elems_except_sap_msgs( EXPORTING iv_entity_name = iv_entity_name
+                                      IMPORTING et_elements    = ls_requested-elements ).
+    ELSE.
+      DELETE TABLE ls_requested-elements FROM co_fieldname_sap_messages.
+      IF sy-subrc = 0.
+        lv_message_mode = if_sadl_message_options=>co_mode-all.
+        _add_missing_keys_to_request( EXPORTING iv_entity_name       = iv_entity_name
+                                      CHANGING ct_requested_elements = ls_requested-elements  ).
+      ENDIF.
+    ENDIF.
+    io_query_options->set_message_mode( lv_message_mode ).
+    io_query_options->set_requested( ls_requested ).
+  ENDMETHOD.
+
+
+  METHOD _add_gw_messages_to_operation.
+    DATA lt_messages TYPE /iwbep/if_v4_runtime_types=>ty_t_message.
+    LOOP AT it_gw_messages ASSIGNING FIELD-SYMBOL(<message>).
+      APPEND VALUE /iwbep/if_v4_runtime_types=>ty_s_message(
+        class                = <message>-msgid
+        number               = <message>-msgno
+        variable_1           = <message>-msgv1
+        variable_2           = <message>-msgv2
+        variable_3           = <message>-msgv3
+        variable_4           = <message>-msgv4
+        target               = <message>-target
+        targets              = <message>-targets
+        target_value_control = iv_target_value_control
+        severity             = <message>-severity
+      ) TO lt_messages.
+    ENDLOOP.
+    io_operation_messages->add_messages( lt_messages ).
+  ENDMETHOD.
+
+
+  METHOD _add_missing_keys_to_request.
+    DATA(lt_primary_key_elem) = _get_primary_key_elem( iv_entity_name ).
+    LOOP AT lt_primary_key_elem ASSIGNING FIELD-SYMBOL(<s_key_elem>).
+      IF NOT line_exists( ct_requested_elements[ table_line = <s_key_elem> ] ).
+        INSERT <s_key_elem> INTO TABLE ct_requested_elements.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _check_aggregation.
+    " avoid aggregation without grouping by reference element (currency, unit)
+    LOOP AT is_aggregation-elements ASSIGNING FIELD-SYMBOL(<s_aggregation>).
+      ASSIGN ir_entity_load->sadl_entity-elements[ KEY name COMPONENTS name = <s_aggregation>-element ] TO FIELD-SYMBOL(<s_measure_element>).
+      IF sy-subrc = 0
+          AND <s_measure_element>-unit_reference_element IS NOT INITIAL
+          AND NOT line_exists( is_requested-elements[ table_line = <s_measure_element>-unit_reference_element ] ).
+        RAISE EXCEPTION TYPE cx_sadl_gw_missing_ref_prop
+          EXPORTING
+            textid    = cx_sadl_gw_missing_ref_prop=>cx_sadl_gw_missing_ref_prop
+            dimension = CONV #( ir_entity_load->sadl_entity-element_external_names[ name = <s_measure_element>-unit_reference_element ]-external_name )
+            property  = CONV #( ir_entity_load->sadl_entity-element_external_names[ name = <s_measure_element>-name ]-external_name ).
+      ENDIF.
+    ENDLOOP.
+
+    " avoid grouping by dependent property without dimension
+    LOOP AT is_requested-elements INTO DATA(lv_group_by) ##INTO_OK.
+      ASSIGN ir_entity_load->query_options-dimension_properties[ property = lv_group_by ] TO FIELD-SYMBOL(<s_dimension>) ##WARN_OK.  " comparison type C and string
+      IF sy-subrc = 0
+          AND <s_dimension>-is_dimension <> abap_true
+          AND NOT line_exists( is_requested-elements[ table_line = <s_dimension>-dimension ] ).
+        RAISE EXCEPTION TYPE cx_sadl_gw_missing_dimension
+          EXPORTING
+            textid    = cx_sadl_gw_missing_dimension=>cx_sadl_gw_missing_dimension
+            dimension = CONV #( ir_entity_load->sadl_entity-element_external_names[ name = <s_dimension>-dimension ]-external_name )
+            property  = CONV #( ir_entity_load->sadl_entity-element_external_names[ name = <s_dimension>-property ]-external_name ).
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _check_cr_nav_path_and_add_src.
+    DATA ls_entity_path TYPE if_sadl_gw_types_int=>ts_entity_path.
+    DATA ls_path TYPE if_sadl_cond_prov_navigation=>ts_entity_path.
+    DATA lt_parameters  TYPE if_sadl_query_engine_types=>tt_entity_parameters.
+    DATA ls_last_nav_step TYPE if_sadl_gw_types_int=>ts_navigation_step.
+
+    DATA(lv_entity_name) = CONV string( cs_create-entity_id ).
+    ls_entity_path = _get_entity_path_and_param( EXPORTING iv_entity_name     = lv_entity_name
+                                                           ir_key             = VALUE #( )
+                                                           it_navigation_step = cs_create-navigation_steps
+                                                 IMPORTING et_parameters      = lt_parameters ).
+    IF lines( cs_create-navigation_steps ) > 1.
+      ls_path = CORRESPONDING #( DEEP ls_entity_path ).
+      DATA(lo_navigation_helper) = NEW cl_sadl_navigation_helper( is_path                     = ls_path
+                                                                  io_mdp                      = mo_mdp
+                                                                  io_temporal_perspective     = cl_sadl_temporal_perspective=>create_neutral( )
+                                                                  it_entity_parameters        = lt_parameters
+                                                                  iv_is_sticky_session_active = iv_is_sticky_session
+                                                                  iv_result_is_collection     = abap_false ).
+      lo_navigation_helper->get_source_entity_key( EXPORTING iv_step_number   = lines( ls_path-navigation_steps )
+                                                   IMPORTING ev_entity_exists = DATA(lv_exists)
+                                                             er_key           = DATA(lr_source_key) ).
+      IF NOT lv_exists = abap_true.
+        RAISE EXCEPTION TYPE cx_sadl_contract_violation
+          EXPORTING
+            textid = cx_sadl_contract_violation=>resource_not_found_for_entity
+            name   = CONV string( cs_create-navigation_steps[ lines( cs_create-navigation_steps ) ]-source_entity_name ).
+      ELSE.
+        ls_last_nav_step = ls_entity_path-navigation_steps[ lines( ls_entity_path-navigation_steps ) ].
+        cs_create-source-association_name = ls_last_nav_step-association.
+        cs_create-source-entity_id = ls_last_nav_step-entity_name.
+        cs_create-source-rs_key_values = lr_source_key.
+      ENDIF.
+    ELSEIF lines( cs_create-navigation_steps ) = 1. "CBA, no source existence check
+      cs_create-source-association_name = cs_create-navigation_steps[ 1 ]-nav_prop.
+      cs_create-source-entity_id = cs_create-navigation_steps[ 1 ]-source_entity_name.
+      cs_create-source-rs_key_values = cs_create-navigation_steps[ 1 ]-source_key.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _check_op_nav_path_and_add_src.
+    DATA ls_entity_path TYPE if_sadl_gw_types_int=>ts_entity_path.
+    DATA ls_path        TYPE if_sadl_cond_prov_navigation=>ts_entity_path.
+    DATA lt_parameters  TYPE if_sadl_query_engine_types=>tt_entity_parameters.
+    FIELD-SYMBOLS <t_target_key> TYPE STANDARD TABLE.
+
+    DATA(lv_entity_name) = CONV string( cs_action_function-entity_id ).
+    IF cs_action_function-rt_key_values IS BOUND.
+      ASSIGN cs_action_function-rt_key_values->* TO <t_target_key>.
+      DATA(lr_key) = REF #( <t_target_key>[ 1 ] ).
+    ENDIF.
+    ls_entity_path = _get_entity_path_and_param( EXPORTING iv_entity_name     = lv_entity_name
+                                                           ir_key             = lr_key
+                                                           it_navigation_step = cs_action_function-navigation_steps
+                                                 IMPORTING et_parameters      = lt_parameters ).
+    IF cs_action_function-navigation_steps IS NOT INITIAL AND NOT _is_static_action_function( iv_entity_name          = lv_entity_name
+                                                                                              iv_action_function_name = cs_action_function-name ) .
+      ls_path = CORRESPONDING #( DEEP ls_entity_path ).
+      DATA(lo_navigation_helper) = NEW cl_sadl_navigation_helper( is_path                     = ls_path
+                                                                  io_mdp                      = mo_mdp
+                                                                  io_temporal_perspective     = cl_sadl_temporal_perspective=>create_neutral( )
+                                                                  it_entity_parameters        = lt_parameters
+                                                                  iv_is_sticky_session_active = iv_is_sticky_session
+                                                                  iv_result_is_collection     = abap_false ).
+      lo_navigation_helper->get_target_entity_key( IMPORTING ev_entity_exists = DATA(lv_exists)
+                                                             er_key           = DATA(lr_source_key) ).
+      IF NOT lv_exists = abap_true.
+        RAISE EXCEPTION TYPE cx_sadl_contract_violation
+          EXPORTING
+            textid = cx_sadl_contract_violation=>resource_not_found_for_entity
+            name   = lv_entity_name.
+      ELSE.
+        cs_action_function-rt_key_values = cl_sadl_gw_dpc_util=>create_table_with_one_key( lr_source_key ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _check_privileged_association.
+    CLEAR rv_is_privileged.
+    CHECK iv_source_entity_id IS NOT INITIAL AND iv_source_association_name IS NOT INITIAL.
+    DATA(lr_source_entity_load) = mo_mdp->get_entity_load( EXACT #( iv_source_entity_id ) ).
+    rv_is_privileged = cl_sadl_entity_util=>is_privileged_association( iv_association_name = iv_source_association_name
+                                                                       ir_entity_load      = lr_source_entity_load ).
+  ENDMETHOD.
+
+
+  METHOD  _check_sort_or_filter_w_msg.
+*    sort_option
+    IF line_exists( it_sort_elements[ element_name = co_fieldname_sap_messages ] ).
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation
+        EXPORTING
+          textid = cx_sadl_contract_violation=>sort_element_not_implemented
+          name   = co_fieldname_sap_messages.
+    ENDIF.
+*   filter conditions
+    IF line_exists( it_complex_condition[ attribute = co_fieldname_sap_messages ] ).
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation
+        EXPORTING
+          textid = cx_sadl_contract_violation=>filter_element_not_implemented
+          name   = co_fieldname_sap_messages.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _clone.
+    CREATE DATA rr_gw_return_data LIKE i_sadl_action_return_data.
+    ASSIGN rr_gw_return_data->* TO FIELD-SYMBOL(<return>).
+    <return> = i_sadl_action_return_data.
+  ENDMETHOD.
+
+
+  METHOD _does_path_contain_entity_name.
+    LOOP AT it_path ASSIGNING FIELD-SYMBOL(<s_path_segment>).
+      IF cl_sadl_entity_util=>get_entity_name( <s_path_segment>-entity_id ) = iv_entity_name.
+        rv_path_contains_entity_name = abap_true.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _find_matching_path_segment.
+    LOOP AT it_path ASSIGNING FIELD-SYMBOL(<s_path_segment>).
+      rv_tabix_of_matching_segment = sy-tabix.
+      IF cl_sadl_entity_util=>get_entity_name( <s_path_segment>-entity_id ) = iv_entity_name.
+        LOOP AT it_key_values INTO DATA(ls_key_value) ##INTO_OK.
+          ASSIGN <s_path_segment>-keys[ name = ls_key_value-name ]-value TO FIELD-SYMBOL(<v_key_field>).
+          ASSERT sy-subrc = 0.
+          IF ls_key_value-value <> <v_key_field>.
+            CLEAR rv_tabix_of_matching_segment.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+        IF rv_tabix_of_matching_segment IS NOT INITIAL.
+          RETURN.
+        ENDIF.
+      ELSE.
+        CLEAR rv_tabix_of_matching_segment.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_data_struct_ref_with_vc.
+    DATA(lo_structdescr) = _get_structdescr_with_val_ctrl( iv_entity_name ).
+    CREATE DATA rr_data TYPE HANDLE lo_structdescr.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~create_data_table_ref_with_vc.
+    DATA(lo_structdescr) = _get_structdescr_with_val_ctrl( iv_entity_name ).
+    DATA(lo_tabledescr) = cl_abap_tabledescr=>get( lo_structdescr ).
+    CREATE DATA rr_data TYPE HANDLE lo_tabledescr.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_v4_generic_dpc~has_value_control.
+    DATA(lr_entity_load) = _get_mdp( )->get_entity_load( iv_entity_name = iv_entity_name ).
+    rv_has_value_control = xsdbool( line_exists( lr_entity_load->dynamic_controls[ KEY subject_core_name COMPONENTS dynamic_control_type = if_sadl_load=>co_dynamic_control_type-element_create_value_provided ] ) ).
+    IF rv_has_value_control = abap_false AND ( lr_entity_load->null_value_indicators IS NOT INITIAL
+                                                OR lr_entity_load->stream_properties IS NOT INITIAL ).
+      rv_has_value_control = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _add_vcs_to_data_container.
+    rv_add_value_ctrl = mv_use_vcs.
+  ENDMETHOD.
+
+
+  METHOD _calc_message_targets.
+    DATA lt_path TYPE if_sadl_message_handler=>tt_location_path.
+    CLEAR: et_targets, ev_key_found_in_location.
+
+    IF is_location-path IS INITIAL.
+      ASSIGN is_location-primary_key_values->* TO FIELD-SYMBOL(<s_primary_key_values>).
+      DATA(lv_all_keys_match) = abap_true.
+      LOOP AT it_key_values INTO DATA(ls_key_value) ##INTO_OK.
+        ASSIGN COMPONENT ls_key_value-name OF STRUCTURE <s_primary_key_values> TO FIELD-SYMBOL(<v_key_field>).
+        ASSERT sy-subrc = 0.
+        IF ls_key_value-value <> <v_key_field>.
+          lv_all_keys_match = abap_false.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF lv_all_keys_match = abap_false.
+        RETURN.
+      ENDIF.
+    ELSE.
+      DATA(lv_matching_path_segment_index) = _find_matching_path_segment( it_path        = is_location-path
+                                                                          iv_entity_name = iv_entity_name
+                                                                          it_key_values  = it_key_values ).
+      IF lv_matching_path_segment_index IS INITIAL.
+        RETURN.
+      ENDIF.
+      lt_path = is_location-path.
+      IF lv_matching_path_segment_index > 1.
+        DELETE lt_path FROM 1 TO lv_matching_path_segment_index - 1.
+      ENDIF.
+    ENDIF.
+
+    ev_key_found_in_location = abap_true.
+
+    IF io_message_target IS BOUND
+    AND ( is_location-element_names IS NOT INITIAL OR is_location-association_names IS NOT INITIAL OR lt_path IS NOT INITIAL ).
+      et_targets = io_message_target->calculate( io_sadl_api              = mo_sadl_api
+                                                 it_location_path         = lt_path
+                                                 iv_start_with_source_key = iv_start_with_source_key
+                                                 it_elements              = is_location-element_names
+                                                 it_associations          = is_location-association_names ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _create_data_line_container.
+    rr_data = _get_mdp( )->create_data_line_container( iv_entity_name ).
+  ENDMETHOD.
+
+
+  METHOD _get_action_return_ref.
+    IF _add_vcs_to_data_container( )
+    AND is_sadl_action-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+      DATA(lv_return_sadl_entity) = substring_after( val = is_sadl_action-return_entity_id  sub = '~' ).
+      er_return_data  = SWITCH #( is_sadl_action-return_cardinality WHEN if_sadl_entity=>co_action_return_cardinality-one
+                                                                                   THEN if_sadl_gw_v4_generic_dpc~create_data_structure_ref( lv_return_sadl_entity )
+                                                                                   ELSE if_sadl_gw_v4_generic_dpc~create_data_table_ref( lv_return_sadl_entity ) ).
+      ASSIGN er_return_data->* TO FIELD-SYMBOL(<ret_data>).
+      CREATE DATA er_return_data LIKE STANDARD TABLE OF <ret_data>.
+    ELSE.
+      er_return_data = mo_odata_runtime->get_action_return_data_ref( is_action = is_sadl_action
+                                                                     io_mdp    = mo_mdp ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_entity_name_for_read.
+    rv_entity_name = cl_sadl_gw_v4_provider_info=>get_entity_name( iv_entity_name ).
+  ENDMETHOD.
+
+
+  METHOD _get_structdescr_with_val_ctrl.
+    DATA(lr_data_container) = _create_data_line_container( iv_entity_name ).
+    ro_structure_descr = CAST #( cl_abap_typedescr=>describe_by_data_ref( lr_data_container ) ).
+    DATA(lo_vcp_structdescr) = _get_vcp_struct_descriptor( iv_entity_name ).
+    CHECK lo_vcp_structdescr IS BOUND.
+    ro_structure_descr = cl_abap_structdescr=>get( VALUE #( ( type       = ro_structure_descr
+                                                              name       = co_includename_data
+                                                              as_include = abap_true )
+                                                            ( type       = lo_vcp_structdescr
+                                                              name       = cl_sadl_entity_util=>co_names-value_control_vcs-complex_property_name ) ) ).
+  ENDMETHOD.
+
+
+  METHOD _get_vcp_struct_descriptor.
+    DATA lt_substr_elem TYPE cl_abap_structdescr=>component_table.
+    DATA lt_value_control_property TYPE stringtab.
+
+    DATA(lr_entity_load) = _get_mdp( )->get_entity_load( iv_entity_name = iv_entity_name ).
+
+    LOOP AT lr_entity_load->dynamic_controls ASSIGNING FIELD-SYMBOL(<s_element_value_control>)
+            USING KEY subject_core_name WHERE dynamic_control_type = if_sadl_load=>co_dynamic_control_type-element_create_value_provided.
+      INSERT <s_element_value_control>-controlled_subject_sadl_name INTO TABLE lt_value_control_property. "use same elements as Seattle
+    ENDLOOP.
+
+    IF lt_value_control_property IS INITIAL.
+      IF cl_sadl_dev_prototypes=>mimetype_nvi_v4( ) = abap_false.
+        LOOP AT lr_entity_load->null_value_indicators ASSIGNING FIELD-SYMBOL(<s_nvi>).
+          INSERT <s_nvi>-element_name INTO TABLE lt_value_control_property.
+        ENDLOOP.
+      ELSE.
+        LOOP AT lr_entity_load->stream_properties ASSIGNING FIELD-SYMBOL(<s_properties>).
+            INSERT <s_properties>-stream_element INTO TABLE lt_value_control_property.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+    IF lt_value_control_property IS NOT INITIAL.
+      DATA(lv_control_data_type) = cl_sadl_entity_util=>get_v4_dynamic_ctrl_data_type( if_sadl_load=>co_dynamic_control_type-element_create_value_provided ).
+      LOOP AT lt_value_control_property ASSIGNING FIELD-SYMBOL(<s_ctrl_elem>).
+        APPEND VALUE #( name = <s_ctrl_elem>
+                        type = CAST #( cl_abap_elemdescr=>describe_by_name( lv_control_data_type ) ) ) TO lt_substr_elem.
+      ENDLOOP.
+      ro_substrdescr = cl_abap_structdescr=>get( lt_substr_elem ).
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

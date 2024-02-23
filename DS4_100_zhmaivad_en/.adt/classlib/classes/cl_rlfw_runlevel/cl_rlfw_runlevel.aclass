@@ -1,0 +1,185 @@
+class CL_RLFW_RUNLEVEL definition
+  public
+  final
+  create public .
+
+public section.
+
+  constants C_RUNLEVEL_RUNNING type RLFW_SERVICE_RL value 0. "#EC NOTEXT
+  constants C_RUNLEVEL_STOPPED type RLFW_SERVICE_RL value 1. "#EC NOTEXT
+  constants C_RUNLEVEL_MAINTENANCE type RLFW_SERVICE_RL value 2. "#EC NOTEXT
+  constants C_LOGON_RUNLEVEL_RUNNING type RLFW_SERVICE_RL value 4. "#EC NOTEXT
+  constants C_LOGON_RUNLEVEL_STOPPED type RLFW_SERVICE_RL value 0. "#EC NOTEXT
+  constants C_LOGON_RUNLEVEL_MAINTENANCE type RLFW_SERVICE_RL value 3. "#EC NOTEXT
+  constants C_RUNLEVEL_MAINTENANCE_CUST type RLFW_SERVICE_RL value 5. "#EC NOTEXT
+
+  "! Returns the current runlevel for a given service. The runlevel is derived from the
+  "! current system runlevel and the overall system state e.g. whether the system is
+  "! currently undergoing a shutdown or startup.
+  "!
+  "! @parameter iv_service_name | The name of the service. See class constants of CL_RLFW_SERVICE
+  "! @parameter iv_server       | The name of an instance. Relevant only for the qRFC and bgRFC Service
+  "!                              The qRFC/bgRFC service must not run on servers which belong to an upgrade
+  "!                              subsystem (server group = 'Q' or 'U').
+  "! @parameter iv_testmode     | Used for testing. Do not use !
+  "! @parameter rv_runlevel     | The service runlevel of the supplied service (RUNNING, STOPPED, IN MAINTENANCE).
+  "!                              See class constants CL_RLFW_RUNLEVEL=>C_RUNLEVEL*
+  class-methods GET_RUNLEVEL
+    importing
+      !IV_SERVICE_NAME type STRING
+      !IV_SERVER type MSNAME2 optional
+      !IV_TESTMODE type I default 0
+    returning
+      value(RV_RUNLEVEL) type I
+    raising
+      CX_RLFW_COMMUNICATION_ERROR .
+  class-methods GET_RUNLEVEL_KERNEL
+    importing
+      !IV_SERVICE_NAME type STRING
+      !IV_TESTMODE type I default 0
+    exporting
+      !EV_RC type I
+    returning
+      value(RV_RUNLEVEL) type I .
+protected section.
+private section.
+
+  class-methods GET_RUNLEVEL_KERNEL_PRIV
+    importing
+      !IV_SERVICE_NAME type STRING
+      !IV_TESTMODE type I
+    exporting
+      !EV_RC type I
+    returning
+      value(RV_RUNLEVEL) type I .
+ENDCLASS.
+
+
+
+CLASS CL_RLFW_RUNLEVEL IMPLEMENTATION.
+
+
+method get_runlevel.
+
+  data: lv_upgrade      type abap_bool,
+        lv_server_group type rlfw_server_group, " server group might be upgrade (zdm) - some services shall not run
+        lv_sep_active   type abap_bool,
+        lv_system_mode  type rlfw_system_rl,    " system mode might be in maintenance or on its way to maintenance
+        lv_user_type    type rl_user_type.      " user mightbe customer (important for service webdispatcher)
+
+  call function 'RLFW_GET_SYSTEM_MODE_INT'
+    exporting
+      iv_testmode  = iv_testmode
+    importing
+      ev_mode      = lv_system_mode
+      ev_user_type = lv_user_type.
+
+* Status of soft shutdown
+  try .
+      cl_shutdown=>get_info( importing active = data(shutdown_active) ).
+    catch cx_shutdown_error ##NO_HANDLER.
+  endtry.
+
+
+* Default: running - if nothing special is defined for this service
+  rv_runlevel = c_runlevel_running.
+
+
+  case iv_service_name.
+
+
+    when cl_rlfw_service=>c_service_bgrfc or cl_rlfw_service=>c_service_qrfc.
+      lv_upgrade = cl_rlfw_server_group=>is_subsystem_upgrade( iv_source_server = iv_server ).
+
+*     RFC variants bgRFC and qRFC shall be stopped on ZDM upgrade instance, to prevent queues collidate with those created on the bridge.
+      if lv_upgrade = abap_true.
+        rv_runlevel = c_runlevel_stopped.
+
+*     No units may start in soft shutdown
+      elseif shutdown_active = abap_true.
+        rv_runlevel = c_runlevel_maintenance.
+
+*     In Maintenance mode they shall only schedule units from users with special logon privilege.
+      elseif    lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_running
+            and lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_restrict_wd.
+        rv_runlevel = c_runlevel_maintenance.
+      endif.
+
+
+*   Transaction RZ10 shall be disable in zdm upgrade.
+*   Neither on the bridge nor on the upgrade instace someone shall upload / download profiles to / from database
+    when cl_rlfw_service=>c_service_rz10.
+      lv_sep_active = cl_rlfw_server_group=>is_system_separation_active( ).
+      lv_server_group = cl_rlfw_server_group=>get_server_group( ).
+      if lv_sep_active = abap_true and lv_server_group <> 'R'.
+        rv_runlevel = c_runlevel_stopped.
+      endif.
+
+
+    when cl_rlfw_service=>c_service_batch.
+
+*     No batches may start in soft shutdown
+      if shutdown_active = abap_true.
+        rv_runlevel = c_runlevel_stopped.
+
+*     In MM, Batch shall schedule only admin jobs (job has an admin flag and the job's user has special logon privilege)
+      elseif    lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_running
+            and lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_restrict_wd.
+        rv_runlevel = c_runlevel_maintenance.
+
+*     Long running batches shall stop if the session has been invalidated by a running CVOI (Online Import)
+      elseif cl_rlfw_oi_workflow=>is_session_affected( ) = abap_true.
+        rv_runlevel = c_runlevel_stopped.
+      endif.
+
+
+*   Web dispatcher shall redirect to "sorry page" if the system is on its way to maintenance mode.
+*   This includes the first step where the system is restricted for WD only
+    when cl_rlfw_service=>c_service_webdispatcher.
+      if lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_running.
+*        DATA lv_workflow TYPE rlfw_workflow.
+*        CALL FUNCTION 'RLFW_GET_SYSTEM_MODE_WORKFLOW' IMPORTING EV_WORKFLOW = lv_workflow.
+*        IF lv_workflow = srlfw_workflow_key_user.
+        if lv_user_type = 'C'.
+          rv_runlevel = c_runlevel_maintenance_cust.
+        else.
+          rv_runlevel = c_runlevel_maintenance.
+        endif.
+      endif.
+
+
+*   Health checks shall not raise any messages during maintenance mode
+    when cl_rlfw_service=>c_service_healthcheck.
+      if lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_running.
+        rv_runlevel = c_runlevel_stopped.
+      endif.
+
+
+    when cl_rlfw_service=>c_service_abap_daemon.
+
+      "No new ABAP Daemon processes shall start when the system is in soft shutdown
+      if shutdown_active = abap_true.
+        rv_runlevel = c_runlevel_stopped.
+
+      " in MM, ABAP Daemon framework shall start only session which
+      elseif    lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_running
+            and lv_system_mode <> cl_rlfw_system_runlevel=>c_sys_rl_restrict_wd.
+        rv_runlevel = c_runlevel_maintenance.
+      endif.
+
+  endcase.
+
+
+endmethod.
+
+
+  method get_runlevel_kernel.
+    rv_runlevel = get_runlevel_kernel_priv( exporting iv_service_name = iv_service_name
+                                                      iv_testmode     = iv_testmode
+                                            importing ev_rc           = ev_rc ).
+  endmethod.
+
+
+  method GET_RUNLEVEL_KERNEL_PRIV by kernel module rlfwKGetRunlevel ignore.
+  endmethod.
+ENDCLASS.

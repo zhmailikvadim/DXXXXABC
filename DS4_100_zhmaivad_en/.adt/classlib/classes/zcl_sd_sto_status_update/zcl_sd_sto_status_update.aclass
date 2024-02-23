@@ -1,0 +1,139 @@
+CLASS zcl_sd_sto_status_update DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+
+    TYPES gtyp_status TYPE char04.
+    TYPES:
+      BEGIN OF mtyp_s_hm_data,
+        order_reason_range TYPE RANGE OF zz1_zorderreason,
+      END OF mtyp_s_hm_data.
+
+    CONSTANTS:
+      BEGIN OF gc_sto_status,
+        confirmed TYPE gtyp_status VALUE 'CONF',
+        cancelled TYPE gtyp_status VALUE 'CANC',
+        shipped   TYPE gtyp_status VALUE 'SHIP',
+        received  TYPE gtyp_status VALUE 'RECP',
+      END OF gc_sto_status.
+    CONSTANTS gc_text_id TYPE tdid VALUE 'F02' ##NO_TEXT.
+    CLASS-DATA gs_hm_data TYPE mtyp_s_hm_data.
+    CONSTANTS gc_pgi_ucomm TYPE tcode VALUE 'WABU_T' ##NO_TEXT.
+
+    CLASS-METHODS set_text_po_item
+      IMPORTING
+        !iv_po_number TYPE ebeln
+        !iv_po_item   TYPE ebelp
+        !iv_status    TYPE gtyp_status.
+    CLASS-METHODS class_constructor.
+    CLASS-METHODS update_from_sto_rejetion
+      IMPORTING
+        !is_mepo_item   TYPE mepoitem
+      CHANGING
+        !co_po_item_api TYPE REF TO cl_po_item_handle_mm.
+  PROTECTED SECTION.
+    DATA mth_messages TYPE finchdel_t.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+CLASS zcl_sd_sto_status_update IMPLEMENTATION.
+  METHOD set_text_po_item.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 19.09.2023 | 21909     : Feature - [Build][CR 37681]  -
+    "              |            | DS4K954453                               -
+    " -----------------------------------------------------------------------
+
+    CONSTANTS lc_tcode  TYPE sy-tcode VALUE 'ME22N'.
+    CONSTANTS lc_update TYPE trtyp VALUE 'V'.
+    CONSTANTS : lc_order_reason_hardcode_id  TYPE zpe_hm_id VALUE '2388'.
+
+    DATA lo_po_api      TYPE REF TO cl_po_header_handle_mm.
+    DATA lo_po_item_api TYPE REF TO cl_po_item_handle_mm.
+    DATA ls_document    TYPE mepo_document.
+    DATA lv_result      TYPE mmpur_bool.
+    DATA lt_models      TYPE mmpur_models.
+    DATA ls_model       LIKE LINE OF lt_models.
+
+    SELECT SINGLE ebeln INTO @DATA(lv_document_number) FROM ekpo WHERE ebeln = @iv_po_number AND ebelp = @iv_po_item.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    lo_po_api = NEW #( iv_po_number ).
+    ls_document = VALUE #( process             = mmpur_po_process
+                           initiator-initiator = mmpur_initiator_call
+                           trtyp               = lc_update ).
+
+    ls_document-doc_key(10) = iv_po_number.
+    lo_po_api->set_state( im_state = cl_po_header_handle_mm=>c_available ).
+    lo_po_api->for_bapi = mmpur_yes.
+    lo_po_api->po_initialize( im_document = ls_document ).
+    lo_po_api->po_read( EXPORTING im_tcode     = lc_tcode
+                                  im_trtyp     = ls_document-trtyp
+                                  im_aktyp     = ls_document-trtyp
+                                  im_po_number = iv_po_number
+                                  im_document  = ls_document
+                        IMPORTING ex_result    = lv_result ).
+    IF lv_result = abap_true.
+      LOOP AT lo_po_api->if_purchase_order_mm~get_items( ) ASSIGNING FIELD-SYMBOL(<ls_po_item>).
+        lo_po_item_api ?= <ls_po_item>-item.
+        lo_po_item_api->get_data( IMPORTING ex_data = DATA(ls_mepoitem) ).
+        IF ls_mepoitem-ebelp = iv_po_item.
+          lo_po_item_api->if_longtexts_mm~delete_text( im_tdid = zcl_sd_sto_status_update=>gc_text_id ).
+          lo_po_item_api->if_longtexts_mm~set_text( im_tdid      = zcl_sd_sto_status_update=>gc_text_id
+                                                    im_textlines = VALUE mmpur_t_textlines( ( tdline = iv_status ) ) ).
+          lo_po_item_api->my_parent ?= lo_po_api.
+          ls_model-model ?= lo_po_item_api.
+          APPEND ls_model TO lt_models.
+        ENDIF.
+      ENDLOOP.
+      IF lt_models[] IS NOT INITIAL.
+        lo_po_api->if_flush_transport_mm~start( EXPORTING im_models = lt_models[] EXCEPTIONS illegal_call = 1 error = 2 OTHERS = 3 ).
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+        lo_po_api->po_post( EXPORTING  im_uncomplete  = mmpur_no
+                                       im_no_commit   = mmpur_yes
+                                       im_commit_wait = mmpur_no
+                            EXCEPTIONS failure        = 1
+                                       OTHERS         = 2 ).
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+        lo_po_api->po_close( ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD class_constructor.
+    CONSTANTS lc_dn_hardcode_id  TYPE zpe_hm_id VALUE '2388'.
+    CONSTANTS lc_i               TYPE ddsign    VALUE 'I'.
+    CONSTANTS lc_eq              TYPE ddoption  VALUE 'EQ'.
+
+    TRY.
+        gs_hm_data-order_reason_range = VALUE #( FOR ls_item IN zcl_pe_hm_basic=>get_table( iv_id = lc_dn_hardcode_id )
+                                                 ( sign   = lc_i
+                                                   option = lc_eq
+                                                   low    = ls_item-field3 ) ).
+      CATCH zcx_pe_hm.
+        CLEAR gs_hm_data.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD update_from_sto_rejetion.
+    IF is_mepo_item-zz1_abgru_pdi <> '' AND sy-ucomm <> gc_pgi_ucomm.
+      co_po_item_api->if_longtexts_mm~delete_text( im_tdid = zcl_sd_sto_status_update=>gc_text_id ).
+      co_po_item_api->if_longtexts_mm~set_text(
+          im_tdid      = zcl_sd_sto_status_update=>gc_text_id
+          im_textlines = VALUE mmpur_t_textlines( ( tdline = zcl_sd_sto_status_update=>gc_sto_status-cancelled ) ) ).
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

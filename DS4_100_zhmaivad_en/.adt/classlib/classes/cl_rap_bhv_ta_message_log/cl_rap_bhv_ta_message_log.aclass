@@ -1,0 +1,182 @@
+CLASS cl_rap_bhv_ta_message_log DEFINITION PUBLIC ABSTRACT INHERITING FROM cl_rap_bhv_transaction_log
+  CREATE PROTECTED .
+
+  PROTECTED SECTION.
+    TYPES BEGIN OF ty_message_key.
+    TYPES entity TYPE abp_entity_name.
+    TYPES cid TYPE abp_behv_cid.
+    TYPES pid TYPE abp_behv_pid.
+    TYPES temp_key TYPE REF TO data.
+    TYPES message_key TYPE REF TO data.
+    TYPES END OF ty_message_key.
+
+    DATA mo_reporter              TYPE REF TO if_rap_reporter.
+    METHODS constructor IMPORTING io_reporter TYPE REF TO if_rap_reporter.
+    METHODS add_reported_instance IMPORTING iv_entity             TYPE abp_entity_name
+                                            iv_flavor             TYPE if_abap_behv_log=>t_flavor
+                                            iv_is_draft_entity    TYPE abap_bool
+                                            iv_is_late_numbering  TYPE abap_bool
+                                            is_instance           TYPE data
+                                  RETURNING VALUE(rs_message_key) TYPE ty_message_key.
+    METHODS add_reported_internal FINAL IMPORTING iv_entity    TYPE abp_entity_name
+                                                  iv_flavor    TYPE if_abap_behv_log=>t_flavor
+                                                  it_instances TYPE STANDARD TABLE.
+    METHODS _get_message_path IMPORTING is_instance        TYPE data
+                                        iv_entity          TYPE abp_entity_name  " delete after we get API for descriptor/alias map?
+                                        is_key             TYPE data
+                                        iv_is_draft_entity TYPE abap_bool
+                              RETURNING VALUE(rt_path)     TYPE if_rap_message_reporter=>tt_path.
+ENDCLASS.
+
+
+
+CLASS CL_RAP_BHV_TA_MESSAGE_LOG IMPLEMENTATION.
+
+
+  METHOD add_reported_instance.
+    FIELD-SYMBOLS <o_bhv_msg> TYPE REF TO if_abap_behv_message.
+    FIELD-SYMBOLS <state_area> TYPE string.
+    FIELD-SYMBOLS <global> TYPE abp_behv_flag.
+    FIELD-SYMBOLS <cid> TYPE abp_behv_cid.
+    FIELD-SYMBOLS <pid> TYPE abp_behv_pid.
+
+    CHECK iv_flavor <> if_abap_behv_log=>base. " base of a projection
+
+    " Unbound messages ----------
+    IF iv_entity IS INITIAL.
+      ASSIGN is_instance TO <o_bhv_msg>.
+      ASSERT <o_bhv_msg> IS BOUND. "must be provided by BIL implementation!
+      mo_reporter->add_message( io_message  = <o_bhv_msg>
+                                iv_severity = cl_rap_bhv_rt_utility=>get_rap_message_severity( <o_bhv_msg>->m_severity ) ).
+      RETURN.
+    ENDIF.
+
+*----- state messages should not reach this point as they are submitted separately by ABAP runtime
+    ASSIGN COMPONENT co_techfield_name-state_area OF STRUCTURE is_instance TO <state_area>.
+    ASSERT sy-subrc = 0.
+    ASSERT <state_area> IS INITIAL.
+
+*----- transition messages
+    ASSIGN COMPONENT co_techfield_name-msg OF STRUCTURE is_instance TO <o_bhv_msg>.
+    ASSERT sy-subrc = 0.
+    ASSERT FIELDS iv_entity CONDITION <o_bhv_msg> IS BOUND. "must be provided by BIL implementation!
+
+    ASSIGN COMPONENT co_techfield_name-msg_global OF STRUCTURE is_instance TO <global>.
+    ASSERT sy-subrc = 0.
+    IF <global> = if_abap_behv=>mk-on.
+      mo_reporter->add_message( io_message  = <o_bhv_msg>
+                                iv_severity = cl_rap_bhv_rt_utility=>get_rap_message_severity( <o_bhv_msg>->m_severity )
+                                iv_entity   = CONV #( iv_entity )
+                                iv_lifetime = if_rap_message_reporter=>co_lifetime-transition ).
+      RETURN.
+    ENDIF.
+
+    IF iv_is_draft_entity = abap_true.
+      DATA(lr_key) = cl_rap_bhv_rt_utility=>get_draft_key( is_instance = is_instance  iv_entity_name = iv_entity ).
+      ASSIGN lr_key->* TO FIELD-SYMBOL(<s_key>).
+    ELSE.
+      ASSIGN COMPONENT co_techfield_name-key OF STRUCTURE is_instance TO <s_key>.
+    ENDIF.
+    ASSERT sy-subrc = 0.
+    rs_message_key-entity = iv_entity.
+    ASSIGN COMPONENT co_techfield_name-cid OF STRUCTURE is_instance TO <cid>.
+    IF sy-subrc = 0.
+      rs_message_key-cid = <cid>.
+    ENDIF.
+    rs_message_key-message_key = mo_reporter->add_message( io_message           = <o_bhv_msg>
+                                                           iv_severity          = cl_rap_bhv_rt_utility=>get_rap_message_severity( <o_bhv_msg>->m_severity )
+                                                           iv_entity            = CONV #( iv_entity )
+                                                           it_element_names     = cl_rap_bhv_rt_utility=>get_message_elements( is_instance )
+                                                           it_association_names = cl_rap_bhv_rt_utility=>get_message_associations( is_instance )
+                                                           is_key               = <s_key>
+                                                           iv_cid               = rs_message_key-cid
+                                                           iv_lifetime          = if_rap_message_reporter=>co_lifetime-transition
+                                                           it_path              = _get_message_path( is_instance        = is_instance
+                                                                                                     iv_entity          = iv_entity
+                                                                                                     is_key             = <s_key>
+                                                                                                     iv_is_draft_entity = iv_is_draft_entity ) ).
+    IF rs_message_key-cid IS INITIAL AND iv_is_late_numbering = abap_false.
+      RETURN.
+    ENDIF.
+    ASSIGN COMPONENT co_techfield_name-pid OF STRUCTURE is_instance TO <pid>.
+    IF sy-subrc = 0.
+      rs_message_key-pid = <pid>.
+    ENDIF.
+    ASSIGN COMPONENT co_techfield_name-key OF STRUCTURE is_instance TO <s_key>.
+    ASSERT sy-subrc = 0.
+    rs_message_key-temp_key =  cl_rap_bhv_rt_utility=>get_copy_ref( <s_key> ).
+  ENDMETHOD.
+
+
+  METHOD add_reported_internal.
+    IF NOT iv_entity IS INITIAL.
+      DATA(lo_md_entity) = cl_rap_bhv_rt_entity_metadata=>get( iv_entity ).
+      DATA(lv_is_late_numbering) = lo_md_entity->is_late_numbering( ).
+      DATA(lv_is_draft_entity) = lo_md_entity->is_draft( ).
+    ENDIF.
+
+    LOOP AT it_instances ASSIGNING FIELD-SYMBOL(<s_instance>).
+      add_reported_instance( iv_entity            = iv_entity
+                             iv_flavor            = iv_flavor
+                             iv_is_draft_entity   = lv_is_draft_entity
+                             iv_is_late_numbering = lv_is_late_numbering
+                             is_instance          = <s_instance> ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    super->constructor( ).
+    mo_reporter = io_reporter.
+  ENDMETHOD.
+
+
+  METHOD _get_message_path.
+    ASSIGN COMPONENT co_techfield_name-path OF STRUCTURE is_instance TO FIELD-SYMBOL(<path>).
+    CHECK sy-subrc = 0.
+    CHECK NOT <path> IS INITIAL.
+
+    cl_abap_behvdescr=>get_path( EXPORTING p_entity = iv_entity
+                                 IMPORTING p_path   = DATA(lt_path_md)
+                                           p_keys   = DATA(lt_key_names) ).
+    LOOP AT lt_path_md ASSIGNING FIELD-SYMBOL(<s_path_md>).
+      APPEND VALUE #( entity_type = 'CDS'  entity_id = <s_path_md>-entity ) TO rt_path ASSIGNING FIELD-SYMBOL(<s_path>).
+      IF <s_path_md>-alias IS INITIAL.
+        ASSIGN COMPONENT <s_path_md>-entity OF STRUCTURE <path> TO FIELD-SYMBOL(<s_transactional_key>).
+      ELSE.
+        ASSIGN COMPONENT <s_path_md>-alias OF STRUCTURE <path> TO <s_transactional_key>.
+      ENDIF.
+      ASSERT sy-subrc = 0.
+
+      LOOP AT <s_path_md>-keys INTO DATA(lv_key_element_name).
+        ASSIGN COMPONENT lv_key_element_name OF STRUCTURE <s_transactional_key> TO FIELD-SYMBOL(<value>).
+        ASSERT sy-subrc = 0.
+        INSERT VALUE #( name = lv_key_element_name  value = <value> ) INTO TABLE <s_path>-keys.
+      ENDLOOP.
+
+      IF iv_is_draft_entity = abap_true.
+        INSERT LINES OF cl_rap_bhv_rt_utility=>get_additional_draftkey_fields( is_instance = <s_transactional_key> ) INTO TABLE <s_path>-keys.
+      ENDIF.
+    ENDLOOP.
+
+    " SADL message handler paths include the current entity as last segment, while RAP paths only contain its ancestors
+    " -> append current entity
+    APPEND VALUE #( entity_type = 'CDS'  entity_id = iv_entity ) TO rt_path ASSIGNING <s_path>.
+
+    LOOP AT lt_key_names INTO lv_key_element_name.
+      ASSIGN COMPONENT lv_key_element_name OF STRUCTURE is_key TO <value>.
+      ASSERT sy-subrc = 0.
+      INSERT VALUE #( name = lv_key_element_name  value = <value> ) INTO TABLE <s_path>-keys.
+    ENDLOOP.
+
+    IF iv_is_draft_entity = abap_true.
+      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE is_key TO <value>.
+      ASSERT sy-subrc = 0.
+      INSERT VALUE #( name = if_draft_constants=>co_db_fieldname-is_active_entity  value = <value> ) INTO TABLE <s_path>-keys.
+      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-draft_uuid  OF STRUCTURE is_key TO <value>.
+      IF sy-subrc = 0.
+        INSERT VALUE #( name = if_draft_constants=>co_db_fieldname-draft_uuid  value = <value> ) INTO TABLE <s_path>-keys.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,285 @@
+" -----------------------------------------------------------------------
+"  R E V I S I O N   H I S T O R Y                                     -
+" -----------------------------------------------------------------------
+" AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+"              |            | TRANSPORT REQUESTS                       -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 29.04.2023 | 20690     : Feature - ATP push from S/4  -
+"              |            | DS4K950897                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 29.04.2023 | 22968     : Feature - ATP push from S/4  -
+"              |            | DS4K957400                               -
+" -----------------------------------------------------------------------
+" NAGARSOW     | 24.08.2023 | 22968     : Feature - ATP push from S/4  -
+"              |            | DS4K957400                               -
+"-----------------------------------------------------------------------
+" ZHMAIVAD     | 05.01.2024 | 27294     : Feature - GAH - Performance  -
+"              |            | DS4K972552                               -
+" -----------------------------------------------------------------------
+CLASS lcx_error DEFINITION INHERITING FROM cx_static_check FINAL.
+  PUBLIC SECTION.
+    INTERFACES if_t100_message.
+    INTERFACES if_t100_dyn_msg.
+ENDCLASS.
+
+
+CLASS lcl_report DEFINITION FINAL.
+  PUBLIC SECTION.
+    METHODS run
+      RAISING cx_root.
+
+  PRIVATE SECTION.
+    TYPES gtyp_tt_kafka_keys TYPE zsd_tt_aif_atp_kafka_keys.
+    TYPES: BEGIN OF mtyp_s_dc,
+             vlfkz TYPE vlfkz,
+             vtweg TYPE vtweg,
+             prreg TYPE prreg,
+           END OF mtyp_s_dc.
+
+    METHODS check_input
+      RAISING lcx_error.
+
+    METHODS publish_atp
+      IMPORTING iv_show TYPE abap_bool
+                iv_test TYPE abap_boolean OPTIONAL
+      RAISING   cx_root.
+
+    METHODS show
+      RAISING cx_root.
+
+    METHODS show_published
+      CHANGING ct_data TYPE STANDARD TABLE
+      RAISING  cx_root.
+
+    METHODS get_timestamp_range
+      RETURNING VALUE(rt_result) TYPE /smb/tr_timestampl
+      RAISING   zcx_pe_runtime_info.
+ENDCLASS.
+
+
+CLASS lcl_report IMPLEMENTATION.
+  METHOD run.
+    MESSAGE i095(/aif/mes) INTO FINAL(lv_message) ##NEEDED ##MG_MISSING.
+    check_input( ).
+
+    IF p_pub2 = abap_true.
+      publish_atp( p_show ).
+    ELSEIF p_show = abap_true.
+      show( ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD show.
+    publish_atp( iv_show = p_show
+                 iv_test = abap_true ).
+  ENDMETHOD.
+
+  METHOD show_published.
+    cl_salv_table=>factory( IMPORTING r_salv_table = FINAL(lo_salv)
+                            CHANGING  t_table      = ct_data ).
+    FINAL(lo_columns) = lo_salv->get_columns( ).
+    lo_columns->set_optimize( if_salv_c_bool_sap=>true ).
+    FINAL(lo_display) = lo_salv->get_display_settings( ).
+    lo_display->set_striped_pattern( if_salv_c_bool_sap=>true ).
+    lo_display->set_list_header( |Published entries ({ lines( ct_data ) }): | ).
+    lo_salv->get_functions( )->set_all( if_salv_c_bool_sap=>true ).
+    lo_salv->display( ).
+  ENDMETHOD.
+
+  METHOD get_timestamp_range.
+    CHECK NOT ( p_begd IS INITIAL AND p_endd IS INITIAL ).
+    " In case of selection screen timestamp mode - just prepare the timestamps using dates
+    CONVERT DATE p_begd TIME p_begt INTO TIME STAMP FINAL(lv_begts) TIME ZONE sy-zonlo.
+    CONVERT DATE p_endd TIME p_endt INTO TIME STAMP FINAL(lv_endts) TIME ZONE sy-zonlo.
+
+    rt_result = VALUE #( ( sign = 'I' option = 'BT' low = lv_begts high = lv_endts ) ).
+  ENDMETHOD.
+
+  METHOD check_input.
+    SELECT queue_name INTO TABLE @DATA(lt_queue_name)
+      FROM /aif/pers_rtcfgr
+      WHERE queue_ns = @p_cf_ns AND queue_name = @p_cf_nm.
+
+    IF p_parall = abap_true AND ( sy-subrc <> 0 OR lt_queue_name IS INITIAL ).
+      RAISE EXCEPTION TYPE lcx_error MESSAGE e138(zsd_aif).
+    ENDIF.
+
+    IF p_begd IS NOT INITIAL OR p_endd IS NOT INITIAL.
+      CONVERT DATE p_begd TIME p_begt INTO TIME STAMP FINAL(lv_begts) TIME ZONE sy-zonlo.
+      CONVERT DATE p_endd TIME p_endt INTO TIME STAMP FINAL(lv_endts) TIME ZONE sy-zonlo.
+      IF lv_begts > lv_endts.
+        RAISE EXCEPTION TYPE lcx_error MESSAGE e119(zsd_aif).
+      ENDIF.
+    ENDIF.
+    IF     p_pub2 = abap_true
+       AND ( p_begd    IS INITIAL AND p_endd    IS INITIAL )
+       AND ( s_matnr[] IS INITIAL OR  s_werks[] IS INITIAL ).
+      RAISE EXCEPTION TYPE lcx_error MESSAGE e121(zsd_aif).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD publish_atp.
+    DATA lts_checking_rules   TYPE SORTED TABLE OF mtyp_s_dc WITH NON-UNIQUE KEY vtweg vlfkz.
+    DATA lv_send              TYPE abap_boolean.
+    DATA lv_type              TYPE datatype_d.
+    DATA lt_aif_messages      TYPE gtyp_tt_kafka_keys.
+    DATA lv_current_timestamp TYPE timestampl.
+
+    FINAL(lt_timestamp_range) = get_timestamp_range( ).
+
+    SELECT plantcategory, distributionchannel, checkingrule, material, plant, atpcalltimestamp, supflag,
+           lastchangetimestamp
+      FROM zsd_i_atp_relevantnetchange
+      INTO TABLE @DATA(lt_atpdata)
+      WHERE plant             IN @s_werks[]
+        AND material          IN @s_matnr[]
+        AND mrparea           IN @s_berid[]
+        AND netchangecategory IN @s_netch[]
+        AND plantcategory     IN @s_vlfkz[]
+        AND atpcalltimestamp  IN @lt_timestamp_range.
+
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE lcx_error MESSAGE e095(/aif/mes).
+    ELSE.
+      DATA lt_atp_data_multiplicate LIKE lt_atpdata.
+      DATA lt_data_show_tmp         LIKE lt_atpdata.
+      DATA lt_data_show             LIKE lt_atpdata.
+      SORT lt_atpdata BY plantcategory
+                         distributionchannel
+                         checkingrule
+                         material
+                         plant
+                         atpcalltimestamp
+                         supflag.
+      DELETE ADJACENT DUPLICATES FROM lt_atpdata COMPARING plantcategory distributionchannel checkingrule material plant atpcalltimestamp supflag.
+
+      DATA(lt_atpdata_inter) = lt_atpdata.
+      DELETE lt_atpdata_inter WHERE supflag = 'F'.
+
+      IF lt_atpdata_inter IS NOT INITIAL.
+        SELECT plantcategory, distributionchannel, checkingrule, material, plant, atpcalltimestamp, supflag,
+               lastchangetimestamp
+          FROM zsd_i_atp_relevantnetchange
+          APPENDING TABLE @lt_atpdata
+          FOR ALL ENTRIES IN @lt_atpdata_inter
+          WHERE plant     = @lt_atpdata_inter-plant
+            AND material  = @lt_atpdata_inter-material
+            AND supflag  <> 'X'.
+        IF sy-subrc = 0.
+          SORT lt_atpdata BY plantcategory
+                             distributionchannel
+                             checkingrule
+                             material
+                             plant
+                             atpcalltimestamp
+                             supflag.
+          DELETE ADJACENT DUPLICATES FROM lt_atpdata COMPARING plantcategory distributionchannel checkingrule material plant atpcalltimestamp supflag.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDDB9D3EE6353849F59'
+                                                iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-names
+                                      IMPORTING et_table        = lts_checking_rules ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    LOOP AT lt_atpdata ASSIGNING FIELD-SYMBOL(<ls_atpdata>).
+      IF <ls_atpdata>-supflag = abap_true.
+        APPEND INITIAL LINE TO lt_atp_data_multiplicate ASSIGNING FIELD-SYMBOL(<ls_atp_data_multiplicate>).
+        <ls_atp_data_multiplicate> = CORRESPONDING #( <ls_atpdata> ).
+      ELSE.
+        LOOP AT lts_checking_rules ASSIGNING FIELD-SYMBOL(<ls_checking_rules>)
+             WHERE    ( vlfkz = <ls_atpdata>-plantcategory AND vtweg = <ls_atpdata>-distributionchannel ) "#EC CI_SORTSEQ "#EC CI_NESTED
+                   OR ( vlfkz = <ls_atpdata>-plantcategory AND vtweg = '' ).
+          APPEND INITIAL LINE TO lt_atp_data_multiplicate ASSIGNING <ls_atp_data_multiplicate>.
+          <ls_atp_data_multiplicate> = CORRESPONDING #( <ls_atpdata> ).
+
+          IF <ls_checking_rules>-vtweg IS INITIAL.
+            CLEAR <ls_atp_data_multiplicate>-distributionchannel.
+          ENDIF.
+          <ls_atp_data_multiplicate>-checkingrule = <ls_checking_rules>-prreg.
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+
+    SORT lt_atp_data_multiplicate BY material
+                                     plant
+                                     distributionchannel
+                                     checkingrule
+                                     atpcalltimestamp DESCENDING.
+    DELETE ADJACENT DUPLICATES FROM lt_atp_data_multiplicate COMPARING material plant distributionchannel checkingrule.
+
+    LOOP AT lt_atp_data_multiplicate ASSIGNING FIELD-SYMBOL(<ls_key>)
+         GROUP BY ( material = <ls_key>-material
+                    plant = <ls_key>-plant
+                    distributionchannel = <ls_key>-distributionchannel
+                    checkingrule = <ls_key>-checkingrule
+                    supflag = <ls_key>-supflag ) ASSIGNING FIELD-SYMBOL(<ls_triggers>).
+
+      CLEAR: lt_data_show_tmp,
+             lv_send.
+
+      " --   At least one trigger should be later than last timestamp
+      LOOP AT GROUP <ls_triggers> ASSIGNING FIELD-SYMBOL(<ls_trigger>).
+        IF p_begd IS INITIAL AND p_endd IS INITIAL AND p_lastr IS NOT INITIAL.
+          FINAL(lv_last_timestamp) = <ls_trigger>-lastchangetimestamp.
+        ENDIF.
+
+        IF <ls_trigger>-atpcalltimestamp >= lv_last_timestamp.
+          lv_send = abap_true.
+          IF p_show = abap_true.
+            INSERT <ls_trigger> INTO TABLE lt_data_show_tmp.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      IF lv_send = abap_false.
+        CONTINUE.
+      ENDIF.
+
+      DATA(ls_kafka_data) = CORRESPONDING zsd_s_aif_atp_kafka_keys( <ls_triggers> ).
+
+      CALL FUNCTION 'NUMERIC_CHECK'
+        EXPORTING string_in = ls_kafka_data-material
+        IMPORTING htype     = lv_type.
+
+      IF lv_type = 'CHAR'.
+        ls_kafka_data-material = shift_left( val = <ls_triggers>-material
+                                             sub = '0' ).
+      ENDIF.
+
+      INSERT ls_kafka_data INTO TABLE lt_aif_messages.
+
+      IF p_begd IS INITIAL AND p_endd IS INITIAL.
+        GET TIME STAMP FIELD lv_current_timestamp.
+        zcl_pe_abap_runtime=>save( VALUE #( timestamp        = lv_current_timestamp
+                                            additional_info1 = <ls_triggers>-plant
+                                            additional_info2 = <ls_triggers>-material ) ).
+      ENDIF.
+
+      IF iv_show = abap_true.
+        INSERT LINES OF lt_data_show_tmp INTO TABLE lt_data_show.
+      ENDIF.
+
+      IF iv_test = abap_true.
+        CONTINUE.
+      ENDIF.
+    ENDLOOP.
+
+    IF iv_test = abap_true.
+      show_published( CHANGING ct_data = lt_data_show ).
+      RETURN.
+    ENDIF.
+
+    zcl_sd_atp_netchanges=>send_to_kafka( it_aif_keys         = lt_aif_messages
+                                          iv_pers_rtcfgr_ns   = p_cf_ns
+                                          iv_pers_rtcfgr_name = p_cf_nm ).
+
+    IF iv_show = abap_true.
+      show_published( CHANGING ct_data = lt_data_show ).
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

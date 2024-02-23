@@ -1,0 +1,1192 @@
+CLASS cl_rap_bhv_processor DEFINITION
+  PUBLIC
+  CREATE PROTECTED
+  GLOBAL FRIENDS tc_rap_bhv_processor tc_rap_bhv_permission_control.
+
+  PUBLIC SECTION.
+    INTERFACES if_rap_transaction_processor .
+    INTERFACES if_rap_eml_processor .
+    INTERFACES if_rap_legacy_transaction .
+    CONSTANTS co_techfield_name LIKE cl_abap_behv=>co_techfield_name VALUE cl_abap_behv=>co_techfield_name ##NO_TEXT.
+    CONSTANTS co_flag_true TYPE abp_behv_flag VALUE if_abap_behv=>mk-on.
+
+    METHODS constructor.
+    CLASS-METHODS create_instance RETURNING VALUE(ro_instance) TYPE REF TO cl_rap_bhv_processor .
+
+  PROTECTED SECTION.
+    CONSTANTS co_phase LIKE if_abap_behv=>phases VALUE if_abap_behv=>phases.
+
+    METHODS call_handlers_modify IMPORTING !io_job      TYPE REF TO cl_abap_behv_job
+                                           !io_reporter TYPE REF TO if_rap_reporter OPTIONAL.
+    METHODS call_handlers_lock IMPORTING !io_job TYPE REF TO cl_abap_behv_job.
+    METHODS call_readers_for_task IMPORTING !io_rjob TYPE REF TO cl_abap_behv_rjob
+                                            !iv_task TYPE string DEFAULT 'TRANSACT_READ'.
+    METHODS read_state_messages_eml_entity IMPORTING !iv_entity         TYPE abp_entity_name
+                                                     !it_tky            TYPE STANDARD TABLE
+                                                     !iv_in_local_mode  TYPE abap_bool
+                                           RETURNING VALUE(rt_reported) TYPE if_rap_bhv_rt_types=>tt_entity_instances.
+    METHODS execute_change_state_checks IMPORTING !io_concurrency_control TYPE REF TO cl_rap_bhv_concurrency_control
+                                                  !io_behv_log            TYPE REF TO if_abap_behv_log
+                                                  !io_reporter            TYPE REF TO if_rap_reporter.
+    METHODS check_global_permissions IMPORTING io_reporter           TYPE REF TO if_rap_reporter
+                                               io_log                TYPE REF TO if_abap_behv_log
+                                               io_permission_control TYPE REF TO cl_rap_bhv_permission_control.
+    METHODS execute_locking IMPORTING io_concurrency_control TYPE REF TO cl_rap_bhv_concurrency_control
+                                      io_behv_log            TYPE REF TO if_abap_behv_log
+                                      io_failure_reduction   TYPE REF TO if_rap_bhv_failure_reduction OPTIONAL.
+    METHODS execute_prechecks IMPORTING io_job TYPE REF TO cl_abap_behv_job
+                                        io_log TYPE REF TO if_abap_behv_log.
+    METHODS execute_instance_permissions
+      IMPORTING
+        io_permission_control TYPE REF TO cl_rap_bhv_permission_control
+        io_reporter           TYPE REF TO if_rap_reporter
+        io_job                TYPE REF TO cl_abap_behv_job.
+    METHODS eml_global_permission_checks IMPORTING io_job                TYPE REF TO cl_abap_behv_job
+                                                   io_permission_control TYPE REF TO cl_rap_bhv_permission_control
+                                                   io_modifcation_set    TYPE REF TO cl_rap_bhv_modification_set.
+  PRIVATE SECTION.
+    CONSTANTS co_cds TYPE if_sadl_entity=>ty_entity_type VALUE 'CDS'.
+
+    DATA mo_exception_handler TYPE REF TO if_sadl_exception_handler .
+    DATA mo_prelim_key_registry TYPE REF TO if_rap_bhv_prelim_key_registry .
+    DATA mo_key_registry_for_eml_save TYPE REF TO if_rap_bhv_prelim_key_registry .  "for converting preliminary keys after save
+    DATA mv_has_changes TYPE abap_bool VALUE abap_false.
+    DATA mv_ai_involved TYPE abap_bool.
+    DATA mv_late_save_phase TYPE abap_bool.
+    DATA mo_strict_mode_handler TYPE REF TO lcl_strict_mode_handler.
+
+    METHODS _execute_save_phase IMPORTING !iv_phase    TYPE if_abap_behv=>t_phase
+                                          !io_reporter TYPE REF TO if_rap_reporter .
+    METHODS _call_readers IMPORTING !io_rjob  TYPE REF TO cl_abap_behv_rjob
+                                    !iv_image TYPE if_abap_behv=>t_image .
+    METHODS _call_instance_controllers IMPORTING !io_fjob TYPE REF TO cl_abap_behv_fjob .
+    METHODS _call_permission_checks IMPORTING !io_pjob TYPE REF TO cl_abap_behv_pjob .
+
+    METHODS _get_selective_funct_request IMPORTING !iv_entity_name        TYPE abp_entity_name
+                                                   !iv_function_name      TYPE abp_action_name
+                                                   !it_requested_elements TYPE if_rap_transaction_processor~tt_elements
+                                                   is_function_return_md  TYPE cl_rap_bhv_rt_entity_metadata=>ty_runtime_operation_result
+                                         RETURNING VALUE(rr_request)      TYPE REF TO data.
+    METHODS _read_state_messages_eml IMPORTING !it_activities    TYPE abp_behv_activities_tab
+                                               !io_behv_log      TYPE REF TO if_abap_behv_log
+                                               !iv_in_local_mode TYPE abap_bool.
+    METHODS _register_locks_from_lock_job IMPORTING !io_job                       TYPE REF TO cl_abap_behv_job
+                                          RETURNING VALUE(ro_concurrency_control) TYPE REF TO cl_rap_bhv_concurrency_control.
+    METHODS _create_job IMPORTING io_behv_log   TYPE REF TO if_abap_behv_log OPTIONAL
+                                  iv_for_eml    TYPE abap_bool DEFAULT abap_false
+                                    PREFERRED PARAMETER io_behv_log
+                        RETURNING VALUE(ro_job) TYPE REF TO cl_abap_behv_job ##RELAX.
+ENDCLASS.
+
+
+
+CLASS CL_RAP_BHV_PROCESSOR IMPLEMENTATION.
+
+
+  METHOD if_rap_legacy_transaction~set_ai_involved.
+    mv_ai_involved = iv_ai_involved.
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~adjust_numbers.
+    mv_late_save_phase = abap_true.
+    _execute_save_phase( iv_phase = co_phase-adjust_numbers io_reporter = io_reporter ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~check_before_save.
+    _execute_save_phase( iv_phase = co_phase-check_before_save io_reporter = io_reporter ).
+
+*----- strict mode: check for state messages
+    IF mo_strict_mode_handler IS BOUND.
+      mo_strict_mode_handler->evaluate_state_messages( io_reporter ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~cleanup.
+    _execute_save_phase( iv_phase    = co_phase-cleanup
+                         io_reporter = NEW cl_rap_reporter( iv_failure_mode = if_rap_reporter=>co_failure_mode-forbidden ) ).
+    CLEAR:
+      mo_prelim_key_registry,
+      mo_strict_mode_handler.
+    mv_has_changes = abap_false.
+    mv_late_save_phase = abap_false.
+    cl_abap_behv_ctrl=>start_saver_collection( ).  " discard old collection, start new
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~cleanup_finalization.
+    _execute_save_phase( iv_phase    = co_phase-cleanup_finalize
+                         io_reporter = NEW cl_rap_reporter( iv_failure_mode = if_rap_reporter=>co_failure_mode-forbidden ) ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~execute_function.
+    DATA ls_activity TYPE abp_behv_activities.
+    DATA lo_collector TYPE REF TO cl_rap_bhv_modify_collector.
+    DATA lr_instance TYPE REF TO data.
+    FIELD-SYMBOLS <t_instances> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <cid> TYPE abp_behv_cid.
+    FIELD-SYMBOLS <x_control> TYPE x.
+
+    CLEAR: et_result.
+
+    ls_activity-entity_name = iv_entity.
+    ls_activity-op = if_abap_behv=>op-r-evaluate.
+    ls_activity-sub_name = iv_name.
+    ls_activity-instances = cl_abap_behvdescr=>create_data( p_name     = ls_activity-entity_name
+                                                            p_op       = cl_abap_behvdescr=>op_evaluate
+                                                            p_sub_name = ls_activity-sub_name ).
+    ASSIGN ls_activity-instances->* TO <t_instances>.
+
+    DATA(ls_function_md) = cl_rap_bhv_rt_entity_metadata=>get( ls_activity-entity_name )->get_function( EXACT #( iv_name ) ).
+
+    IF it_keys IS INITIAL.
+      APPEND INITIAL LINE TO <t_instances> ASSIGNING FIELD-SYMBOL(<s_instances>).
+      ASSIGN COMPONENT cl_abap_behv=>co_techfield_name-cid OF STRUCTURE <s_instances> TO <cid>.
+      ASSERT sy-subrc = 0.
+      <cid> = '%SADL_FUNCTION_CID'.
+    ELSE.
+      IF cl_rap_bhv_rt_entity_metadata=>get( ls_activity-entity_name )->is_draft( ).
+        CREATE DATA lr_instance LIKE LINE OF <t_instances>.
+        ASSIGN lr_instance->* TO FIELD-SYMBOL(<s_instance>).
+        LOOP AT it_keys ASSIGNING FIELD-SYMBOL(<s_key>).
+          <s_instance> = CORRESPONDING #( <s_key> ).
+          cl_rap_bhv_rt_utility=>set_draft_key_to_bhv( EXPORTING is_sadl_instance = <s_key>
+                                                       CHANGING  cs_bhv_instance  = <s_instance> ).
+          INSERT <s_instance> INTO TABLE <t_instances>.
+        ENDLOOP.
+      ELSE.
+        <t_instances> = CORRESPONDING #( it_keys ).
+      ENDIF.
+    ENDIF.
+
+    IF NOT ls_function_md-parameter-data_type IS INITIAL.
+      LOOP AT <t_instances> ASSIGNING <s_instances>.
+        ASSIGN COMPONENT cl_abap_behv=>co_techfield_name-param OF STRUCTURE <s_instances> TO FIELD-SYMBOL(<s_param>).
+        ASSERT sy-subrc = 0.
+        <s_param> = CORRESPONDING #( is_parameters ).
+        IF ls_function_md-parameter-is_deep = abap_false OR cl_sadl_dev_prototypes=>v4_actfct_parameter_ctrl_flds( ) = abap_false.
+          CHECK ls_function_md-parameter-is_selective = abap_true.
+          ASSIGN COMPONENT cl_abap_behv=>co_techfield_name-control OF STRUCTURE <s_param> TO <x_control> CASTING.
+          ASSERT sy-subrc = 0.
+          CLEAR <x_control> WITH if_abap_behv=>mk-on IN BYTE MODE.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    ls_activity-results = cl_abap_behvdescr=>create_data( p_name     = ls_activity-entity_name
+                                                          p_op       = cl_abap_behvdescr=>op_evaluate
+                                                          p_sub_name = ls_activity-sub_name
+                                                          p_kind     = cl_abap_behv_ctrl=>typekind-returning ).
+
+    IF ls_function_md-result-is_selective = abap_true.
+      ls_activity-links = _get_selective_funct_request( iv_entity_name        = ls_activity-entity_name
+                                                        iv_function_name      = EXACT #( iv_name )
+                                                        is_function_return_md = ls_function_md-result
+                                                        it_requested_elements = it_requested_elements ).
+    ENDIF.
+
+    DATA(lo_rjob) = cl_abap_behv_rjob=>create( log = cl_rap_bhv_log_factory=>transaction_function( io_reporter ) ).
+    TRY.
+        lo_rjob->add_retrievals( entity_name = ls_activity-entity_name
+                                 sub_name    = ls_activity-sub_name
+                                 operation   = ls_activity-op
+                                 instances   = ls_activity-instances
+                                 full        = ls_activity-full
+                                 links       = ls_activity-links
+                                 results     = ls_activity-results ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+    call_readers_for_task( io_rjob = lo_rjob iv_task = 'FUNCTION' ).
+
+    lo_collector = NEW #( io_reporter             = io_reporter
+                          io_concurrency_registry = VALUE #( )
+                          io_permission_registry  = VALUE #( )
+                          io_cid_registry         = VALUE #( ) ).
+    lo_collector->transfer_function_result( EXPORTING is_function_activity = ls_activity
+                                            IMPORTING et_result            = et_result ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~finalize.
+    cl_rap_bhv_state_msg_handler=>get_instance( )->init_failed_save_registration( ).
+    _execute_save_phase( iv_phase    = co_phase-finalize
+                         io_reporter = io_reporter ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~get_properties.
+    DATA(lo_feature_control) = NEW cl_rap_bhv_feature_control( iv_entity           = iv_entity
+                                                               io_failure_reporter = io_failure_reporter ).
+
+    lo_feature_control->prepare_job( EXPORTING it_keys                       = it_keys
+                                               iv_fill_entity_properties     = iv_fill_entity_properties
+                                               it_requested_elements         = it_requested_elements
+                                               it_requested_actions          = it_requested_actions
+                                               it_requested_associations     = it_requested_associations
+                                     IMPORTING eo_permission_job             = DATA(lo_permission_job)
+                                               es_default_entity_properties  = es_default_entity_properties
+                                               et_default_element_properties = et_default_element_properties
+                                               et_default_action_properties  = et_default_action_properties
+                                               et_default_assoc_properties   = et_default_assoc_properties ).
+
+    IF lo_permission_job IS BOUND.
+      _call_permission_checks( lo_permission_job ).
+    ENDIF.
+
+    lo_feature_control->evaluate_results( EXPORTING iv_fill_entity_properties    = iv_fill_entity_properties
+                                                    it_requested_elements        = it_requested_elements
+                                                    it_requested_actions         = it_requested_actions
+                                                    it_requested_associations    = it_requested_associations
+                                                    is_default_entity_properties = es_default_entity_properties
+                                          IMPORTING et_entity_properties         = et_entity_properties
+                                                    et_element_properties        = et_element_properties
+                                                    et_action_properties         = et_action_properties
+                                                    et_association_properties    = et_association_properties ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~has_changes.
+    rv_has_changes = mv_has_changes.
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~modify.
+    DATA lo_collector TYPE REF TO cl_rap_bhv_modify_collector.
+    DATA lo_log TYPE REF TO if_abap_behv_log.
+
+    if_rap_legacy_transaction~check_is_not_aborted( ).
+    IF mo_prelim_key_registry IS INITIAL.
+      mo_prelim_key_registry = NEW cl_rap_bhv_prelim_key_registry( ).
+    ENDIF.
+    DATA(lo_cid_registry) = NEW cl_rap_bhv_cid_registry( mo_prelim_key_registry ).
+    lo_log = cl_rap_bhv_log_factory=>transaction_modify( io_reporter     = io_reporter
+                                                         io_cid_registry = lo_cid_registry ).
+    DATA(lo_concurrency_control) = cl_rap_bhv_concurrency_control=>create( ).
+    DATA(lo_permission_control) = NEW cl_rap_bhv_permission_control( ).
+
+*----- collect operations
+    lo_collector = NEW #( io_cid_registry         = lo_cid_registry
+                          io_concurrency_registry = lo_concurrency_control
+                          io_permission_registry  = lo_permission_control
+                          io_reporter             = io_reporter
+                          iv_is_sticky_session    = iv_is_sticky_session ).
+    lo_collector->collect( it_create = it_create
+                           it_update = it_update
+                           it_delete = it_delete
+                           it_action = it_action ).
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+
+*------ check global permissions
+    check_global_permissions( io_reporter           = io_reporter
+                              io_log                = lo_log
+                              io_permission_control = lo_permission_control ).
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+
+*------ locking
+    execute_locking( io_concurrency_control = lo_concurrency_control
+                     io_behv_log            = lo_log ).
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+
+*----- ETag comparison
+    execute_change_state_checks( io_concurrency_control = lo_concurrency_control
+                                 io_behv_log            = lo_log
+                                 io_reporter            = io_reporter ).
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+
+*----- assemble reduced job
+    DATA(lo_job) = cl_abap_behv_job=>create( log = lo_log ).
+    TRY.
+        lo_job->add_changes_tab( lo_collector->get_collected_modifications( ) ).
+      CATCH cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+
+*----- precheck
+    execute_prechecks( io_job = lo_job
+                       io_log = lo_log ).
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+
+*----- instance permissions checks
+    execute_instance_permissions( io_permission_control = lo_permission_control
+                                  io_reporter           = io_reporter
+                                  io_job                = lo_job ).
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+
+*----- process modifications
+    call_handlers_modify( io_job      = lo_job
+                          io_reporter = io_reporter ).
+
+*----- finish
+    lo_collector->finish( ).
+
+*----- strict mode: instance collection for state messages
+    IF io_reporter->mv_strict_mode = abap_true
+    AND ( iv_is_sticky_session = abap_false OR
+          cl_sadl_crud_runtime_util=>sticky_session_save_requested( it_action ) ).
+      IF mo_strict_mode_handler IS INITIAL.
+        mo_strict_mode_handler = NEW #( ).
+      ENDIF.
+      mo_strict_mode_handler->collect_instances( it_create = it_create
+                                                 it_action = it_action
+                                                 it_update = it_update
+                                                 it_delete = it_delete ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~read.
+
+    DATA ls_activity TYPE abp_behv_activities.
+    FIELD-SYMBOLS <t_keys> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <t_links> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <flag> TYPE abp_behv_flag.
+
+    CLEAR: et_result, et_links.
+
+    IF it_keys IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    ls_activity-entity_name = iv_entity.
+    IF iv_association IS INITIAL.
+      ls_activity-op = if_abap_behv=>op-r-read.
+      DATA(lv_data_operation) = cl_abap_behvdescr=>op_read.
+    ELSE.
+      ls_activity-op = if_abap_behv=>op-r-read_ba.
+      lv_data_operation = cl_abap_behvdescr=>op_read_ba.
+      ls_activity-sub_name = iv_association.
+      ls_activity-full = abap_true.
+      ls_activity-links = cl_abap_behvdescr=>create_data( p_name     = ls_activity-entity_name
+                                                          p_op       = lv_data_operation
+                                                          p_sub_name = ls_activity-sub_name
+                                                          p_kind     = cl_abap_behv_ctrl=>typekind-link ).
+    ENDIF.
+    ls_activity-instances = cl_abap_behvdescr=>create_data( p_name     = ls_activity-entity_name
+                                                            p_op       = lv_data_operation
+                                                            p_sub_name = ls_activity-sub_name ).
+    ASSIGN ls_activity-instances->* TO <t_keys>.
+    <t_keys> = CORRESPONDING #( it_keys ).
+    LOOP AT <t_keys> ASSIGNING FIELD-SYMBOL(<s_key>).
+      DATA(lv_tabix) = sy-tabix.
+      ASSIGN COMPONENT co_techfield_name-control OF STRUCTURE <s_key> TO FIELD-SYMBOL(<control>).
+      ASSERT sy-subrc = 0.
+      IF lv_tabix = 1.
+        IF it_requested_elements IS INITIAL.
+          DO.
+            ASSIGN COMPONENT sy-index OF STRUCTURE <control> TO <flag>.
+            IF sy-subrc <> 0.
+              EXIT.
+            ENDIF.
+            <flag> = co_flag_true.
+          ENDDO.
+        ELSE.
+          cl_abap_behvdescr=>set_control_flag( EXPORTING p_fields = EXACT #( it_requested_elements )
+                                                         p_flag   = co_flag_true
+                                               CHANGING  p_data   = <s_key> ).
+        ENDIF.
+        ASSIGN <control> TO FIELD-SYMBOL(<control_template>).
+      ELSE.
+        <control> = <control_template>.
+      ENDIF.
+    ENDLOOP.
+
+    ls_activity-results = cl_abap_behvdescr=>create_data( p_name     = ls_activity-entity_name
+                                                          p_op       = lv_data_operation
+                                                          p_sub_name = ls_activity-sub_name
+                                                          p_kind     = cl_abap_behv_ctrl=>typekind-returning ).
+
+    DATA(lo_rjob) = cl_abap_behv_rjob=>create( log = cl_rap_bhv_log_factory=>transaction_read( io_failure_reporter ) ).
+    TRY.
+        lo_rjob->add_retrievals( entity_name = ls_activity-entity_name
+                                 sub_name    = ls_activity-sub_name
+                                 operation   = ls_activity-op
+                                 instances   = ls_activity-instances
+                                 full        = ls_activity-full
+                                 links       = ls_activity-links
+                                 results     = ls_activity-results ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+    call_readers_for_task( io_rjob = lo_rjob ).
+    ASSIGN ls_activity-results->* TO <t_data>.
+    et_result = CORRESPONDING #( <t_data> ).
+
+    IF NOT iv_association IS INITIAL AND et_links IS SUPPLIED.
+      ASSIGN ls_activity-links->* TO <t_links>.
+      CHECK NOT <t_links> IS INITIAL.
+
+      LOOP AT <t_links> ASSIGNING FIELD-SYMBOL(<s_link>).
+        ASSIGN COMPONENT co_techfield_name-link_src OF STRUCTURE <s_link> TO FIELD-SYMBOL(<s_source>).
+        ASSERT sy-subrc = 0.
+        ASSIGN COMPONENT co_techfield_name-tky OF STRUCTURE <s_source> TO FIELD-SYMBOL(<s_tky>).
+        ASSERT sy-subrc = 0.
+        DATA(lv_where) = co_techfield_name-tky && | = <S_TKY>|.
+        READ TABLE <t_keys>
+          WITH KEY
+            (co_techfield_name-tky) = <s_tky>
+          TRANSPORTING NO FIELDS.
+        ASSERT sy-subrc = 0.
+        LOOP AT <t_keys> TRANSPORTING NO FIELDS WHERE (lv_where).
+          DATA(lv_source_index) = sy-tabix.
+          ASSIGN COMPONENT co_techfield_name-link_trg OF STRUCTURE <s_link> TO FIELD-SYMBOL(<s_target>).
+          ASSERT sy-subrc = 0.
+          ASSIGN COMPONENT co_techfield_name-tky OF STRUCTURE <s_target> TO <s_tky>.
+          ASSERT sy-subrc = 0.
+          READ TABLE <t_data>
+            WITH KEY
+              (co_techfield_name-tky) = <s_tky>
+            TRANSPORTING NO FIELDS.
+          ASSERT sy-subrc = 0.
+          DATA(lv_target_index) = sy-tabix.
+          INSERT VALUE #( source = lv_source_index target = lv_target_index ) INTO TABLE et_links.
+        ENDLOOP.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_rap_transaction_processor~save.
+    _execute_save_phase( iv_phase = co_phase-save io_reporter = io_reporter ).
+    mv_has_changes = abap_false.
+  ENDMETHOD.
+
+
+  METHOD read_state_messages_eml_entity.
+    DATA(lo_state_message_handler) = cl_rap_bhv_state_msg_handler=>get_instance( ).
+    rt_reported = lo_state_message_handler->read( iv_entity        = iv_entity
+                                                  it_tky           = it_tky
+                                                  iv_in_local_mode = iv_in_local_mode ).
+  ENDMETHOD.
+
+
+  METHOD _call_instance_controllers.
+    TRY.
+        cl_abap_behv_ctrl=>call_instance_controllers( io_fjob ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+    IF NOT io_fjob->unhandled_activities IS INITIAL.
+      RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( iv_method            = 'INSTANCE_CONTROL'
+                                                                                      it_all_activities    = io_fjob->activities
+                                                                                      it_unhandled_indexes = io_fjob->unhandled_activities ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _call_permission_checks.
+    TRY.
+        cl_abap_behv_ctrl=>call_permissions( io_pjob ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+    IF io_pjob->m_subjobs-instance_features IS BOUND.
+      IF NOT io_pjob->m_subjobs-instance_features->unhandled_activities IS INITIAL.
+        RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( iv_method            = 'INSTANCE_FEATURE'
+                                                                                        it_all_activities    = io_pjob->m_subjobs-instance_features->activities
+                                                                                        it_unhandled_indexes = io_pjob->m_subjobs-instance_features->unhandled_activities ).
+      ENDIF.
+    ENDIF.
+    IF io_pjob->m_subjobs-global_features IS BOUND.
+      IF NOT io_pjob->m_subjobs-global_features->unhandled_activities IS INITIAL.
+        RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( iv_method            = 'GLOBAL_FEATURE'
+                                                                                        it_all_activities    = io_pjob->m_subjobs-global_features->activities
+                                                                                        it_unhandled_indexes = io_pjob->m_subjobs-global_features->unhandled_activities ).
+      ENDIF.
+    ENDIF.
+    IF io_pjob->m_subjobs-instance_authorization IS BOUND.
+      IF NOT io_pjob->m_subjobs-instance_authorization->unhandled_activities IS INITIAL.
+        RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( iv_method            = 'INSTANCE_AUTHORIZATION'
+                                                                                        it_all_activities    = io_pjob->m_subjobs-instance_authorization->activities
+                                                                                        it_unhandled_indexes = io_pjob->m_subjobs-instance_authorization->unhandled_activities ).
+      ENDIF.
+    ENDIF.
+    IF io_pjob->m_subjobs-global_authorization IS BOUND.
+      IF NOT io_pjob->m_subjobs-global_authorization->unhandled_activities IS INITIAL.
+        RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( iv_method            = 'GLOBAL_AUTHORIZATION'
+                                                                                        it_all_activities    = io_pjob->m_subjobs-global_authorization->activities
+                                                                                        it_unhandled_indexes = io_pjob->m_subjobs-global_authorization->unhandled_activities ).
+      ENDIF.
+    ENDIF.
+    IF io_pjob->m_subjobs-read IS BOUND.
+      IF NOT io_pjob->m_subjobs-read->unhandled_activities IS INITIAL.
+        RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( iv_method            = 'READ_FOR_AUTHORIZATION_DEPENDENT'
+                                                                                        it_all_activities    = io_pjob->m_subjobs-read->activities
+                                                                                        it_unhandled_indexes = io_pjob->m_subjobs-read->unhandled_activities ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _call_readers.
+    TRY.
+        cl_abap_behv_ctrl=>call_readers( job   = io_rjob
+                                         image = iv_image ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+    IF NOT io_rjob->unhandled_activities IS INITIAL.
+      DATA(lv_op) = io_rjob->activities[ io_rjob->unhandled_activities[ 1 ] ]-op.
+      RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index(
+        iv_method            = SWITCH #( lv_op WHEN if_abap_behv=>op-r-evaluate
+                                                 OR cl_abap_behv_ctrl=>d010behv_op-pseudo-evaluate_ind
+                                               THEN 'EVALUATE'
+                                               WHEN if_abap_behv=>op-r-read_ba
+                                               THEN 'READ_BY_ASSOCIATION'
+                                               ELSE 'READ' )
+        it_all_activities    = io_rjob->activities
+        it_unhandled_indexes = io_rjob->unhandled_activities ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _create_job.
+    ro_job = cl_abap_behv_job=>create( log = io_behv_log for_eml = iv_for_eml ).
+  ENDMETHOD.
+
+
+  METHOD _execute_save_phase.
+    DATA(lo_log) = cl_rap_bhv_log_factory=>transaction_save( io_prelim_key_registry = mo_prelim_key_registry
+                                                             io_reporter            = io_reporter ).
+
+    cl_abap_behv_ctrl=>call_collected_savers( EXPORTING phase           = iv_phase
+                                                        log             = lo_log
+                                              IMPORTING unhandled_roots = DATA(lt_unhandled_root) ).
+
+    IF lt_unhandled_root IS NOT INITIAL.
+      RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_entities( it_unhandled_entities = lt_unhandled_root
+                                                                              iv_method             = 'SAVE' ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_selective_funct_request.
+    rr_request = cl_abap_behvdescr=>create_data( p_name     = iv_entity_name
+                                                 p_op       = cl_abap_behvdescr=>op_evaluate
+                                                 p_sub_name = iv_function_name
+                                                 p_kind     = if_abap_behv=>typekind-request ).
+
+    cl_rap_bhv_rt_utility=>set_operation_requested_flags( is_operation_result_md = is_function_return_md
+                                                          it_requested_elements  = it_requested_elements
+                                                          ir_control_flags       = rr_request ).
+  ENDMETHOD.
+
+
+  METHOD _read_state_messages_eml.
+    DATA lt_assoc_cross_bo_corona TYPE SORTED TABLE OF abp_entity_name WITH UNIQUE DEFAULT KEY.
+    FIELD-SYMBOLS <t_tky> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <t_reported> TYPE STANDARD TABLE.
+
+*----- only if response is requested at all
+    IF io_behv_log IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT it_activities ASSIGNING FIELD-SYMBOL(<s_activity>).
+      DATA(lv_activity_entity_root) = cl_abap_behvdescr=>get_root( <s_activity>-entity_name ).
+      io_behv_log->is_for_eml( EXPORTING root             = lv_activity_entity_root " even for RbA, ABAP expects root of source entity
+                               IMPORTING logging_reported = DATA(lv_logging_reported) ).
+      IF lv_logging_reported = abap_false.
+        CONTINUE.
+      ENDIF.
+
+      CASE <s_activity>-op.
+        WHEN if_abap_behv=>op-r-read.
+          DATA(lv_entity) = <s_activity>-entity_name.
+          ASSIGN <s_activity>-results->* TO <t_data>.
+          ASSERT sy-subrc = 0.
+        WHEN if_abap_behv=>op-r-read_ba.
+          lv_entity = cl_rap_bhv_rt_entity_metadata=>get( <s_activity>-entity_name )->get_association_target( <s_activity>-sub_name ).
+
+*----- prevent dump for non-transactional target view
+*----- (CL_DD_UT_INTGRTN_RAP_RUNTIME=>TEST_EML_READ_SO_I_ASSOC or TC_SADL_CTR_TEST_READ->LTC_ROOT_TRANS_ONLY_SMOKE->RBA)
+          CHECK cl_rap_bhv_rt_entity_metadata=>get( lv_entity )->is_in_bdef( ).
+
+          ASSIGN <s_activity>-links->* TO <t_data>.
+          ASSERT sy-subrc = 0.
+        WHEN OTHERS.
+          CONTINUE.
+      ENDCASE.
+
+      DATA(lr_tky) = cl_abap_behvdescr=>create_data( p_name = lv_entity
+                                                     p_op   = cl_abap_behvdescr=>op_virtual_tkey ).
+      ASSIGN lr_tky->* TO <t_tky>.
+      ASSERT sy-subrc = 0.
+
+      CASE <s_activity>-op.
+        WHEN if_abap_behv=>op-r-read.
+          <t_tky> = CORRESPONDING #( <t_data> ).
+        WHEN if_abap_behv=>op-r-read_ba.
+          CREATE DATA lr_tky LIKE LINE OF <t_tky>.
+          ASSIGN lr_tky->* TO FIELD-SYMBOL(<s_tky>).
+          ASSERT sy-subrc = 0.
+          LOOP AT <t_data> ASSIGNING FIELD-SYMBOL(<s_link>).
+            ASSIGN COMPONENT co_techfield_name-link_trg OF STRUCTURE <s_link> TO FIELD-SYMBOL(<s_target>).
+            ASSERT sy-subrc = 0.
+            MOVE-CORRESPONDING <s_target> TO <s_tky>.
+            INSERT <s_tky> INTO TABLE <t_tky>.
+          ENDLOOP.
+      ENDCASE.
+
+      SORT <t_tky> BY (co_techfield_name-tky).         "#EC CI_SORTLOOP
+      DELETE ADJACENT DUPLICATES FROM <t_tky> COMPARING (co_techfield_name-tky).
+
+      DATA(lt_reported) = read_state_messages_eml_entity( iv_entity        = lv_entity
+                                                          it_tky           = <t_tky>
+                                                          iv_in_local_mode = iv_in_local_mode ).
+
+      CHECK NOT lt_reported IS INITIAL.
+
+      DATA(lv_cross_bo_rba) = abap_false.
+      CLEAR lt_assoc_cross_bo_corona.
+
+*----- for RBA: check if association is cross-BO and collect all transactional association target entities
+      IF <s_activity>-op = if_abap_behv=>op-r-read_ba.
+        cl_abap_behv_load=>get_load( EXPORTING entity   = lv_activity_entity_root
+                                               all      = abap_true
+                                     IMPORTING entities = DATA(lt_rba_source_bo_entities) ).
+        IF NOT line_exists( lt_rba_source_bo_entities[ name = lv_entity ] ).
+          lv_cross_bo_rba = abap_true.
+          cl_abap_behv_load=>get_load( EXPORTING entity       = lv_activity_entity_root
+                                                 all          = abap_true
+                                       IMPORTING associations = DATA(lt_rba_source_bo_assocs) ).
+          LOOP AT lt_rba_source_bo_assocs ASSIGNING FIELD-SYMBOL(<s_assoc>).
+            IF <s_assoc>-target_entity <> lv_entity. "already checked above
+              CHECK NOT line_exists( lt_rba_source_bo_entities[ name = <s_assoc>-target_entity ] ).
+              CHECK cl_rap_bhv_rt_entity_metadata=>get( <s_assoc>-target_entity )->is_in_bdef( ).
+            ENDIF.
+            INSERT <s_assoc>-target_entity INTO TABLE lt_assoc_cross_bo_corona.
+          ENDLOOP.
+        ENDIF.
+      ENDIF.
+
+      LOOP AT lt_reported ASSIGNING FIELD-SYMBOL(<s_reported>).
+        ASSIGN <s_reported>-instances->* TO <t_reported>.
+        ASSERT sy-subrc = 0.
+
+*----- only report for entities which are in the (cross BO) association hull as only those fit syntactically in REPORTED
+        IF lv_cross_bo_rba = abap_true.
+          CHECK line_exists( lt_assoc_cross_bo_corona[ table_line = <s_reported>-entity ] ).
+        ENDIF.
+        io_behv_log->add( kind        = if_abap_behv_log=>reported
+                          flavor      = if_abap_behv_log=>unspecific
+                          root_name   = lv_activity_entity_root
+                          entity_name = <s_reported>-entity
+                          instances   = <t_reported> ).
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _register_locks_from_lock_job.
+    FIELD-SYMBOLS <t_instances> TYPE STANDARD TABLE.
+
+    ro_concurrency_control = cl_rap_bhv_concurrency_control=>create( io_job ).
+
+    LOOP AT io_job->activities ASSIGNING FIELD-SYMBOL(<s_activity>).
+      ASSIGN <s_activity>-instances->* TO <t_instances>.
+      ASSERT sy-subrc = 0.
+      ASSERT <s_activity>-op = cl_abap_behv_ctrl=>op-lock.
+      LOOP AT <t_instances> ASSIGNING FIELD-SYMBOL(<s_instance>).
+        ro_concurrency_control->if_rap_bhv_lock_registry~register_lock_instance(
+          iv_entity_name = <s_activity>-entity_name
+          is_instance    = <s_instance> ).
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_rap_legacy_transaction~fail_with_delayed_abortion.
+    DATA lx_dump TYPE REF TO cx_root.
+
+    ASSERT mv_late_save_phase = abap_true. "must only be called in ADJUST_NUMBERS or SAVE.
+
+    IF mv_ai_involved = abap_true. " BOPF RT is involved
+      lx_dump = cx_rap_late_failure=>create_for_ai_involvement( ).
+      mo_exception_handler->handle( lx_dump ).
+    ENDIF.
+
+    " Delayed abortion is allowed => signal failure and delayed abort request:
+    if_rap_legacy_transaction~mv_abort = abap_true.
+    if_rap_legacy_transaction~mv_aborted_bo = cl_abap_behvdescr=>get_root( iv_entity ).
+  ENDMETHOD.
+
+
+  METHOD call_handlers_lock.
+
+    TRY.
+        cl_abap_behv_ctrl=>get_handlers( EXPORTING job           = io_job
+                                         IMPORTING lock_handlers = DATA(lt_lock_handlers) ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+
+    IF lt_lock_handlers IS INITIAL.
+      RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activities( iv_method               = 'LOCK'
+                                                                                it_unhandled_activities = io_job->activities ).
+    ENDIF.
+
+    LOOP AT lt_lock_handlers ASSIGNING FIELD-SYMBOL(<s_hdlr>).
+      TRY.
+          cl_abap_behv_ctrl=>call_handler( handler = <s_hdlr>-handler
+                                           root    = <s_hdlr>-root
+                                           params  = REF #( <s_hdlr>-params )
+                                           job     = io_job ).
+        CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO lx_behv.
+          mo_exception_handler->handle( lx_behv ).
+      ENDTRY.
+    ENDLOOP.
+
+    LOOP AT io_job->unhandled_activities_lock ASSIGNING FIELD-SYMBOL(<unhandled_index>).
+      RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( iv_method            = 'LOCK'
+                                                                                      it_all_activities    = io_job->activities
+                                                                                      it_unhandled_indexes = io_job->unhandled_activities_lock ).
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD call_handlers_modify.
+
+    CHECK NOT io_job->activities IS INITIAL.
+    mv_has_changes = abap_true.
+    TRY.
+        cl_abap_behv_ctrl=>get_handlers( EXPORTING job      = io_job
+                                         IMPORTING handlers = DATA(lt_handlers) ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+    IF lt_handlers IS INITIAL.
+      RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activities( iv_method               = 'MODIFY'
+                                                                                it_unhandled_activities = io_job->activities ).
+    ENDIF.
+
+    LOOP AT lt_handlers ASSIGNING FIELD-SYMBOL(<s_hdlr>).
+      TRY.
+          cl_abap_behv_ctrl=>call_handler( handler = <s_hdlr>-handler
+                                           root    = <s_hdlr>-root
+                                           params  = REF #( <s_hdlr>-params )
+                                           job     = io_job ).
+        CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO lx_behv.
+          mo_exception_handler->handle( lx_behv ).
+      ENDTRY.
+      IF io_reporter IS BOUND AND io_reporter->is_failed( ).
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+
+    IF NOT io_job->unhandled_activities IS INITIAL.
+      RAISE EXCEPTION cx_rap_handler_not_implemented=>for_unhandled_activts_by_index( it_all_activities    = io_job->activities
+                                                                                      it_unhandled_indexes = io_job->unhandled_activities
+                                                                                      iv_method            = 'MODIFY' ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD call_readers_for_task.
+    _call_readers( io_rjob = io_rjob iv_image = if_abap_behv=>image-transactional ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    mo_exception_handler = cl_sadl_exception_gatekeeper=>get( if_sadl_exception_handler=>at_behavior_impl_call ).
+    cl_abap_behv_ctrl=>start_saver_collection( ).
+  ENDMETHOD.
+
+
+  METHOD create_instance.
+    IF cl_sadl_trace_factory=>is_any_trace_active( ).
+      ro_instance = NEW cl_rap_bhv_processor_trace( ).
+    ELSE.
+      ro_instance = NEW cl_rap_bhv_processor( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD execute_change_state_checks.
+*----- read and check Etag for drafts: DraftEntityLastChangeDateTime is used
+    io_concurrency_control->check_draft_by_last_chng_tstmp( io_reporter = io_reporter ).
+
+*----- read ETag values
+    DATA(lo_rjob) = io_concurrency_control->generate_rjob_for_change_state( io_behv_log ).
+    IF lo_rjob->activities IS INITIAL.
+      RETURN.
+    ENDIF.
+    call_readers_for_task( io_rjob = lo_rjob iv_task = 'ETAG' ).
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+
+*----- ETag check
+    io_concurrency_control->check_change_state( io_rjob = lo_rjob io_reporter = io_reporter ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~add_state_messages.
+    cl_rap_bhv_state_msg_handler=>get_instance( )->read_for_failed_save( io_log = io_log iv_root = iv_root_name ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~cleanup.
+    DATA lo_ta_addenda TYPE REF TO if_rap_transaction_addenda.
+    mo_key_registry_for_eml_save = mo_prelim_key_registry.
+    TRY.
+        lo_ta_addenda ?= cl_sadl_entity_trans_factory=>get_transactional_provider( co_cds )->get_transaction_manager( co_cds ).
+        lo_ta_addenda->cleanup( ).
+      CATCH BEFORE UNWIND cx_sadl_static cx_sadl_contract_violation cx_sadl_no_check INTO DATA(lx_sadl).
+        mv_late_save_phase = abap_false.
+        mo_exception_handler->handle( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~close_save.
+    CLEAR mo_key_registry_for_eml_save.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~discard_changes.
+    DATA lo_ta_manager TYPE REF TO if_sadl_transaction_manager.
+    CLEAR: mo_prelim_key_registry,  mo_key_registry_for_eml_save.
+    TRY.
+        lo_ta_manager = cl_sadl_entity_trans_factory=>get_transactional_provider( co_cds )->get_transaction_manager( co_cds ).
+        ASSERT lo_ta_manager->discard_changes( ) = abap_false.
+      CATCH BEFORE UNWIND cx_sadl_static cx_sadl_contract_violation cx_sadl_no_check INTO DATA(lx_sadl).
+        mo_exception_handler->handle( lx_sadl ).
+    ENDTRY.
+    cl_rap_state_message_handler=>get_instance( )->clean_up( ).   " IM 2080337963, UIAK322126, 7.56 782
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~feature_check.
+    io_fjob->log = cl_rap_bhv_log_factory=>eml_features_wrapper( io_fjob->log ).
+
+*----- process handlers
+    TRY.
+        _call_instance_controllers( io_fjob ).
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO DATA(lx_no_check).
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~get_preliminary_key_converter.
+    IF mo_prelim_key_registry IS BOUND.
+      ro_preliminary_key_converter = mo_prelim_key_registry.
+    ELSE. "during EML save, i.e. before close_save
+      ro_preliminary_key_converter = mo_key_registry_for_eml_save.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~lock.
+    TRY.
+        execute_locking( io_concurrency_control = _register_locks_from_lock_job( io_job )
+                         io_behv_log            = io_job->log ).
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO DATA(lx_no_check).
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~modify.
+    if_rap_legacy_transaction~check_is_not_aborted( ).
+    IF mo_prelim_key_registry IS INITIAL.
+      mo_prelim_key_registry = NEW cl_rap_bhv_prelim_key_registry( ).
+    ENDIF.
+    DATA(lo_cid_registry) = NEW cl_rap_bhv_cid_registry( mo_prelim_key_registry ).
+    DATA(lo_concurrency_control) = cl_rap_bhv_concurrency_control=>create( io_job ).
+    DATA(lo_permission_control) = NEW cl_rap_bhv_permission_control( ).
+    TRY.
+        DATA(lo_modifcation_set) = cl_rap_bhv_modification_set=>get_for_job( io_cid_registry  = lo_cid_registry
+                                                                             io_lock_registry = lo_concurrency_control
+                                                                             io_job           = io_job ).
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO DATA(lx_no_check).
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+
+*----- global permission check
+    eml_global_permission_checks( io_job                = io_job
+                                  io_permission_control = lo_permission_control
+                                  io_modifcation_set    = lo_modifcation_set ).
+
+*----- maintain registries
+    TRY.
+        lo_modifcation_set->register_locks_and_cid_refs( ).
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO lx_no_check.
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+    DATA(lo_failure_reduction) = lo_modifcation_set->get_failure_reduction( ).
+
+*------ locking
+    IF io_job->m_draft_activate IS INITIAL. "avoid duplicate locks during activation (concept meeting of 28.06.2021)
+      TRY.
+          execute_locking( io_concurrency_control = lo_concurrency_control
+                           io_behv_log            = io_job->log
+                           io_failure_reduction   = lo_failure_reduction ).
+        CATCH BEFORE UNWIND cx_sadl_no_check INTO lx_no_check.
+          mo_exception_handler->handle( lx_no_check ).
+      ENDTRY.
+    ENDIF.
+
+*----- pre-check with reduced job - but suppressed in local mode if not extensible
+    IF io_job->m_draft_activate IS INITIAL. "no permission and pre- checks during activation, BCP 2180347607
+      DATA(lo_job) = cl_abap_behv_job=>create( log        = cl_rap_bhv_log_factory=>eml_precheck_wrapper(
+                                                              io_behv_log          = io_job->log
+                                                              io_failure_reduction = lo_failure_reduction )
+                                               attrs_from = io_job ).
+      lo_job->add_changes_tab( lo_modifcation_set->get_prepared_activities(  ) ).
+      IF NOT lo_job->activities IS INITIAL.
+        TRY.
+            cl_abap_behv_ctrl=>call_precheckers( lo_job ).
+          CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+            mo_exception_handler->handle( lx_behv ).
+        ENDTRY.
+      ENDIF.
+
+*----- instance permissions checks
+      TRY.
+          DATA(lo_permission_job) = lo_permission_control->get_instance_pjob_for_eml(
+            it_activities        = lo_modifcation_set->get_prepared_activities( )
+            io_job               = io_job
+            io_failure_reduction = lo_failure_reduction ).
+          IF lo_permission_job IS BOUND.
+            _call_permission_checks( lo_permission_job ).
+            DATA(lo_instance_reduction) = lo_modifcation_set->get_instance_reduction( ).
+            lo_permission_control->evaluate_instance_for_eml( io_pjob               = lo_permission_job
+                                                              io_behv_log           = io_job->log
+                                                              io_instance_reduction = lo_instance_reduction ).
+          ENDIF.
+        CATCH BEFORE UNWIND cx_sadl_no_check INTO lx_no_check.
+          mo_exception_handler->handle( lx_no_check ).
+      ENDTRY.
+    ENDIF.
+
+
+*----- reduced job for modify
+    lo_job = cl_abap_behv_job=>create( log        = cl_rap_bhv_log_factory=>eml_modify_wrapper(
+                                                      io_behv_log             = io_job->log
+                                                      io_cid_registry         = lo_cid_registry
+                                                      io_failure_reduction    = lo_failure_reduction )
+                                       attrs_from = io_job ).
+    lo_job->add_changes_tab( lo_modifcation_set->get_prepared_activities(  ) ).
+
+*----- process handlers
+    TRY.
+        call_handlers_modify( lo_job ).
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO lx_no_check.
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~permission_check.
+    io_pjob->log = cl_rap_bhv_log_factory=>eml_permission_wrapper( io_pjob->log ).
+
+*----- process handlers
+    TRY.
+        _call_permission_checks( io_pjob ).
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO DATA(lx_no_check).
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~read.
+
+*----- store behavior log
+    DATA(lo_behv_log) = io_rjob->log.
+
+    io_rjob->log = cl_rap_bhv_log_factory=>eml_read_wrapper( io_rjob->log ).
+
+*----- process handlers
+    TRY.
+        _call_readers( io_rjob = io_rjob iv_image = iv_image ).
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO DATA(lx_no_check).
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+
+*----- read state messages from service
+    _read_state_messages_eml( it_activities    = io_rjob->activities
+                              io_behv_log      = lo_behv_log
+                              iv_in_local_mode = COND #( WHEN io_rjob->m_in_local_mode IS INITIAL THEN abap_false ELSE abap_true ) ).
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~save.
+    DATA lo_ta_manager TYPE REF TO if_sadl_transaction_manager.
+    mo_key_registry_for_eml_save = mo_prelim_key_registry.
+    TRY.
+        lo_ta_manager = cl_sadl_entity_trans_factory=>get_transactional_provider( co_cds )->get_transaction_manager( co_cds ).
+        ev_failed = lo_ta_manager->save( ).
+      CATCH BEFORE UNWIND cx_sadl_static cx_sadl_contract_violation cx_sadl_no_check INTO DATA(lx_sadl).
+        mv_late_save_phase = abap_false.
+        mo_exception_handler->handle( lx_sadl ).
+    ENDTRY.
+    ev_failed_late = if_rap_legacy_transaction~mv_abort.
+    mv_late_save_phase = abap_false.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~save_without_commit.
+    DATA lo_ta_addenda TYPE REF TO if_rap_transaction_addenda.
+    mo_key_registry_for_eml_save = mo_prelim_key_registry.
+    TRY.
+        lo_ta_addenda ?= cl_sadl_entity_trans_factory=>get_transactional_provider( co_cds )->get_transaction_manager( co_cds ).
+        ev_failed = lo_ta_addenda->save_without_commit( ).
+      CATCH BEFORE UNWIND cx_sadl_static cx_sadl_contract_violation cx_sadl_no_check INTO DATA(lx_sadl).
+        mv_late_save_phase = abap_false.
+        mo_exception_handler->handle( lx_sadl ).
+    ENDTRY.
+    mv_late_save_phase = abap_false.
+  ENDMETHOD.
+
+
+  METHOD if_rap_eml_processor~simulate_save.
+    DATA lo_ta_addenda TYPE REF TO if_rap_transaction_addenda.
+    mo_key_registry_for_eml_save = mo_prelim_key_registry.
+    TRY.
+        lo_ta_addenda ?= cl_sadl_entity_trans_factory=>get_transactional_provider( co_cds )->get_transaction_manager( co_cds ).
+        ev_failed = lo_ta_addenda->simulate_save( ).
+      CATCH BEFORE UNWIND cx_sadl_static cx_sadl_contract_violation cx_sadl_no_check INTO DATA(lx_sadl).
+        mv_late_save_phase = abap_false.
+        mo_exception_handler->handle( lx_sadl ).
+    ENDTRY.
+    mv_late_save_phase = abap_false.
+  ENDMETHOD.
+
+
+  METHOD if_rap_legacy_transaction~check_is_not_aborted.
+    IF if_rap_legacy_transaction~mv_abort = abap_true.
+      IF iv_soft = abap_true.
+        RAISE EXCEPTION cx_rap_change_aftr_delyd_abort=>create( aborted_bo_name = if_rap_legacy_transaction~mv_aborted_bo as_appl_model = abap_false ).
+      ELSE.
+        mo_exception_handler->handle( cx_rap_change_aftr_delyd_abort=>create( aborted_bo_name = if_rap_legacy_transaction~mv_aborted_bo ) ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD check_global_permissions.
+
+    TRY.
+        DATA(lo_permission_job)  = io_permission_control->get_global_pjob_for_transact( io_log ).
+        IF lo_permission_job IS BOUND.
+          _call_permission_checks( lo_permission_job ).
+          io_permission_control->evaluate_global_for_transact( io_pjob     = lo_permission_job
+                                                               io_reporter = io_reporter ).
+        ENDIF.
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO DATA(lx_no_check).
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD eml_global_permission_checks.
+
+    DATA lx_no_check TYPE REF TO cx_sadl_no_check.
+
+    IF io_job->m_draft_activate IS INITIAL. "no permission checks during activation, BCP 2180347607
+      TRY.
+          DATA(lo_permission_job)  = io_permission_control->get_global_pjob_for_eml( io_job ).
+          IF lo_permission_job IS BOUND.
+            _call_permission_checks( lo_permission_job ).
+            DATA(lo_global_reduction) = io_modifcation_set->get_global_reduction( ).
+            io_permission_control->evaluate_global_for_eml( io_pjob             = lo_permission_job
+                                                            io_behv_log         = io_job->log
+                                                            io_global_reduction = lo_global_reduction ).
+          ENDIF.
+        CATCH BEFORE UNWIND cx_sadl_no_check INTO lx_no_check.
+          mo_exception_handler->handle( lx_no_check ).
+      ENDTRY.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD execute_instance_permissions.
+    TRY.
+        DATA(lo_permission_job) = io_permission_control->get_instance_pjob_for_transact( io_reporter ).
+        IF lo_permission_job IS BOUND.
+          _call_permission_checks( lo_permission_job ).
+          DATA(lo_upd_compare_rjob) = io_permission_control->evaluate_instance_for_transact(
+            io_pjob     = lo_permission_job
+            io_reporter = io_reporter ).
+        ENDIF.
+      CATCH BEFORE UNWIND cx_sadl_no_check INTO DATA(lx_no_check).
+        mo_exception_handler->handle( lx_no_check ).
+    ENDTRY.
+    IF io_reporter->is_failed( ) = abap_true.
+      RETURN.
+    ENDIF.
+    IF lo_upd_compare_rjob IS BOUND.
+      call_readers_for_task( io_rjob = lo_upd_compare_rjob ).
+      IF io_reporter->is_failed( ) = abap_true.
+        RETURN.
+      ENDIF.
+      TRY.
+          io_permission_control->evaluate_read_upd_compare_4_ta( io_rjob     = lo_upd_compare_rjob
+                                                                 io_job      = io_job
+                                                                 io_pjob     = lo_permission_job
+                                                                 io_reporter = io_reporter ).
+        CATCH BEFORE UNWIND cx_sadl_no_check INTO lx_no_check.
+          mo_exception_handler->handle( lx_no_check ).
+      ENDTRY.
+      IF io_reporter->is_failed( ) = abap_true.
+        RETURN.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD execute_locking.
+    DATA(lo_rjob) = io_concurrency_control->generate_rjob_for_lock_deleg( io_behv_log          = io_behv_log
+                                                                          io_failure_reduction = io_failure_reduction ).
+    IF NOT lo_rjob->activities IS INITIAL.
+      call_readers_for_task( io_rjob = lo_rjob iv_task = 'LOCK_DELEGATE' ).
+      io_concurrency_control->evaluate_rjob_for_lock_deleg( lo_rjob ).
+    ENDIF.
+    DATA(lo_ljob) = io_concurrency_control->generate_lock_job( io_behv_log          = io_behv_log
+                                                               io_failure_reduction = io_failure_reduction ).
+    IF NOT lo_ljob->activities IS INITIAL.
+      call_handlers_lock( lo_ljob ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD execute_prechecks.
+
+    DATA(lo_prechecker_job) = cl_abap_behv_job=>create( log        = io_log
+                                                        attrs_from = io_job ).
+    lo_prechecker_job->add_changes_tab( io_job->activities ).
+    TRY.
+        cl_abap_behv_ctrl=>call_precheckers( lo_prechecker_job ).
+      CATCH BEFORE UNWIND cx_abap_behv_runtime_error INTO DATA(lx_behv).
+        mo_exception_handler->handle( lx_behv ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD if_rap_legacy_transaction~resume_after_delayed_abortion.
+    CLEAR: if_rap_legacy_transaction~mv_abort, if_rap_legacy_transaction~mv_aborted_bo.
+  ENDMETHOD.
+ENDCLASS.

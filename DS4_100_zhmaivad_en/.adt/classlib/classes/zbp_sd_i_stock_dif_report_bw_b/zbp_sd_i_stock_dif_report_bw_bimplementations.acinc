@@ -1,0 +1,224 @@
+CLASS lhc_stockdifference DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PRIVATE SECTION.
+    TYPES: typ_t_difference_rows TYPE TABLE OF zsd_i_stock_dif_report_rows.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys REQUEST requested_authorizations FOR stockdifference RESULT result.
+
+    METHODS read FOR READ
+      IMPORTING keys FOR READ stockdifference RESULT result.
+
+    METHODS lock FOR LOCK
+      IMPORTING keys FOR LOCK stockdifference.
+
+    METHODS readyforstockcorrection FOR MODIFY
+      IMPORTING keys FOR ACTION stockdifference~readyforstockcorrection.
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys REQUEST requested_features FOR stockdifference RESULT result.
+
+    METHODS modify_transfer_adjustment CHANGING ct_create_for_stock_correction TYPE typ_t_difference_rows.
+
+ENDCLASS.
+
+CLASS lhc_stockdifference IMPLEMENTATION.
+
+  METHOD readyforstockcorrection.
+
+    DATA: lt_create_for_stock_correction TYPE TABLE FOR CREATE zsd_i_stock_corr_rprt.
+
+    SELECT *
+        FROM zsd_i_stock_dif_report_rows
+        INTO TABLE @DATA(lt_difference_rows)
+        FOR ALL ENTRIES IN @keys
+        WHERE       wmssnapshotdate =    @keys-wmssnapshotdate
+                AND plant =             @keys-plant
+                AND storagelocation =   @keys-storagelocation
+                AND article =           @keys-article
+                AND salesordernumber =  @keys-salesordernumber
+                AND salesorderitem =    @keys-salesorderitem.
+
+    modify_transfer_adjustment( CHANGING ct_create_for_stock_correction = lt_difference_rows ).
+
+    LOOP AT lt_difference_rows ASSIGNING FIELD-SYMBOL(<ls_difference_rows>).
+      APPEND VALUE #(
+                       wmssnapshotdate = <ls_difference_rows>-wmssnapshotdate
+                       plant =  <ls_difference_rows>-plant
+                       storagelocation = <ls_difference_rows>-storagelocation
+                       article = <ls_difference_rows>-article
+                       salesordernumber = <ls_difference_rows>-salesordernumber
+                       salesorderitem = <ls_difference_rows>-salesorderitem
+                       status = zcl_sd_sap_stock_snapshot=>gv_stock_corr_status_open
+                       difference = <ls_difference_rows>-differencequantity
+                       adjustmentqty = <ls_difference_rows>-adjustmentquantity
+                       transferto = <ls_difference_rows>-transferto
+                       stocktype = <ls_difference_rows>-StockType
+                       movetypegroup = <ls_difference_rows>-MoveTypeGroup
+                    )
+                      TO lt_create_for_stock_correction.
+    ENDLOOP.
+
+    SELECT uuid
+        FROM zsd_i_stock_corr_rprt
+        INTO TABLE @DATA(lt_delete_stock_corr)
+        FOR ALL ENTRIES IN @keys
+        WHERE   wmssnapshotdate = @keys-wmssnapshotdate
+            AND plant = @keys-plant
+            AND storagelocation = @keys-storagelocation
+            AND article = @keys-article
+            AND salesordernumber = @keys-salesordernumber
+            AND salesorderitem = @keys-salesorderitem
+            AND status = @zcl_sd_sap_stock_snapshot=>gv_stock_corr_status_open.
+
+    MODIFY ENTITIES OF zsd_i_stock_corr_rprt
+        ENTITY stockcorrection
+        DELETE FROM CORRESPONDING #( lt_delete_stock_corr )
+        FAILED   DATA(lt_del_failed)
+        REPORTED DATA(lt_del_reported).
+
+    MODIFY ENTITIES OF zsd_i_stock_corr_rprt
+        ENTITY stockcorrection
+        CREATE AUTO FILL CID FIELDS (
+                       wmssnapshotdate
+                       plant
+                       storagelocation
+                       article
+                       salesordernumber
+                       salesorderitem
+                       stocktype
+                       status
+                       difference
+                       transferto
+                       adjustmentqty
+                       MoveTypeGroup )
+        WITH lt_create_for_stock_correction
+        MAPPED DATA(l_mapped)
+        FAILED   DATA(l_failed)
+        REPORTED DATA(l_reported).
+
+  ENDMETHOD.
+
+  METHOD modify_transfer_adjustment.
+    DATA: lt_create_for_stock_correction TYPE typ_t_difference_rows .
+
+    DATA(lt_unique_keys) = ct_create_for_stock_correction.
+
+
+    SORT lt_unique_keys BY wmssnapshotdate plant storagelocation salesordernumber salesorderitem article.
+    DELETE ADJACENT DUPLICATES FROM lt_unique_keys COMPARING wmssnapshotdate plant storagelocation salesordernumber salesorderitem article.
+
+    SORT ct_create_for_stock_correction BY adjustmentquantity.
+
+    LOOP AT lt_unique_keys ASSIGNING FIELD-SYMBOL(<ls_unique_keys>).
+      DO 3 TIMES.
+        DATA(stock_type) = COND #(  WHEN sy-index = 1 THEN zcl_sd_sap_stock_snapshot=>gv_stock_type_unrestricted
+                                    WHEN sy-index = 2 THEN zcl_sd_sap_stock_snapshot=>gv_stock_type_in_quality
+                                    WHEN sy-index = 3 THEN zcl_sd_sap_stock_snapshot=>gv_stock_type_blocked ).
+
+        ASSIGN ct_create_for_stock_correction[ stocktype = stock_type ] TO FIELD-SYMBOL(<ls_stock_selected>).
+
+        IF sy-subrc = 0.
+          IF <ls_stock_selected>-adjustmentquantity >= 0.
+            CONTINUE.
+          ENDIF.
+        ELSE.
+          CONTINUE.
+        ENDIF.
+
+        LOOP AT ct_create_for_stock_correction ASSIGNING FIELD-SYMBOL(<ls_create_for_stock_corr>)
+                                                  WHERE wmssnapshotdate = <ls_unique_keys>-wmssnapshotdate
+                                                      AND plant = <ls_unique_keys>-plant
+                                                      AND storagelocation = <ls_unique_keys>-storagelocation
+                                                      AND salesordernumber = <ls_unique_keys>-salesordernumber
+                                                      AND salesorderitem = <ls_unique_keys>-salesorderitem
+                                                      AND article = <ls_unique_keys>-article
+                                                      AND stocktype <> stock_type.
+
+          IF <ls_create_for_stock_corr>-adjustmentquantity > 0 AND <ls_stock_selected>-adjustmentquantity < 0.
+            IF abs( <ls_stock_selected>-adjustmentquantity ) >= <ls_create_for_stock_corr>-adjustmentquantity.
+              <ls_stock_selected>-adjustmentquantity = <ls_stock_selected>-adjustmentquantity + <ls_create_for_stock_corr>-adjustmentquantity.
+              <ls_stock_selected>-transferquantity =  <ls_stock_selected>-transferquantity - <ls_create_for_stock_corr>-adjustmentquantity.
+              <ls_create_for_stock_corr>-transferquantity =  <ls_create_for_stock_corr>-transferquantity + <ls_create_for_stock_corr>-adjustmentquantity .
+              <ls_stock_selected>-transferto = <ls_create_for_stock_corr>-stocktype.
+              <ls_create_for_stock_corr>-adjustmentquantity = 0.
+            ELSE.
+              <ls_create_for_stock_corr>-adjustmentquantity = <ls_create_for_stock_corr>-adjustmentquantity + <ls_stock_selected>-adjustmentquantity.
+              <ls_stock_selected>-transferquantity =  <ls_stock_selected>-transferquantity + <ls_stock_selected>-adjustmentquantity.
+              <ls_create_for_stock_corr>-transferquantity =  <ls_create_for_stock_corr>-transferquantity - <ls_stock_selected>-adjustmentquantity.
+              <ls_stock_selected>-transferto = <ls_create_for_stock_corr>-stocktype.
+              <ls_stock_selected>-adjustmentquantity = 0.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+      ENDDO.
+    ENDLOOP.
+
+    LOOP AT ct_create_for_stock_correction ASSIGNING <ls_create_for_stock_corr> WHERE transferquantity <> 0.
+      <ls_create_for_stock_corr>-movetypegroup = zcl_sd_sap_stock_snapshot=>gv_move_type_group_adjustment.
+
+      DATA(ls_create_for_stock_corr) = <ls_create_for_stock_corr>.
+
+      ls_create_for_stock_corr-adjustmentquantity =   ls_create_for_stock_corr-transferquantity.
+      CLEAR: <ls_create_for_stock_corr>-transferquantity, ls_create_for_stock_corr-transferquantity.
+      ls_create_for_stock_corr-movetypegroup = zcl_sd_sap_stock_snapshot=>gv_move_type_group_transfer.
+
+      APPEND ls_create_for_stock_corr TO lt_create_for_stock_correction.
+    ENDLOOP.
+
+    DELETE ct_create_for_stock_correction WHERE adjustmentquantity = 0.
+
+    APPEND LINES OF lt_create_for_stock_correction TO ct_create_for_stock_correction.
+  ENDMETHOD.
+  METHOD get_instance_features.
+
+    READ ENTITIES OF  zsd_i_stock_dif_report_bw_base IN LOCAL MODE
+    ENTITY stockdifference
+        FIELDS ( status  )
+         WITH CORRESPONDING #( keys )
+        RESULT DATA(lt_stock_difference).
+
+    result = VALUE #( FOR ls_variable IN lt_stock_difference
+    (
+
+    %tky = ls_variable-%tky
+
+    %features-%action-readyforstockcorrection = COND #( WHEN ls_variable-status = space
+                                                THEN if_abap_behv=>fc-o-enabled
+                                                ELSE if_abap_behv=>fc-o-disabled )
+
+     ) ) .
+
+
+  ENDMETHOD.
+  METHOD get_instance_authorizations.
+  ENDMETHOD.
+
+  METHOD read.
+    SELECT * FROM zsd_i_stock_dif_report_bw_base
+      FOR ALL ENTRIES IN @keys
+      WHERE wmssnapshotdate = @keys-wmssnapshotdate
+          AND  plant = @keys-plant
+          AND storagelocation = @keys-storagelocation
+          AND article = @keys-article
+          AND salesordernumber = @keys-salesordernumber
+          AND salesorderitem = @keys-salesorderitem
+      INTO CORRESPONDING FIELDS OF TABLE @result.
+  ENDMETHOD.
+
+  METHOD lock.
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS lsc_zsd_i_stock_dif_report_bw_ DEFINITION INHERITING FROM cl_abap_behavior_saver.
+  PROTECTED SECTION.
+
+    METHODS save REDEFINITION.
+
+ENDCLASS.
+
+CLASS lsc_zsd_i_stock_dif_report_bw_ IMPLEMENTATION.
+
+  METHOD save.
+  ENDMETHOD.
+
+ENDCLASS.

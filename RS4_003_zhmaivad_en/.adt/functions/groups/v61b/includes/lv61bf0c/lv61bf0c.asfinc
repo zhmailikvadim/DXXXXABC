@@ -1,0 +1,761 @@
+***********************************************************************
+*  Include        : LV61BF0C                                          *
+*  Hauptprogramm  : SAPLV61B  Funktionsgruppe V61B                    *
+*  Inhalt         : Form-Routinen beginnend mit Buchstabe C           *
+*  Bemerkung      : Form-Routinen simd im Include alphabetisch        *
+*                   sortiert.                                         *
+***********************************************************************
+
+*----------------------------------------------------------------------*
+*       FORM  CHECK_NAST                                               *
+*----------------------------------------------------------------------*
+*       Prüfen, ob der NAST-Satz vollständig ist.                      *
+*----------------------------------------------------------------------*
+
+FORM check_nast USING us_subrc LIKE sy-subrc.
+
+  CLEAR us_subrc.
+
+** check timing START
+  DATA: l_error       TYPE i,
+        l_dummy_rc    LIKE sy-subrc,
+        l_rc          LIKE sy-subrc,
+        lt_comm_types LIKE tcstrp OCCURS 5 WITH HEADER LINE.
+
+  CASE xnast-vsztp.
+    WHEN '1'.
+      IF t685b-erlv1 EQ yes.
+        l_error = 1.
+      ENDIF.
+    WHEN '2'.
+      IF t685b-erlv2 EQ yes.
+        l_error = 2.
+      ENDIF.
+    WHEN '3'.
+      IF t685b-erlv3 EQ yes.
+        l_error = 3.
+      ENDIF.
+    WHEN '4'.
+      IF t685b-erlv4 EQ yes.
+        l_error = 4.
+      ENDIF.
+  ENDCASE.
+* timing not allowed?
+  IF l_error NE 0.
+    us_subrc = 9.
+    CLEAR koprt.
+    koprt-stunr = 930.
+    koprt-kschl = xnast-kschl.
+    koprt-typ = typ_messa.
+    koprt-msgnr = '571'.
+    koprt-msgv1 = xnast-vsztp.
+    koprt-msgv2 = xnast-kschl.
+    PERFORM protocol_update USING koprt.
+    EXIT.
+  ENDIF.
+
+** check timing END
+
+  SELECT SINGLE * FROM tnapr WHERE kschl = xnast-kschl
+                             AND   nacha = xnast-nacha
+                             AND   kappl = xnast-kappl.
+  IF sy-subrc NE 0.
+    us_subrc = sy-subrc.
+    CLEAR koprt.
+    koprt-stunr = 950.
+    koprt-kschl = xnast-kschl.
+    koprt-typ = typ_messa.
+    koprt-msgnr = '514'.
+    koprt-msgv1 = komt1-kschl.
+    koprt-msgv2 = xnast-nacha.
+    koprt-msgv3 = xnast-kappl.
+    PERFORM protocol_update USING koprt.
+    EXIT.
+  ENDIF.
+
+  CASE xnast-nacha.
+    WHEN postversand.
+      IF xnast-ldest IS INITIAL.
+        us_subrc = 2.
+        CLEAR koprt.
+        koprt-stunr = 951.
+        koprt-kschl = xnast-kschl.
+        koprt-typ = typ_messa.
+        koprt-msgnr = '515'.
+        koprt-msgv1 = komt1-kschl.
+        PERFORM protocol_update USING koprt.
+      ELSE.
+* valid printer?
+        PERFORM check_ldest USING xnast-ldest
+              us_subrc.
+        IF us_subrc NE 0.
+          PERFORM koprt_no_valid_printer USING xnast-kschl
+                xnast-ldest.
+        ENDIF.
+
+      ENDIF.
+    WHEN telefax.
+* allow user to specify an own fax number
+      CALL CUSTOMER-FUNCTION '001'
+        EXPORTING
+          parvw  = xnast-parvw
+          parnr  = xnast-parnr
+        CHANGING
+          telfx  = xnast-telfx
+        EXCEPTIONS
+          OTHERS = 1.
+
+      IF xnast-telfx = space.
+        us_subrc = 3.
+        CLEAR koprt.
+        koprt-stunr = 952.
+        koprt-kschl = xnast-kschl.
+        koprt-typ = typ_messa.
+        koprt-msgnr = '516'.
+        PERFORM protocol_update USING koprt.
+** START telefax check
+      ELSE.
+        IF xnast-tland NE space.
+* country provided: use function module
+
+          DATA: l_telfx LIKE tskpa-telnr.
+          l_telfx = xnast-telfx.
+
+          CALL FUNCTION 'TELECOMMUNICATION_NUMBER_CHECK'
+            EXPORTING
+              country                = xnast-tland
+              number                 = l_telfx
+              service                = 'TELEFAX'
+            EXCEPTIONS
+              country_not_configured = 0
+              number_emptied         = 2
+              number_empty           = 3
+              number_not_legal       = 4
+              server_not_found       = 0
+              service_not_supported  = 0
+              OTHERS                 = 0.
+
+          IF sy-subrc NE 0.
+
+            us_subrc = 3.
+            CLEAR koprt.
+            koprt-stunr = 952.
+            koprt-kschl = xnast-kschl.
+            koprt-typ = typ_messa.
+            koprt-msgnr = '545'.
+            koprt-msgv1 = xnast-telfx.
+            PERFORM protocol_update USING koprt.
+          ENDIF.
+
+        ELSE.
+          IF xnast-telfx NA '0123456789'  OR
+          xnast-telfx CN '0123456789 ()/-.&'.
+* telefax number is syntactically incorrect
+            us_subrc = 3.
+            CLEAR koprt.
+            koprt-stunr = 952.
+            koprt-kschl = xnast-kschl.
+            koprt-typ = typ_messa.
+            koprt-msgnr = '545'.
+            koprt-msgv1 = xnast-telfx.
+            PERFORM protocol_update USING koprt.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+** END telefax check
+
+    WHEN teletex.
+* teletex is not supported anymore
+      us_subrc = 4.
+      CLEAR koprt.
+      koprt-stunr = 953.
+      koprt-kschl = xnast-kschl.
+      koprt-typ = typ_messa.
+      koprt-msgnr = '572'.
+      PERFORM protocol_update USING koprt.
+    WHEN telex.
+      IF xnast-telx1 = space.
+        us_subrc = 5.
+        CLEAR koprt.
+        koprt-stunr = 954.
+        koprt-kschl = xnast-kschl.
+        koprt-typ = typ_messa.
+        koprt-msgnr = '518'.
+        PERFORM protocol_update USING koprt.
+      ENDIF.
+    WHEN edi.
+
+      DATA: lr_edi_soap      TYPE REF TO if_edi_op_utility,
+            lo_badi          TYPE REF TO saps_com_ca_om_b2b_srv,
+            ls_receiver_id   TYPE if_saps_com_ca_b2b_srv=>ty_receiver,
+            ls_appl_object   TYPE if_saps_com_ca_b2b_srv=>ty_appl_object,
+            lv_receiver_type TYPE edippartyp.
+
+      DATA: ls_nast        TYPE nast.
+
+
+      IF xnast-kappl = 'V1' OR xnast-kappl = 'V2' OR xnast-kappl = 'V3'.
+        lr_edi_soap = cl_sd_edi_op_utility=>create( ).
+      ELSEIF xnast-kappl = 'EF'.
+        lr_edi_soap = cl_mm_edi_op_utility=>create( ).
+      ENDIF.
+
+
+      IF lr_edi_soap IS NOT INITIAL.
+        CALL METHOD lr_edi_soap->get_edi_send_type
+          EXPORTING
+            iv_output_type    = xnast-kschl
+            iv_message_medium = xnast-nacha
+            iv_application    = xnast-kappl
+          IMPORTING
+            es_program        = DATA(ls_program).
+       ENDIF.
+* EDI soap output check
+        IF ls_program-pgnam = cl_sd_edi_op_utility=>gc_program.
+          ls_receiver_id-id   = xnast-parnr.
+          ls_receiver_id-type = lv_receiver_type.
+          ls_receiver_id-role = xnast-parvw.
+
+          ls_appl_object-obj_id = xnast-objky.
+          IF ls_appl_object-obj_id IS INITIAL.
+            ls_appl_object-obj_id = msg_objky.
+          ENDIF.
+          ls_appl_object-obj_type = edi.
+          ls_appl_object-output_type = xnast-kschl.
+          MOVE-CORRESPONDING xnast TO ls_nast.
+          TRY.
+              CALL METHOD lr_edi_soap->check_service_active
+                EXPORTING
+                  is_receiver_id                 = ls_receiver_id
+                  is_appl_object                 = ls_appl_object
+                  is_program                     = ls_program
+                IMPORTING
+                  ev_service_active              = DATA(lv_service_active)
+                EXCEPTIONS
+                  multiple_active_services_found = 01.
+          ENDTRY.
+**** This Validation logic need enhanced, especially for receiver determination by business ID.
+***          IF sy-subrc <> 0.
+***            us_subrc = 8.
+***            CLEAR koprt.
+***            koprt-stunr = 955.
+***            koprt-kschl = xnast-kschl.
+***            koprt-typ = typ_messa.
+***            koprt-msgnr = '582'.
+***            koprt-msgv1 = xnast-parnr.
+***            PERFORM protocol_update USING koprt.
+***          ENDIF.
+***
+***          IF lv_service_active = abap_false.
+***            us_subrc = 8.
+***            CLEAR koprt.
+***            koprt-stunr = 955.
+***            koprt-kschl = xnast-kschl.
+***            koprt-typ = typ_messa.
+***            koprt-msgnr = '581'.
+***            koprt-msgv1 = xnast-parnr.
+***            PERFORM protocol_update USING koprt.
+***          ENDIF.
+        ELSE.
+          CALL FUNCTION 'EDI_PARTNER_TEST_OUTGOING'
+            EXPORTING
+              edi_parvw                    = xnast-parvw
+              edi_parnr                    = xnast-parnr
+              edi_kappl                    = xnast-kappl
+              edi_kschl                    = xnast-kschl
+              edi_aende                    = xnast-aende
+            EXCEPTIONS
+              no_entry_in_tpar             = 01
+              no_partner_declaration_found = 02.
+          IF sy-subrc NE 0.
+            us_subrc = 8.
+            CLEAR koprt.
+            koprt-stunr = 955.
+            koprt-kschl = xnast-kschl.
+            koprt-typ = typ_messa.
+            koprt-msgnr = '561'.
+            koprt-msgv1 = xnast-parnr.
+            PERFORM protocol_update USING koprt.
+          ENDIF.
+        ENDIF.
+
+* SAPoffice mail
+    WHEN mail_intern.
+      PERFORM check_receivers USING xnast-tdname
+            l_dummy_rc
+            l_rc.
+      IF l_rc NE 0 OR l_dummy_rc NE 0.
+        us_subrc = 16.
+        CLEAR koprt.
+        koprt-stunr = 955.
+        koprt-kschl = xnast-kschl.
+        koprt-typ = typ_messa.
+        koprt-msgnr = '573'.
+        PERFORM protocol_update USING koprt.
+      ENDIF.
+
+* external mail
+    WHEN mail_extern.
+* communication strategy available?
+      IF xnast-tcode EQ space.
+        us_subrc = 13.
+        PERFORM koprt_no_strategy USING xnast-kschl.
+      ELSE.
+* yes, but do we find communication types for our partner address?
+* at least the address number needs to be filled
+        IF xnast-adrnr NE space.
+
+* type casting necessary
+          DATA: l_persnumber LIKE adrp-persnumber,
+                l_comm_type  TYPE ad_comm.
+          l_persnumber = xnast-usrnam.
+
+          CALL FUNCTION 'ADDR_GET_NEXT_COMM_TYPE'
+            EXPORTING
+              strategy           = xnast-tcode
+              address_type       = xnast-sndbc
+              address_number     = xnast-adrnr
+              person_number      = l_persnumber
+            IMPORTING
+              comm_type          = l_comm_type
+            EXCEPTIONS
+              address_not_exist  = 1
+              person_not_exist   = 2
+              no_comm_type_found = 3
+              internal_error     = 4
+              parameter_error    = 5
+              OTHERS             = 6.
+
+          CASE sy-subrc.
+            WHEN 1 OR 2 OR 4 OR 5 OR 6.
+              us_subrc = 14.
+              PERFORM koprt_address_not_exist USING xnast-kschl
+                    xnast-adrnr
+                    l_persnumber
+                    xnast-sndbc.
+            WHEN 3.
+              us_subrc = 15.
+              PERFORM koprt_no_comm_type USING xnast-kschl
+                    xnast-tcode
+                    xnast-adrnr
+                    l_persnumber
+                    xnast-sndbc.
+
+          ENDCASE.
+* in case of printed output: check printer data
+          IF l_comm_type EQ 'LET' AND xnast-ldest EQ space.
+            PERFORM koprt_comm_no_printer USING xnast-kschl
+                  xnast-adrnr
+                  l_persnumber
+                  xnast-sndbc.
+          ENDIF.
+        ELSE.
+* no address specified: if strategy contains 'LET': check printer
+
+          CALL FUNCTION 'COMM_STRATEGY_READ'
+            EXPORTING
+              pi_strategy = xnast-tcode
+            TABLES
+              t_strategy  = lt_comm_types
+            EXCEPTIONS
+              not_found   = 1
+              OTHERS      = 2.
+          IF sy-subrc <> 0.
+            PERFORM koprt_no_comm_type USING xnast-kschl
+                  xnast-tcode
+                  xnast-adrnr
+                  l_persnumber
+                  xnast-sndbc.
+          ELSE.
+* strategy exists, check for printed output
+            LOOP AT lt_comm_types WHERE comm_type EQ 'LET'.
+              IF xnast-ldest IS INITIAL.
+                us_subrc = 2.
+                CLEAR koprt.
+                koprt-stunr = 951.
+                koprt-kschl = xnast-kschl.
+                koprt-typ = typ_messa.
+                koprt-msgnr = '579'.
+                koprt-msgv1 = komt1-kschl.
+                PERFORM protocol_update USING koprt.
+              ELSE.
+* valid printer?
+                PERFORM check_ldest USING xnast-ldest
+                      us_subrc.
+                IF us_subrc NE 0.
+                  PERFORM koprt_no_valid_printer USING xnast-kschl
+                        xnast-ldest.
+                ENDIF.
+
+              ENDIF.
+              EXIT.
+
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+
+
+
+      ENDIF.
+
+* Ereignis
+    WHEN c_event.
+* events can only be triggered if they exist for the current
+* application's object type
+* G_OBJTYPE is set in function module MESSAGING
+      IF g_objtype EQ space.
+        us_subrc = 9.
+        PERFORM koprt_no_objtype_for_event USING xnast-kschl
+              xnast-event.
+      ELSE.
+        PERFORM check_event USING xnast-kschl
+              g_objtype
+              xnast-event
+              l_rc.
+        IF l_rc NE 0.
+          us_subrc = 10.
+        ENDIF.
+      ENDIF.
+    WHEN c_task.
+* check if task is defined for this object type
+* use XNAST-EVENT and G_OBJTYPE
+      IF g_objtype EQ space.
+        us_subrc = 11.
+        PERFORM koprt_no_objtype_for_task USING xnast-kschl
+              xnast-event.
+      ELSE.
+        PERFORM check_task  USING xnast-kschl
+              g_objtype
+              xnast-event
+              l_rc.
+        IF l_rc NE 0.
+          us_subrc = 12.
+        ENDIF.
+      ENDIF.
+
+  ENDCASE.
+
+
+  CASE xnast-vsztp.
+    WHEN space.
+      us_subrc = 6.
+      CLEAR koprt.
+      koprt-stunr = 956.
+      koprt-kschl = xnast-kschl.
+      koprt-typ = typ_messa.
+      koprt-msgnr = '519'.
+      PERFORM protocol_update USING koprt.
+    WHEN '2'.
+      IF xnast-vsura IS INITIAL.
+        us_subrc = 7.
+        CLEAR koprt.
+        koprt-stunr = 957.
+        koprt-kschl = xnast-kschl.
+        koprt-typ = typ_messa.
+        koprt-msgnr = '520'.
+        PERFORM protocol_update USING koprt.
+      ENDIF.
+  ENDCASE.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_EVENT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->PI_KSCHL      Nachrichtenart                                 *
+*      -->PI_OBJTYPE    Objekttyp                                      *
+*      -->PI_EVENT      Ereignis                                       *
+*      <--PE_RC         Ergebnis                                       *
+*----------------------------------------------------------------------*
+FORM check_event USING    pi_kschl    LIKE nast-kschl
+                          pi_objtype  LIKE nast-objtype
+                          pi_event    LIKE nast-event
+                          pe_rc       LIKE sy-subrc.
+
+  DATA: pt_swotre LIKE swotre OCCURS 5 WITH HEADER LINE.
+
+  CLEAR pe_rc.
+
+* get all events for the current object type
+  CALL FUNCTION 'SWO_QUERY_EVENTS'
+    EXPORTING
+      objtype = pi_objtype
+    TABLES
+      info    = pt_swotre.
+
+* search PI_EVENT in event table
+  LOOP AT pt_swotre WHERE event EQ pi_event.
+    EXIT.
+  ENDLOOP.
+
+* not there?  output will be discarded
+  IF sy-subrc NE 0.
+    pe_rc = sy-subrc.
+    PERFORM koprt_invalid_event USING pi_kschl
+                                      pi_objtype
+                                      pi_event.
+  ENDIF.
+
+ENDFORM.                               " CHECK_EVENT
+*---------------------------------------------------------------------*
+*       FORM CHECK_TASK                                               *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  PI_KSCHL                                                      *
+*  -->  PI_OBJTYPE                                                    *
+*  -->  PI_TASK                                                       *
+*  -->  PE_RC                                                         *
+*---------------------------------------------------------------------*
+FORM check_task  USING    pi_kschl    LIKE nast-kschl
+                          pi_objtype  LIKE nast-objtype
+                          pi_task     LIKE nast-event
+                          pe_rc       LIKE sy-subrc.
+
+* task list
+  DATA: lt_swhactor LIKE swhactor OCCURS 5 WITH HEADER LINE,
+        l_objtype   LIKE hrs1201-swotp,
+        l_otype     LIKE swhactor-otype,
+        l_objid     LIKE swhactor-objid.
+  CLEAR pe_rc.
+
+  l_objtype = pi_objtype.
+* get all tasks for the current object type
+  CALL FUNCTION 'RH_TASKS_OF_WF_OBJECT_TYPE_GET'
+    EXPORTING
+      act_objtype     = l_objtype
+    TABLES
+      task_list       = lt_swhactor
+    EXCEPTIONS
+      no_active_plvar = 1
+      OTHERS          = 2.
+
+* search PI_TASK in task list
+  MOVE pi_task(2) TO l_otype.
+  MOVE pi_task+2  TO l_objid.
+  LOOP AT lt_swhactor WHERE otype EQ l_otype
+                      AND   objid EQ l_objid.
+    EXIT.
+  ENDLOOP.
+
+* not there?  output will be discarded
+  IF sy-subrc NE 0.
+    pe_rc = sy-subrc.
+    PERFORM koprt_invalid_task  USING pi_kschl
+                                      pi_objtype
+                                      pi_task.
+  ENDIF.
+ENDFORM.                               " CHECK_EVENT
+
+*&---------------------------------------------------------------------*
+*&      Form  COPY_MESSAGE_OBJECT
+*&---------------------------------------------------------------------*
+*       copy template object to new found object
+*----------------------------------------------------------------------*
+*      -->P_XNAST-TDNAME  text                                         *
+*----------------------------------------------------------------------*
+FORM copy_message_object USING    pc_xnast    LIKE vnast
+                                  pi_no_spras TYPE c
+                                  pi_text_id  LIKE thead-tdid.
+
+  DATA: l_objkey_old LIKE swotobjid-objkey,
+        l_objkey_new LIKE swotobjid-objkey,
+        l_nast       LIKE nast.
+
+  MOVE-CORRESPONDING pc_xnast TO l_nast.
+
+  IF pc_xnast-tdname IS INITIAL.
+* no template object: try to generate object from attributes
+
+    CALL FUNCTION 'NAST_CREATE_MESSAGE_OBJECT'
+      EXPORTING
+        pi_nast       = l_nast
+        pi_text_id    = pi_text_id
+        pi_processing = space
+      IMPORTING
+        pe_objkey     = l_objkey_new
+      EXCEPTIONS
+        OTHERS        = 0.
+    pc_xnast-tdname = l_objkey_new.
+
+  ELSE.
+* copy template object
+    l_objkey_old = pc_xnast-tdname.
+    CALL FUNCTION 'NAST_COPY_TEMPLATE_OBJECT'
+      EXPORTING
+        pi_objkey     = l_objkey_old
+        pi_nast       = l_nast
+        pi_processing = no
+        pi_new_texts  = pi_no_spras
+      IMPORTING
+        pe_objkey     = l_objkey_new
+      EXCEPTIONS
+        OTHERS        = 0.
+    pc_xnast-tdname = l_objkey_new.
+
+    IF sy-subrc NE 0.
+* no object generated?  try to generate from NAST
+      MOVE-CORRESPONDING pc_xnast TO l_nast.
+      CALL FUNCTION 'NAST_CREATE_MESSAGE_OBJECT'
+        EXPORTING
+          pi_nast       = l_nast
+          pi_processing = space
+        IMPORTING
+          pe_objkey     = l_objkey_new
+        EXCEPTIONS
+          OTHERS        = 0.
+      pc_xnast-tdname = l_objkey_new.
+
+    ENDIF.
+
+  ENDIF.
+ENDFORM.                               " COPY_MESSAGE_OBJECT
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_LDEST
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_XNAST_LDEST  text
+*      -->P_XSUBRC  text
+*----------------------------------------------------------------------*
+FORM check_ldest USING    pi_ldest   LIKE nast-ldest
+                          pe_rc      LIKE sy-subrc.
+
+  DATA: l_ldest LIKE tsp03-padest.
+
+* is the current printer available?
+  SELECT SINGLE padest FROM tsp03 INTO l_ldest
+                                 WHERE padest EQ pi_ldest.
+  pe_rc = sy-subrc.
+
+ENDFORM.                               " CHECK_LDEST
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_MAIL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_XNAST_TDNAME  text
+*      --> PE_DUMMY_ONLY
+*              0: valid receivers exist
+*              1: there is only a dummy receiver
+*      -->P_L_RC  text
+*----------------------------------------------------------------------*
+FORM check_receivers USING    pi_tdname     LIKE nast-tdname
+                              pe_dummy_only LIKE sy-subrc
+                              pe_rc         LIKE sy-subrc.
+
+  DATA: lo_message    TYPE swc_object,
+        l_idnumber    LIKE soos-recno,
+        lt_recipients TYPE swc_object OCCURS 5 WITH HEADER LINE.
+
+  CLEAR pe_rc.
+
+  swc_create_object lo_message 'MESSAGE' pi_tdname.
+  swc_get_table_property lo_message 'Recipients' lt_recipients.
+
+  IF lt_recipients[] IS INITIAL.
+    pe_rc = 12.
+    pe_dummy_only = 0.
+  ELSE.
+    LOOP AT lt_recipients.
+      swc_get_property lt_recipients 'IDNumber' l_idnumber.
+      IF l_idnumber EQ c_dollar_id.
+* dummy ID
+        pe_dummy_only = 1.
+      ELSE.
+        pe_dummy_only = 0.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  swc_free_object lo_message.
+
+ENDFORM.                               " CHECK_MAIL
+
+FORM compact_xnast TABLES pt_xnast STRUCTURE vnast.
+
+* output to be deleted
+  DATA:    lt_dnast LIKE vnast OCCURS 20 WITH HEADER LINE.
+
+* get outputs to be deleted
+  LOOP AT pt_xnast WHERE updat EQ 'D'.
+    lt_dnast = pt_xnast.
+    APPEND lt_dnast.
+  ENDLOOP.
+
+* check if new output exists for this deleted output
+  LOOP AT lt_dnast.
+    LOOP AT pt_xnast WHERE
+          kappl      EQ   lt_dnast-kappl   AND
+          objky      EQ   lt_dnast-objky   AND
+          kschl      EQ   lt_dnast-kschl   AND
+          spras      EQ   lt_dnast-spras   AND
+          parnr      EQ   lt_dnast-parnr   AND
+          parvw      EQ   lt_dnast-parvw   AND
+          vstat      EQ   lt_dnast-vstat   AND
+          manue      EQ   lt_dnast-manue   AND
+          updat      NE   lt_dnast-updat.
+* found new output: remove LT_DNAST output
+      DELETE TABLE pt_xnast FROM lt_dnast.
+    ENDLOOP.
+  ENDLOOP.
+
+  DATA: current_key   LIKE nast_key,
+        old_key       LIKE nast_key,
+        l_first(1)    TYPE c VALUE 'X',
+        exists_std(1) TYPE c.
+
+* goal: only one entry per key
+  LOOP AT pt_xnast.
+    current_key = pt_xnast(66).
+* initialization
+    IF l_first EQ 'X'.
+      CLEAR l_first.
+      old_key = current_key.
+    ENDIF.
+    IF current_key NE old_key.
+* new set
+      IF exists_std EQ 'X' AND NOT old_key IS INITIAL.
+* delete entries which are to delete or not active
+        DELETE pt_xnast WHERE
+          kappl      EQ   old_key-kappl   AND
+          objky      EQ   old_key-objky   AND
+          kschl      EQ   old_key-kschl   AND
+          spras      EQ   old_key-spras   AND
+          parnr      EQ   old_key-parnr   AND
+          parvw      EQ   old_key-parvw   AND
+          eruhr      EQ   old_key-eruhr   AND
+          erdat      EQ   old_key-erdat   AND
+          updat      NE   space.
+      ENDIF.
+* clean up
+      CLEAR exists_std.
+      old_key = current_key.
+    ENDIF.
+* same set of NAST records
+    IF pt_xnast-updat EQ space.
+* found entry which is not to delete
+      exists_std = 'X'.
+    ENDIF.
+  ENDLOOP.
+
+* process last set
+  IF NOT current_key IS INITIAL.
+* new set
+    IF exists_std EQ 'X'.
+      DELETE pt_xnast WHERE
+        kappl      EQ   current_key-kappl   AND
+        objky      EQ   current_key-objky   AND
+        kschl      EQ   current_key-kschl   AND
+        spras      EQ   current_key-spras   AND
+        parnr      EQ   current_key-parnr   AND
+        parvw      EQ   current_key-parvw   AND
+        eruhr      EQ   current_key-eruhr   AND
+        erdat      EQ   current_key-erdat   AND
+        updat      NE   space.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    "compact_xnast

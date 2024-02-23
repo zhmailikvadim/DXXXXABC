@@ -1,0 +1,436 @@
+FUNCTION arfc_init
+  IMPORTING
+    VALUE(dest) TYPE any DEFAULT space ##ADT_PARAMETER_UNTYPED
+    VALUE(func) LIKE tfdir-funcname DEFAULT space
+    VALUE(separate) TYPE any DEFAULT space ##ADT_PARAMETER_UNTYPED
+    VALUE(sid) LIKE trfcqout-qname DEFAULT space
+  EXPORTING
+    VALUE(tid) LIKE arfctid
+  EXCEPTIONS
+    qrfc_receiver_list_mismatch
+    qout_qin_mode_mismatch
+    trfc_inactive.
+
+
+
+
+  DATA: qrcvstate LIKE arfcsstate,
+        chk_state LIKE arfcsstate.
+
+  DATA: hash LIKE arfcsstate-hash.
+
+  DATA: dest_help TYPE rfcdest.
+
+*Note 2025507 - Start
+  PERFORM check_and_set_trfc_status.
+  if is_trfc_deactivated = abap_true.
+    RAISE TRFC_INACTIVE.
+  endif.
+*Note 2025507 - End
+
+* Funktionsnummer in der aktuellen LUW
+  ADD 1 TO callcount.
+
+* Prüfung auf Schreiben in die lokale Eingangsqueue
+  PERFORM check_local_qin USING dest.
+
+* Prüfung auf Schreiben in die lokale gesicherte Eingangsqueue
+  PERFORM check_local_saved_qin USING dest.
+
+  dest_help = dest.
+
+* Prüfung ob Destination für klassischen qRFC (nicht tRFC) gültig ist.
+  CALL FUNCTION 'ARFC_CHECK_DEST_NAME_OUTBOUND'
+    EXPORTING
+      dest_name         = dest_help
+    EXCEPTIONS
+      bgrfc_destination = 1
+      OTHERS            = 2.
+
+  IF 1 = sy-subrc AND qoutname <> space.
+    MESSAGE x320(sr) WITH dest.
+  ENDIF.
+
+* Sonderbehandlung der Destination NONE and SPACE
+  arfcsstate-arfcdest = dest.
+  PERFORM get_none_server CHANGING arfcsstate-arfcdest.
+  IF dest = space.
+    sendstate-arfcdest = 'NONE'.
+  ELSE.
+    sendstate-arfcdest = arfcsstate-arfcdest.
+  ENDIF.
+
+* Sonderbehandlung für direktes Schreiben in die lokale Eingangsqueue
+  IF use_iqlist <> space.
+
+* Misch-Mode QOUT/QIN in einer LUW nicht erlaubt
+    LOOP AT itqout
+      WHERE trfcqout-dest = dest.
+      RAISE qout_qin_mode_mismatch.
+    ENDLOOP.
+    PERFORM register_local_qin_entry USING    separate func
+                                     CHANGING tid.
+    sendstate(24) = acttid = tid.
+
+* oder direktes Schreiben in die lokale gesicherte Eingansgqueue
+  ELSEIF use_sqlist <> space.
+
+* Misch-Mode QOUT/QIN in einer LUW nicht erlaubt
+    LOOP AT itqout
+      WHERE trfcqout-dest = dest.
+      RAISE qout_qin_mode_mismatch.
+    ENDLOOP.
+    PERFORM register_local_qins_entry USING    separate func
+                                      CHANGING tid.
+    sendstate(24) = acttid = tid.
+  ELSE.
+
+* Plausibitätsprüfung wegen Queue-Receiver
+    IF use_rqlist = space.
+      IF separate = space.
+        READ TABLE itqout
+          WITH KEY trfcqout-dest = dest
+                   separate      = space
+                   urqlist       = 'X'.
+        IF sy-subrc = 0.
+          RAISE qrfc_receiver_list_mismatch.
+        ENDIF.
+      ENDIF.
+    ELSE.
+      IF qrcv_sep = space.
+        LOOP AT rqlist.
+          READ TABLE itqout
+            WITH KEY trfcqout-dest = rqlist-dest
+                     separate      = space
+                     urqlist       = space.
+          IF sy-subrc = 0.
+            RAISE qrfc_receiver_list_mismatch.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+* LUW ohne qRFC: unterschiedliche TRFC-Destinationen erhalten
+* unterschiedliche TIDs
+    IF use_rqlist = space.
+      IF qoutflag = space AND qinflag = space.
+        IF separate = 'X'.                   "Immer eine neue TID
+          CALL FUNCTION 'ARFC_GET_TID'
+            IMPORTING
+              tid = tid.
+        ENDIF.
+
+* Destination neu? dann auch neue TID verwenden
+        IF separate = space.
+          dest_help = sendstate-arfcdest.
+          READ TABLE sendstate
+            WITH KEY arfcdest = dest_help.
+          IF sy-subrc = 0.            "wenn ja gleiche TID verwenden.
+            tid-arfcipid   = sendstate-arfcipid.
+            tid-arfcpid    = sendstate-arfcpid.
+            tid-arfctime   = sendstate-arfctime.
+            tid-arfctidcnt = sendstate-arfctidcnt.
+          ELSE.            " Destination noch nicht verwendet
+            CALL FUNCTION 'ARFC_GET_TID'    "neue TID ermittlen
+             IMPORTING
+                  tid = tid.
+          ENDIF.
+        ENDIF.
+
+* LUW mit qRFC: Neue TID-Vergabe und Queue-Einträge ermitteln
+      ELSE.
+
+* Misch-Mode QOUT/QIN in einer LUW nicht erlaubt
+        LOOP AT itqin
+          WHERE trfcqin-dest = dest.
+          RAISE qout_qin_mode_mismatch.
+        ENDLOOP.
+        LOOP AT itqins
+          WHERE trfcqins-dest = dest.
+          RAISE qout_qin_mode_mismatch.
+        ENDLOOP.
+        PERFORM register_queue_entry USING    separate func
+                                              qnosend sid
+                                     CHANGING  dest_help tid.
+      ENDIF.
+    ELSE.
+      tid = qrcvtid.
+      sendstate-arfcdest = qd_qrcv.
+    ENDIF.
+    sendstate(24) = acttid = tid.        "Global ACTTID fuellen
+  ENDIF.
+
+* Erzeugen des Hashwertes für NICHT %_QRECEIVER Destination
+* Hash der LUWs des QRECEIVER wird in 'TRFC_INIT_QRCV_LIST' generiert
+  if sendstate-arfcdest <> qd_qrcv.
+    PERFORM generate_hash USING    sendstate-arfcdest tid
+                          CHANGING hash.
+  endif.
+
+  sendstate-arfcluwcnt = callcount.
+  sendstate-arfcstate  = recorded.
+  sendstate-arfcfnam   = func.
+*Note 1740421 - Start
+*  sendstate-arfcuser   = sy-uname.
+  sendstate-arfcuser   = cl_abap_syst=>get_user_name( ).
+*Note 1740421 - End
+  GET TIME.
+  sendstate-arfcuzeit  = sy-uzeit.
+  sendstate-arfcdatum  = sy-datum.
+  sendstate-arfcretrys = '0000'.
+  sendstate-arfcrhost  = sy-host.
+  sendstate-arfctcode  = sy-tcode.
+  sendstate-hash       = hash.
+  CLEAR sendstate-arfcmsg.
+  %_reserv       = space.                                   "#EC *
+  %_reserv-cprog = sy-cprog.                                "#EC *
+*Note 1740421 - Start
+*  %_reserv-mandt = sy-mandt.                                "#EC *
+  %_reserv-mandt = cl_abap_syst=>get_client( ).
+*Note 1740421 - End
+  %_reserv-qdate = sy-datum.                                "#EC *
+  %_reserv-qtime = sy-uzeit.                                "#EC *
+*Note 1740421 - Start
+*  %_reserv-langu = sy-langu.                                "#EC *
+  %_reserv-langu = cl_abap_syst=>get_language( ).
+*Note 1740421 - End
+
+* Kennung für qRFC
+  %_reserv-qrfcflag = sendstate-arfcreturn = space.         "#EC *
+  IF qoutflag = qf_qout.                                    "#EC *
+    IF qoutname <> space.
+
+* Misch-Mode QOUT/QIN in einer LUW nicht erlaubt
+      %_reserv-qname  = qoutname.                           "#EC *
+      sendstate-arfcreserv = %_reserv.
+      LOOP AT sendstate
+        INTO chk_state
+        WHERE arfcipid   = tid-arfcipid
+          AND arfcpid    = tid-arfcpid
+          AND arfctime   = tid-arfctime
+          AND arfctidcnt = tid-arfctidcnt.
+        %_reserv = chk_state-arfcreserv.
+        IF %_reserv-qrfcflag = qf_qin AND qinname = space.
+          RAISE qout_qin_mode_mismatch.
+        ENDIF.
+      ENDLOOP.
+      %_reserv = sendstate-arfcreserv.
+      %_reserv-qrfcflag = sendstate-arfcreturn = qoutflag.
+      IF use_nqlist <> space.
+        %_reserv-useqlist = 'X'.                            "#EC *
+      ENDIF.
+
+    ENDIF.
+
+* Bei Queue-Receiver: Anzahl Referenzen eintragen
+    IF use_rqlist <> space.
+      DESCRIBE TABLE rqlist LINES %_reserv-qcount.          "#EC *
+
+* Verfahren "Referenz-Counter" für Receiver List
+      IF reftid_for_receiver_list = space.
+        %_reserv-qrfcflag = sendstate-arfcreturn = qf_qrcv.
+
+* Verfahren "Referenz-TID" für Receiver List
+      ELSE.
+        %_reserv-qrfcflag = sendstate-arfcreturn = qf_reftid.
+      ENDIF.
+
+    ENDIF.
+  ENDIF.
+  IF qinflag = qf_qin.
+    IF qinname <> space.
+
+* Misch-Mode QOUT/QIN in einer LUW nicht erlaubt
+      %_reserv-qname  = qinname.
+      %_reserv-qcount = qincount.
+      sendstate-arfcreserv = %_reserv.
+      LOOP AT sendstate
+        INTO chk_state
+        WHERE arfcipid   = tid-arfcipid
+          AND arfcpid    = tid-arfcpid
+          AND arfctime   = tid-arfctime
+          AND arfctidcnt = tid-arfctidcnt.
+        %_reserv = chk_state-arfcreserv.
+        IF %_reserv-qrfcflag = qf_qout.
+          RAISE qout_qin_mode_mismatch.
+        ENDIF.
+      ENDLOOP.
+      %_reserv = sendstate-arfcreserv.
+      %_reserv-qrfcflag = sendstate-arfcreturn = qinflag.
+      IF use_nqlist <> space.
+        %_reserv-useqlist = 'X'.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+* ASGROUP für Restart (über RZ12/SM59 definierbar)
+  IF pf_asgroup = space.
+    pf_asgroup = 'X'.
+    CALL 'C_SAPGPARAM' ID 'NAME'  FIELD 'abap/qrfc_asgroup_for_sysload'"#EC CI_CCALL
+                       ID 'VALUE' FIELD asgroup.
+
+* Eigener, interner Hostname
+    CALL FUNCTION 'TRFC_GET_NONE_DESTINATION'
+      IMPORTING
+        none_dest = nonedest.
+    orghost = nonedest.
+  ENDIF.
+  %_reserv-asgroup = asgroup.                               "#EC *
+  %_reserv-orghost = orghost.                               "#EC *
+
+* Kennung für NO_EXECUTE (QIN-Scheduler)
+  %_reserv-qnoexec = qnoexec.                               "#EC *
+
+* Kennung für NOSEND (Distributed GET-QUEUE)
+  %_reserv-qnosend = qnosend.                               "#EC *
+
+  sendstate-arfcreserv = %_reserv.
+  APPEND sendstate.
+
+* Sonderbehandlung für Queue-Receiver-List
+  IF use_rqlist <> space.
+    qrcvstate = sendstate.
+    CALL FUNCTION 'TRFC_INIT_QRCV_LIST'
+      EXPORTING
+        state = sendstate
+        sid   = sid.
+    sendstate = qrcvstate.
+  ENDIF.
+
+* Notwendige Initialisierung für den nächsten tRFC-Aufruf
+  REFRESH: nqlist, iqlist, sqlist.
+  CLEAR:   qrcvmid, qnosend, qrcv_sep, qoutname, qinname, trfc_change,
+           use_rqlist, use_nqlist, use_iqlist, use_sqlist.
+  blockcount = '00000000'.             "Folgedaten falls > LEN(ARFCDATA)
+ENDFUNCTION.                           "Wird vom ARFC-Treiber verwendet.
+
+
+*---------------------------------------------------------------------*
+*       FORM check_local_qin
+*---------------------------------------------------------------------*
+FORM check_local_qin USING dest TYPE any.
+
+  DATA: qnamlist LIKE qrfcrcv OCCURS 0 WITH HEADER LINE.
+
+  IF qinflag    = qf_qin AND
+     qinname   <> space  AND
+     use_iqlist = space  AND
+     ( dest = space  OR  dest = 'NONE' ).
+    qnamlist-qname = qinname.
+    APPEND qnamlist.
+
+*   Überprüfung ob Inbound-Queue_Namen für bgRFC reserviert ist.
+    PERFORM check_qin_name_bgrfc USING qnamlist-qname.
+
+    CALL FUNCTION 'TRFC_SET_LOCAL_QIN'
+      EXPORTING
+        qin_count = qincount
+      TABLES
+        qnamlist  = qnamlist
+      EXCEPTIONS
+        OTHERS    = 0.
+  ENDIF.
+
+ENDFORM.                    "check_local_qin
+
+
+*---------------------------------------------------------------------*
+*       FORM check_local_saved_qin
+*---------------------------------------------------------------------*
+FORM check_local_saved_qin USING dest TYPE any.
+
+  DATA: qnamlist LIKE qrfcrcv OCCURS 0 WITH HEADER LINE.
+
+  IF qinflag    = qf_qin AND
+     qinname   <> space  AND
+     use_sqlist = space  AND
+     ( dest = space  OR  dest = 'NONE' ).
+    qnamlist-qname = qinname.
+    APPEND qnamlist.
+    CALL FUNCTION 'TRFC_SET_LOCAL_SAVED_QIN'
+      EXPORTING
+        qin_count = qincount
+      TABLES
+        qnamlist  = qnamlist
+      EXCEPTIONS
+        OTHERS    = 0.
+  ENDIF.
+
+ENDFORM.                    "check_local_saved_qin
+
+
+*---------------------------------------------------------------------*
+*       FORM generate_hash
+*---------------------------------------------------------------------*
+FORM generate_hash USING    dest LIKE arfcsstate-arfcdest
+                            tid  LIKE acttid
+                   CHANGING hash LIKE arfcsstate-hash.
+
+  CALL 'RFCControl' ID 'CODE'        FIELD 'P'            "#EC CI_CCALL
+                    ID 'DESTINATION' FIELD dest
+                    ID 'TID'         FIELD tid
+                    ID 'DIG'         FIELD hash.
+
+ENDFORM.                    "generate_hash
+
+
+*---------------------------------------------------------------------*
+*       FORM check_qin_name_bgrfc
+*---------------------------------------------------------------------*
+FORM check_qin_name_bgrfc USING qin_name TYPE trfcqnam.
+
+  DATA: l_dest_name   TYPE bgrfc_dest_name_inbound,
+        lt_queue_name TYPE qrfc_queue_name_tab,
+        l_queue_name  TYPE qrfc_queue_name.
+
+  field-symbols:
+        <wa_nqlist>   like nqlist.
+
+* Überprüfe ob qname list aktiv ist
+  IF nqlist[] IS INITIAL.
+*   Nur lokale Inbound queues verwendet
+    l_queue_name = qin_name.
+    INSERT l_queue_name INTO TABLE lt_queue_name.
+  ELSE.
+*   Mehre Queuenamen wurden verwendet aufruf mit 'TRFC_SET_QIN_NAME_LIST'
+    LOOP AT nqlist assigning <wa_nqlist>.
+      l_queue_name = <wa_nqlist>-qname.
+      INSERT l_queue_name INTO TABLE lt_queue_name.
+    ENDLOOP.
+  ENDIF.
+
+* Prüfe ob Inbound-Queue-Name registriert ist für bgRFC
+* ---------------------------------------------------------
+  cl_qrfc_shm_root_queue_to_dest=>queue_names_to_dest_inbound(
+    EXPORTING
+      queue_names           = lt_queue_name
+    IMPORTING
+      dest_name             = l_dest_name ).
+
+  IF l_dest_name is not initial.
+*   Queuenamen ist für bgRFC registriert und darf für den klassischen
+*   qrfc nicht verwendet werden
+    MESSAGE x321(sr) WITH l_queue_name.
+  ENDIF.
+
+ENDFORM.                    "check_qin_name_bgrfc
+*Note 2025507 - Start
+FORM check_and_set_trfc_status.
+
+DATA lv_runlevel TYPE i value CL_RLFW_RUNLEVEL=>C_RUNLEVEL_RUNNING.
+
+is_trfc_deactivated = abap_false.
+
+TRY.
+*this check is per application server
+  lv_runlevel = CL_RLFW_RUNLEVEL=>GET_RUNLEVEL( CL_RLFW_SERVICE=>C_SERVICE_QRFC ).
+  IF lv_runlevel = CL_RLFW_RUNLEVEL=>C_RUNLEVEL_STOPPED. "for current app server
+    is_trfc_deactivated = abap_true.
+  ENDIF.
+*CATCH CX_RLFW_COMMUNICATION_ERROR.
+CATCH  CX_ROOT.
+*an incorrect configuration at CL_RLFW_RUNLEVEL (or) any other related error should not affect tRFC, qRFC creation in the system
+ENDTRY.
+
+ENDFORM.
+*Note 2025507 - End

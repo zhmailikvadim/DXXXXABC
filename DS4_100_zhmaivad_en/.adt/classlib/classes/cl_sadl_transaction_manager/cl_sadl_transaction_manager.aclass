@@ -1,0 +1,624 @@
+CLASS cl_sadl_transaction_manager DEFINITION PUBLIC CREATE PRIVATE
+                                  GLOBAL FRIENDS cl_sadl_aunit_friend  " to inject manager
+                                                 th_sadl_transact_manager_spy.
+  PUBLIC SECTION.
+    INTERFACES if_sadl_transaction_manager.
+    INTERFACES if_sadl_changeset.
+    CLASS-METHODS get_transaction_manager RETURNING VALUE(ro_transaction_manager) TYPE REF TO cl_sadl_transaction_manager.
+    METHODS register_transaction_framework IMPORTING io_transaction_manager TYPE REF TO cl_sadl_frwk_transact_manager
+                                                     iv_entity_type         TYPE        sadl_entity_type
+                                                     io_mdp                 TYPE REF TO if_sadl_metadata_provider
+                                           RAISING   cx_sadl_static.
+
+  PROTECTED SECTION.
+
+    METHODS _modify_via_batch_iface
+      IMPORTING it_create TYPE if_sadl_batch=>tt_create
+                it_update TYPE if_sadl_batch=>tt_update
+                it_delete TYPE if_sadl_batch=>tt_delete
+                it_action TYPE if_sadl_batch=>tt_action
+      EXPORTING ev_failed TYPE abap_bool
+      RAISING   cx_sadl_static
+                cx_sadl_contract_violation.
+
+
+    METHODS _modify
+      IMPORTING it_create                    TYPE if_sadl_changeset=>tt_create
+                it_update                    TYPE if_sadl_changeset=>tt_update
+                it_delete                    TYPE if_sadl_changeset=>tt_delete
+                it_action                    TYPE if_sadl_changeset=>tt_action
+                iv_is_sticky_session         TYPE abap_bool
+                iv_strict_handling_requested TYPE abap_bool
+      EXPORTING ev_failed                    TYPE abap_bool
+                ev_failure_reason            TYPE if_sadl_changeset=>ty_failure_reason
+      RAISING   cx_sadl_static
+                cx_sadl_contract_violation.
+
+  PRIVATE SECTION.
+    CONSTANTS co_is_active_entity LIKE if_draft_constants=>co_db_fieldname-is_active_entity VALUE if_draft_constants=>co_db_fieldname-is_active_entity.
+    CONSTANTS co_rai_for_failed_sticky TYPE rap_message_read_access_id VALUE 1.
+    CLASS-DATA go_transaction_manager TYPE REF TO cl_sadl_transaction_manager.
+
+    TYPES: BEGIN OF ty_transaction,
+             entity_type TYPE        sadl_entity_type,
+             manager     TYPE REF TO if_sadl_transaction_manager,
+           END OF ty_transaction.
+*    TYPES tt_transactions TYPE SORTED TABLE OF ty_transaction WITH UNIQUE KEY entity_type.
+    TYPES: BEGIN OF ty_keys,
+             key_data    TYPE REF TO data, " table with primary keys of the modified instances
+             entity_id   TYPE sadl_entity_id,
+             entity_type TYPE sadl_entity_type,
+             entity      TYPE REF TO if_sadl_entity_runtime_access,
+           END OF ty_keys.
+    TYPES tt_keys TYPE SORTED TABLE OF ty_keys WITH UNIQUE KEY entity_id.
+
+    DATA ms_transaction_framework TYPE ty_transaction.
+    DATA mo_mdp                   TYPE REF TO if_sadl_metadata_provider.
+    DATA mo_sadl_message_handler  TYPE REF TO cl_sadl_frwk_message_handler.
+
+    METHODS constructor.
+
+    METHODS _pick_messages_from_framework RETURNING VALUE(rt_messages) TYPE if_sadl_message_handler=>tt_messages.
+    METHODS _read_state_messages_from_sms IMPORTING it_keys            TYPE tt_keys   OPTIONAL  " for state messages
+                                                    iv_read_from_db    TYPE abap_bool OPTIONAL  " for state messages
+                                                    iv_read_access_id  TYPE rap_message_read_access_id OPTIONAL
+                                          RETURNING VALUE(rt_messages) TYPE if_sadl_message_handler=>tt_messages.
+
+    METHODS _map_and_add_messages IMPORTING it_messages TYPE if_sadl_message_handler=>tt_messages.
+
+    TYPES: BEGIN OF ty_modify,
+             entity_id            TYPE sadl_entity_id,
+             alternative_key_name TYPE if_sadl_entity=>ty_key_name,
+             rs_entity_data       TYPE REF TO data,
+           END OF ty_modify.
+    TYPES tt_modify TYPE STANDARD TABLE OF ty_modify WITH DEFAULT KEY.
+
+    METHODS _is_rap_changeset_enabled RETURNING VALUE(rv_enabled) TYPE abap_bool.
+
+    METHODS _get_modify_keys IMPORTING iv_entity_type        TYPE sadl_entity_type
+                                       it_create             TYPE if_sadl_changeset=>tt_create OPTIONAL
+                                       it_update             TYPE if_sadl_changeset=>tt_update
+                                       it_delete             TYPE if_sadl_changeset=>tt_delete
+                                       it_action             TYPE if_sadl_changeset=>tt_action
+                                       iv_for_strict_failure TYPE abap_bool
+                             EXPORTING et_keys4state_msgs    TYPE tt_keys.
+
+    METHODS _get_action_keys4strict_failr IMPORTING is_action        TYPE if_sadl_changeset=>ty_action
+                                          RETURNING VALUE(rt_modify) TYPE tt_modify.
+    METHODS _get_keys4state_msgs_from_itab IMPORTING it_modify      TYPE tt_modify
+                                                     iv_entity_type TYPE sadl_entity_type
+                                           EXPORTING et_keys        TYPE tt_keys.
+    METHODS _handle_state_messages IMPORTING iv_is_sticky_session TYPE abap_bool
+                                             it_action            TYPE if_sadl_changeset=>tt_action
+                                             it_delete            TYPE if_sadl_changeset=>tt_delete
+                                             it_update            TYPE if_sadl_changeset=>tt_update
+                                             it_create            TYPE if_sadl_changeset=>tt_create
+                                             iv_is_sticky_save    TYPE abap_bool
+                                             iv_failed            TYPE abap_bool
+                                             iv_failure_reason    TYPE if_sadl_changeset=>ty_failure_reason.
+    METHODS _call_sms_buffer_before_modify IMPORTING it_action TYPE if_sadl_changeset=>tt_action
+                                                     it_delete TYPE if_sadl_changeset=>tt_delete
+                                                     it_update TYPE if_sadl_changeset=>tt_update.
+    METHODS _get_entity_load IMPORTING iv_cds_entity_id               TYPE sadl_entity_id
+                             RETURNING VALUE(rr_exposure_entity_load) TYPE REF TO if_sadl_load=>ty_entity_load.
+    METHODS _create_tracer IMPORTING iv_wrapper_level TYPE i
+                           RETURNING VALUE(ro_tracer) TYPE REF TO if_sadl_trace.
+
+ENDCLASS.
+
+
+
+CLASS CL_SADL_TRANSACTION_MANAGER IMPLEMENTATION.
+
+
+  METHOD constructor.
+    if_sadl_transaction_manager~get_message_handler( ).
+  ENDMETHOD.
+
+
+  METHOD get_transaction_manager.
+    IF go_transaction_manager IS NOT BOUND.
+      CREATE OBJECT go_transaction_manager.
+    ENDIF.
+    ro_transaction_manager = go_transaction_manager.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_changeset~modify.
+    CLEAR: ev_failed, ev_failure_reason.
+
+    cl_sadl_assert=>bound( ms_transaction_framework-manager ).
+    ms_transaction_framework-manager->get_message_handler( ). " Initialize message handler for compatibility
+
+    " Dispatch MODIFY to all (= one) registered framework TX managers.
+    " BEWARE: The SADL mapping of the operation data is done in CL_SADL_CHANGESET.
+    "         So, the method input and output data are BO layer data.
+    " However, messages are mapped (BO to SADL) by this class.
+
+    IF _is_rap_changeset_enabled( ).  " CDS (also AI)
+      _modify( EXPORTING it_create                    = it_create
+                         it_update                    = it_update
+                         it_delete                    = it_delete
+                         it_action                    = it_action
+                         iv_is_sticky_session         = iv_is_sticky_session
+                         iv_strict_handling_requested = iv_strict_handling_requested
+               IMPORTING ev_failed                    = ev_failed
+                         ev_failure_reason            = ev_failure_reason ).
+    ELSE. " BOPF, EPM, DDIC, SRS
+      " Note that preconditions are silently stripped away here because we expect none.
+      "  The entity types mentioned above are only possible with OData v2 SEGW projects / manual services.
+      "  Thus the Gateway fallback for conditional requests should have dealt with them already.
+      _modify_via_batch_iface( EXPORTING it_create = CORRESPONDING #( DEEP it_create )
+                                         it_update = CORRESPONDING #( DEEP it_update )
+                                         it_delete = CORRESPONDING #( DEEP it_delete )
+                                         it_action = CORRESPONDING #( DEEP it_action )
+                               IMPORTING ev_failed = ev_failed ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~discard_changes.
+    CHECK ms_transaction_framework-manager IS BOUND.
+    ms_transaction_framework-manager->get_message_handler( ). " Initialize message handler for compatibility
+
+    " -------
+    ms_transaction_framework-manager->discard_changes( ).
+    " -------
+
+    DATA(lt_messages) = _pick_messages_from_framework( ).
+
+    DATA(lo_tracer) = _create_tracer( iv_wrapper_level = 0 ).
+    lo_tracer->add_event( `Transaction Manager` )->classified_as_consumer_info( )->with_message( `DISCARD_CHANGES` )->as_single_record( )  ##NO_TEXT.
+
+    _map_and_add_messages( lt_messages ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~get_message_handler.
+    IF mo_sadl_message_handler IS NOT BOUND.
+      mo_sadl_message_handler = NEW cl_sadl_transact_message_hndlr( ).
+    ENDIF.
+    ro_message_handler = mo_sadl_message_handler.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~has_changes.
+    rv_has_changes = boolc( ms_transaction_framework-manager IS BOUND
+                        AND ms_transaction_framework-manager->has_changes( ) = abap_true ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~save.
+    CHECK ms_transaction_framework-manager IS BOUND.
+    ms_transaction_framework-manager->get_message_handler( ). " Initialize message handler for compatibility
+
+    DATA(lo_tracer) = _create_tracer( iv_wrapper_level = 0 ).
+    DATA(task) = lo_tracer->add_event( `Save` )->classified_as_consumer_info( )->with_automatic_message( )->as_task_begin( ) ##NO_TEXT.
+
+    " -----------
+    rv_failed = ms_transaction_framework-manager->save( ).
+    " -----------
+
+    DATA(lt_messages) = _pick_messages_from_framework( ).
+
+
+    task->with_message( SWITCH #( rv_failed WHEN abap_true THEN `FAILED!` ELSE `Succeeded` ) )->trace_end_of_task( ) ##NO_TEXT.
+
+    _map_and_add_messages( lt_messages ).
+  ENDMETHOD.
+
+
+  METHOD register_transaction_framework.
+    IF io_transaction_manager IS NOT BOUND.
+      RAISE EXCEPTION NEW cx_sadl_register_transaction( textid = cx_sadl_register_transaction=>cx_unbound_manager ).
+    ENDIF.
+    IF ms_transaction_framework-entity_type = iv_entity_type.
+      IF ms_transaction_framework-manager <> io_transaction_manager.
+        RAISE EXCEPTION NEW cx_sadl_register_transaction( textid = cx_sadl_register_transaction=>cx_another_manager_registered ).
+      ENDIF.
+    ELSE.
+      IF ms_transaction_framework IS NOT INITIAL.
+        " currently only one transaction manager is allowed, because a subordinate mode does not exist
+        RAISE EXCEPTION NEW cx_sadl_register_transaction( textid = cx_sadl_register_transaction=>cx_another_manager_registered ).
+      ENDIF.
+      ms_transaction_framework =  VALUE #( entity_type = iv_entity_type
+                                           manager     = io_transaction_manager ).
+    ENDIF.
+    mo_mdp = io_mdp.
+  ENDMETHOD.
+
+
+  METHOD _call_sms_buffer_before_modify.
+    " If a request fails, we should return only those state messages which were caused by that request.
+    " in a sticky session, the SMS session buffer contains messages from the whole session, not only the last request. We use the SMS's Read Access ID (RAI)
+    " to identify the messages from the current request. Therefore we read the SMS buffer BEFORE and after the Modify with the SAME (non-initial) RAI. This makes SMS
+    " return each buffered message only once.
+
+    _get_modify_keys( EXPORTING iv_entity_type        = ms_transaction_framework-entity_type
+                                it_create             = VALUE #( ) " before they are created, new instances can't have messages. Regarding CbA sources: We don't read their messages anyway
+                                it_update             = it_update
+                                it_delete             = it_delete
+                                it_action             = it_action
+                                iv_for_strict_failure = abap_false
+                      IMPORTING et_keys4state_msgs    = DATA(lt_keys) ).
+
+    " we aren't really interested in the messages (those were returned to consumer in previous round-trips), but want to prevent SMS from returning them the
+    " next time, if the request happens to fail
+    _read_state_messages_from_sms( it_keys           = lt_keys
+                                   iv_read_from_db   = abap_false
+                                   iv_read_access_id = co_rai_for_failed_sticky ).
+  ENDMETHOD.
+
+
+  METHOD _create_tracer.
+    IF ms_transaction_framework-entity_type = cl_sadl_entity_factory=>co_type-cds.
+      DATA(lv_object_name) = `RAP Transaction Manager`  ##NO_TEXT.
+    ELSE.
+      lv_object_name = |{ ms_transaction_framework-entity_type } Transaction Manager|  ##NO_TEXT.
+    ENDIF.
+    ro_tracer  = cl_sadl_trace_factory=>build_inline_called_tracer( )->for_runtime( )->with_custom_navigation_offset( iv_wrapper_level )->create_for_object( lv_object_name ).
+  ENDMETHOD.
+
+
+  METHOD _get_action_keys4strict_failr. " get action keys for strict failure
+    FIELD-SYMBOLS <t_key_values> TYPE ANY TABLE.
+    FIELD-SYMBOLS <t_action_result> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <t_action_result_instances> TYPE ANY TABLE.
+
+    ASSIGN is_action-rt_key_values->* TO <t_key_values>.
+    cl_sadl_assert=>sy_subrc( 0 ).
+    DATA(lr_entity_load) = _get_entity_load( is_action-entity_id ).
+    LOOP AT <t_key_values> ASSIGNING FIELD-SYMBOL(<s_key_values>).
+      DATA(lv_content_id_ref) = VALUE #( is_action-content_id_refs[ sy-tabix ] OPTIONAL ).
+      CHECK lv_content_id_ref IS INITIAL.
+      IF lr_entity_load->sadl_entity-is_draft_enabled = abap_true.
+        ASSIGN COMPONENT co_is_active_entity OF STRUCTURE <s_key_values> TO FIELD-SYMBOL(<is_active>).
+        CHECK sy-subrc = 0 AND <is_active> = abap_true.
+      ENDIF.
+      APPEND VALUE #( entity_id = is_action-entity_id  alternative_key_name = is_action-alternative_key_name  rs_entity_data = REF #( <s_key_values> ) ) TO rt_modify.
+    ENDLOOP.
+
+    IF is_action-r_returning_parameters IS BOUND.
+      ASSIGN lr_entity_load->sadl_entity-actions[ name = is_action-name ] TO FIELD-SYMBOL(<s_action_md>).
+      ASSERT sy-subrc = 0.
+      IF <s_action_md>-return_entity_type = cl_sadl_entity_factory=>co_type-sadl AND NOT <s_action_md>-return_entity_id IS INITIAL.
+        DATA(lv_result_entity) = cl_sadl_entity_util=>get_entity_name( EXACT #( <s_action_md>-return_entity_id ) ).
+        DATA(lr_result_entity_load) = _get_entity_load( lv_result_entity ).
+        ASSIGN is_action-r_returning_parameters->* TO <t_action_result>.
+        ASSERT sy-subrc = 0.
+        LOOP AT <t_action_result> ASSIGNING FIELD-SYMBOL(<action_result>).
+          IF <s_action_md>-return_cardinality = if_sadl_entity=>co_action_return_cardinality-zero_to_many
+          OR <s_action_md>-return_cardinality = if_sadl_entity=>co_action_return_cardinality-one_to_many
+          OR <s_action_md>-return_cardinality = if_sadl_entity=>co_action_return_cardinality-zero_to_one.
+            ASSIGN <action_result> TO <t_action_result_instances>.
+            LOOP AT <t_action_result_instances> ASSIGNING FIELD-SYMBOL(<s_instance>).
+              IF lr_result_entity_load->sadl_entity-is_draft_enabled = abap_true.
+                ASSIGN COMPONENT co_is_active_entity OF STRUCTURE <s_instance> TO <is_active>.
+                CHECK sy-subrc = 0 AND <is_active> = abap_true.
+              ENDIF.
+              APPEND VALUE #( entity_id = lv_result_entity  rs_entity_data = REF #( <s_instance> ) ) TO rt_modify.
+            ENDLOOP.
+          ELSE.
+            ASSIGN <action_result> TO <s_instance>.
+            IF lr_result_entity_load->sadl_entity-is_draft_enabled = abap_true.
+              ASSIGN COMPONENT co_is_active_entity OF STRUCTURE <s_instance> TO <is_active>.
+              CHECK sy-subrc = 0 AND <is_active> = abap_true.
+            ENDIF.
+            APPEND VALUE #( entity_id = lv_result_entity  rs_entity_data = REF #( <s_instance> ) ) TO rt_modify.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_entity_load.
+    DATA(lo_exposure_mdp) = cl_sadl_mdp_exposure=>get_for_entity( iv_id   = iv_cds_entity_id
+                                                                  iv_type = cl_sadl_entity_factory=>co_type-cds ).
+    rr_exposure_entity_load = lo_exposure_mdp->get_entity_load( EXACT #( iv_cds_entity_id ) ).
+  ENDMETHOD.
+
+
+  METHOD _get_keys4state_msgs_from_itab.
+    DATA lr_sorted_keys TYPE REF TO data.
+    CLEAR et_keys.
+
+    LOOP AT it_modify ASSIGNING FIELD-SYMBOL(<entity_modifications>) WHERE rs_entity_data IS NOT INITIAL
+        GROUP BY <entity_modifications>-entity_id.
+      INSERT VALUE #( entity_id = <entity_modifications>-entity_id  entity_type = iv_entity_type )
+          INTO TABLE et_keys ASSIGNING FIELD-SYMBOL(<s_key>).
+      ASSIGN <entity_modifications>-rs_entity_data->* TO FIELD-SYMBOL(<s_sample_key_record>).
+      DATA(lr_load) = _get_entity_load( <entity_modifications>-entity_id ).
+      CREATE DATA lr_sorted_keys LIKE SORTED TABLE OF <s_sample_key_record> WITH UNIQUE KEY (lr_load->sadl_entity-primary_key).
+      CREATE DATA <s_key>-key_data LIKE TABLE OF <s_sample_key_record>. " Use STD table to keep order of messages (otherwise just the sorted table would be sufficient)
+
+      " we don't need to read primary for alternative key: state messages are only relevant for CDS entities, and those have no alternative keys
+
+      LOOP AT GROUP <entity_modifications> ASSIGNING FIELD-SYMBOL(<s_modification>) WHERE rs_entity_data IS NOT INITIAL.
+        INSERT <s_modification>-rs_entity_data->* INTO TABLE lr_sorted_keys->*.
+        IF sy-subrc = 0.
+          INSERT <s_modification>-rs_entity_data->* INTO TABLE <s_key>-key_data->*.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _get_modify_keys.
+    FIELD-SYMBOLS <t_key_values> TYPE ANY TABLE.
+    DATA lt_modify TYPE tt_modify.
+    DATA ls_modify TYPE ty_modify.
+
+    CLEAR et_keys4state_msgs.
+
+    " for CreateByAssociation together with source creation and for DeepCreate, read messages only for source in order to avoid double messages.
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create>) WHERE source-tabix IS INITIAL AND source-content_id_ref IS INITIAL.
+      CLEAR ls_modify.
+      IF iv_for_strict_failure = abap_true.
+        DATA(lr_entity_load) = _get_entity_load( <s_create>-entity_id ).
+        IF lr_entity_load->sadl_entity-is_draft_enabled = abap_true.
+          ASSIGN <s_create>-rs_entity_data->* TO FIELD-SYMBOL(<s_instance>).
+          ASSERT sy-subrc = 0.
+          ASSIGN COMPONENT co_is_active_entity OF STRUCTURE <s_instance> TO FIELD-SYMBOL(<is_active>).
+          CHECK sy-subrc = 0 AND <is_active> = abap_true.
+        ENDIF.
+      ENDIF.
+      MOVE-CORRESPONDING <s_create> TO ls_modify. " it doesn't fill alternative_key_name, but that's ok. CREATE must always fill the primary key as well
+      APPEND ls_modify TO lt_modify.
+    ENDLOOP.
+
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update>) WHERE content_id_ref IS INITIAL.
+      IF iv_for_strict_failure = abap_true.
+        lr_entity_load = _get_entity_load( <s_update>-entity_id ).
+        IF lr_entity_load->sadl_entity-is_draft_enabled = abap_true.
+          ASSIGN <s_update>-rs_entity_data->* TO <s_instance>.
+          ASSERT sy-subrc = 0.
+          ASSIGN COMPONENT co_is_active_entity OF STRUCTURE <s_instance> TO <is_active>.
+          CHECK sy-subrc = 0 AND <is_active> = abap_true.
+        ENDIF.
+      ENDIF.
+      APPEND CORRESPONDING #( <s_update> ) TO lt_modify.
+    ENDLOOP.
+
+    LOOP AT it_delete ASSIGNING FIELD-SYMBOL(<s_delete>) WHERE content_id_ref IS INITIAL.
+      IF iv_for_strict_failure = abap_true.
+        lr_entity_load = _get_entity_load( <s_delete>-entity_id ).
+        IF lr_entity_load->sadl_entity-is_draft_enabled = abap_true.
+          ASSIGN <s_delete>-rs_key_values->* TO <s_instance>.
+          ASSERT sy-subrc = 0.
+          ASSIGN COMPONENT co_is_active_entity OF STRUCTURE <s_instance> TO <is_active>.
+          CHECK sy-subrc = 0 AND <is_active> = abap_true.
+        ENDIF.
+      ENDIF.
+      APPEND VALUE #( entity_id = <s_delete>-entity_id  alternative_key_name = <s_delete>-alternative_key_name  rs_entity_data = <s_delete>-rs_key_values ) TO lt_modify.
+    ENDLOOP.
+
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      IF iv_for_strict_failure = abap_true.
+        DATA(lt_action_keys) = _get_action_keys4strict_failr( <s_action> ).
+        APPEND LINES OF lt_action_keys TO lt_modify.
+      ELSE.
+        ASSIGN <s_action>-rt_key_values->* TO <t_key_values>.
+        cl_sadl_assert=>sy_subrc( 0 ).
+        LOOP AT <t_key_values> ASSIGNING FIELD-SYMBOL(<s_key_values>).
+          DATA(lv_content_id_ref) = VALUE #( <s_action>-content_id_refs[ sy-tabix ] OPTIONAL ).
+          CHECK lv_content_id_ref IS INITIAL.
+          APPEND VALUE #( entity_id = <s_action>-entity_id  alternative_key_name = <s_action>-alternative_key_name  rs_entity_data = REF #( <s_key_values> ) ) TO lt_modify.
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+
+    _get_keys4state_msgs_from_itab( EXPORTING it_modify      = lt_modify
+                                              iv_entity_type = iv_entity_type
+                                    IMPORTING et_keys        = et_keys4state_msgs ).
+  ENDMETHOD.
+
+
+  METHOD _handle_state_messages.
+    DATA(lo_fwk_msg_handler) = CAST cl_sadl_frwk_message_handler( ms_transaction_framework-manager->get_message_handler( ) ).
+
+    " If FAILED, get state messages from SMS puffer for binding entities
+    " and add them to RAP message handler to emulate this done in RAP layer.
+    IF iv_failed = abap_true.
+
+*----- indicate special key collection for strict failure
+      IF iv_failure_reason = if_sadl_changeset~co_failure_reason-message_in_strict_mode.
+        DATA(lv_for_strict_failure) = abap_true.
+      ENDIF.
+
+*----- collect keys for state message retrieval
+      _get_modify_keys( EXPORTING iv_entity_type        = ms_transaction_framework-entity_type
+                                  it_create             = it_create
+                                  it_update             = it_update
+                                  it_delete             = it_delete
+                                  it_action             = it_action
+                                  iv_for_strict_failure = lv_for_strict_failure
+                        IMPORTING et_keys4state_msgs    = DATA(lt_keys) ).
+
+      "failure in strict mode may be caused by persisted state messages - so they must also be returned! (TGPMBSA-6021)
+      DATA(lv_read_from_db) = xsdbool( iv_failure_reason = if_sadl_changeset~co_failure_reason-message_in_strict_mode ).
+      IF iv_is_sticky_session = abap_true
+      AND iv_failure_reason <> if_sadl_changeset~co_failure_reason-message_in_strict_mode.
+        DATA(lv_rai) = co_rai_for_failed_sticky.
+      ENDIF.
+      DATA(lt_state_messages) = _read_state_messages_from_sms( it_keys           = lt_keys
+                                                               iv_read_from_db   = lv_read_from_db
+                                                               iv_read_access_id = lv_rai ).
+      lo_fwk_msg_handler->add_messages( lt_state_messages ).
+    ENDIF.
+
+    " Clean SMS in non-sticky case and after successful sticky save.
+    IF iv_is_sticky_session = abap_false OR iv_failed = abap_false AND iv_is_sticky_save = abap_true.
+      IF lo_fwk_msg_handler IS INSTANCE OF if_rap_rt_message_handler.  " (it is not in AUTs with a dummy (non-RAP) frwk manager)
+        CAST if_rap_rt_message_handler( lo_fwk_msg_handler )->clean_up( ).
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD _is_rap_changeset_enabled.
+    rv_enabled = boolc( ms_transaction_framework-manager IS INSTANCE OF if_sadl_changeset ).
+  ENDMETHOD.
+
+
+  METHOD _map_and_add_messages.
+    DATA(lt_messages) = it_messages.
+    cl_sadl_runtime_messages=>map_messages( EXPORTING io_mdp      = mo_mdp
+                                            CHANGING  ct_messages = lt_messages ).
+    mo_sadl_message_handler->add_messages( lt_messages ). " keeps order of messages, whereas collect_messages reverses it. E2E that means that it's reversed... (See tc_sadl_v4_bhv_delayed_abort->create_with_abortion)
+  ENDMETHOD.
+
+
+  METHOD _modify.
+    CLEAR: ev_failed, ev_failure_reason.
+
+    IF cl_sadl_trace_factory=>is_any_trace_active( ).
+      DATA(lo_tracer) = _create_tracer( iv_wrapper_level = 1 ).
+      DATA(lo_changeset_tracer) = cl_sadl_changeset_trace=>trace_modify_start( io_tracer                    = lo_tracer
+                                                                               it_create                    = it_create
+                                                                               it_update                    = it_update
+                                                                               it_delete                    = it_delete
+                                                                               it_action                    = it_action
+                                                                               iv_is_sticky_session         = iv_is_sticky_session
+                                                                               iv_strict_handling_requested = iv_strict_handling_requested
+                                                                               iv_operation_context         = cl_sadl_changeset_trace=>co_operation_context-changeset
+                                                                               iv_is_visible_for_consumer   = abap_true ).
+    ENDIF.
+
+    DATA(lv_strict_handling_requested) = iv_strict_handling_requested.
+    IF iv_is_sticky_session = abap_true.
+      DATA(lv_is_sticky_save) = cl_sadl_crud_runtime_util=>sticky_session_save_requested(
+        iv_entity_type = ms_transaction_framework-entity_type
+        it_action      = it_action ).
+      IF lv_is_sticky_save = abap_false.
+
+*----- for the sticky session, strict handling can only be handled for save, cf. https://sapjira.wdf.sap.corp/browse/FIORITECHP1-19694
+        lv_strict_handling_requested = abap_false.
+      ENDIF.
+
+      _call_sms_buffer_before_modify( it_action = it_action
+                                      it_delete = it_delete
+                                      it_update = it_update ).
+    ENDIF.
+
+    " -------
+    CAST if_sadl_changeset( ms_transaction_framework-manager )->modify(  EXPORTING it_create                    = it_create
+                                                                                   it_update                    = it_update
+                                                                                   it_delete                    = it_delete
+                                                                                   it_action                    = it_action
+                                                                                   iv_is_sticky_session         = iv_is_sticky_session
+                                                                                   iv_strict_handling_requested = lv_strict_handling_requested
+                                                                         IMPORTING ev_failed                    = ev_failed
+                                                                                   ev_failure_reason            = ev_failure_reason ).
+
+    " (PN) state message handling actually belongs into deeper layer, because it knows reasons for failed and where to get messages from.
+    "      even if you might need to implement certain logic for RAP and AI twice...
+    _handle_state_messages( iv_is_sticky_session = iv_is_sticky_session
+                            it_action            = it_action
+                            it_delete            = it_delete
+                            it_update            = it_update
+                            it_create            = it_create
+                            iv_failed            = ev_failed
+                            iv_is_sticky_save    = lv_is_sticky_save
+                            iv_failure_reason    = ev_failure_reason ).
+    " -------
+
+    DATA(lt_messages) = _pick_messages_from_framework( ).
+
+    IF lo_changeset_tracer IS BOUND.
+      lo_changeset_tracer->trace_modify_end( iv_failed         = ev_failed
+                                             iv_failure_reason = ev_failure_reason
+                                             it_create         = it_create
+                                             it_update         = it_update
+                                             it_action         = it_action
+                                             it_messages       = lt_messages ).
+    ENDIF.
+
+    " MAPPING --------------
+    _map_and_add_messages( lt_messages ).
+    " Response data are mapped in CL_SADL_CHANGESET!
+
+  ENDMETHOD.
+
+
+  METHOD _modify_via_batch_iface.
+    CLEAR: ev_failed.
+
+    DATA(lt_action) = it_action.
+    IF cl_sadl_action_ret_verkorxer=>is_verkorxing_needed( ms_transaction_framework-manager ).
+      DATA(lo_verkorxer) = NEW cl_sadl_action_ret_verkorxer( ).
+      LOOP AT lt_action ASSIGNING FIELD-SYMBOL(<s_action>).
+        <s_action>-r_returning_parameters = lo_verkorxer->get_and_register_bopf_containr( <s_action>-r_returning_parameters ).
+      ENDLOOP.
+    ENDIF.
+
+    IF cl_sadl_trace_factory=>is_any_trace_active( ).
+      DATA(lo_tracer) = _create_tracer( iv_wrapper_level = 1 ).
+      DATA(lo_task) = cl_sadl_batch_trace=>trace_modify_start( io_tracer = lo_tracer
+                                                               it_create = it_create
+                                                               it_update = it_update
+                                                               it_delete = it_delete
+                                                               it_action = lt_action ).
+    ENDIF.
+
+
+    TRY.
+        " -------
+        CAST if_sadl_batch( ms_transaction_framework-manager )->modify(  EXPORTING it_create = it_create
+                                                                                   it_update = it_update
+                                                                                   it_delete = it_delete
+                                                                                   it_action = lt_action
+                                                                         IMPORTING ev_failed = ev_failed ).
+        " -------
+      CATCH BEFORE UNWIND cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_transaction_error).
+        DATA(lo_exc_handler) = cl_sadl_exception_gatekeeper=>get( if_sadl_exception_handler=>for_transaction_manager ).
+        lo_exc_handler->handle( lx_transaction_error ).
+    ENDTRY.
+    DATA(lt_messages) = _pick_messages_from_framework( ).
+
+    IF lo_task IS BOUND.
+      cl_sadl_batch_trace=>trace_modify_end( io_tracer   = lo_tracer
+                                             io_task     = lo_task
+                                             iv_failed   = ev_failed
+                                             it_create   = it_create
+                                             it_action   = lt_action
+                                             it_messages = lt_messages ).
+    ENDIF.
+
+    " MAPPING --------------
+    IF lo_verkorxer IS BOUND.
+      lo_verkorxer->copy_bopf_data_to_return_data( ).
+    ENDIF.
+
+    _map_and_add_messages( lt_messages ).
+
+    " Response data are mapped in CL_SADL_CHANGESET!
+  ENDMETHOD.
+
+
+  METHOD _pick_messages_from_framework.
+    DATA(lo_fwk_msg_handler) = ms_transaction_framework-manager->get_message_handler( ).
+    lo_fwk_msg_handler->get_messages( IMPORTING et_messages = rt_messages ).
+    lo_fwk_msg_handler->clear( ).
+  ENDMETHOD.
+
+
+  METHOD _read_state_messages_from_sms. " State messages for FAILED change set
+    DATA(lo_fwk_msg_handler) = ms_transaction_framework-manager->get_message_handler( ).
+
+    IF lo_fwk_msg_handler IS INSTANCE OF if_rap_rt_message_handler.
+      LOOP AT it_keys ASSIGNING FIELD-SYMBOL(<s_key>).
+        ASSIGN <s_key>-key_data->* TO FIELD-SYMBOL(<t_key_data>). " table expected
+        DATA(lt_state_messages) = CAST if_rap_rt_message_handler( lo_fwk_msg_handler )->get_state_messages(
+            iv_entity_id        = <s_key>-entity_id
+            iv_entity_type      = <s_key>-entity_type
+            it_keys             = <t_key_data>
+            iv_related_targets  = abap_true      " scope ALL
+            iv_read_from_db     = iv_read_from_db
+            iv_read_access_id   = iv_read_access_id ).  " allow repeat
+        INSERT LINES OF lt_state_messages INTO TABLE rt_messages.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

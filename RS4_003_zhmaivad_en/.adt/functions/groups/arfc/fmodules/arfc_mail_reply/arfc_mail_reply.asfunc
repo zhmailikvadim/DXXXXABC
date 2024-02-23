@@ -1,0 +1,76 @@
+FUNCTION ARFC_MAIL_REPLY
+  IMPORTING
+    VALUE(RETURNCODE) LIKE SY-MSGNO
+    VALUE(TID) LIKE ARFCCALLID.
+
+
+
+  DATA: STARTDATE LIKE TBTCJOB-SDLSTRTDT,
+        STARTTIME LIKE TBTCJOB-SDLSTRTTM.
+  DATA: ERASE_IN_DAYS TYPE I VALUE 8.  "clear log 8 days later
+  DATA: COMM_ERR.                      "marks that CPICERR occured
+  DATA: BEGIN OF TP OCCURS 50.
+          INCLUDE STRUCTURE TEXTPOOL.
+  DATA  END OF TP.
+  DATA  TTID LIKE ARFCTID.
+
+  FIELD-SYMBOLS:  <PTR> type any.
+  FIELDS: TEXT-000, TEXT-012,  TEXT-013, TEXT-014, TEXT-015, TEXT-016.
+  FIELDS: TEXT-021, TEXT-022,  TEXT-023, TEXT-024, TEXT-025, TEXT-026.
+  FIELDS: TEXT-027, TEXT-031,  TEXT-032, TEXT-033, TEXT-034, TEXT-041.
+  FIELDS: TEXT-042, TEXT-043,  TEXT-044, TEXT-051, TEXT-052, TEXT-053.
+  FIELDS: TEXT-054, TEXT-055, TEXT-011, TEXT-017.
+
+  SELECT * FROM ARFCSSTATE WHERE  ARFCIPID = TID-ARFCIPID
+                           AND    ARFCPID  = TID-ARFCPID
+                           AND    ARFCTIME = TID-ARFCTIME
+                           AND    ARFCTIDCNT = TID-ARFCTIDCNT.
+    IF ARFCSSTATE-ARFCSTATE = CPICERR.
+      COMM_ERR = 'X'.                  "no confirm allowed
+    ENDIF.
+    ARFCSSTATE-ARFCSTATE = READ.
+    MODIFY  ARFCSSTATE.
+  ENDSELECT.
+  IF SY-SUBRC <> 0.                    "kein Satz vorhanden-> Fehler
+      COMM_ERR = 'X'.                  "no confirm allowed
+  ENDIF.
+  IF RETURNCODE <> '000'.
+    COMM_ERR = 'X'.                    "no confirm allowed (HAN)
+*  Besorge Errortext aus Textpool und schreibe ihn in ARFCSDATA
+    SELECT SINGLE * FROM  ARFCSDATA
+           WHERE  ARFCIPID    = ARFCSSTATE-ARFCIPID
+           AND    ARFCPID     = ARFCSSTATE-ARFCPID
+           AND    ARFCTIME    = ARFCSSTATE-ARFCTIME
+           AND    ARFCTIDCNT  = ARFCSSTATE-ARFCTIDCNT
+           AND    ARFCDEST    = ARFCSSTATE-ARFCDEST
+           AND    ARFCLUWCNT  = ARFCSSTATE-ARFCLUWCNT
+           AND    ARFCBLCNT   = 1.
+    IF SY-SUBRC = 0.
+      READ TEXTPOOL SY-REPID INTO TP LANGUAGE SY-LANGU.
+      IF SY-SUBRC = 0.
+        LOOP AT TP WHERE ID = 'I' AND KEY = RETURNCODE.
+        ENDLOOP.
+        ASSIGN TP-ENTRY TO <PTR> TYPE 'X'.
+        ARFCSDATA-ARFCDATA01 = <PTR>.
+        MODIFY ARFCSDATA.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+*  Bei CPICERR wird nicht bestätigt; Mail vielleicht trotzdem abgesetzt
+  IF COMM_ERR <> 'X'.
+    CALL FUNCTION 'ARFC_MAIL_CONFIRM' DESTINATION 'BACK'
+         EXPORTING
+              CALLID = TID.
+  ENDIF.
+* Batch einplanen zum Löschen des Protokolleintrags.
+  STARTTIME = SY-UZEIT.
+  STARTDATE = SY-DATUM + ERASE_IN_DAYS.
+  TTID = TID(24).
+  CALL FUNCTION 'ARFC_BP_REQUEST'      "clear log
+       EXPORTING
+            STARTDATE = STARTDATE
+            STARTTIME = STARTTIME
+            REPORT    = 'RSARFCDL'
+            TID       = TTID.
+
+ENDFUNCTION.

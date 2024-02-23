@@ -1,0 +1,534 @@
+class CL_ABAP_BEHV_SAVER_PROJ definition
+  public
+  inheriting from CL_ABAP_BEHAVIOR_SAVER
+  create protected
+
+  global friends CL_ABAP_BEHV_CTRL
+                 CL_ABAP_BEHV_HANDLER_PROJ .
+
+public section.
+
+  data LOG type ref to IF_ABAP_BEHV_LOG .
+
+  class-methods TRANSFER_RESP_TO_PROJ_LOG
+    importing
+      !KIND type IF_ABAP_BEHV_LOG=>T_KIND
+      !PROJ_ROOT type ABP_ROOT_ENTITY_NAME
+      !BASE_ROOT type ABP_ROOT_ENTITY_NAME
+      !PROJ_RESPONSE type ref to DATA
+      !BASE_RESPONSE type ref to DATA
+      !LOG type ref to IF_ABAP_BEHV_LOG .
+  class-methods TRANSFER_RESP_TAB_TO_PROJ
+    importing
+      !OP type ABP_BEHV_OP
+      !BASE_ENTITIES type ABP_BEHV_RESPONSE_TAB
+      !REAL_NAMES type CL_ABAP_BEHV_CTRL=>TT_REAL_NAME
+    changing
+      !PROJ_ENTITIES type ABP_BEHV_RESPONSE_TAB .
+  methods TRANSFER_STRUC_TO_PROJ_APPEND
+    importing
+      !KIND type IF_ABAP_BEHV_LOG=>T_KIND
+      !BASE_STRUC type DATA
+    changing
+      !PROJ_STRUC type DATA .
+protected section.
+
+  class-methods CREATE
+    importing
+      !ROOT type ABP_ROOT_ENTITY_NAME
+      !JOB type ref to CL_ABAP_BEHV_JOB_BASE
+    returning
+      value(SAVER) type ref to CL_ABAP_BEHV_SAVER_PROJ .
+  class-methods CHECK_AND_MARK_CENTRAL_SAVER
+    importing
+      !SAVER type ref to CL_ABAP_BEHAVIOR_SAVER
+    returning
+      value(RUN) type SYCHAR01 .
+  methods TRANS_REPORTED
+    importing
+      !BASE_REPORTED type DATA
+    changing
+      !REPORTED type DATA .
+  methods ADD_REMOVED_REPORTED
+    importing
+      !LOG type ref to IF_ABAP_BEHV_LOG
+      !REPORTED type DATA .
+  methods INITIALIZE .
+
+  methods ADJUST_NUMBERS
+    final redefinition .
+  methods CHECK_BEFORE_SAVE
+    final redefinition .
+  methods CLEANUP
+    final redefinition .
+  methods CLEANUP_FINALIZE
+    redefinition .
+  methods FINALIZE
+    final redefinition .
+  methods SAVE
+    final redefinition .
+private section.
+
+  data m_base_savers type sorted table of cl_abap_behv_ctrl=>t_saver
+       with unique key root pool_name saver_idx.
+  data m_root type abp_root_entity_name .
+  data m_prog type program .
+  data m_augm_genrefs type cl_abap_behv_ctrl=>tt_genref .
+  data r_base_mapped type ref to data .
+  data r_base_failed type ref to data .
+  data r_base_reported type ref to data .
+  data removed_entities type cl_abap_behv_ctrl=>tt_entity_uniq .
+ENDCLASS.
+
+
+
+CLASS CL_ABAP_BEHV_SAVER_PROJ IMPLEMENTATION.
+
+
+method ADD_REMOVED_REPORTED.
+
+field-symbols <rela> type cl_abap_behv_load=>t_relat_ext.
+
+check removed_entities is not initial.
+
+if log is instance of IF_ABAP_BEHV_LOG_WRAPPING.
+
+  data(commit_log) = cl_abap_behv_ctrl=>GET_EML_COMMIT_LOG( m_root ).
+
+  if commit_log is not initial.
+
+    " calls with empty instance table, needed for state message handling
+
+    data(wrapping_log) = cast IF_ABAP_BEHV_LOG_WRAPPING( log ).
+    wrapping_log->wrap_log = commit_log.
+
+    loop at removed_entities assigning field-symbol(<base_removed>).
+
+      GET_RELA_FOR_TRG <base_removed> m_root.
+      check <rela> is assigned.
+      cl_abap_behv_ctrl=>GET_ENTITY_INDEX(
+        exporting entity_name  = <rela>-source_entity
+                  root_name    = m_root
+        importing entity_index = data(entity_idx) ).
+      check entity_idx > 0.
+      assign component entity_idx of structure reported to field-symbol(<instances>).
+      check sy-subrc = 0.
+      check <instances> is initial.  " (actually ASSERT)
+
+      log->ADD( kind         = if_abap_behv_log=>reported_late
+                root_name    = m_root
+                entity_name  = <rela>-source_entity
+                entity_index = entity_idx
+                instances    = <instances>  " initial
+                flavor       = if_abap_behv_log=>projection ).
+    endloop.
+
+  endif.
+endif.
+
+clear removed_entities.
+
+endmethod.
+
+
+method ADJUST_NUMBERS.
+
+set_context.
+
+loop at m_base_savers assigning field-symbol(<base_saver>).
+  if check_and_mark_central_saver( <base_saver>-saver ) is initial.
+    continue.
+  endif.
+
+  cl_abap_behv_ctrl=>call_saver(
+    exporting saver            = <base_saver>-saver
+              phase            = if_abap_behv=>phases-adjust_numbers
+              root             = <base_saver>-root
+              log              = me->log
+    importing direct_mapped    = r_base_mapped
+              direct_reported  = r_base_reported
+              direct_failed    = r_base_failed
+    changing  removed_entities = removed_entities
+  ).
+
+  if r_base_mapped is not initial.
+    assign r_base_mapped->*   to field-symbol(<base_mapped>).
+    to_proj MAPPED.
+  endif.
+  if r_base_reported is not initial.
+    assign r_base_reported->*   to field-symbol(<base_reported>).
+    to_proj REPORTED.
+  endif.
+  if r_base_failed is not initial.
+    assign r_base_failed->*   to field-symbol(<base_failed>).
+    to_proj FAILED.
+  endif.
+
+endloop.
+
+reset_context.
+
+endmethod.
+
+
+  method check_and_mark_central_saver.
+    run = abap_true.
+    check cl_abap_behv_ctrl=>saver_collector is bound.
+    read table cl_abap_behv_ctrl=>saver_collector->savers
+        with key ksav components saver = saver
+        assigning field-symbol(<central_saver>).
+    check sy-subrc = 0.
+    if <central_saver>-execution_status = cl_abap_behv_ctrl=>co_execution_done.
+      run = abap_false.
+    else.
+      <central_saver>-execution_status = cl_abap_behv_ctrl=>co_execution_done.
+    endif.
+  endmethod.
+
+
+method CHECK_BEFORE_SAVE.
+
+set_context.
+
+loop at m_base_savers assigning field-symbol(<base_saver>).
+  if check_and_mark_central_saver( <base_saver>-saver ) is initial.
+    continue.
+  endif.
+
+  cl_abap_behv_ctrl=>call_saver(
+    exporting saver            = <base_saver>-saver
+              phase            = if_abap_behv=>phases-check_before_save
+              root             = <base_saver>-root
+              log              = me->log
+    importing direct_failed    = r_base_failed
+              direct_reported  = r_base_reported
+    changing  removed_entities = removed_entities
+  ).
+
+  if r_base_failed is not initial.
+    assign r_base_failed->*   to field-symbol(<base_failed>).
+    to_proj FAILED.
+  endif.
+  if r_base_reported is not initial.
+    assign r_base_reported->*   to field-symbol(<base_reported>).
+    to_proj REPORTED.
+  endif.
+
+endloop.
+
+reset_context.
+
+endmethod.
+
+
+method CLEANUP.
+
+set_context.
+
+loop at m_base_savers assigning field-symbol(<base_saver>).
+  if check_and_mark_central_saver( <base_saver>-saver ) is initial.
+    continue.
+  endif.
+
+  cl_abap_behv_ctrl=>call_saver(
+    exporting saver = <base_saver>-saver
+              phase = if_abap_behv=>phases-cleanup
+              root  = <base_saver>-root ).
+
+endloop.
+
+reset_context.
+
+endmethod.
+
+
+method CLEANUP_FINALIZE.
+
+set_context.
+
+loop at m_base_savers assigning field-symbol(<base_saver>).
+  if check_and_mark_central_saver( <base_saver>-saver ) is initial.
+    continue.
+  endif.
+
+  cl_abap_behv_ctrl=>call_saver(
+    exporting saver = <base_saver>-saver
+              phase = if_abap_behv=>phases-cleanup_finalize
+              root  = <base_saver>-root ).
+
+endloop.
+
+reset_context.
+
+endmethod.
+
+
+method CREATE.
+
+saver = new CL_ABAP_BEHV_SAVER_PROJ( ).
+
+saver->m_root = root.
+saver->m_prog = conv program( root ).
+overlay saver->m_prog with '==============================BD'.
+
+endmethod.
+
+
+method FINALIZE.
+
+data repeat type c length 1 value 'X'.
+data base_savers type standard table of cl_abap_behv_ctrl=>t_saver with empty key.
+
+set_context.
+
+"dvm saver must be last saver here
+base_savers = m_base_savers.
+read table base_savers with key saver_idx = cl_abap_behv_ctrl=>mki-dvm_active into data(dvm_saver).
+if sy-subrc = 0.
+  delete base_savers index sy-tabix.
+  append dvm_saver to base_savers.
+endif.
+
+while repeat is not initial.
+  clear repeat.
+
+  loop at base_savers assigning field-symbol(<base_saver>)
+      where execution_status <> cl_abap_behv_ctrl=>co_execution_done.
+
+    <base_saver>-execution_status = cl_abap_behv_ctrl=>co_execution_done.
+    if check_and_mark_central_saver( <base_saver>-saver ) is initial.
+      continue.
+    endif.
+    repeat = 'X'. " FINALIZEs might trigger MODIFYs => might need to repeat the loop
+
+    cl_abap_behv_ctrl=>call_saver(
+      exporting saver            = <base_saver>-saver
+                phase            = if_abap_behv=>phases-finalize
+                root             = <base_saver>-root
+                log              = me->log
+      importing direct_failed    = r_base_failed
+                direct_reported  = r_base_reported
+      changing  removed_entities = removed_entities
+    ).
+
+    if r_base_failed is not initial.
+      assign r_base_failed->*   to field-symbol(<base_failed>).
+      to_proj FAILED.
+    endif.
+    if r_base_reported is not initial.
+      assign r_base_reported->*   to field-symbol(<base_reported>).
+      to_proj REPORTED.
+    endif.
+
+  endloop.
+
+endwhile.
+
+loop at m_base_savers assigning <base_saver>.
+  <base_saver>-execution_status = cl_abap_behv_ctrl=>co_execution_not_run.
+endloop.
+
+reset_context.
+
+endmethod.
+
+
+method INITIALIZE.
+
+" MUST be called before re-use (in same transaction after a "commit entities")
+" - should have been mandatory part of CL_ABAP_BEHAVIOR_SAVER
+" - might move into a new interface IF_ABAP_BEHV_SAVER_EXT or similar
+
+clear:
+  log,
+  m_base_savers,  " !
+  m_augm_genrefs,
+  r_base_mapped, r_base_failed, r_base_reported,
+  removed_entities.
+
+endmethod.
+
+
+method SAVE.
+
+set_context.
+
+loop at m_base_savers assigning field-symbol(<base_saver>).
+  if check_and_mark_central_saver( <base_saver>-saver ) is initial.
+    continue.
+  endif.
+
+  cl_abap_behv_ctrl=>call_saver(
+    exporting saver            = <base_saver>-saver
+              phase            = if_abap_behv=>phases-save
+              root             = <base_saver>-root
+              log              = me->log
+    importing direct_reported  = r_base_reported
+              direct_failed    = r_base_failed
+    changing  removed_entities = removed_entities
+  ).
+
+  if r_base_reported is not initial.
+    assign r_base_reported->* to field-symbol(<base_reported>).
+    to_proj REPORTED.
+  endif.
+  if r_base_failed is not initial.
+    assign r_base_failed->*   to field-symbol(<base_failed>).
+    to_proj FAILED.
+  endif.
+
+endloop.
+
+reset_context.
+
+endmethod.
+
+
+method TRANSFER_RESP_TAB_TO_PROJ.
+
+field-symbols <orig_fail> type abp_behv_response.
+field-symbols <orig_table> type index table.
+field-symbols <real_table> type index table.
+field-symbols <real> like line of real_names.
+field-symbols <rela> type cl_abap_behv_load=>t_relat_ext.
+
+
+loop at base_entities assigning field-symbol(<real_fail>)
+ group by <real_fail>-root_name assigning field-symbol(<real_root>).
+
+  data(is_mapped) = 0.
+  data(orig_reqd) = 0.
+
+  " EML might request responses for >=2 interfaces on the same base => map to all
+  loop at real_names using key kr assigning <real> where real = <real_root>.
+
+    if <real>-orig = <real>-real.
+      " EML requests the base name -> to be copied w/o mapping
+      orig_reqd = 1.
+      continue.
+    endif.
+
+    loop at group <real_root> assigning <real_fail>.
+
+      GET_RELA_FOR_TRG <real_fail>-entity_name <real>-orig.
+      if <rela> is not assigned.
+        cl_abap_behv_load=>get_relation( source_entity = <real>-orig kind = 'B' ).
+        GET_RELA_FOR_TRG <real_fail>-entity_name <real>-orig.
+        check <rela> is assigned.
+      endif.
+      add 1 to is_mapped.
+
+      insert value #( root_name   = <real>-orig
+                      entity_name = <rela>-source_entity )
+       into table proj_entities assigning <orig_fail>.
+
+      <orig_fail>-entries = cl_abap_behvdescr=>create_data( p_op = op
+        p_root = <real>-orig
+        p_name = <rela>-source_entity ).
+      assign <orig_fail>-entries->* to <orig_table>.
+      assign <real_fail>-entries->* to <real_table>.
+
+      " just use MAPPING TO ENTITY
+      <orig_table> = corresponding #( <real_table> mapping to entity ).
+
+    endloop.
+
+  endloop.
+
+  if orig_reqd is not initial or is_mapped is initial.
+    " --- copy to result unmapped
+    loop at group <real_root> assigning <real_fail>.
+      insert <real_fail> into table proj_entities.
+    endloop.
+  endif.
+
+endloop.
+
+endmethod.
+
+
+method TRANSFER_RESP_TO_PROJ_LOG.
+
+assign base_response->* to field-symbol(<base_response>).
+assign proj_response->* to field-symbol(<proj_response>).
+check <base_response> is assigned and <proj_response> is assigned and <base_response> is not initial.
+
+data(m_prog) = conv program( proj_root ).
+overlay m_prog with '==============================BD'.
+
+data(proj_enames) = |({ m_prog })ENTITYNAME| ##NUMBER_OK.
+assign (proj_enames) to field-symbol(<proj_enames>).
+
+data(form) = |PE_{ cond #( when kind = if_abap_behv_log=>failed_late   then `FAILED`
+                           when kind = if_abap_behv_log=>reported_late then `REPORTED`
+                           else `MAPPED` ) }_LATE|.
+
+" --- Execute mapping form BASE -> PROJ
+perform (form) in program (m_prog) using <base_response> ' ' changing <proj_response>.
+
+if <proj_response> is not initial.
+  cl_abap_behv_ctrl=>TRANSFER_TO_LOG(
+   exporting log                = log
+            "other_log          =
+            "smsg_log           =
+             kind               = kind
+             root_name          = proj_root
+             entity_name        = <proj_enames>
+            "discard_afterwards =
+            "flavor             =
+            "phase              =
+            "do_map_messages    =  " ?
+   changing  src_struc          = <proj_response> ).
+endif.
+
+endmethod.
+
+
+method TRANSFER_STRUC_TO_PROJ_APPEND.
+
+data proj_resp  type ref to data.
+data proj_resps type standard table of ref to data.
+
+field-symbols <proj_resp> type index table.
+field-symbols <proj_copy> type index table.
+
+assert proj_struc is not initial.  " otherwise this method should not be called
+
+data(form) = |PE_{ cond #( when kind = if_abap_behv_log=>failed_late   then `FAILED`
+                           when kind = if_abap_behv_log=>reported_late then `REPORTED`
+                           else `MAPPED` ) }_LATE|.
+
+" --- Save existing table entries of PROJ_STRUC
+do.
+  assign component sy-index of structure proj_struc to <proj_resp>.
+  if sy-subrc <> 0.  exit.  endif.
+  if <proj_resp> is initial.
+    append initial line to proj_resps.
+  else.
+    create data proj_resp like <proj_resp>.
+    assign proj_resp->* to <proj_copy>.
+    <proj_copy> = <proj_resp>.
+    proj_resps = value #( base proj_resps ( proj_resp ) ).
+  endif.
+enddo.
+
+" --- Form overwrites all components of PROJ_STRUC
+PERFORM (form) in program (m_prog) using base_struc ' ' changing proj_struc.
+
+" --- Re-append previously saved table entries of PROJ_STRUC
+loop at proj_resps into proj_resp where table_line is not initial.
+  assign component sy-tabix of structure proj_struc to <proj_resp>.
+  assign proj_resp->* to <proj_copy>.
+  append lines of <proj_copy> to <proj_resp>.
+endloop.
+
+endmethod.
+
+
+method TRANS_REPORTED.
+
+assign base_reported to field-symbol(<base_reported>).
+to_proj REPORTED.
+
+endmethod.
+ENDCLASS.

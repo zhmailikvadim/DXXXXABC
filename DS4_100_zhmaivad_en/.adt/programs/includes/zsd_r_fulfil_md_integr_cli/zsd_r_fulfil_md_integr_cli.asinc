@@ -1,0 +1,376 @@
+*&---------------------------------------------------------------------*
+*& Include          ZSD_R_FULFIL_MD_INTEGR_CLI
+*&---------------------------------------------------------------------*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* UAKASAZA    | 10.01.2023 | 16555     : [Feature] [PLATFORM] DC Capa *
+*              |            | DS4K939401                               *
+*----------------------------------------------------------------------*
+CLASS lcl_product_alloc_pd IMPLEMENTATION.
+  METHOD get_data.
+    DATA lv_cond TYPE string.
+
+    IF s_plant IS NOT INITIAL.
+      lv_cond = 'PRODALLOCCHARC01 IN @S_PLANT AND PRODALLOCCHARC02 IN @S_DISCH'.
+      lv_cond = |{ lv_cond } AND PRODALLOCCHARC03 IN @S_PACKT AND PRODALLOCCHARC04 IN @S_MATDV|.
+      mv_plant_comb = abap_true.
+    ELSEIF s_store IS NOT INITIAL.
+      lv_cond = 'PRODALLOCCHARC01 IN @S_STORE'.
+      mv_store_comb = abap_true.
+    ELSEIF s_vkorg IS NOT INITIAL.
+      lv_cond = 'PRODALLOCCHARC01 IN @S_VKORG AND PRODALLOCCHARC02 IN @S_DISCH'.
+      IF s_vkbur IS NOT INITIAL.
+        lv_cond = |{ lv_cond } AND PRODALLOCCHARC03 IN @S_VKBUR|.
+        IF s_kunnr IS NOT INITIAL.
+          lv_cond = |{ lv_cond } AND PRODALLOCCHARC04 IN @S_KUNNR AND PRODALLOCCHARC05 IN @S_MATNR|.
+        ELSE.
+          lv_cond = |{ lv_cond } AND PRODALLOCCHARC04 IN @S_MATNR|.
+        ENDIF.
+      ELSEIF s_kunnr IS NOT INITIAL.
+        lv_cond = |{ lv_cond } AND PRODALLOCCHARC03 IN @S_KUNNR|.
+      ELSEIF s_matnr IS NOT INITIAL.
+        lv_cond = |{ lv_cond } AND PRODALLOCCHARC03 IN @S_MATNR|.
+      ENDIF.
+      mv_sales_org_comb = abap_true.
+    ENDIF.
+
+    SELECT *
+      FROM c_prodallocobjplngdatacombnwd
+      INTO TABLE @mt_combnwd
+      WHERE productallocationobjectuuid = @p_prall
+        AND (lv_cond).                                 "#EC CI_DYNWHERE
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+    IF mt_combnwd IS NOT INITIAL.
+      SELECT *
+      FROM c_prodallocobjplngdataserswd
+      FOR ALL ENTRIES IN @mt_combnwd
+      WHERE productallocationobjectuuid = @mt_combnwd-productallocationobjectuuid
+        AND charcvaluecombinationuuid = @mt_combnwd-charcvaluecombinationuuid
+        AND prodallocationperiodstartdate IN @s_datum
+      INTO TABLE @mt_serswd.                       "#EC CI_NO_TRANSFORM
+      IF sy-subrc NE 0.
+        RETURN.
+      ENDIF.
+      IF mt_serswd IS NOT INITIAL.
+        SELECT *
+        FROM c_prodalloccnsmpnoverview
+        INTO TABLE @mt_overview
+        FOR ALL ENTRIES IN @mt_serswd
+        WHERE charcvaluecombinationuuid = @mt_serswd-charcvaluecombinationuuid
+          AND startdate = @mt_serswd-prodallocationperiodstartdate. "#EC CI_NO_TRANSFORM
+        IF sy-subrc NE 0.
+          RETURN.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+  METHOD process_data.
+    CASE abap_true.
+      WHEN mv_plant_comb.
+        DATA(lt_plant) = VALUE zsd_tt_prodallocacharact( FOR ls_combnwd IN mt_combnwd ( ls_combnwd-prodalloccharc01 ) ).
+        SORT lt_plant.
+        DELETE ADJACENT DUPLICATES FROM lt_plant.
+        SORT mt_combnwd BY prodalloccharc01 prodalloccharc02 prodalloccharc03 prodalloccharc04.
+        LOOP AT lt_plant ASSIGNING FIELD-SYMBOL(<lv_plant>).
+          APPEND INITIAL LINE TO mt_prod_alloc ASSIGNING FIELD-SYMBOL(<ls_prod_alloc>).
+          LOOP AT mt_combnwd ASSIGNING FIELD-SYMBOL(<ls_combnwd>) WHERE prodalloccharc01 = <lv_plant>. "#EC CI_STDSEQ "#EC CI_NESTED
+            <ls_prod_alloc>-productallocationobject = <ls_combnwd>-productallocationobject.
+            <ls_prod_alloc>-charcomb = <lv_plant>.
+            ##WARN_OK
+            IF line_exists( <ls_prod_alloc>-t_prod_allocation[ plant                = <ls_combnwd>-prodalloccharc01
+                                                               distributionchannel  = <ls_combnwd>-prodalloccharc02
+                                                               packingtype          = <ls_combnwd>-prodalloccharc03
+                                                               materialdivision     = <ls_combnwd>-prodalloccharc04 ] ). "#EC CI_STDSEQ
+              CONTINUE.
+            ELSE.
+              APPEND INITIAL LINE TO <ls_prod_alloc>-t_prod_allocation ASSIGNING FIELD-SYMBOL(<ls_prod_allocation>).
+              <ls_prod_allocation>-plant = <ls_combnwd>-prodalloccharc01.
+              <ls_prod_allocation>-distributionchannel = <ls_combnwd>-prodalloccharc02.
+              <ls_prod_allocation>-packingtype = <ls_combnwd>-prodalloccharc03.
+              <ls_prod_allocation>-materialdivision = <ls_combnwd>-prodalloccharc04.
+              <ls_prod_allocation>-productallocobjectuuid = <ls_combnwd>-productallocationobjectuuid.
+              <ls_prod_allocation>-productallocobject = <ls_combnwd>-productallocationobject.
+              <ls_prod_allocation>-datefrom = s_datum-low.
+              <ls_prod_allocation>-dateto = s_datum-high.
+              LOOP AT mt_combnwd ASSIGNING FIELD-SYMBOL(<ls_combnwd_2>) WHERE prodalloccharc01 = <ls_combnwd>-prodalloccharc01
+                AND prodalloccharc02 = <ls_combnwd>-prodalloccharc02 AND prodalloccharc03 = <ls_combnwd>-prodalloccharc03 AND prodalloccharc04 = <ls_combnwd>-prodalloccharc04. "#EC CI_STDSEQ "#EC CI_NESTED
+                APPEND INITIAL LINE TO <ls_prod_allocation>-t_objectandcharvalcomb ASSIGNING FIELD-SYMBOL(<ls_objectandcharvalcomb>).
+                <ls_objectandcharvalcomb> = CORRESPONDING #( <ls_combnwd_2> MAPPING productallocobjectuuid        = productallocationobjectuuid
+                                                                                    productallocobject            = productallocationobject
+                                                                                    charvaluecombuuid             = charcvaluecombinationuuid
+                                                                                    productalloccharacteristic01  = prodalloccharc01
+                                                                                    productalloccharacteristic02  = prodalloccharc02
+                                                                                    productalloccharacteristic03  = prodalloccharc03
+                                                                                    productalloccharacteristic04  = prodalloccharc04
+                                                                                    productalloccharacteristic05  = prodalloccharc05
+                                                                                    productalloccharacteristic06  = prodalloccharc06
+                                                                                    productalloccharacteristic07  = prodalloccharc07
+                                                                                    productalloccharacteristic08  = prodalloccharc08
+                                                                                    productalloccharacteristic09  = prodalloccharc09
+                                                                                    productalloccharacteristic10  = prodalloccharc10
+                                                                                    productallocactivestatus      = prodallocationactivationstatus
+                                                                                    activeindicator               = charcvaluetextisrequested
+                                                                                    charvaluecombchangemode       = charcvalcombnchangemode ).
+                LOOP AT mt_serswd ASSIGNING FIELD-SYMBOL(<ls_serswd>) WHERE productallocationobjectuuid = <ls_combnwd_2>-productallocationobjectuuid
+                  AND charcvaluecombinationuuid = <ls_combnwd_2>-charcvaluecombinationuuid. "#EC CI_STDSEQ "#EC CI_NESTED
+                  APPEND INITIAL LINE TO <ls_objectandcharvalcomb>-t_time_series_consumption ASSIGNING FIELD-SYMBOL(<ls_time_series_consumption>).
+                  <ls_time_series_consumption> = CORRESPONDING #( <ls_serswd> MAPPING productalloctimeseriesuuid    = prodallocationtimeseriesuuid
+                                                                                      productallocobjectuuid        = productallocationobjectuuid
+                                                                                      charvaluecombuuid             = charcvaluecombinationuuid
+                                                                                      startdateofproductallocperd   = prodallocationperiodstartdate
+                                                                                      prodallocperdstarttimezone    = prodallocperiodstarttimezone
+                                                                                      prodallocperdstartutcdatetime = prodallocperdstartutcdatetime
+                                                                                      prodallocperdendtimezone      = prodallocperiodendtimezone
+                                                                                      prodallocperdendutcdatetime   = prodallocperiodendutcdatetime
+                                                                                      productallocquantity          = productallocationquantity
+                                                                                      productallocquantityunit      = productallocationquantityunit ).
+                  READ TABLE mt_overview ASSIGNING FIELD-SYMBOL(<ls_overview>) WITH KEY charcvaluecombinationuuid = <ls_serswd>-charcvaluecombinationuuid startdate = <ls_serswd>-prodallocationperiodstartdate. "#EC CI_STDSEQ
+                  IF sy-subrc EQ 0.
+                    <ls_time_series_consumption>-startdateofprodallocconsump = <ls_overview>-startdate.
+                    <ls_time_series_consumption>-prodallocconsumpnegopenqty  = <ls_overview>-negativeopenquantity.
+                    <ls_time_series_consumption>-prodallocconsumpopenqty     = <ls_overview>-openquantity.
+                    <ls_time_series_consumption>-prodallocconsumpassigqty    = <ls_overview>-prodallocassignedquantity.
+                    <ls_time_series_consumption>-prodallocconsumpqty         = <ls_overview>-productallocationquantity.
+                    <ls_time_series_consumption>-prodallocconsumpqtyunit     = <ls_overview>-productallocationquantityunit.
+                  ENDIF.
+                ENDLOOP.
+              ENDLOOP.
+            ENDIF.
+          ENDLOOP.
+        ENDLOOP.
+      WHEN mv_store_comb.
+        DATA(lt_store) = VALUE zsd_tt_prodallocacharact( FOR ls_combnwd IN mt_combnwd ( ls_combnwd-prodalloccharc01 ) ).
+        SORT lt_store.
+        DELETE ADJACENT DUPLICATES FROM lt_store.
+        SORT mt_combnwd BY prodalloccharc01.
+        LOOP AT lt_store ASSIGNING FIELD-SYMBOL(<lv_store>).
+          APPEND INITIAL LINE TO mt_prod_alloc ASSIGNING <ls_prod_alloc>.
+          LOOP AT mt_combnwd ASSIGNING <ls_combnwd> WHERE prodalloccharc01 = <lv_store>. "#EC CI_STDSEQ "#EC CI_NESTED
+            <ls_prod_alloc>-productallocationobject = <ls_combnwd>-productallocationobject.
+            <ls_prod_alloc>-charcomb = <lv_store>.
+            ##WARN_OK
+            IF line_exists( <ls_prod_alloc>-t_prod_allocation[ store = <ls_combnwd>-prodalloccharc01 ] ). "#EC CI_STDSEQ
+              CONTINUE.
+            ELSE.
+              APPEND INITIAL LINE TO <ls_prod_alloc>-t_prod_allocation ASSIGNING <ls_prod_allocation>.
+              <ls_prod_allocation>-store = <ls_combnwd>-prodalloccharc01.
+              <ls_prod_allocation>-productallocobjectuuid = <ls_combnwd>-productallocationobjectuuid.
+              <ls_prod_allocation>-productallocobject = <ls_combnwd>-productallocationobject.
+              <ls_prod_allocation>-datefrom = s_datum-low.
+              <ls_prod_allocation>-dateto = s_datum-high.
+              LOOP AT mt_combnwd ASSIGNING <ls_combnwd_2> WHERE prodalloccharc01 = <ls_combnwd>-prodalloccharc01. "#EC CI_STDSEQ "#EC CI_NESTED
+                APPEND INITIAL LINE TO <ls_prod_allocation>-t_objectandcharvalcomb ASSIGNING <ls_objectandcharvalcomb>.
+                <ls_objectandcharvalcomb> = CORRESPONDING #( <ls_combnwd_2> MAPPING productallocobjectuuid        = productallocationobjectuuid
+                                                                                    productallocobject            = productallocationobject
+                                                                                    charvaluecombuuid             = charcvaluecombinationuuid
+                                                                                    productalloccharacteristic01  = prodalloccharc01
+                                                                                    productalloccharacteristic02  = prodalloccharc02
+                                                                                    productalloccharacteristic03  = prodalloccharc03
+                                                                                    productalloccharacteristic04  = prodalloccharc04
+                                                                                    productalloccharacteristic05  = prodalloccharc05
+                                                                                    productalloccharacteristic06  = prodalloccharc06
+                                                                                    productalloccharacteristic07  = prodalloccharc07
+                                                                                    productalloccharacteristic08  = prodalloccharc08
+                                                                                    productalloccharacteristic09  = prodalloccharc09
+                                                                                    productalloccharacteristic10  = prodalloccharc10
+                                                                                    productallocactivestatus      = prodallocationactivationstatus
+                                                                                    activeindicator               = charcvaluetextisrequested
+                                                                                    charvaluecombchangemode       = charcvalcombnchangemode ).
+                LOOP AT mt_serswd ASSIGNING <ls_serswd> WHERE productallocationobjectuuid = <ls_combnwd_2>-productallocationobjectuuid
+                  AND charcvaluecombinationuuid = <ls_combnwd_2>-charcvaluecombinationuuid. "#EC CI_STDSEQ "#EC CI_NESTED
+                  APPEND INITIAL LINE TO <ls_objectandcharvalcomb>-t_time_series_consumption ASSIGNING <ls_time_series_consumption>.
+                  <ls_time_series_consumption> = CORRESPONDING #( <ls_serswd> MAPPING productalloctimeseriesuuid    = prodallocationtimeseriesuuid
+                                                                                      productallocobjectuuid        = productallocationobjectuuid
+                                                                                      charvaluecombuuid             = charcvaluecombinationuuid
+                                                                                      startdateofproductallocperd   = prodallocationperiodstartdate
+                                                                                      prodallocperdstarttimezone    = prodallocperiodstarttimezone
+                                                                                      prodallocperdstartutcdatetime = prodallocperdstartutcdatetime
+                                                                                      prodallocperdendtimezone      = prodallocperiodendtimezone
+                                                                                      prodallocperdendutcdatetime   = prodallocperiodendutcdatetime
+                                                                                      productallocquantity          = productallocationquantity
+                                                                                      productallocquantityunit      = productallocationquantityunit ).
+                  READ TABLE mt_overview ASSIGNING <ls_overview> WITH KEY charcvaluecombinationuuid = <ls_serswd>-charcvaluecombinationuuid startdate = <ls_serswd>-prodallocationperiodstartdate. "#EC CI_STDSEQ
+                  IF sy-subrc EQ 0.
+                    <ls_time_series_consumption>-startdateofprodallocconsump = <ls_overview>-startdate.
+                    <ls_time_series_consumption>-prodallocconsumpnegopenqty  = <ls_overview>-negativeopenquantity.
+                    <ls_time_series_consumption>-prodallocconsumpopenqty     = <ls_overview>-openquantity.
+                    <ls_time_series_consumption>-prodallocconsumpassigqty    = <ls_overview>-prodallocassignedquantity.
+                    <ls_time_series_consumption>-prodallocconsumpqty         = <ls_overview>-productallocationquantity.
+                    <ls_time_series_consumption>-prodallocconsumpqtyunit     = <ls_overview>-productallocationquantityunit.
+                  ENDIF.
+                ENDLOOP.
+              ENDLOOP.
+            ENDIF.
+          ENDLOOP.
+        ENDLOOP.
+      WHEN mv_sales_org_comb.
+        DATA(lt_sales_org) = VALUE zsd_tt_prodallocacharact( FOR ls_combnwd IN mt_combnwd ( ls_combnwd-prodalloccharc01 ) ).
+        SORT lt_sales_org.
+        DELETE ADJACENT DUPLICATES FROM lt_store.
+        SORT mt_combnwd BY prodalloccharc01 prodalloccharc02 prodalloccharc03 prodalloccharc04 prodalloccharc05.
+        LOOP AT lt_sales_org ASSIGNING FIELD-SYMBOL(<lv_sales_org>).
+          APPEND INITIAL LINE TO mt_prod_alloc ASSIGNING <ls_prod_alloc>.
+          LOOP AT mt_combnwd ASSIGNING <ls_combnwd> WHERE prodalloccharc01 = <lv_sales_org>. "#EC CI_STDSEQ "#EC CI_NESTED
+            <ls_prod_alloc>-productallocationobject = <ls_combnwd>-productallocationobject.
+            <ls_prod_alloc>-charcomb = <lv_sales_org>.
+            ##WARN_OK
+            IF line_exists( <ls_prod_alloc>-t_prod_allocation[ salesorg             = <ls_combnwd>-prodalloccharc01
+                                                               distributionchannel  = <ls_combnwd>-prodalloccharc02
+                                                               salesoffice          = <ls_combnwd>-prodalloccharc03
+                                                               customer             = <ls_combnwd>-prodalloccharc04
+                                                               material             = <ls_combnwd>-prodalloccharc05 ] ) "#EC CI_STDSEQ
+
+              OR line_exists( <ls_prod_alloc>-t_prod_allocation[  salesorg            = <ls_combnwd>-prodalloccharc01
+                                                                  distributionchannel = <ls_combnwd>-prodalloccharc02
+                                                                  salesoffice         = <ls_combnwd>-prodalloccharc03
+                                                                  material            = <ls_combnwd>-prodalloccharc04 ] ) "#EC CI_STDSEQ
+
+              OR line_exists( <ls_prod_alloc>-t_prod_allocation[  salesorg            = <ls_combnwd>-prodalloccharc01
+                                                                  distributionchannel = <ls_combnwd>-prodalloccharc02
+                                                                  customer            = <ls_combnwd>-prodalloccharc03
+                                                                  material            = <ls_combnwd>-prodalloccharc04 ] ) "#EC CI_STDSEQ
+
+              OR line_exists( <ls_prod_alloc>-t_prod_allocation[  salesorg            = <ls_combnwd>-prodalloccharc01
+                                                                  distributionchannel = <ls_combnwd>-prodalloccharc02
+                                                                  material            = <ls_combnwd>-prodalloccharc03 ] ). "#EC CI_STDSEQ
+
+              CONTINUE.
+            ELSE.
+              APPEND INITIAL LINE TO <ls_prod_alloc>-t_prod_allocation ASSIGNING <ls_prod_allocation>.
+              <ls_prod_allocation>-salesorg = <ls_combnwd>-prodalloccharc01.
+              <ls_prod_allocation>-distributionchannel = <ls_combnwd>-prodalloccharc02.
+              IF s_vkbur IS NOT INITIAL AND <ls_combnwd>-prodalloccharc03 IN s_vkbur.
+                <ls_prod_allocation>-salesoffice = <ls_combnwd>-prodalloccharc03.
+                IF s_kunnr IS NOT INITIAL AND <ls_combnwd>-prodalloccharc04 IN s_kunnr.
+                  <ls_prod_allocation>-customer = <ls_combnwd>-prodalloccharc04.
+                  <ls_prod_allocation>-material = <ls_combnwd>-prodalloccharc05.
+                ELSEIF s_matnr IS NOT INITIAL AND <ls_combnwd>-prodalloccharc04 IN s_matnr.
+                  <ls_prod_allocation>-material = <ls_combnwd>-prodalloccharc04.
+                ENDIF.
+              ELSEIF s_kunnr IS NOT INITIAL AND <ls_combnwd>-prodalloccharc03 IN s_kunnr.
+                <ls_prod_allocation>-customer = <ls_combnwd>-prodalloccharc03.
+                <ls_prod_allocation>-material = <ls_combnwd>-prodalloccharc04.
+              ELSEIF s_matnr IS NOT INITIAL AND <ls_combnwd>-prodalloccharc03 IN s_matnr.
+                <ls_prod_allocation>-material = <ls_combnwd>-prodalloccharc03.
+              ENDIF.
+              <ls_prod_allocation>-productallocobject = <ls_combnwd>-productallocationobject.
+              <ls_prod_allocation>-productallocobjectuuid = <ls_combnwd>-productallocationobjectuuid.
+              <ls_prod_allocation>-datefrom = s_datum-low.
+              <ls_prod_allocation>-dateto = s_datum-high.
+              LOOP AT mt_combnwd ASSIGNING <ls_combnwd_2> WHERE prodalloccharc01 = <ls_combnwd>-prodalloccharc01
+                AND prodalloccharc02 = <ls_combnwd>-prodalloccharc02 AND prodalloccharc03 = <ls_combnwd>-prodalloccharc03
+                AND prodalloccharc04 = <ls_combnwd>-prodalloccharc04 AND prodalloccharc05 = <ls_combnwd>-prodalloccharc05. "#EC CI_STDSEQ "#EC CI_NESTED
+                APPEND INITIAL LINE TO <ls_prod_allocation>-t_objectandcharvalcomb ASSIGNING <ls_objectandcharvalcomb>.
+                <ls_objectandcharvalcomb> = CORRESPONDING #( <ls_combnwd_2> MAPPING productallocobjectuuid        = productallocationobjectuuid
+                                                                                    productallocobject            = productallocationobject
+                                                                                    charvaluecombuuid             = charcvaluecombinationuuid
+                                                                                    productalloccharacteristic01  = prodalloccharc01
+                                                                                    productalloccharacteristic02  = prodalloccharc02
+                                                                                    productalloccharacteristic03  = prodalloccharc03
+                                                                                    productalloccharacteristic04  = prodalloccharc04
+                                                                                    productalloccharacteristic05  = prodalloccharc05
+                                                                                    productalloccharacteristic06  = prodalloccharc06
+                                                                                    productalloccharacteristic07  = prodalloccharc07
+                                                                                    productalloccharacteristic08  = prodalloccharc08
+                                                                                    productalloccharacteristic09  = prodalloccharc09
+                                                                                    productalloccharacteristic10  = prodalloccharc10
+                                                                                    productallocactivestatus      = prodallocationactivationstatus
+                                                                                    activeindicator               = charcvaluetextisrequested
+                                                                                    charvaluecombchangemode       = charcvalcombnchangemode ).
+                LOOP AT mt_serswd ASSIGNING <ls_serswd> WHERE productallocationobjectuuid = <ls_combnwd_2>-productallocationobjectuuid
+                  AND charcvaluecombinationuuid = <ls_combnwd_2>-charcvaluecombinationuuid. "#EC CI_STDSEQ "#EC CI_NESTED
+                  APPEND INITIAL LINE TO <ls_objectandcharvalcomb>-t_time_series_consumption ASSIGNING <ls_time_series_consumption>.
+                  <ls_time_series_consumption> = CORRESPONDING #( <ls_serswd> MAPPING productalloctimeseriesuuid    = prodallocationtimeseriesuuid
+                                                                                      productallocobjectuuid        = productallocationobjectuuid
+                                                                                      charvaluecombuuid             = charcvaluecombinationuuid
+                                                                                      startdateofproductallocperd   = prodallocationperiodstartdate
+                                                                                      prodallocperdstarttimezone    = prodallocperiodstarttimezone
+                                                                                      prodallocperdstartutcdatetime = prodallocperdstartutcdatetime
+                                                                                      prodallocperdendtimezone      = prodallocperiodendtimezone
+                                                                                      prodallocperdendutcdatetime   = prodallocperiodendutcdatetime
+                                                                                      productallocquantity          = productallocationquantity
+                                                                                      productallocquantityunit      = productallocationquantityunit ).
+                  READ TABLE mt_overview ASSIGNING <ls_overview> WITH KEY charcvaluecombinationuuid = <ls_serswd>-charcvaluecombinationuuid startdate = <ls_serswd>-prodallocationperiodstartdate. "#EC CI_STDSEQ
+                  IF sy-subrc EQ 0.
+                    <ls_time_series_consumption>-startdateofprodallocconsump = <ls_overview>-startdate.
+                    <ls_time_series_consumption>-prodallocconsumpnegopenqty  = <ls_overview>-negativeopenquantity.
+                    <ls_time_series_consumption>-prodallocconsumpopenqty     = <ls_overview>-openquantity.
+                    <ls_time_series_consumption>-prodallocconsumpassigqty    = <ls_overview>-prodallocassignedquantity.
+                    <ls_time_series_consumption>-prodallocconsumpqty         = <ls_overview>-productallocationquantity.
+                    <ls_time_series_consumption>-prodallocconsumpqtyunit     = <ls_overview>-productallocationquantityunit.
+                  ENDIF.
+                ENDLOOP.
+              ENDLOOP.
+            ENDIF.
+          ENDLOOP.
+        ENDLOOP.
+      WHEN OTHERS.
+    ENDCASE.
+
+  ENDMETHOD.
+  METHOD send_data.
+    DATA ls_kafka_payload TYPE zsd_s_product_alloc_payload.
+    LOOP AT mt_prod_alloc ASSIGNING FIELD-SYMBOL(<ls_prod_alloc>).
+      ms_kafka_key = VALUE zpe_s_kafka_key( event_name = mc_event_name
+                                            event_key = |{ <ls_prod_alloc>-productallocationobject }_{ <ls_prod_alloc>-charcomb } | ).
+      ls_kafka_payload-product_allocation = <ls_prod_alloc>-t_prod_allocation. "#EC CI_CONV_OK
+      ms_kafka_data = VALUE zsd_s_aif_out_prodalloc_kafka( topic = mc_prod_alloc_topic
+                                                        key = ms_kafka_key
+                                                        value-metadata = CORRESPONDING #( ms_kafka_key )
+                                                        value-payload  = ls_kafka_payload  ).
+      TRY.
+          /aif/cl_enabler_xml=>transfer_to_aif( ms_kafka_data ).
+          ##CATCH_ALL
+        CATCH cx_root INTO DATA(lo_cx).
+
+          MESSAGE lo_cx->get_longtext( ) TYPE 'I'.
+      ENDTRY.
+
+      MESSAGE s000.
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.
+CLASS lcl_outbound_scheduling_route IMPLEMENTATION.
+  METHOD get_data.
+    RETURN.
+  ENDMETHOD.##NEEDED
+  METHOD process_data.
+    RETURN.
+  ENDMETHOD.##NEEDED
+  METHOD send_data.
+    DATA:
+      lt_depart TYPE RANGE OF t001w-werks,
+      lt_destin TYPE RANGE OF t001w-werks,
+      lt_shippo TYPE RANGE OF tvst-vstel.
+
+    APPEND VALUE #( low = p_depart sign = 'I' option = 'EQ' ) TO lt_depart.
+
+    lt_destin[] = s_destin[].
+    lt_shippo[] = s_shippo[].
+
+    DATA(lo_send_to_kafka) = NEW zcl_sd_route_schedul_for_kafka( ).
+    lo_send_to_kafka->get_data( it_departures = lt_depart it_destinations = lt_destin it_shipping_points = lt_shippo ).
+
+    lo_send_to_kafka->send_to_kafka( ).
+  ENDMETHOD.
+ENDCLASS.
+CLASS lcl_process_factory IMPLEMENTATION.
+  METHOD create.
+    CASE abap_true.
+      WHEN rb_1.
+        ro_process = NEW lcl_outbound_scheduling_route( ).
+      WHEN rb_2.
+      WHEN rb_3.
+        ro_process = NEW lcl_product_alloc_pd( ).
+      WHEN OTHERS.
+    ENDCASE.
+  ENDMETHOD.
+ENDCLASS.

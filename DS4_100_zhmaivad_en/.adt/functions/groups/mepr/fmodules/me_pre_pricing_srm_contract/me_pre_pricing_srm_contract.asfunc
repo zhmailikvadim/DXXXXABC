@@ -1,0 +1,147 @@
+FUNCTION me_pre_pricing_srm_contract
+  IMPORTING
+    i_ekko TYPE ekko OPTIONAL
+    i_ekpo TYPE ekpo OPTIONAL
+    i_komk TYPE komk OPTIONAL
+    i_komp TYPE komp OPTIONAL
+    i_dialog TYPE flag DEFAULT space
+    i_call_all TYPE flag DEFAULT space
+    i_itm_typ TYPE char_01 DEFAULT space
+  EXPORTING
+    e_gkomv TYPE mmbsi_srm_komv_tty
+    e_gkomv_ind TYPE mmbsi_prsim_tty
+    e_messages TYPE bapiret2_tab.
+
+
+
+* Declarations
+  DATA : l_srm_contrt_param_stu TYPE mmbsi_srm_contrt_param_stu,
+         lt_srm_contrt_param TYPE mmbsi_srm_contrt_param_tty.
+
+  DATA : l_lines TYPE i,
+         ls_message_out TYPE bapiret2.
+
+  DESCRIBE TABLE g_srm_contrt_param LINES l_lines.
+
+* Check if its a price simulation for all call and for material 'M'
+* Else if i_call_all NE 'X' then create a input structure of SOS and store it in a globle internal table
+  IF i_call_all = 'X' AND i_itm_typ = 'M'.
+*Check if there any source of supply else exit.
+    IF l_lines > 0.
+      TRY.
+        CALL FUNCTION 'ME_PRICING_SRM_CONTRACT'
+          EXPORTING
+            i_srm_contract_param       = g_srm_contrt_param
+*         I_DIALOG                   = ' '
+            i_itm_typ                  = i_itm_typ
+        IMPORTING
+           e_gkomv                    = e_gkomv
+           e_gkomv_ind                = e_gkomv_ind
+           e_messages                 = e_messages
+         EXCEPTIONS
+           service_proxy_error        = 1
+           service_error              = 2
+           error_kschl_conversion     = 3
+           no_srm_contract            = 4
+           OTHERS                     = 5.
+        CASE sy-subrc.
+          WHEN 0.
+*             Do nothing
+          WHEN OTHERS.
+*           Clear the globle interal table of SOS for SRM pricing service call
+            CLEAR : g_srm_contrt_param.
+            EXIT.
+        ENDCASE.
+      ENDTRY.
+    ELSE.
+      EXIT.
+    ENDIF.
+  ELSE.
+
+* Construct the input SOS structure
+    l_srm_contrt_param_stu-konnr_erp = i_ekpo-ebeln.
+    l_srm_contrt_param_stu-ktpnr_erp = i_ekpo-ebelp.
+    l_srm_contrt_param_stu-konnr_srm = i_ekpo-srm_contract_id.
+    l_srm_contrt_param_stu-ktpnr_srm = i_ekpo-srm_contract_itm.
+    l_srm_contrt_param_stu-matnr = i_ekpo-matnr.
+    l_srm_contrt_param_stu-werks = i_ekpo-werks.
+*   Check for the simulation qantity
+    IF simul-mglme NE space AND simul-mglme NE 0.
+      l_srm_contrt_param_stu-menge = simul-mglme.
+    ELSE.
+      l_srm_contrt_param_stu-menge = '1'.
+    ENDIF.
+    l_srm_contrt_param_stu-meins = i_ekpo-meins.
+    l_srm_contrt_param_stu-bprme = i_ekpo-bprme.
+    l_srm_contrt_param_stu-waers = i_ekko-waers.
+    l_srm_contrt_param_stu-wkurs = i_ekko-wkurs.
+    l_srm_contrt_param_stu-spras = i_ekko-spras.
+    l_srm_contrt_param_stu-prdat = simul-prsdt.
+    l_srm_contrt_param_stu-ekko = i_ekko.
+    l_srm_contrt_param_stu-ekpo = i_ekpo.
+
+* If price simulation for single SOS for material item 'M'.
+    IF i_dialog = 'X' AND i_itm_typ = 'M'.
+      CLEAR : gkomv, gkomv_ind, tkomv.
+      REFRESH : gkomv, gkomv_ind, tkomv.
+      APPEND l_srm_contrt_param_stu TO lt_srm_contrt_param.
+      CALL FUNCTION 'ME_PRICING_SRM_CONTRACT'
+        EXPORTING
+          i_srm_contract_param   = lt_srm_contrt_param
+          i_dialog               = i_dialog
+          i_itm_typ              = 'M'
+        EXCEPTIONS
+          service_proxy_error    = 1
+          service_error          = 2
+          error_kschl_conversion = 3
+          no_srm_contract        = 4
+          OTHERS                 = 5.
+
+      CASE sy-subrc.
+        WHEN 0.
+*             Do nothing
+        WHEN OTHERS.
+          CLEAR : tkomv, gkomv, gkomv_ind, g_srm_contrt_param, ls_message_out, lt_srm_contrt_param.
+          l_lines = 0.
+          posnr = 0.
+          DESCRIBE TABLE gt_messages LINES l_lines.
+*         Check for any messages
+          IF l_lines > 0.
+*             CHECK IF MESSAGE HANDLER IS ACTIVE
+            CALL FUNCTION 'MESSAGES_ACTIVE'
+              EXCEPTIONS
+                not_active = 1
+                OTHERS     = 2.
+            IF sy-subrc <> 0.
+*              IF MESSAGE HANDLER NOT ACTIVE INITIALIZE MESSAGE HANDLER
+              CALL FUNCTION 'MESSAGES_INITIALIZE'.
+            ENDIF.
+
+            LOOP AT gt_messages INTO ls_message_out.
+*               STORE THE MESSAGES
+              CALL FUNCTION 'MESSAGE_STORE'
+                EXPORTING
+                  zeile = sy-tabix
+                  arbgb = ls_message_out-id
+                  msgty = ls_message_out-type
+                  txtnr = ls_message_out-number
+                  msgv1 = ls_message_out-message_v1
+                  msgv2 = ls_message_out-message_v2
+                  msgv3 = ls_message_out-message_v3
+                  msgv4 = ls_message_out-message_v4.
+            ENDLOOP.
+            CLEAR : gt_messages.
+            REFRESH : gt_messages.
+*               DISPLAY THE STORED MESSAGES
+            CALL FUNCTION 'MESSAGES_SHOW'.
+*             Delete already colected messages and collect future message.
+            CALL FUNCTION 'MESSAGES_INITIALIZE'.
+          ENDIF.
+          EXIT.
+      ENDCASE.
+    ELSEIF i_dialog NE 'X'.
+* else store the input SOS strucutre in a globle internal table
+      APPEND l_srm_contrt_param_stu TO g_srm_contrt_param.
+    ENDIF.
+  ENDIF.
+ENDFUNCTION.

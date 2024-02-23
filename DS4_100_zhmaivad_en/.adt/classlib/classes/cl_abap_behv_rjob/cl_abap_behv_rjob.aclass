@@ -1,0 +1,269 @@
+class CL_ABAP_BEHV_RJOB definition
+  public
+  inheriting from CL_ABAP_BEHV_JOB_BASE
+  final
+  create private
+
+  global friends CL_ABAP_BEHV_CTRL .
+
+public section.
+
+  methods ADD_RETRIEVALS
+    importing
+      !ENTITY_NAME type ABP_ENTITY_NAME
+      !OPERATION type ABP_BEHV_OP_READ
+      !SUB_NAME type T_SUB_NAME optional
+      value(INSTANCES) type ref to DATA
+      value(FULL) type SYCHAR01 default ' '
+      value(RESULTS) type ref to DATA optional
+      value(LINKS) type ref to DATA optional
+      !IS_DRAFT type ABP_BEHV_FLAG optional
+    returning
+      value(JOB) type ref to CL_ABAP_BEHV_RJOB .
+  methods ADD_RETRIEVALS_TAB
+    importing
+      !RETRIEVALS type ABP_BEHV_ACTIVITIES_TAB .
+  methods ADD_RETRIEVALS_TAB_READ
+    importing
+      !RETRIEVALS type ABP_BEHV_RETRIEVALS_TAB .
+*      !WITH_CIDS type SYCHAR01 default ' '
+  class-methods CREATE
+    importing
+      !LOG type ref to IF_ABAP_BEHV_LOG optional
+      !CHECK_DATA type SYCHAR01 default ' '
+      value(FOR_EML) type SYCHAR01 default ' '
+      value(IN_LOCAL_MODE) type SYCHAR01 optional
+      value(PRIVILEGED) type SYCHAR01 optional
+      value(EML_TICKET) type I default -1
+      !EML_PROGRAM type PROGRAM optional
+      !EML_INCLUDE type PROGRAM optional
+      !EML_LINE type I optional
+      !ATTRS_FROM type ref to CL_ABAP_BEHV_JOB_BASE optional
+    returning
+      value(JOB) type ref to CL_ABAP_BEHV_RJOB .
+protected section.
+
+  methods GET_BEHAVIOR
+    redefinition .
+private section.
+ENDCLASS.
+
+
+
+CLASS CL_ABAP_BEHV_RJOB IMPLEMENTATION.
+
+
+method ADD_RETRIEVALS.
+
+if m_closed is not initial.
+  raise shortdump type cx_abap_behv_runtime_error
+    message e012.  " job is CLOSEd
+endif.
+
+assign instances->* to field-symbol(<data>).
+
+if m_check_data is initial.
+  if <data> is not assigned or <data> is initial.
+    return.
+  endif.
+  unassign <data>.
+else.
+
+  if operation na cl_abap_behv_ctrl=>op_chars_R.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e011 with entity_name operation
+      exporting "textid    = cx_abap_behv_runtime_error=>operation_illegal
+                entity    = entity_name
+                operation = operation
+                tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+
+  if sub_name is initial.
+    if operation = ops-read_ba.
+      raise shortdump type cx_abap_behv_runtime_error
+        message e023 with entity_name
+        exporting "textid    = cx_abap_behv_runtime_error=>assocname_missing
+                  entity    = entity_name.
+    elseif operation = ops-evaluate.
+      raise shortdump type cx_abap_behv_runtime_error
+        message e024 with entity_name
+        exporting "textid    = cx_abap_behv_runtime_error=>assocname_missing
+                  entity    = entity_name.
+    endif.
+  elseif operation na cl_abap_behv_ctrl=>op_chars_w_sub.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e021 with entity_name operation
+      exporting "textid    = cx_abap_behv_runtime_error=>subname_illegal
+                entity    = entity_name
+                operation = operation
+                tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+
+  if sy-subrc <> 0 or <data> is initial.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e010 with entity_name operation
+      exporting "textid    = cx_abap_behv_runtime_error=>instances_missing
+                entity    = entity_name
+                operation = operation.
+  endif.
+
+  " more: type checks
+
+endif.  " --- data checks
+
+if operation <> ops-read_ba.
+  clear full.
+else.
+  full = cond #( when full is initial then 'L' else 'R' ).
+endif.
+
+append value #( op          = operation
+                entity_name = entity_name
+                sub_name    = cond #( when operation ca cl_abap_behv_ctrl=>op_chars_w_sub then sub_name )
+                instances   = instances
+                full        = full
+                results     = results
+                links       = links
+                is_draft    = is_draft
+              ) to me->activities.
+
+job = me.  " for fluent style
+
+endmethod.
+
+
+method ADD_RETRIEVALS_TAB.
+
+loop at retrievals assigning field-symbol(<actv>).
+
+  add_retrievals( entity_name = <actv>-entity_name
+                  operation   = <actv>-op
+                  sub_name    = <actv>-sub_name
+                  instances   = <actv>-instances
+                  full        = <actv>-full
+                  results     = <actv>-results
+                  links       = <actv>-links
+                  is_draft    = <actv>-is_draft
+             ).
+
+endloop.
+
+endmethod.
+
+
+method add_retrievals_tab_read.
+
+  data entities type abp_entity_name_tab.
+  data roots type abp_entity_name_tab.
+
+  loop at retrievals assigning field-symbol(<actv>).
+
+    if m_privileged is not initial.
+      insert <actv>-entity_name into table entities.
+    endif.
+
+    add_retrievals( entity_name = <actv>-entity_name
+                    operation   = <actv>-op
+                    sub_name    = <actv>-sub_name
+                    instances   = <actv>-instances
+                    full        = <actv>-full
+                    results     = <actv>-results
+                    links       = <actv>-links
+               ).
+
+  endloop.
+
+  if m_privileged is not initial.
+    cl_abap_behvdescr=>get_roots_of_entities(
+      exporting entities = entities
+      changing  roots = roots ).
+    " in privileged mode only activities for ONE root is allowed
+    if lines( roots ) > 1.
+      raise shortdump type cx_abap_behvdescr
+        exporting
+          textid = cx_abap_behvdescr=>not_this_root
+          text1  = conv #( roots[ 1 ] )
+          text2  = conv #( roots[ 2 ] ).
+    endif.
+  endif.
+
+endmethod.
+
+
+method CREATE.
+
+"verify correct ticket or legal caller
+call 'BEHV_EXEC' id 'OP' field 16 id 'TICKET' field eml_ticket.
+
+job = new #( ).
+
+job->op_chars_w_adh = `y`.  " operations with Active/Draft Handling
+
+if attrs_from is not initial.
+  job->m_in_local_mode   = cond #( when in_local_mode is supplied then in_local_mode
+                                   else attrs_from->m_in_local_mode ).
+  job->m_internal        = cond #( when for_eml = 'I' then intrn_eml
+                                   else attrs_from->m_internal ).
+  job->m_privileged      = cond #( when privileged is supplied then privileged
+                                   else attrs_from->m_privileged ).
+  job->m_from_projection = attrs_from->m_from_projection.
+  job->m_from_interface  = attrs_from->m_from_interface.
+  job->eml_position      = attrs_from->eml_position.
+else.
+  job->m_in_local_mode  = xsdbool( in_local_mode is not initial or for_eml = 'O' ).
+  job->m_internal       = cond #( when for_eml = 'I' then intrn_eml ).
+  " take 'privileged' flag from running EML statement if there is one
+  " (avoid need to pipe thru all *SP calls)
+  job->m_privileged = xsdbool( privileged is not initial
+   or ( for_eml ca ' I' and privileged is not supplied and
+        curr_eml_job is not initial and
+        curr_eml_job->m_privileged is not initial )
+   ).
+* deferred to CALL_HANDLER, where the job roots can be compared:
+*  if ( for_eml is initial or job->m_in_local_mode is not initial )
+*   and curr_p_b_job is not initial.
+*    job->m_from_projection = curr_p_b_job->m_from_projection.
+*  endif.
+  job->eml_position = value #( program = eml_program include = eml_include line = eml_line ).
+endif.
+
+job->m_level = read_direct.
+
+if log is not initial.
+  job->log = log.
+else.
+  job->log = cl_abap_behv_log=>create( ).
+endif.
+
+job->m_check_data = check_data.
+
+endmethod.
+
+
+method GET_BEHAVIOR.
+
+loop at actv_roots assigning field-symbol(<root>).
+
+  clear: bdi_ops.
+
+  CL_ABAP_BEHV_CTRL=>GET_IMPLEMENTATIONS_KRN(
+    exporting root_entity = <root> "-name
+              no_buffer   = ' '
+              kind_pos    = 'R'  " include only [R]ead methods
+              kind_neg    = cond #( when m_content = content_active
+                                    then cl_abap_behv_ctrl=>C_IMPL_REQ_DRAFT   " no DRAFT entries
+                                    when m_content = content_draft
+                                    then cl_abap_behv_ctrl=>C_IMPL_REQ_ACTIVE  " no ACTIVE entries
+                                  )
+    importing rc          = data(rc)
+    changing  impl_ops    = bdi_ops    " (appending)
+  ).
+
+  if rc <= 4 and bdi_ops is not initial.
+    insert lines of bdi_ops into table behavior.
+  endif.
+
+endloop.
+
+endmethod.
+ENDCLASS.

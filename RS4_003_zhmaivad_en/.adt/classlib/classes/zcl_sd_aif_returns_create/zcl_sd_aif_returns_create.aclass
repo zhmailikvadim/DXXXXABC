@@ -1,0 +1,567 @@
+CLASS zcl_sd_aif_returns_create DEFINITION
+  PUBLIC FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    CONSTANTS gc_max_item_id TYPE posnr_va VALUE '999' ##NO_TEXT.
+    CONSTANTS:
+      BEGIN OF gc_ref_code,
+        new_item   TYPE sdesr_purchase_order_by_custom VALUE 'NEW_ITEM',
+        ndlv_under TYPE sdesr_purchase_order_by_custom VALUE 'NDLV_UNDER',
+        ndlv_over  TYPE sdesr_purchase_order_by_custom VALUE 'NDLV_OVER',
+        dlv_under  TYPE sdesr_purchase_order_by_custom VALUE 'DLV_UNDER',
+        dlv_over   TYPE sdesr_purchase_order_by_custom VALUE 'DLV_OVER',
+        dlv_happy  TYPE sdesr_purchase_order_by_custom VALUE 'DLV_HAPPY',
+      END OF gc_ref_code.
+    CONSTANTS:
+      BEGIN OF gc_status,
+        over_rec     TYPE sdesr_sddocument_reason_gfn VALUE 'R25',
+        diff_grading TYPE sdesr_sddocument_reason_gfn VALUE 'R26',
+        diff_size    TYPE sdesr_sddocument_reason_gfn VALUE 'R27',
+      END OF gc_status.
+    CONSTANTS gc_invoice_source_current TYPE zsd_invoice_source VALUE 'I' ##NO_TEXT.
+    CONSTANTS gc_invoice_source_legacy  TYPE zsd_invoice_source VALUE 'L' ##NO_TEXT.
+
+    CLASS-METHODS add_items
+      CHANGING cs_data TYPE sdsls_esr_customer_return_bulk.
+
+    CLASS-DATA gt_buffer_external_id TYPE zsd_tt_return_orders_vbap.
+
+  PRIVATE SECTION.
+    TYPES:
+      BEGIN OF gtyp_pos_data,
+        ext_ref_doc_id   TYPE sd_ext_ref_doc_id,
+        vbeln            TYPE vbeln_va,
+        posnr            TYPE posnr_va,
+        arktx            TYPE arktx,
+        matnr            TYPE matnr,
+        werks            TYPE werks_ext,
+        vrkme            TYPE vrkme,
+        kwmeng           TYPE kwmeng,
+        msr_ret_reason   TYPE msr_returns_reason,
+        msr_approv_block TYPE msr_approval_block,
+        msr_refund_code  TYPE msr_returns_refund_code,
+        gbsta            TYPE gbsta,
+        auart            TYPE auart,
+        vkorg            TYPE vkorg,
+        vtweg            TYPE vtweg,
+        kunag            TYPE kunag,
+        dlvqty_bu        TYPE dlvqty,
+        dlvqty_su        TYPE dlvqty,
+        wmeng            TYPE wmeng,
+        inspection_code  TYPE msr_d_executed-inspection_code,
+        refund_type      TYPE msr_d_executed-refund_type,
+        refund_control   TYPE msr_d_executed-refund_control,
+        fu_code          TYPE msr_i_chain-fu_code,
+        mat_received     TYPE msr_i_chain-mat_received,
+      END OF gtyp_pos_data.
+    TYPES gtyp_t_pos_data TYPE SORTED TABLE OF gtyp_pos_data WITH NON-UNIQUE KEY ext_ref_doc_id.
+
+    CLASS-METHODS get_position_data
+      IMPORTING iv_externaldoc_id TYPE sd_ext_ref_doc_id
+                iv_sendersys_id   TYPE sdesr_business_system_id
+      RETURNING VALUE(rts_result) TYPE gtyp_t_pos_data.
+
+    CLASS-METHODS get_new_posnr
+      IMPORTING it_item          TYPE sdsls_esr_cust_return_item_tab
+      RETURNING VALUE(rv_result) TYPE posnr_va.
+
+    CLASS-METHODS manage_multiply_inspect_codes
+      CHANGING cs_data TYPE sdsls_esr_customer_return_bulk.
+
+    CLASS-METHODS get_external_document_id
+      IMPORTING iv_ref_id            TYPE sdesr_business_document_messag
+      RETURNING VALUE(rv_ext_doc_id) TYPE sd_ext_ref_doc_id.
+
+    CLASS-METHODS change_external_item_id
+      IMPORTING iv_customer_return_id TYPE vbeln
+                iv_no_buffer          TYPE abap_boolean OPTIONAL
+      CHANGING  cs_item               TYPE sdsls_esr_customer_return_item
+                cv_external_item_id   TYPE posnr_va.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_AIF_RETURNS_CREATE IMPLEMENTATION.
+
+
+  METHOD add_items.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " KARPOSER     | 02.08.2022 | 12528     : Enhance return order update  -
+    "              |            | DS4K925688                               -
+    " -----------------------------------------------------------------------
+    " DOLYADMI     | 09.03.2023 | 18455     : Feature - Development - O2C- -
+    "              |            | DS4K945140                               -
+    " -----------------------------------------------------------------------
+    " DOLYADMI     | 27.04.2023 | 20730     : Feature - Development - O2C- -
+    "              |            | DS4K951058                               -
+    " -----------------------------------------------------------------------
+    " DOLYADMI     | 26.08.2023 | 24464     : Return order confirmation in -
+    "              |            | DS4K961548                               -
+    " -----------------------------------------------------------------------
+    " ANIPEVIN     | 13.09.2023 | 25135     : Defect-Test-Return order conf-
+    "              |            | DS4K963930                               -
+    " -----------------------------------------------------------------------
+    " IAPRYALE     | 03.11.2023 | 25135 : O2C - Returns - LPD check        -
+    "              |            | DS4K963930                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 23.11.2023 | 25135 : O2C - Returns - LPD check        -
+    "              |            | DS4K963930                               -
+    " -----------------------------------------------------------------------
+    CHECK cs_data-customer_return IS NOT INITIAL.
+
+    TRY.
+        FINAL(lt_cust) = zcl_pe_hm_basic=>get_table( '2339' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    zcl_sd_o2c_posex_share=>clear( ).
+
+    zcl_sd_return_data_provider=>gv_wms_call = abap_true.
+
+    FINAL(lv_external_id) = get_external_document_id( cs_data-message_header-reference_id-content ).
+
+    " Get DB data for all items
+    FINAL(lts_pos_data) = get_position_data( iv_externaldoc_id = lv_external_id
+                                             iv_sendersys_id   = cs_data-message_header-sender_business_system_id ).
+
+    " Find a "template" item
+    LOOP AT cs_data-customer_return ASSIGNING FIELD-SYMBOL(<ls_header>).
+      <ls_header>-external_doc_last_change_date = cs_data-message_header-creation_date_time.
+      <ls_header>-external_document_id          = lv_external_id.
+      ASSIGN <ls_header>-item[ 1 ] TO FIELD-SYMBOL(<ls_template_item>).
+      IF sy-subrc = 0.
+        FINAL(ls_template_item) = <ls_template_item>.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    " IF the same line item exists more than once and the grading is different
+    manage_multiply_inspect_codes( CHANGING cs_data = cs_data ).
+
+    LOOP AT cs_data-customer_return ASSIGNING <ls_header>.
+      SORT <ls_header>-item BY external_item_id.       "#EC CI_SORTLOOP
+
+      " If no entry in the database - hardcode the return info
+      LOOP AT <ls_header>-item ASSIGNING FIELD-SYMBOL(<ls_item>). "#EC CI_NESTED
+        IF line_exists( lts_pos_data[ ext_ref_doc_id = <ls_header>-external_document_id
+                                      posnr          = <ls_item>-external_item_id ] )  ##WARN_OK.
+          CONTINUE.
+        ENDIF.
+        <ls_item>-return_information-returns_refund_procg_mode = lt_cust[ 1 ]-field1.
+        <ls_item>-return_information-returns_refund_extent     = lt_cust[ 1 ]-field2.
+        IF <ls_item>-external_item_id < gc_max_item_id.
+          <ls_item>-return_information-return_reason = gc_status-diff_grading.
+        ENDIF.
+      ENDLOOP.
+
+      LOOP AT lts_pos_data ASSIGNING FIELD-SYMBOL(<ls_pos_data>) "#EC CI_NESTED
+           WHERE ext_ref_doc_id = <ls_header>-external_document_id.
+
+        READ TABLE <ls_header>-item ASSIGNING <ls_item>
+             WITH KEY external_item_id = <ls_pos_data>-posnr BINARY SEARCH ##WARN_OK.
+
+        IF sy-subrc = 0.
+
+          IF <ls_item>-material = <ls_pos_data>-matnr.
+
+            IF    <ls_pos_data>-dlvqty_bu > <ls_pos_data>-wmeng
+               OR <ls_pos_data>-gbsta     = 'C'.
+              " No open quantity for item - new item
+              INSERT VALUE #( BASE <ls_item>
+                              external_item_id                         = get_new_posnr( <ls_header>-item )
+                              return_information-returns_refund_extent = <ls_pos_data>-msr_refund_code ) INTO TABLE <ls_header>-item
+                     ASSIGNING FIELD-SYMBOL(<ls_new_item>).
+
+              <ls_item>-requested_quantity-unit_code = <ls_pos_data>-vrkme.
+              <ls_item>-requested_quantity-content   = <ls_pos_data>-kwmeng.
+
+              <ls_new_item>-material = <ls_pos_data>-matnr.
+              <ls_new_item>-return_information-return_reason                  = <ls_pos_data>-msr_ret_reason.
+              <ls_new_item>-return_information-rets_mgmt_processing_block     = <ls_pos_data>-msr_approv_block.
+              <ls_new_item>-return_information-returns_refund_extent          = <ls_pos_data>-msr_refund_code.
+              <ls_new_item>-return_information-ret_matl_insp_result_code      = <ls_pos_data>-inspection_code.
+              <ls_new_item>-return_information-cust_ret_itm_follow_up_activit = <ls_pos_data>-fu_code.
+              <ls_new_item>-return_information-returns_material_has_been_rece = <ls_pos_data>-mat_received.
+              <ls_new_item>-return_information-returns_refund_type            = <ls_pos_data>-refund_type.
+              <ls_new_item>-return_information-returns_refund_procg_mode      = <ls_pos_data>-refund_control.
+
+              zcl_sd_o2c_posex_share=>add_item( iv_posnr = CONV #( <ls_new_item>-external_item_id )
+                                                iv_posex = CONV #( <ls_item>-external_item_id ) ).
+            ELSEIF     <ls_pos_data>-dlvqty_su IS INITIAL
+                   AND <ls_pos_data>-wmeng      = <ls_item>-requested_quantity-content.
+              " Happy flow -do nothing
+
+            ELSEIF     <ls_pos_data>-dlvqty_su IS INITIAL
+                   AND <ls_pos_data>-wmeng      > <ls_item>-requested_quantity-content.
+              " Under receive-first update
+              <ls_item>-purchase_order_by_customer = gc_ref_code-ndlv_under.
+
+            ELSEIF     <ls_pos_data>-dlvqty_su IS INITIAL
+                   AND <ls_pos_data>-wmeng      < <ls_item>-requested_quantity-content.
+              " Over receive-one update
+              INSERT VALUE #( BASE <ls_item>
+                              external_item_id                         = get_new_posnr( <ls_header>-item )
+                              return_information-returns_refund_extent = <ls_pos_data>-msr_refund_code ) INTO TABLE <ls_header>-item
+                     ASSIGNING <ls_new_item>.
+
+              <ls_new_item>-requested_quantity-unit_code = <ls_pos_data>-vrkme.
+              <ls_new_item>-material = <ls_pos_data>-matnr.
+              <ls_new_item>-return_information-return_reason = gc_status-over_rec.
+              <ls_new_item>-requested_quantity-content = <ls_item>-requested_quantity-content - <ls_pos_data>-wmeng.
+
+              <ls_item>-requested_quantity-content = <ls_pos_data>-wmeng.
+
+              zcl_sd_o2c_posex_share=>add_item( iv_posnr = CONV #( <ls_new_item>-external_item_id )
+                                                iv_posex = CONV #( <ls_item>-external_item_id ) ).
+
+            ELSEIF     <ls_pos_data>-inspection_code                  = <ls_item>-return_information-ret_matl_insp_result_code
+                   AND <ls_pos_data>-fu_code = <ls_item>-return_information-cust_ret_itm_follow_up_activit
+                   AND <ls_pos_data>-dlvqty_su IS NOT INITIAL
+                   AND <ls_pos_data>-wmeng - <ls_pos_data>-dlvqty_bu  > <ls_item>-requested_quantity-content.
+              " Under receive- after first update
+              <ls_item>-purchase_order_by_customer = gc_ref_code-dlv_under.
+
+            ELSEIF     <ls_pos_data>-inspection_code                  = <ls_item>-return_information-ret_matl_insp_result_code
+                   AND <ls_pos_data>-fu_code = <ls_item>-return_information-cust_ret_itm_follow_up_activit
+                   AND <ls_pos_data>-dlvqty_su IS NOT INITIAL
+                   AND <ls_pos_data>-wmeng - <ls_pos_data>-dlvqty_bu  < <ls_item>-requested_quantity-content.
+              " Over  receive- after first update
+              INSERT VALUE #( BASE <ls_item>
+                              external_item_id                         = get_new_posnr( <ls_header>-item )
+                              return_information-returns_refund_extent = <ls_pos_data>-msr_refund_code ) INTO TABLE <ls_header>-item
+                     ASSIGNING <ls_new_item>.
+
+              <ls_item>-requested_quantity-unit_code = <ls_pos_data>-vrkme.
+
+              <ls_new_item>-material = <ls_pos_data>-matnr.
+              <ls_new_item>-return_information-return_reason = gc_status-over_rec.
+              <ls_new_item>-requested_quantity-content = <ls_item>-requested_quantity-content - ( <ls_pos_data>-wmeng - <ls_pos_data>-dlvqty_bu ).
+
+              <ls_item>-requested_quantity-content = <ls_pos_data>-wmeng.
+              <ls_item>-purchase_order_by_customer = gc_ref_code-dlv_over.
+              zcl_sd_o2c_posex_share=>add_item( iv_posnr = CONV #( <ls_new_item>-external_item_id )
+                                                iv_posex = CONV #( <ls_item>-external_item_id ) ).
+            ELSEIF     <ls_pos_data>-inspection_code                  = <ls_item>-return_information-ret_matl_insp_result_code
+                   AND <ls_pos_data>-fu_code = <ls_item>-return_information-cust_ret_itm_follow_up_activit
+                   AND <ls_pos_data>-dlvqty_su IS NOT INITIAL
+                   AND <ls_pos_data>-wmeng - <ls_pos_data>-dlvqty_bu  = <ls_item>-requested_quantity-content.
+              " Happy flow-after first update
+              <ls_item>-purchase_order_by_customer = gc_ref_code-dlv_happy.
+
+            ELSEIF     <ls_pos_data>-dlvqty_su IS NOT INITIAL
+                   AND (    <ls_pos_data>-inspection_code <> <ls_item>-return_information-ret_matl_insp_result_code
+                         OR <ls_pos_data>-fu_code         <> <ls_item>-return_information-cust_ret_itm_follow_up_activit ).
+              " Same article different grade - new item
+              INSERT VALUE #( BASE <ls_item>
+                              external_item_id                         = get_new_posnr( <ls_header>-item )
+                              return_information-returns_refund_extent = <ls_pos_data>-msr_refund_code ) INTO TABLE <ls_header>-item
+                     ASSIGNING <ls_new_item>.
+
+              <ls_item>-requested_quantity-unit_code = <ls_pos_data>-vrkme.
+              <ls_item>-requested_quantity-content   = <ls_pos_data>-kwmeng.
+              <ls_item>-return_information-ret_matl_insp_result_code      = <ls_pos_data>-inspection_code.
+              <ls_item>-return_information-cust_ret_itm_follow_up_activit = <ls_pos_data>-fu_code.
+
+              <ls_new_item>-material = <ls_pos_data>-matnr.
+              <ls_new_item>-return_information-return_reason                  = gc_status-diff_grading.
+              <ls_new_item>-return_information-rets_mgmt_processing_block     = <ls_pos_data>-msr_approv_block.
+              <ls_new_item>-return_information-returns_refund_extent          = <ls_pos_data>-msr_refund_code.
+              <ls_new_item>-return_information-returns_material_has_been_rece = <ls_pos_data>-mat_received.
+              <ls_new_item>-return_information-returns_refund_type            = <ls_pos_data>-refund_type.
+              <ls_new_item>-return_information-returns_refund_procg_mode      = <ls_pos_data>-refund_control.
+
+              zcl_sd_o2c_posex_share=>add_item( iv_posnr = CONV #( <ls_new_item>-external_item_id )
+                                                iv_posex = CONV #( <ls_item>-external_item_id ) ).
+            ENDIF.
+
+          ELSE.
+            " Different articles
+            INSERT VALUE #( BASE <ls_item>
+                            external_item_id                             = space
+                            return_information-returns_refund_extent     = <ls_pos_data>-msr_refund_code
+                            return_information-returns_refund_type       = <ls_pos_data>-refund_type
+                            return_information-returns_refund_procg_mode = <ls_pos_data>-refund_control ) INTO TABLE <ls_header>-item
+                   ASSIGNING <ls_new_item>.
+
+            <ls_item>-requested_quantity-unit_code = <ls_pos_data>-vrkme.
+            <ls_item>-requested_quantity-content   = <ls_pos_data>-kwmeng.
+            <ls_item>-material = <ls_pos_data>-matnr.
+
+            <ls_new_item>-return_information-return_reason = gc_status-diff_size.
+
+            <ls_item>-return_information-ret_matl_insp_result_code      = <ls_pos_data>-inspection_code.
+            <ls_item>-return_information-rets_mgmt_processing_block     = <ls_pos_data>-msr_approv_block.
+            <ls_item>-return_information-returns_refund_extent          = <ls_pos_data>-msr_refund_code.
+            <ls_item>-return_information-cust_ret_itm_follow_up_activit = <ls_pos_data>-fu_code.
+            <ls_item>-return_information-returns_material_has_been_rece = <ls_pos_data>-mat_received.
+            <ls_item>-return_information-returns_refund_type            = <ls_pos_data>-refund_type.
+            <ls_item>-return_information-returns_refund_procg_mode      = <ls_pos_data>-refund_control.
+          ENDIF.
+        ELSEIF ls_template_item IS NOT INITIAL.
+
+          " No item found - create a new item
+          FINAL(lv_index) = sy-tabix.
+          INSERT VALUE #( BASE ls_template_item
+                          customer_return_item_id                           = space
+                          external_item_id                                  = <ls_pos_data>-posnr
+                          customer_return_item_text                         = <ls_pos_data>-arktx
+                          material                                          = <ls_pos_data>-matnr
+                          plant                                             = <ls_pos_data>-werks
+                          action_code                                       = '04'
+                          requested_quantity-unit_code                      = <ls_pos_data>-vrkme
+                          requested_quantity-content                        = <ls_pos_data>-kwmeng
+                          return_information-returns_refund_procg_mode      = <ls_pos_data>-refund_control
+                          return_information-ret_matl_insp_result_code      = <ls_pos_data>-inspection_code
+                          return_information-return_reason                  = <ls_pos_data>-msr_ret_reason
+                          return_information-rets_mgmt_processing_block     = <ls_pos_data>-msr_approv_block
+                          return_information-returns_refund_extent          = <ls_pos_data>-msr_refund_code
+                          return_information-cust_ret_itm_follow_up_activit = <ls_pos_data>-fu_code
+                          return_information-returns_material_has_been_rece = <ls_pos_data>-mat_received
+                          return_information-returns_refund_type            = <ls_pos_data>-refund_type )
+                 INTO <ls_header>-item INDEX lv_index.
+        ENDIF.
+      ENDLOOP.
+
+      " Fill the external_item_id  for the new items
+      LOOP AT <ls_header>-item ASSIGNING <ls_item>       "#EC CI_NESTED
+           WHERE external_item_id = space.
+        <ls_item>-external_item_id = get_new_posnr( <ls_header>-item ).
+      ENDLOOP.
+
+      SORT <ls_header>-item BY external_item_id.       "#EC CI_SORTLOOP
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD get_external_document_id.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " DOLYADMI     | 28.04.2023 | 20730     : Feature - Development - O2C- -
+    "              |            | DS4K951058                               -
+    " -----------------------------------------------------------------------
+
+    DATA lv_salesdocument TYPE vbeln.
+
+    lv_salesdocument = |{ iv_ref_id ALPHA = IN }|.
+
+    SELECT SINGLE externaldocumentid                      "#EC CI_SUBRC
+      FROM i_salesdocument
+      INTO @rv_ext_doc_id
+      WHERE salesdocument = @lv_salesdocument.
+  ENDMETHOD.
+
+
+  METHOD get_new_posnr.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " KARPOSER     | 02.08.2022 | 12528     : Enhance return order update  -
+    "              |            | DS4K925688                               -
+    " -----------------------------------------------------------------------
+    CHECK it_item IS NOT INITIAL.
+
+    DATA(lt_item) = it_item.
+
+    SORT lt_item BY external_item_id DESCENDING.
+
+    rv_result = lt_item[ 1 ]-external_item_id.
+    rv_result += 10.
+  ENDMETHOD.
+
+
+  METHOD get_position_data.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " KARPOSER     | 18.07.2022 | 11509     : Build - API in S4 to process return order -
+    "              |            | DS4K920039                               -
+    " -----------------------------------------------------------------------
+    " KARPOSER     | 02.08.2022 | 12528     : Enhance return order update  -
+    "              |            | DS4K925688                               -
+    " -----------------------------------------------------------------------
+    " DOLYADMI     | 27.04.2023 | 20730     : Feature - Development - O2C- -
+    "              |            | DS4K951058                               -
+    " -----------------------------------------------------------------------
+    " IAPRYALE     | 05.06.2023 | 21530: O2C - Returns - LPD check         -
+    "              |            | DS4K953169                               -
+    " -----------------------------------------------------------------------
+    SELECT                                                "#EC CI_SUBRC
+           vk~externaldocumentid      AS ext_ref_doc_id,
+           vp~salesdocument           AS vbeln,
+           vp~salesdocumentitem       AS posnr,
+           vp~salesdocumentitemtext   AS arktx,
+           vp~material                AS matnr,
+           vp~plant                   AS werks,
+           vp~orderquantityunit       AS vrkme,
+           vp~orderquantity           AS kwmeng,
+           vp~returnreason            AS msr_ret_reason,
+           vp~retsmgmtprocessingblock AS msr_approv_block,
+           vp~returnsrefundextent     AS msr_refund_code,
+           vp~sdprocessstatus         AS gbsta,
+           vp~salesdocumenttype       AS auart,
+           vp~salesorganization       AS vkorg,
+           vp~distributionchannel     AS vtweg,
+           vp~soldtoparty             AS kunag,
+           vp2~dlvqty_bu,
+           vp2~dlvqty_su,
+           vp2~wmeng,
+           msr_d~inspection_code,
+           msr_d~refund_type,
+           msr_d~refund_control,
+           msr_i~fu_code,
+           msr_i~mat_received
+      FROM                                              i_salesdocument AS vk
+      JOIN i_salesdocumentitem
+           AS vp ON vk~salesdocument = vp~salesdocument
+                 LEFT JOIN
+                                                                zsd_c_vbep_aggr_discrepancies AS vp2 ON  vp2~vbeln = vp~salesdocument
+                                                                                                     AND vp2~posnr = vp~salesdocumentitem
+                     LEFT JOIN
+                                                                    msr_d_executed AS msr_d                  "#EC CI_BUFFJOIN
+                                                                                            ON  msr_d~doc_nr   = vp~salesdocument
+                                                                                            AND msr_d~doc_item = concat( '0000', vp~salesdocumentitem )
+                         LEFT JOIN
+                                                                        msr_i_chain AS msr_i ON msr_i~chain_id = msr_d~chain_id
+      WHERE vk~externaldocumentid       = @iv_externaldoc_id
+        AND vk~senderbusinesssystemname = @iv_sendersys_id
+      INTO CORRESPONDING FIELDS OF TABLE @rts_result.
+  ENDMETHOD.
+
+
+  METHOD change_external_item_id.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 27.11.2023 | 25135     : Feature- Defect- Test- Retur -
+    "              |            | DS4K963930                               -
+    " -----------------------------------------------------------------------
+    IF iv_no_buffer = abap_false.
+      APPEND VALUE #( material          = cs_item-material
+                      salesdocument     = iv_customer_return_id
+                      externalitemidold = cs_item-external_item_id
+                      externalitemidnew = cv_external_item_id ) TO gt_buffer_external_id.
+    ENDIF.
+    cs_item-external_item_id = cv_external_item_id.
+    cv_external_item_id += 1.
+  ENDMETHOD.
+
+
+  METHOD manage_multiply_inspect_codes.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 27.11.2023 | 25135     : Feature- Defect- Test- Retur -
+    "              |            | DS4K963930                               -
+    " -----------------------------------------------------------------------
+
+    DATA lv_customer_return_id TYPE vbeln.
+    DATA lv_posnr_va           TYPE posnr_va.
+
+    LOOP AT cs_data-customer_return ASSIGNING FIELD-SYMBOL(<ls_header>).
+      DATA ls_prev_item LIKE LINE OF <ls_header>-item.
+      DATA(lt_item) = <ls_header>-item.
+
+      FINAL(lts_pos_data) = get_position_data( iv_externaldoc_id = <ls_header>-external_document_id
+                                               iv_sendersys_id   = cs_data-message_header-sender_business_system_id ).
+      lv_customer_return_id = VALUE #( lts_pos_data[ ext_ref_doc_id = <ls_header>-external_document_id ]-vbeln OPTIONAL ).
+
+      SORT lt_item BY external_item_id                 "#EC CI_SORTLOOP
+                      material
+                      return_information-ret_matl_insp_result_code.
+
+      DATA(lv_item_id) = gc_max_item_id.
+
+      LOOP AT lt_item ASSIGNING FIELD-SYMBOL(<ls_item_initial>). "#EC CI_NESTED
+        lv_posnr_va = <ls_item_initial>-external_item_id.
+        <ls_item_initial>-external_item_id            = lv_posnr_va.
+
+        <ls_item_initial>-product_tax_classification9 = COND #( WHEN line_exists( lts_pos_data[
+                                                                                      posnr           = <ls_item_initial>-external_item_id ##WARN_OK "#EC CI_SORTSEQ
+                                                                                      matnr           = <ls_item_initial>-material
+                                                                                      inspection_code = <ls_item_initial>-return_information-ret_matl_insp_result_code ]  )
+                                                                THEN ''
+                                                                ELSE 'X' ).
+      ENDLOOP.
+
+      SORT lt_item BY external_item_id                 "#EC CI_SORTLOOP
+                      material
+                      product_tax_classification9
+                      return_information-ret_matl_insp_result_code.
+
+      LOOP AT lt_item ASSIGNING <ls_item_initial>.       "#EC CI_NESTED
+        CLEAR <ls_item_initial>-product_tax_classification9.
+      ENDLOOP.
+
+      LOOP AT lt_item ASSIGNING FIELD-SYMBOL(<ls_item_g>) WHERE external_item_id < gc_max_item_id "#EC CI_NESTED
+           GROUP BY ( external_item_id = <ls_item_g>-external_item_id
+                      material         = <ls_item_g>-material )
+           ASSIGNING FIELD-SYMBOL(<ls_item_gr>).
+        CLEAR ls_prev_item.
+        LOOP AT GROUP <ls_item_gr> ASSIGNING FIELD-SYMBOL(<ls_item_1>).
+          IF ls_prev_item IS INITIAL.
+            ls_prev_item = <ls_item_1>.
+          ELSEIF ls_prev_item-return_information-ret_matl_insp_result_code <> <ls_item_1>-return_information-ret_matl_insp_result_code.
+
+            change_external_item_id( EXPORTING iv_customer_return_id = lv_customer_return_id
+                                     CHANGING  cs_item               = <ls_item_1>
+                                               cv_external_item_id   = lv_item_id ).
+
+            <ls_item_1>-return_information-return_reason = gc_status-diff_grading.
+          ENDIF.
+        ENDLOOP.
+      ENDLOOP.
+
+      LOOP AT lt_item ASSIGNING <ls_item_g> WHERE external_item_id >= gc_max_item_id "#EC CI_NESTED
+           GROUP BY ( external_item_id = <ls_item_g>-external_item_id )
+           ASSIGNING FIELD-SYMBOL(<ls_item_gr_max>).
+
+        CLEAR ls_prev_item.
+        LOOP AT GROUP <ls_item_gr_max> ASSIGNING FIELD-SYMBOL(<ls_item_gr_max_line>) WHERE external_item_id = gc_max_item_id.
+          IF ls_prev_item IS INITIAL.
+            ls_prev_item = <ls_item_gr_max_line>.
+            IF <ls_item_gr_max_line>-return_information-return_reason <> gc_status-diff_grading.
+              <ls_item_gr_max_line>-return_information-return_reason = gc_status-diff_size.
+            ENDIF.
+            IF lv_item_id = gc_max_item_id.
+              lv_item_id += 1.
+            ENDIF.
+          ELSE.
+            change_external_item_id( EXPORTING iv_customer_return_id = lv_customer_return_id
+                                               iv_no_buffer          = abap_true
+                                     CHANGING  cs_item               = <ls_item_gr_max_line>
+                                               cv_external_item_id   = lv_item_id ).
+            <ls_item_gr_max_line>-return_information-return_reason = gc_status-diff_size.
+          ENDIF.
+        ENDLOOP.
+      ENDLOOP.
+
+      SORT lt_item BY external_item_id. "#EC CI_SORTLOOP
+
+      <ls_header>-item = lt_item.
+      CLEAR lv_item_id.
+    ENDLOOP.
+    zcl_sd_aif_returns_buffer=>get_instance( )->set_add_buffer_data( gt_buffer_external_id ).
+  ENDMETHOD.
+ENDCLASS.

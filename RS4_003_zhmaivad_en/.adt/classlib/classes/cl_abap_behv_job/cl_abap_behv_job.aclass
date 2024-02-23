@@ -1,0 +1,693 @@
+class CL_ABAP_BEHV_JOB definition
+  public
+  inheriting from CL_ABAP_BEHV_JOB_BASE
+  final
+  create private
+
+  global friends CL_ABAP_BEHV_CTRL
+                 CL_ABAP_BEHV_HANDLER_PROJ .
+
+public section.
+
+  data AUGM_BEHAVIOR type TT_BEHAVIOR_HDLR_SORT read-only .
+
+  methods ADD_CHANGES
+    importing
+      !ENTITY_NAME type ABP_ENTITY_NAME
+      !OPERATION type ABP_BEHV_OP_MODIFY
+      !SUB_NAME type T_SUB_NAME optional
+      !INSTANCES type ref to DATA
+      !RESULTS type ref to DATA optional
+      !REQUEST type ref to DATA optional
+      !ACCEPT_INSTANCES_EMPTY type SYCHAR01 optional
+      !IS_DRAFT type ABP_BEHV_FLAG optional
+      !RELATING_TO type DATA optional
+      !RELATING_BY type ABP_BEHV_RELATING_TAB optional
+    returning
+      value(JOB) type ref to CL_ABAP_BEHV_JOB .
+  methods ADD_CHANGES_TAB
+    importing
+      !CHANGES type ABP_BEHV_ACTIVITIES_TAB
+      !ACCEPT_INSTANCES_EMPTY type SYCHAR01 optional .
+  methods ADD_CHANGES_TAB_MODIFY
+    importing
+      !CHANGES type ABP_BEHV_CHANGES_TAB .
+  methods ADD_CHANGES_TAB_LOCK
+    importing
+      !CHANGES type ABP_BEHV_LOCKS_TAB .
+  class-methods CREATE
+    importing
+      !LOG type ref to IF_ABAP_BEHV_LOG optional
+      !CHECK_DATA type SYCHAR01 default ' '
+      !FOR_EML type SYCHAR01 default ' '
+      !AUGMENTING type SYCHAR01 optional
+      value(IN_LOCAL_MODE) type SYCHAR01 optional
+      value(DRAFT_ACTIVATE) type SYCHAR01 optional
+      value(IS_INDIRECT) type SYCHAR01 default ' '
+      value(EML_TICKET) type I default -1
+      value(TOKEN) type XSDUUID_RAW optional
+      !ATTRS_FROM type ref to CL_ABAP_BEHV_JOB_BASE optional
+      value(PRIVILEGED) type SYCHAR01 optional
+      !EML_PROGRAM type PROGRAM optional
+      !EML_INCLUDE type PROGRAM optional
+      !EML_LINE type I optional
+    returning
+      value(JOB) type ref to CL_ABAP_BEHV_JOB .
+  class-methods SERIALIZE_KEY
+    importing
+      !INSTANCE type DATA
+    exporting
+      !KEY type CL_ABAP_BEHV_CTRL=>T_SERIAL_KEY
+      !CID type ABP_BEHV_CID .
+  class-methods DESERIALIZE_KEY
+    importing
+      !KEY type CL_ABAP_BEHV_CTRL=>T_SERIAL_KEY
+      !CID type ABP_BEHV_CID
+    changing
+      !INSTANCE type DATA .
+protected section.
+
+  methods GET_BEHAVIOR
+    redefinition .
+private section.
+
+  data FOR_EML type SYCHAR01 .
+
+  methods ADD_PRECHECK_FOR_AUGM_ONLY
+    importing
+      !AUGM_HDLR type TT_BEHAVIOR_HDLR_SORT
+    changing
+      !BDI_OPS type TT_BEHAVIOR_TRIG_SORT .
+  methods PROCESS_RELATING
+    importing
+      !ENTITY_NAME type ABP_ENTITY_NAME
+      !OPERATION type ABP_BEHV_OP_MODIFY
+      !INSTANCES type DATA
+      !RELATING_TO type DATA
+      !RELATING_BY type ABP_BEHV_RELATING_TAB
+    changing
+      !CC_OK type SYCHAR01 optional .
+ENDCLASS.
+
+
+
+CLASS CL_ABAP_BEHV_JOB IMPLEMENTATION.
+
+
+method ADD_CHANGES.
+
+if m_closed is not initial.
+  raise shortdump type cx_abap_behv_runtime_error
+    message e012.  " job is CLOSEd
+endif.
+
+data cc_ok type sychar01 value 'X'.
+
+clear CL_ABAP_BEHV_CTRL=>CC_ERR-OP.
+
+assign instances->* to field-symbol(<data>).
+
+if <data> is assigned and ( relating_by is not initial or m_augmenting is not initial ).
+  process_relating(
+   exporting  entity_name = entity_name
+              operation   = operation
+              instances   = <data>
+              relating_to = relating_to
+              relating_by = relating_by
+  changing    cc_ok       = cc_ok ).
+endif.
+
+if m_check_data is initial.
+  if <data> is not assigned or ( <data> is initial and accept_instances_empty is initial ).
+    return.
+  endif.
+  unassign <data>.
+else.
+
+  if operation na cl_abap_behv_ctrl=>op_chars_M.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e011 with entity_name operation
+      exporting "textid    = cx_abap_behv_runtime_error=>operation_illegal
+                entity    = entity_name
+                operation = operation
+                tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+
+  if sub_name is initial.
+    if operation = ops-create_ba.
+      raise shortdump type cx_abap_behv_runtime_error
+        message e023 with entity_name
+        exporting "textid    = cx_abap_behv_runtime_error=>assocname_missing
+                  entity    = entity_name.
+    elseif operation = ops-action or operation = ops-evaluate.
+      raise shortdump type cx_abap_behv_runtime_error
+        message e024 with entity_name
+        exporting "textid    = cx_abap_behv_runtime_error=>actionname_missing
+                  entity    = entity_name.
+    endif.
+  elseif operation na cl_abap_behv_ctrl=>op_chars_w_sub.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e021 with entity_name operation
+      exporting "textid    = cx_abap_behv_runtime_error=>subname_illegal
+                entity    = entity_name
+                operation = operation
+                tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+
+  if <data> is not assigned or <data> is initial.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e010 with entity_name operation
+      exporting "textid    = cx_abap_behv_runtime_error=>instances_missing
+                entity    = entity_name
+                operation = operation.
+  endif.
+
+if operation <> ops-action.  " ***TODO/ACTIONS*** cl_abap_behvdescr=>get_action_type
+  try.
+    data(td) = cl_abap_behvdescr=>get_type( p_name = entity_name p_op = operation ).
+  catch cx_abap_behvdescr into data(tde).
+    raise shortdump type cx_abap_behv_runtime_error
+      message e009 with entity_name operation
+      exporting previous  = tde
+                "textid    = cx_abap_behv_runtime_error=>entity_wrong_type
+                entity    = entity_name
+                operation = operation.
+  endtry.
+  if not td->applies_to_data( <data> ).
+    "data(tn) = td->m_tab_descr->get_relative_name( ).
+
+" for debugging:
+data td_data type ref to data. create data td_data type handle td.
+assign td_data->* to field-symbol(<td_tab>). move-corresponding <data> to <td_tab>.
+
+    raise shortdump type cx_abap_behv_runtime_error
+      message e009 with entity_name operation
+      exporting "textid    = cx_abap_behv_runtime_error=>instances_wrong_type
+                entity    = entity_name
+                operation = operation.
+  endif.
+endif.
+
+endif.  " --- data checks
+
+append value #( op          = operation
+                entity_name = entity_name
+                sub_name    = cond #( when operation ca cl_abap_behv_ctrl=>op_chars_w_sub then sub_name )
+                instances   = instances
+                results     = results
+                links       = request
+                is_draft    = is_draft
+              ) to me->activities.
+
+if cc_ok is initial.
+  cl_abap_behv_ctrl=>cc_err-OP     = operation.
+  cl_abap_behv_ctrl=>cc_err-ENTITY = entity_name.
+  cl_abap_behv_ctrl=>cc_err-FIELD  = sub_name.
+  cl_abap_behv_ctrl=>cc_err-ROOT   = cl_abap_behv_ctrl=>CURR_PROJ_HDLR->m_proj_root.
+endif.
+
+job = me.  " for fluent style
+
+endmethod.
+
+
+method ADD_CHANGES_TAB.
+
+loop at changes assigning field-symbol(<actv>).
+
+  add_changes( entity_name = <actv>-entity_name
+               operation   = <actv>-op
+               sub_name    = <actv>-sub_name
+               instances   = <actv>-instances
+               results     = <actv>-results
+               request     = <actv>-links
+               " these parameters only for use with projection (CL_ABAP_BEHV_HANDLER_PROJ):
+               is_draft    = <actv>-is_draft
+               accept_instances_empty = accept_instances_empty
+             ).
+
+endloop.
+
+endmethod.
+
+
+method ADD_CHANGES_TAB_LOCK.
+
+loop at changes assigning field-symbol(<chng>).
+
+  add_changes( entity_name = <chng>-entity_name
+               operation   = ops-lock
+               instances   = <chng>-instances ).
+
+endloop.
+
+endmethod.
+
+
+method add_changes_tab_modify.
+
+  data entities type abp_entity_name_tab.
+  data roots type abp_entity_name_tab.
+
+  loop at changes assigning field-symbol(<chng>).
+
+    if m_privileged is not initial.
+      insert <chng>-entity_name into table entities.
+    endif.
+
+    add_changes( entity_name = <chng>-entity_name
+                 operation   = <chng>-op
+                 sub_name    = <chng>-sub_name
+                 instances   = <chng>-instances
+                 results     = <chng>-results ).
+
+  endloop.
+
+  if m_privileged is not initial.
+   cl_abap_behvdescr=>get_roots_of_entities(
+     exporting entities = entities
+     changing  roots = roots ).
+    " in privileged mode only activities for ONE root is allowed
+    if lines( roots ) > 1.
+      raise shortdump type cx_abap_behvdescr exporting
+         textid = cx_abap_behvdescr=>not_this_root
+         text1 = conv #( roots[ 1 ] )
+         text2 = conv #( roots[ 2 ] ).
+    endif.
+  endif.
+
+
+endmethod.
+
+
+  method add_precheck_for_augm_only.
+
+    " check all augm ops for precheck ops and insert pseudo precheck ops if necessary
+    loop at augm_hdlr assigning field-symbol(<augm_hdlr>).
+
+      case <augm_hdlr>-operation.
+        when cl_abap_behv_ctrl=>op-augm_create.
+          " check for precheck projection handler
+          if not line_exists( bdi_ops[
+               entity = <augm_hdlr>-entity
+               operation = cl_abap_behv_ctrl=>op-create
+               clsname = '%MANAGED'
+               kind = cl_abap_behv_ctrl=>op-precheck ] ).
+            loop at bdi_ops into data(bdi_op)
+              where
+                entity = <augm_hdlr>-entity and
+                operation = cl_abap_behv_ctrl=>op-create and
+                clsname = '%MANAGED' and
+                kind = 'M'.
+              bdi_op-kind = 'P'.
+              bdi_op-ip = -20000. " ip = -20000 magic number for added entries
+              insert bdi_op into table bdi_ops.
+            endloop.
+            assert sy-subrc is initial. " there is augmenting for the operation, so the operation must exists
+          endif.
+        when cl_abap_behv_ctrl=>op-augm_update.
+          if not line_exists( bdi_ops[
+              entity = <augm_hdlr>-entity
+              operation = cl_abap_behv_ctrl=>op-update
+              clsname = '%MANAGED'
+              kind = cl_abap_behv_ctrl=>op-precheck ] ).
+            loop at bdi_ops into bdi_op
+              where
+                entity = <augm_hdlr>-entity and
+                operation = cl_abap_behv_ctrl=>op-update and
+                clsname = '%MANAGED' and
+                kind = 'M'.
+              bdi_op-kind = 'P'.
+              bdi_op-ip = -20000. " ip = -20000 magic number for added entries
+              insert bdi_op into table bdi_ops.
+            endloop.
+            assert sy-subrc is initial. " there is augmenting for the operation, so the operation must exists
+          endif.
+        when cl_abap_behv_ctrl=>op-augm_crt_ba.
+          if not line_exists( bdi_ops[
+              entity = <augm_hdlr>-entity
+              operation = cl_abap_behv_ctrl=>op-create_ba
+              clsname = '%MANAGED'
+              kind = cl_abap_behv_ctrl=>op-precheck
+              op_info = <augm_hdlr>-op_info ] ).
+            loop at bdi_ops into bdi_op
+              where
+                entity = <augm_hdlr>-entity and
+                operation = cl_abap_behv_ctrl=>op-create_ba and
+                clsname = '%MANAGED' and
+                op_info = <augm_hdlr>-op_info and
+                kind = 'M'.
+              bdi_op-kind = 'P'.
+              bdi_op-ip = -20000. " ip = -20000 magic number for added entries
+              insert bdi_op into table bdi_ops.
+            endloop.
+            assert sy-subrc is initial. " there is augmenting for the operation, so the operation must exists
+          endif.
+        when others.
+          " unsupported augmenting operation
+          assert 1 = 0.
+      endcase.
+
+    endloop.
+
+  endmethod.
+
+
+method CREATE.
+
+"verify correct ticket or legal caller
+call 'BEHV_EXEC' id 'OP' field 16 id 'TICKET' field eml_ticket.  "#EC CI_CCALL
+
+job = new #( ).
+
+job->op_chars_w_adh = `xcug`.  " operations with Active/Draft Handling
+
+if attrs_from is not initial.
+  job->m_in_local_mode   = cond #( when in_local_mode is supplied then in_local_mode
+                                   else attrs_from->m_in_local_mode ).
+  job->m_internal        = cond #( when for_eml = 'I' then intrn_eml
+                                   else attrs_from->m_internal ).
+  job->m_privileged      = cond #( when privileged is supplied then privileged
+                                   else attrs_from->m_privileged ).
+  job->m_draft_activate  = cond #( when draft_activate is supplied then draft_activate
+                                   else attrs_from->m_draft_activate ).
+  job->m_from_projection = attrs_from->m_from_projection.
+  job->m_from_interface  = attrs_from->m_from_interface.
+  job->m_token           = cond #( when token is supplied then token
+                                   else attrs_from->m_token ).  " (AUGM_in_PRCH) see below
+  job->eml_position      = attrs_from->eml_position.
+else.
+  job->m_in_local_mode  = xsdbool( in_local_mode is not initial or for_eml = 'O' ).
+  job->m_internal       = cond #( when for_eml = 'I' then intrn_eml ).
+  job->m_draft_activate = draft_activate.
+  " take 'privileged' flag from running EML statement if there is one
+  " (avoid need to pipe thru all *SP calls)
+  job->m_privileged = xsdbool( privileged is not initial
+   or ( for_eml ca ' I' and privileged is not supplied and
+        curr_eml_job is not initial and
+        curr_eml_job->m_privileged is not initial )
+   ).
+  job->m_augmenting = augmenting.
+* deferred to CALL_HANDLER, where the job roots can be compared:
+*  if ( for_eml is initial or job->m_in_local_mode is not initial )
+*   and curr_p_b_job is not initial.
+*    job->m_from_projection = curr_p_b_job->m_from_projection.
+*  endif.
+  try.
+  " (AUGM_in_PRCH): The token connects Precheck and Modify jobs (sharing Augment execution)
+  system-call debugger set system path on.  "#EC CI_SYSTEMCALL  " don't debug into CL_SYSTEM_UUID (auto-off at endmethod)
+  job->m_token = cond #( when token is not initial then token
+                         else cl_system_uuid=>create_uuid_x16_static( ) ).
+  catch cx_uuid_error ##NO_HANDLER.
+  endtry.
+  job->eml_position = value #( program = eml_program include = eml_include line = eml_line ).
+endif.
+
+job->m_level = cond #( when is_indirect is initial then modify_direct ).
+
+job->m_check_data = check_data.
+
+if log is not initial.
+  " external LOG object is provided
+  job->log = log.
+elseif for_eml is initial or for_eml = 'I'.
+  " not a call from EML: internal LOG object is created
+  job->log = cl_abap_behv_log=>create( ).
+"else.
+  " call from EML:
+  " internal LOG object will be created in CL_ABAP_BEHV_CTRL=>EXECUTE_MODIFY
+endif.
+
+job->for_eml = for_eml.
+
+"cl_abap_behv_transaction_ctrl=>start( in_local_mode ).
+
+endmethod.
+
+
+method DESERIALIZE_KEY.
+
+deserial_key 1 instance key cid.
+
+endmethod.
+
+
+method GET_BEHAVIOR.
+
+loop at actv_roots assigning field-symbol(<root>).
+
+  clear bdi_ops.
+
+  data(kind_pos) =
+    cond #( when m_content = content_active
+            then cl_abap_behv_ctrl=>C_IMPL_REQ_ACTIVE  " only ACTIVE entries
+            when m_content = content_draft
+            then cl_abap_behv_ctrl=>C_IMPL_REQ_DRAFT   " only DRAFT entries
+          ).                                           " else both
+  if kind = 'P' and m_content = content_draft.
+    cl_abap_behv_load=>get_load( exporting entity = <root> importing head = data(head) ).
+    if head-impltype <> cl_abap_behv_load=>c_impltype_projection.
+      " non-projection: retrieve ACTIVE entries; they serve DRAFT too
+      kind_pos = cl_abap_behv_ctrl=>C_IMPL_REQ_ACTIVE.
+    else.
+      " projection: retrieve both ACTIVE (for direct precheck-on-PROJ) and DRAFT (for
+      " generic PROJ handler); remove unneeded ACTIVE-for-generic-PROJ entries below
+      clear kind_pos.
+    endif.
+  endif.
+
+  CL_ABAP_BEHV_CTRL=>GET_IMPLEMENTATIONS_KRN(
+    exporting root_entity = <root> "-name
+              no_buffer   = ' '
+              kind_pos    = kind_pos
+              kind_neg    = 'R'  " exclude [R]ead methods
+    importing rc          = data(rc)
+    changing  impl_ops    = bdi_ops    " (appending)
+              impl_order  = bdi_order  " appending
+  ).
+
+  if rc <= 4.
+    " (AUGM_in_PRCH): Augment behavior has kind 'M', but is needed als for 'P'recheck
+    loop at bdi_ops assigning field-symbol(<bdi>) where operation ca cl_abap_behv_ctrl=>op_chars_augmenting.
+      insert <bdi> into table augm_behavior.
+    endloop.
+    if kind = 'P'.
+      " add empty precheck entries for augmenting only
+      add_precheck_for_augm_only( exporting augm_hdlr = augm_behavior changing bdi_ops = bdi_ops ).
+      if m_content = content_draft and kind_pos is initial.
+        delete bdi_ops where kind <> 'P' or ic = cl_abap_behv_ctrl=>mki-projection.
+        " in cases where DRAFT = transposed(ACTIVE) were both returned, transpose(ACTIVE) must be removed;
+        " otherwise the handler would be called twice
+        data cancel_bdi type sorted table of D010BEHV with unique key ic im clsname.
+        loop at bdi_ops into data(bdi_op) where ic < -10.
+          bdi_op-ic = bdi_op-ic + 32768.
+          insert bdi_op into table cancel_bdi.
+        endloop.
+        if cancel_bdi is not initial.
+          loop at bdi_ops assigning field-symbol(<bdi_op>) where ic > 0.
+            if line_exists( cancel_bdi[ ic = <bdi_op>-ic im = <bdi_op>-im clsname = <bdi_op>-clsname ] ).
+              delete bdi_ops.
+             endif.
+          endloop.
+        endif.
+      else.
+        delete bdi_ops where kind <> 'P'.
+      endif.
+    else.
+      delete bdi_ops where kind na 'MmL24678913' or operation ca cl_abap_behv_ctrl=>op_chars_augmenting.
+    endif.
+    insert lines of bdi_ops into table behavior.
+  endif.
+
+endloop.
+
+endmethod.
+
+
+method PROCESS_RELATING.
+
+types: begin of t_idx_key,
+         idx type i,
+         key type cl_abap_behv_ctrl=>t_serial_key,
+         cid type abp_behv_cid,
+       end of t_idx_key.
+
+data inst_refs    type cl_abap_behv_ctrl=>tt_genref.
+data idx_keys     type hashed table of t_idx_key with unique key idx.
+data inst_ref     type cl_abap_behv_ctrl=>t_genref.
+data trg_inst_ref type cl_abap_behv_ctrl=>t_genref.
+data trg_inst     type ref to data.
+data ik           type t_idx_key.
+data dd           type ref to cl_abap_typedescr.
+
+field-symbols <instances>   type index table.
+field-symbols <relating_to> type index table.
+field-symbols <target>      type index table.
+field-symbols <f_instances> type index table.
+field-symbols <inst>        type data.
+field-symbols <reft>        type data.
+field-symbols <trg_inst>    type data.
+field-symbols <cid>         type ABP_BEHV_CID.
+field-symbols <cid_ref>     type ABP_BEHV_CID.
+
+describe field instances type data(_t).
+if _t <> 'h'.
+  raise shortdump type cx_abap_behv_runtime_error message e009  " INSTANCES not table?!
+    with entity_name operation
+    exporting entity = entity_name operation = operation tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+endif.
+assign instances to <instances>.
+
+if relating_by is not initial.
+  " routine may also be called (for contract check) without RELATING_BY/TO
+  " - then specific checks on these data must be skipped
+
+  if lines( <instances> ) <> lines( relating_by ).
+    raise shortdump type cx_abap_behv_runtime_error message e032  " RELATING_BY lines mismatch
+      exporting entity = entity_name operation = operation tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+  describe field relating_to type _t.
+  if _t <> 'h'.
+    raise shortdump type cx_abap_behv_runtime_error message e009  " [other?] RELATING_TO not table
+      with entity_name operation
+      exporting entity = entity_name operation = operation tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+  assign relating_to to <relating_to>.
+  data(n_rel_to) = lines( <relating_to> ).
+
+  dd = cl_abap_datadescr=>describe_by_data( relating_to ).
+  data(to_bdef) = substring_before( val = substring_after( val = dd->absolute_name sub = `\BDEF=` ) sub = `\` ).
+  inst_ref-ref_to-entity = substring_before( val = substring_after( val = dd->absolute_name sub = `ENTITY=` ) sub = `\` ).
+  if inst_ref-ref_to-entity is initial.
+    raise shortdump type cx_abap_behv_runtime_error message e034  " RELATING_TO illegal type
+      exporting entity = entity_name operation = operation tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+
+* 'Normalize' instances to type FAILED to avoid potential alignment problems with %TKY
+  data(failed) = cl_abap_behvdescr=>create_data(
+                  p_name = conv #( inst_ref-ref_to-entity )
+                  p_root = conv #( to_bdef )
+                  p_op   = cl_abap_behvdescr=>OP_FAILED
+                  p_structure = 'X' ).
+  assign failed->* to <inst>.
+  if <relating_to> is not initial.
+    " check if <relating_to> has %CID_REF; then a simple "corresponding" is not sufficient
+    assign <relating_to>[ 1 ] to <reft>.
+    assign component cl_abap_behv=>co_techfield_name-cid_ref of structure <reft> to <cid_ref>.
+  endif.
+
+  loop at relating_by into data(idx) group by idx.  " compute key only once for each referenced instance
+    check idx <> 0.  " 0 is for instances NOT related to another
+    if not idx between 1 and n_rel_to.
+      raise shortdump type cx_abap_behv_runtime_error message e033  " RELATING_BY illegal index
+        exporting entity = entity_name operation = operation tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+    endif.
+    assign <relating_to>[ idx ] to <reft>.
+    <inst> = corresponding #( <reft> ).
+    if <cid_ref> is assigned.  " (possibly) assigned above
+      "assign component cl_abap_behv=>co_techfield_name-cid_ref of structure <reft> to <cid_ref>.
+      assign component 1 of structure <reft> to <cid_ref>.  " we KNOW it's 1
+      if <cid_ref> is not initial.
+        "assign component cl_abap_behv=>co_techfield_name-cid of structure <inst> to <cid>.
+        assign component 1 of structure <inst> to <cid>.  " we KNOW it's 1
+        <cid> = <cid_ref>.
+      endif.
+    endif.
+    serial_key 1 <inst> ik-key ik-cid.
+    ik-idx = idx.
+    insert ik into table idx_keys.
+  endloop.
+  unassign: <inst>, <cid_ref>, <cid>. clear failed.
+
+endif. " relating_by is not initial
+
+dd = cl_abap_datadescr=>describe_by_data( <instances> ).
+inst_ref-ref_from-entity = substring_before( val = substring_after( val = dd->absolute_name sub = `ENTITY=` ) sub = `\` ).
+
+data(is_cba) = xsdbool( contains( val = dd->absolute_name sub = `\ASSOC=` ) ).
+* [TODO: Only INTRA-BO assoc is relevant; failed keys for foreign entities won't be mapped back]
+
+* 'Normalize' instances to type FAILED to avoid potential alignment problems with %TKY
+data(from_bdef) = conv abp_root_entity_name( substring_before( val = substring_after( val = dd->absolute_name sub = `BDEF=` ) sub = `\` ) ).
+failed = cl_abap_behvdescr=>create_data(
+          p_name = entity_name
+          p_root = from_bdef
+          p_op   = cl_abap_behvdescr=>OP_FAILED ).
+assign failed->* to <f_instances>.
+<f_instances> = corresponding #( <instances> ).
+" check if <instances> has %CID_REF; then a simple "corresponding" is not sufficient
+assign <instances>[ 1 ] to <inst>.
+assign component cl_abap_behv=>co_techfield_name-cid_ref of structure <inst> to <cid_ref>.
+if <cid_ref> is assigned.
+  loop at <instances> assigning <inst>.
+    "assign component cl_abap_behv=>co_techfield_name-cid_ref of structure <inst> to <cid_ref>.
+    assign component 1 of structure <inst> to <cid_ref>.  " we KNOW it's 1
+    check <cid_ref> is not initial.
+    assign <f_instances>[ sy-tabix ] to field-symbol(<finst>).
+    "assign component cl_abap_behv=>co_techfield_name-cid of structure <finst> to <cid>.
+    assign component 1 of structure <finst> to <cid>.  " we KNOW it's 1
+    <cid> = <cid_ref>.
+  endloop.
+endif.
+
+data(related) = 0.
+
+loop at relating_by into idx.  " store referenced key for each referencing key
+  check idx <> 0.  " 0 is for instances NOT related to another
+  add 1 to related.
+  data(rel_tabix) = sy-tabix.
+  assign <f_instances>[ rel_tabix ] to <inst>.
+  serial_key 2 <inst> inst_ref-ref_from-key inst_ref-ref_from-cid.
+  move-corresponding idx_keys[ idx = idx ] to inst_ref-ref_to.  " computed above
+  insert inst_ref into table inst_refs.
+  if is_cba is initial.  continue.  endif.
+  " for (intra-BO) CBA, all target instances must be related too
+  assign <instances>[ rel_tabix ] to <inst>.
+  assign component cl_abap_behv=>co_techfield_name-target of structure <inst> to <target>.
+  if <target> is initial.  continue.  endif.
+  if trg_inst_ref is initial.
+    " create container structure of type FAILED (it has %TKY; Create doesn't)
+    data(ddt) = cl_abap_datadescr=>describe_by_data( <target> ).
+    trg_inst_ref-ref_to = inst_ref-ref_to.
+    trg_inst_ref-ref_from-entity = substring_before( val = substring_after( val = ddt->absolute_name sub = `ENTITY=` ) sub = `\` ).
+    trg_inst = cl_abap_behvdescr=>create_data(
+                p_name = conv #( trg_inst_ref-ref_from-entity )
+                p_op = cl_abap_behvdescr=>OP_FAILED
+                p_structure = 'X' ).
+    assign trg_inst->* to <trg_inst>.
+  endif.
+  loop at <target> assigning field-symbol(<tinst>).
+    <trg_inst> = corresponding #( <tinst> ).  " OK: both have %CID, not %CID_REF
+    serial_key 3 <trg_inst> trg_inst_ref-ref_from-key trg_inst_ref-ref_from-cid.
+    insert trg_inst_ref into table inst_refs.
+  endloop.
+endloop. " at relating_by
+
+if cl_abap_behv_ctrl=>CURR_PROJ_HDLR is initial.
+  return.  " direct call of "augment" method in unit test?!
+endif.
+
+" Perform contract check (detect new instances w/o RELATING_BY entry)
+" - wrap call in ASSERT only to skip it when checkpoint group is switched off
+" - actual handling is in caller of ADD_CHANGES, which reacts to CL_ABAP_BEHV_CTRL=>CC_ERR
+ASSERT id CC_RAP_CONTRACT condition related >= lines( <f_instances> ) or
+  cl_abap_behv_ctrl=>CURR_PROJ_HDLR->CHECK_AUGMENT(
+   exporting entity_name = entity_name
+             operation   = operation
+             instances   = ref #( <f_instances> )
+             relating_by = relating_by
+   changing  cc_ok       = cc_ok ) = 0.
+
+if inst_refs is not initial.
+  cl_abap_behv_ctrl=>ADD_INSTANCE_REFS( exporting inst_refs = inst_refs bdef = to_bdef ).
+endif.
+
+endmethod.
+
+
+method SERIALIZE_KEY.
+
+serial_key 1 instance key cid.
+
+endmethod.
+ENDCLASS.

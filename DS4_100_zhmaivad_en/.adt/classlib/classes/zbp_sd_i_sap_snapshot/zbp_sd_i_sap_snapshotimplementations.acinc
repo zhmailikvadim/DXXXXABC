@@ -1,0 +1,499 @@
+" -----------------------------------------------------------------------
+"  R E V I S I O N   H I S T O R Y                                     -
+" -----------------------------------------------------------------------
+" AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+"              |            | TRANSPORT REQUESTS                       -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 21.04.2023 | 19611     : [Build]- Stock reconciliation-
+"              |            | DS4K950069                               -
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 06.06.2023 | 20960     : [Build] - Stock reconciliati -
+"              |            | DS4K951475                               -
+" ----------------------------------------------------------------------*
+" ZHMAIVAD     | 27.07.2023 | 22859     : [Feature] [Build] - Stock re -
+"              |            | DS4K957133                               -
+" ----------------------------------------------------------------------*/
+CLASS lcl_snapshot_keys_buffer DEFINITION CREATE PRIVATE FINAL.
+
+  PUBLIC SECTION.
+
+    CLASS-METHODS get_instance
+      RETURNING VALUE(ro_instance) TYPE REF TO lcl_snapshot_keys_buffer.
+
+    CLASS-METHODS check_instance
+      RETURNING VALUE(rv_bound) TYPE abap_boolean.
+
+    CLASS-METHODS clear_instance.
+
+    METHODS set_buffer_data
+      IMPORTING it_buffer_data TYPE zsd_tt_stock_snapshot_keys.
+
+    METHODS get_buffer_data
+      RETURNING
+        VALUE(rt_buffer_data) TYPE zsd_tt_stock_snapshot_keys.
+
+  PRIVATE SECTION.
+
+    CLASS-DATA: go_instance TYPE REF TO lcl_snapshot_keys_buffer.
+
+    DATA: mt_buffer_data TYPE zsd_tt_stock_snapshot_keys.
+
+ENDCLASS.
+
+
+CLASS lcl_snapshot_keys_buffer IMPLEMENTATION.
+  METHOD get_instance.
+    IF go_instance IS NOT BOUND.
+      go_instance = NEW #( ).
+    ENDIF.
+
+    ro_instance = go_instance.
+  ENDMETHOD.
+
+  METHOD set_buffer_data.
+    mt_buffer_data = it_buffer_data.
+  ENDMETHOD.
+
+  METHOD get_buffer_data.
+    rt_buffer_data = mt_buffer_data.
+  ENDMETHOD.
+
+  METHOD check_instance.
+    IF go_instance IS BOUND.
+      rv_bound = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD clear_instance.
+    IF go_instance IS BOUND.
+      CLEAR go_instance.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS lhc_sapsnapshot DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  PRIVATE SECTION.
+    TYPES mtyp_range_plant              TYPE RANGE OF i_storagelocation-plant.
+    TYPES mtyp_range_storage_location   TYPE RANGE OF i_storagelocation-storagelocation.
+    TYPES gtyp_range_plant              TYPE RANGE OF i_productstoragelocationbasic-plant.
+    TYPES gtyp_range_storage_location   TYPE RANGE OF i_productstoragelocationbasic-storagelocation.
+    TYPES gtyp_range_matnr              TYPE RANGE OF i_productstoragelocationbasic-product.
+    TYPES gtyp_range_sales_order_number TYPE RANGE OF i_materialstock-sddocument.
+    TYPES gtyp_range_sales_order_item   TYPE RANGE OF i_materialstock-sddocumentitem.
+    TYPES gtyp_t_snapshot               TYPE STANDARD TABLE OF zsd_i_sap_snapshot.
+    TYPES gtyp_snapshot_create          TYPE TABLE FOR CREATE zsd_i_sap_snapshot.
+    TYPES gtyp_snapshot_update          TYPE TABLE FOR UPDATE zsd_i_sap_snapshot.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys REQUEST requested_authorizations FOR sapsnapshot RESULT result.
+
+    METHODS deleteall FOR MODIFY
+      IMPORTING keys FOR ACTION sapsnapshot~deleteall ##NEEDED.
+
+    METHODS makesnapshot FOR MODIFY
+      IMPORTING keys FOR ACTION sapsnapshot~makesnapshot ##NEEDED.
+
+    METHODS makesnapshotwithparams FOR MODIFY
+      IMPORTING keys FOR ACTION sapsnapshot~makesnapshotwithparams ##NEEDED.
+
+    METHODS recalcselecteditems FOR MODIFY
+      IMPORTING keys FOR ACTION sapsnapshot~recalcselecteditems ##NEEDED.
+
+    METHODS deletelessthentimestamp FOR MODIFY
+      IMPORTING keys FOR ACTION sapsnapshot~deletelessthentimestamp.
+
+    METHODS is_lv_update_granted
+      RETURNING VALUE(rv_update_granted) TYPE abap_bool.
+
+    METHODS is_lv_delete_granted
+      RETURNING VALUE(rv_delete_granted) TYPE abap_bool.
+
+    METHODS modify_snapshot
+      CHANGING ct_snapshot           TYPE gtyp_t_snapshot OPTIONAL
+               ct_plant              TYPE gtyp_range_plant OPTIONAL
+               ct_storage_location   TYPE gtyp_range_storage_location OPTIONAL
+               ct_matnr              TYPE gtyp_range_matnr OPTIONAL
+               ct_sales_order_number TYPE gtyp_range_sales_order_number OPTIONAL
+               ct_sales_order_item   TYPE gtyp_range_sales_order_item OPTIONAL.
+    METHODS create_entities CHANGING ct_create TYPE gtyp_snapshot_create.
+    METHODS update_entities CHANGING ct_update TYPE gtyp_snapshot_update.
+ENDCLASS.
+
+
+CLASS lhc_sapsnapshot IMPLEMENTATION.
+  METHOD get_instance_authorizations.
+    DATA lv_update_requested TYPE abap_bool.
+    DATA lv_delete_requested TYPE abap_bool.
+    DATA lv_update_granted   TYPE abap_bool.
+    DATA lv_delete_granted   TYPE abap_bool.
+
+    READ ENTITIES OF zsd_i_sap_snapshot IN LOCAL MODE
+     ENTITY sapsnapshot
+     ALL FIELDS
+     WITH CORRESPONDING #( keys )
+     RESULT DATA(lt_snapshot).
+
+    lv_update_requested = COND #( WHEN requested_authorizations-%update                = if_abap_behv=>mk-on OR
+                                    requested_authorizations-%action-recalcselecteditems      = if_abap_behv=>mk-on
+                               THEN abap_true ELSE abap_false ).
+
+    lv_delete_requested = COND #( WHEN requested_authorizations-%delete                = if_abap_behv=>mk-on
+                               THEN abap_true ELSE abap_false ).
+
+    LOOP AT lt_snapshot ASSIGNING FIELD-SYMBOL(<ls_snapshot>).
+      IF lv_update_requested = abap_true.
+        lv_update_granted = is_lv_update_granted( ).
+        IF lv_update_granted = abap_false.
+          APPEND VALUE #( %tky = <ls_snapshot>-%tky
+                          %msg = NEW zcl_sd_stock_corr_messages(
+                                         iv_textid   = zcl_sd_stock_corr_messages=>not_authorized
+                                         iv_severity = if_abap_behv_message=>severity-error ) )
+                         TO reported-sapsnapshot.
+        ENDIF.
+      ENDIF.
+
+      IF lv_delete_requested = abap_true.
+        lv_delete_granted = is_lv_delete_granted( ).
+        IF lv_delete_granted = abap_false.
+          APPEND VALUE #( %tky = <ls_snapshot>-%tky
+                          %msg = NEW zcl_sd_stock_corr_messages(
+                                         iv_textid   = zcl_sd_stock_corr_messages=>not_authorized
+                                         iv_severity = if_abap_behv_message=>severity-error ) )
+                         TO reported-sapsnapshot.
+        ENDIF.
+      ENDIF.
+
+      APPEND VALUE #( LET lv_upd_auth = COND #( WHEN lv_update_granted = abap_true THEN if_abap_behv=>auth-allowed
+                                             ELSE if_abap_behv=>auth-unauthorized )
+                          lv_del_auth = COND #( WHEN lv_delete_granted = abap_true THEN if_abap_behv=>auth-allowed
+                                             ELSE if_abap_behv=>auth-unauthorized )
+                      IN  %tky                        = <ls_snapshot>-%tky
+                          %update                     = lv_upd_auth
+                          %action-recalcselecteditems = lv_upd_auth
+                          %delete                     = lv_del_auth )
+                    TO result.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD deleteall.
+    DELETE FROM zsd_t_stock_corr.         "#EC CI_NOWHERE "#EC CI_SUBRC
+    DELETE FROM zsd_t_stk_corr_d.         "#EC CI_NOWHERE "#EC CI_SUBRC
+    DELETE FROM zsd_t_stcor_hist.         "#EC CI_NOWHERE "#EC CI_SUBRC
+    DELETE FROM zsd_t_cor_hist_d.         "#EC CI_NOWHERE "#EC CI_SUBRC
+    DELETE FROM zsd_t_corr_error.         "#EC CI_NOWHERE "#EC CI_SUBRC
+    DELETE FROM zsd_t_sc_error_d.         "#EC CI_NOWHERE "#EC CI_SUBRC
+    DELETE FROM zsd_t_snapshot_a.         "#EC CI_NOWHERE "#EC CI_SUBRC
+  ENDMETHOD.
+
+  METHOD makesnapshot.
+    modify_snapshot( ).
+  ENDMETHOD.
+
+  METHOD recalcselecteditems.
+    DATA:
+        lt_snapshot TYPE TABLE OF zsd_i_sap_snapshot.
+
+    READ ENTITIES OF zsd_i_sap_snapshot IN LOCAL MODE
+     ENTITY sapsnapshot
+     ALL FIELDS
+     WITH CORRESPONDING #( keys )
+     RESULT DATA(lt_snapshot_selected_items).
+
+    lt_snapshot = CORRESPONDING #( lt_snapshot_selected_items ).
+
+    modify_snapshot( CHANGING ct_snapshot = lt_snapshot ).
+  ENDMETHOD.
+
+  METHOD makesnapshotwithparams.
+    DATA lt_plant            TYPE mtyp_range_plant.
+    DATA lt_storage_location TYPE mtyp_range_storage_location.
+
+    DATA(lt_keys) = keys.
+
+    LOOP AT lt_keys ASSIGNING FIELD-SYMBOL(<ls_key>).
+      IF <ls_key>-%param-plant IS NOT INITIAL.
+        APPEND VALUE #( low = <ls_key>-%param-plant sign = 'I' option = 'EQ' )
+            TO lt_plant.
+      ENDIF.
+
+      IF <ls_key>-%param-storage_location IS NOT INITIAL.
+        APPEND VALUE #( low = <ls_key>-%param-storage_location sign = 'I' option = 'EQ' )
+            TO lt_storage_location.
+      ENDIF.
+    ENDLOOP.
+
+    modify_snapshot( CHANGING ct_plant = lt_plant ct_storage_location = lt_storage_location ).
+
+    READ ENTITIES OF zsd_i_sap_snapshot IN LOCAL MODE
+     ENTITY sapsnapshot
+     ALL FIELDS
+     WITH CORRESPONDING #( keys )
+     RESULT DATA(lt_snapshot_selected_items) ##NEEDED.
+  ENDMETHOD.
+
+  METHOD is_lv_update_granted.
+    rv_update_granted = abap_true.
+  ENDMETHOD.
+
+  METHOD is_lv_delete_granted.
+    rv_delete_granted = abap_true.
+  ENDMETHOD.
+
+  METHOD deletelessthentimestamp.
+    DATA(lt_keys) = keys.
+
+    LOOP AT lt_keys ASSIGNING FIELD-SYMBOL(<ls_key>).
+      IF <ls_key>-%param-sap_timestamp IS NOT INITIAL.
+        DELETE FROM zsd_t_snapshot_a WHERE sap_timestamp < <ls_key>-%param-sap_timestamp. "#EC CI_IMUD_NESTED "#EC CI_SUBRC
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD modify_snapshot.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 26.09.2022 | 13444     : [Build] - Stock reconciliation with WMS -
+    "              |            | DS4K929106                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 19.12.2022 | FB_16311_SD_[Feature] [Build] - Stock reconciliation -
+    "              |            | DS4K938447                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 21.04.2023 | 19611     : [Build]- Stock reconciliation-
+    "              |            | DS4K950069                               -
+    " -----------------------------------------------------------------------
+    DATA lt_create   TYPE gtyp_snapshot_create.
+    DATA ls_create   LIKE LINE OF lt_create.
+    DATA lt_update   TYPE gtyp_snapshot_update.
+
+    LOOP AT ct_snapshot ASSIGNING FIELD-SYMBOL(<ls_snapshot>).
+      APPEND VALUE #( low = <ls_snapshot>-plant sign = 'I' option = 'EQ' )
+          TO ct_plant.
+      APPEND VALUE #( low = <ls_snapshot>-storagelocation sign = 'I' option = 'EQ' )
+          TO ct_storage_location.
+      APPEND VALUE #( low = <ls_snapshot>-article sign = 'I' option = 'EQ' )
+          TO ct_matnr.
+      APPEND VALUE #( low = <ls_snapshot>-salesordernumber sign = 'I' option = 'EQ' )
+          TO ct_sales_order_number.
+      APPEND VALUE #( low = <ls_snapshot>-salesorderitem sign = 'I' option = 'EQ' )
+          TO ct_sales_order_item.
+    ENDLOOP.
+
+    SELECT DISTINCT matnr AS article, werks AS plant, lgort AS storagelocation "#EC CI_SUBRC "#EC CI_NOWHERE "#EC CI_SEL_DEL
+      FROM zsd_i_nsdm_v_mard
+      WHERE werks IN @ct_plant AND lgort IN @ct_storage_location
+      UNION DISTINCT
+        SELECT DISTINCT matnr AS article, werks AS plant, lgort AS storagelocation
+          FROM zsd_i_nsdm_v_mska
+          WHERE werks IN @ct_plant AND lgort IN @ct_storage_location
+          INTO  TABLE @DATA(lt_product_keys).
+
+    IF  lines( lt_product_keys ) = 0.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_product_keys ASSIGNING FIELD-SYMBOL(<ls_product_keys>). "To get different timestamp
+      SELECT *                       "#EC CI_SROFC_NESTED "#EC CI_SUBRC
+        FROM zsd_i_actual_sap_stock_col_typ
+        WHERE article = @<ls_product_keys>-article
+             AND plant = @<ls_product_keys>-plant
+             AND storagelocation = @<ls_product_keys>-storagelocation
+        APPENDING TABLE @DATA(lt_read_stock). "#EC CI_ALL_FIELDS_NEEDED       "#EC CI_SEL_DEL
+    ENDLOOP.
+
+    lt_create = CORRESPONDING #( lt_read_stock ).
+
+    READ ENTITIES OF zsd_i_sap_snapshot IN LOCAL MODE "#EC CI_NO_TRANSFORM
+     ENTITY sapsnapshot
+     ALL FIELDS
+     WITH CORRESPONDING #( lt_create )
+     RESULT DATA(lt_snapshot_items_update).
+
+    lt_update = CORRESPONDING #( lt_snapshot_items_update ).
+
+    LOOP AT lt_update ASSIGNING FIELD-SYMBOL(<ls_update>).
+      TRY.
+          ls_create = lt_create[ KEY entity
+                                 %key-sapsnapshotdate  = <ls_update>-sapsnapshotdate
+                                 %key-plant            = <ls_update>-plant
+                                 %key-storagelocation  = <ls_update>-storagelocation
+                                 %key-article          = <ls_update>-article
+                                 %key-salesordernumber = <ls_update>-salesordernumber
+                                 %key-salesorderitem   = <ls_update>-salesorderitem ].
+
+          <ls_update> = CORRESPONDING #( ls_create ).
+        CATCH cx_sy_itab_line_not_found.
+          CLEAR ls_create.
+      ENDTRY.
+
+      DELETE lt_create WHERE      plant = <ls_update>-plant
+                             AND  storagelocation = <ls_update>-storagelocation
+                             AND  sapsnapshotdate = <ls_update>-sapsnapshotdate
+                             AND  article = <ls_update>-article
+                             AND salesordernumber = <ls_update>-salesordernumber
+                             AND salesorderitem = <ls_update>-salesorderitem. "#EC CI_STDSEQ
+    ENDLOOP.
+
+    IF ( 0 < lines( lt_create  ) ).
+      create_entities( CHANGING ct_create = lt_create ).
+    ENDIF.
+
+    IF ( 0 < lines( lt_update ) ).
+      update_entities( CHANGING ct_update = lt_update ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD create_entities.
+    " -----------------------------------------------------------------------
+    "  R E V I S I O N   H I S T O R Y                                     -
+    " -----------------------------------------------------------------------
+    " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+    "              |            | TRANSPORT REQUESTS                       -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 26.09.2022 | 13444     : [Build] - Stock reconciliation with WMS -
+    "              |            | DS4K929106                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 19.12.2022 | 16311     : [Feature] [Build] - Stock re -
+    "              |            | DS4K938447                               -
+    " -----------------------------------------------------------------------
+    " ZHMAIVAD     | 21.04.2023 | 19611     : [Build]- Stock reconciliation-
+    "              |            | DS4K950069                               -
+    " -----------------------------------------------------------------------
+    CHECK lines( ct_create ) > 0.
+
+    LOOP AT ct_create ASSIGNING FIELD-SYMBOL(<ls_create>).
+      GET TIME STAMP FIELD DATA(lv_timestamp).
+      <ls_create>-changedon = lv_timestamp.
+    ENDLOOP.
+
+    MODIFY ENTITIES OF zsd_i_sap_snapshot IN LOCAL MODE
+        ENTITY sapsnapshot
+        CREATE AUTO FILL CID FIELDS ( sapsnapshotdate
+                                      plant
+                                      storagelocation
+                                      salesordernumber
+                                      salesorderitem
+                                      article
+                                      saptimestamp
+                                      uuqty
+                                      blqty
+                                      qiqty
+                                      uudiff
+                                      bldiff
+                                      qidiff
+                                      uurealdiff
+                                      blrealdiff
+                                      qirealdiff
+                                      uudiffvalue
+                                      bldiffvalue
+                                      qidiffvalue
+                                      errorsuutiming
+                                      errorsbltiming
+                                      errorsqitiming
+                                      errorsgruuqty
+                                      errorsgrqiqty
+                                      errorsgrblqty
+                                      errorsgiuuqty
+                                      errorgrecom
+                                      errorgiecom
+                                      errorsinvpostuuqty
+                                      errorsinvpostblqty
+                                      errorsinvpostqiqty
+                                      totalnetdiff
+                                      totalnetdiffabs
+                                      totaldiffvalue
+                                      totaldiffvalueabs
+                                      hasdifference
+                                      currency
+                                      unitofmeasure
+                                      createdon
+                                      createdby
+                                      changedon
+                                      changedby )
+        WITH ct_create
+        MAPPED DATA(ls_mapped)
+        FAILED   DATA(ls_failed)
+        REPORTED DATA(ls_reported).
+
+    DATA(lt_keys) = CORRESPONDING zsd_tt_stock_snapshot_keys( ls_mapped-sapsnapshot ).
+    lcl_snapshot_keys_buffer=>get_instance( )->set_buffer_data( lt_keys ).
+  ENDMETHOD.
+
+  METHOD update_entities.
+    CHECK lines( ct_update ) > 0.
+
+    MODIFY ENTITIES OF zsd_i_sap_snapshot IN LOCAL MODE
+        ENTITY sapsnapshot
+        UPDATE FIELDS ( sapsnapshotdate
+                                      plant
+                                      storagelocation
+                                      salesordernumber
+                                      salesorderitem
+                                      article
+                                      saptimestamp
+                                      uuqty
+                                      blqty
+                                      qiqty
+                                      uudiff
+                                      bldiff
+                                      qidiff
+                                      uurealdiff
+                                      blrealdiff
+                                      qirealdiff
+                                      uudiffvalue
+                                      bldiffvalue
+                                      qidiffvalue
+                                      errorsuutiming
+                                      errorsbltiming
+                                      errorsqitiming
+                                      errorsgruuqty
+                                      errorsgrqiqty
+                                      errorsgrblqty
+                                      errorsgiuuqty
+                                      errorgrecom
+                                      errorgiecom
+                                      errorsinvpostuuqty
+                                      errorsinvpostblqty
+                                      errorsinvpostqiqty
+                                      totalnetdiff
+                                      totalnetdiffabs
+                                      totaldiffvalue
+                                      totaldiffvalueabs
+                                      hasdifference
+                                      currency
+                                      unitofmeasure
+                                      changedon
+                                      changedby )
+        WITH ct_update
+        MAPPED DATA(ls_mapped)
+        FAILED   DATA(ls_failed)
+        REPORTED DATA(ls_reported).
+
+    DATA(lt_keys) = CORRESPONDING zsd_tt_stock_snapshot_keys( ct_update ).
+    lcl_snapshot_keys_buffer=>get_instance( )->set_buffer_data( lt_keys ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS lsc_sapsnapshot DEFINITION INHERITING FROM cl_abap_behavior_saver FINAL.
+  PROTECTED SECTION.
+    METHODS save_modified REDEFINITION.
+ENDCLASS.
+
+
+CLASS lsc_sapsnapshot IMPLEMENTATION.
+  METHOD save_modified.
+    IF lcl_snapshot_keys_buffer=>check_instance( ) = abap_true.
+      CALL FUNCTION 'ZSD_FM_STOREDIFFANDALLERRORS' IN BACKGROUND TASK
+        EXPORTING
+          it_keys = CORRESPONDING
+                    zsd_tt_stock_difference_keys( lcl_snapshot_keys_buffer=>get_instance( )->get_buffer_data( ) MAPPING wmssnapshotdate = sapsnapshotdate ).
+
+      lcl_snapshot_keys_buffer=>clear_instance( ).
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

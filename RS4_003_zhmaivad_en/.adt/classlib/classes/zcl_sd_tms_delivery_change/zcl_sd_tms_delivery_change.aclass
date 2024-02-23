@@ -1,0 +1,114 @@
+CLASS zcl_sd_tms_delivery_change DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    TYPES:
+      BEGIN OF gtyp_custom_fields,
+        deliv_numb	            TYPE vbeln_vl,
+        zz1_tms_carrierstr_dlh TYPE zz1_tms_carrierstr,
+        zz1_tms_loadid_dlh     TYPE zz1_tms_loadid,
+      END OF gtyp_custom_fields .
+
+    CONSTANTS gc_identifier TYPE string VALUE 'TMS' ##NO_TEXT.
+
+    METHODS change_delivery_custom_fields
+      IMPORTING
+        !is_custom_fields TYPE gtyp_custom_fields
+      RETURNING
+        VALUE(rt_return)  TYPE bapiret2_tab .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    CONSTANTS gc_attempts_due_lock_outb_deli TYPE i VALUE 10 .
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_TMS_DELIVERY_CHANGE IMPLEMENTATION.
+
+
+  METHOD change_delivery_custom_fields.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 02.03.2023 | 18316     : [Platform] - Inbound interfa *
+*              |            | DS4K944595                               *
+*----------------------------------------------------------------------*
+* KALSHZHA     | 10.04.2023 | 19930     : [Defect] - Inbound interfa   *
+*              |            | DS4K949496                               *
+*----------------------------------------------------------------------*
+    DATA ls_header_data TYPE bapiobdlvhdrchg.
+    DATA ls_header_control TYPE  bapiobdlvhdrctrlchg.
+    DATA ls_techn_control  TYPE bapidlvcontrol.
+    DATA lt_extenshion1 TYPE TABLE OF bapiextc.
+    DATA ls_extenshion1 TYPE bapiextc.
+    DATA lt_extension2 TYPE TABLE OF bapiext.
+    DATA ls_extension2 TYPE bapiext.
+    ls_header_data-deliv_numb = is_custom_fields-deliv_numb.
+    ls_header_control-deliv_numb = is_custom_fields-deliv_numb.
+    ls_techn_control-upd_ind = abap_true.
+
+    ls_extenshion1 = is_custom_fields.
+    INSERT ls_extenshion1 INTO TABLE lt_extenshion1.
+    ls_extension2-value =  gc_identifier.
+    INSERT ls_extension2 INTO TABLE lt_extension2.
+
+    DO gc_attempts_due_lock_outb_deli TIMES.
+      CALL FUNCTION 'SHP_ENQUEUE_EVVBLKE'
+        EXPORTING
+          mode_likp         = 'E'
+          mandt             = sy-mandt
+          vbeln             = is_custom_fields-deliv_numb
+        EXCEPTIONS
+          foreign_lock      = 1
+          system_failure    = 2
+          csl_no_connection = 3
+          csl_inconsistency = 4
+          OTHERS            = 5.
+      IF sy-subrc = 0.
+        EXIT.
+      ENDIF.
+    ENDDO.
+
+    CALL FUNCTION 'BAPI_OUTB_DELIVERY_CHANGE'
+      EXPORTING
+        header_data    = ls_header_data
+        header_control = ls_header_control
+        delivery       = is_custom_fields-deliv_numb
+        techn_control  = ls_techn_control
+      TABLES
+        extension1     = lt_extenshion1
+        extension2     = lt_extension2
+        return         = rt_return.
+
+    IF cl_bapi_msg=>contains_error( rt_return ) EQ abap_true.
+      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+      MESSAGE  e003(zsd_tsm_delv_update) WITH is_custom_fields-deliv_numb INTO DATA(lv_message).
+      INSERT VALUE #(
+       type = 'E'
+       id = 'ZSD_TSM_DELV_UPDATE'
+       number = '003'
+       message_v1 = is_custom_fields-deliv_numb
+       message = lv_message
+      ) INTO TABLE rt_return.
+    ELSE.
+      MESSAGE  s002(zsd_tsm_delv_update) WITH is_custom_fields-deliv_numb lv_message.
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+        EXPORTING
+          wait = abap_true.
+      INSERT VALUE #(
+       type = 'S'
+       id = 'ZSD_TSM_DELV_UPDATE'
+       number = '002'
+       message_v1 = is_custom_fields-deliv_numb
+       message = lv_message
+      ) INTO TABLE rt_return.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

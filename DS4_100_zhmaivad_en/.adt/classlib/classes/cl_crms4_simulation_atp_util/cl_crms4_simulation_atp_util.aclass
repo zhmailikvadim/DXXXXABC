@@ -1,0 +1,269 @@
+class CL_CRMS4_SIMULATION_ATP_UTIL definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_CRMS4_SIMULATION_ATP_UTIL .
+
+  aliases IS_ITEM_ELIGIBLE_FOR_SIMLN
+    for IF_CRMS4_SIMULATION_ATP_UTIL~IS_ITEM_ELIGIBLE_FOR_SIMLN .
+  aliases PREPARE_FOR_SIMULATIVE_ATP
+    for IF_CRMS4_SIMULATION_ATP_UTIL~PREPARE_FOR_SIMULATIVE_ATP .
+  aliases RUN_SIMLN_ATP_CHECK
+    for IF_CRMS4_SIMULATION_ATP_UTIL~RUN_SIMLN_ATP_CHECK .
+
+  data LS_AVAILABILITY type ATP_INFO_RES_AVAILY_RECORD .
+
+  class-methods GET_INSTANCE
+    returning
+      value(RO_SIMULATION_ATP_UTIL) type ref to IF_CRMS4_SIMULATION_ATP_UTIL .
+  methods CONSTRUCTOR .
+protected section.
+private section.
+
+  class-data MO_SIMULATION_ATP_UTIL type ref to IF_CRMS4_SIMULATION_ATP_UTIL .
+  class-data MO_SIMULATION_UTILITY type ref to LIF_SIMULATION_UTILITY .
+ENDCLASS.
+
+
+
+CLASS CL_CRMS4_SIMULATION_ATP_UTIL IMPLEMENTATION.
+
+
+  method CONSTRUCTOR.
+     mo_simulation_utility = lcl_oneorder_utility=>get_instance(  ).
+  endmethod.
+
+
+  method GET_INSTANCE.
+       IF mo_simulation_atp_util IS   NOT BOUND.
+
+      mo_simulation_atp_util = NEW cl_crms4_simulation_atp_util(  ).
+
+    ENDIF.
+    ro_simulation_atp_util = mo_simulation_atp_util.
+
+  endmethod.
+
+
+  METHOD if_crms4_simulation_atp_util~is_item_eligible_for_simln.
+    INCLUDE: crm_status_con.
+
+    DATA: ls_sales_item  TYPE crmc_sales_item.
+
+
+    CHECK iv_itm_type IS NOT INITIAL.
+
+    CHECK iv_requested_quantity IS NOT INITIAL.
+
+*   items are eligible for simulative check only in open, in process and released status
+    CHECK iv_status EQ gc_status-open OR
+      iv_status EQ gc_status-in_process OR
+       iv_status EQ gc_status-released.
+
+
+*   Check if is_atp_relevant is set at item category.
+    mo_simulation_utility->get_sales_atp_check(
+      EXPORTING
+        iv_item_type  = iv_itm_type
+     IMPORTING
+       es_sales_item = ls_sales_item
+       EXCEPTIONS
+           OTHERS          = 1
+    ).
+
+    IF sy-subrc = 0 AND ls_sales_item-is_atp_relevant IS NOT INITIAL.
+      rv_eligible = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_crms4_simulation_atp_util~prepare_for_simulative_atp.
+    DATA:lt_header_guid       TYPE crmt_object_guid_tab,
+         lt_orderadm_i        TYPE crmt_orderadm_i_wrkt,
+         lt_partner           TYPE crmt_partner_external_wrkt,
+         lt_orgman            TYPE crmt_orgman_wrkt,
+         lt_return            TYPE bapiret2_t,
+         lt_appointment       TYPE crmt_appointment_wrkt,
+         lv_timestamp_current TYPE timestamp.
+
+    CONSTANTS:
+      lc_checking_rule_s1 TYPE prreg VALUE 'S1',
+      lc_checking_rule_s2 TYPE prreg VALUE 'S2'.
+
+    INCLUDE: crm_status_con.
+
+    CHECK  iv_header_guid IS NOT INITIAL AND iv_item_guid IS NOT INITIAL.
+    INSERT  iv_header_guid INTO TABLE lt_header_guid.
+*    INSERT  iv_item_guid INTO TABLE lt_item_guid.
+
+
+    mo_simulation_utility->one_order_read( EXPORTING it_header_guid = lt_header_guid
+*                                                   it_item_guid   = lt_item_guid
+                                         IMPORTING et_orderadm_i  = lt_orderadm_i
+                                                   et_partner     = lt_partner
+                                                   et_orgman      = lt_orgman
+                                                   et_appointment = lt_appointment ).
+
+    READ TABLE lt_orderadm_i INTO DATA(ls_orderadm_i) WITH KEY guid = iv_item_guid .
+
+
+   mo_simulation_utility->get_storage_location_plant(
+   EXPORTING
+        is_orderadm_i       = ls_orderadm_i
+        it_orgman           = lt_orgman
+        it_partners         = lt_partner
+      IMPORTING
+        ev_plant            =  ev_plant
+        et_return           =  lt_return
+     ).
+
+*   get requested start date
+    READ TABLE lt_appointment INTO DATA(ls_appointment) WITH KEY
+    ref_guid = iv_item_guid ref_kind = 'B' appt_type = 'SRV_CUST_BEG'.
+    IF sy-subrc = 0.
+
+*      get current timestamp in UTC format
+      GET TIME STAMP FIELD lv_timestamp_current.
+
+      IF ls_appointment-timestamp_from GE  lv_timestamp_current.
+        ev_requested_start_date = ls_appointment-timestamp_from.
+      ELSE.
+*        The current support of ATP check does not allow replenishment of stock at different times in a day
+*        and hence current timestamp in UTC format is passed
+        ev_requested_start_date = lv_timestamp_current.
+      ENDIF.
+
+    ELSE.
+*     no requested start date found hence the item is not eligible for simulation
+      RETURN.
+
+    ENDIF.
+
+*   Determine checking rule based on status
+    IF iv_status EQ gc_status-in_process OR
+      iv_status EQ gc_status-open.
+      ev_checking_rule = lc_checking_rule_s1.
+    ELSEIF iv_status EQ gc_status-released.
+      ev_checking_rule = lc_checking_rule_s2.
+    ENDIF.
+
+
+*   material number conversion
+    mo_simulation_utility->material_order_check(
+      EXPORTING
+        iv_order    = iv_ordered_prod
+      IMPORTING
+        ev_material = ev_material
+        EXCEPTIONS
+          length_error = 1
+           OTHERS       = 2
+    ).
+
+
+    IF sy-subrc NE 0.
+*   In case of error try to take as is..
+      ev_material = iv_ordered_prod.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD if_crms4_simulation_atp_util~run_simln_atp_check.
+
+
+    DATA: lo_raw_request_factory TYPE REF TO cl_atp_info_raw_req_factory,
+          lo_raw_request         TYPE REF TO if_atp_info_raw_req,
+          ls_availability        TYPE atp_info_res_availy_record,
+          ls_availability_date_record  TYPE atp_info_res_availy_record,
+          ls_requested_date      TYPE  TIMESTAMP,
+          lv_uom_from_atp        TYPE mara-meins,
+          lv_quantity_erfmg      TYPE erfmg,
+          ls_requested_quantity  TYPE IF_ATP_INFO_RAW_REQ=>TT_MESSAGE,
+          ls_message             TYPE IF_ATP_INFO_RAW_REQ=>TT_MESSAGE,
+          lv_quantity_menge      TYPE mseg-menge.
+    CONSTANTS:
+    lc_checking_rule TYPE prreg VALUE 'S1'.
+
+    lo_raw_request = mo_simulation_utility->create_for_material_plant(
+      EXPORTING
+        it_material_plant = VALUE #( ( material = iv_material supplying_plant = iv_plant ) )
+        iv_checking_rule  = lc_checking_rule ).
+    CHECK lo_raw_request IS BOUND.
+
+
+    mo_simulation_utility->determine_availability_at(
+      EXPORTING
+        io_raw_request         = lo_raw_request
+        iv_requested_date      = iv_requested_date
+      IMPORTING
+        es_availability_record = ls_availability
+        et_message             = ls_message ).
+
+    APPEND lines of ls_message to et_message.
+
+    IF iv_request_available_on = abap_true.
+
+    mo_simulation_utility->determine_availability_of(
+      EXPORTING
+        io_raw_request         = lo_raw_request
+        iv_requested_quantity  = iv_requested_quantity
+        iv_requested_date      = iv_requested_date
+      IMPORTING
+        es_availability_record = ls_availability_date_record
+        et_message             = ls_message ).
+
+     IF ls_message is not initial.
+        APPEND lines of ls_message to et_message.
+     ENDIF.
+
+    IF ls_availability_date_record is not initial.
+      ev_available_on = ls_availability_date_record-PERIODSTARTUTCDATETIME.
+    ENDIF.
+
+   ENDIF.
+
+    lv_uom_from_atp = ls_availability-baseunit.
+
+    IF iv_uom <> lv_uom_from_atp.   "We need to convert the quantity
+
+      TRY.
+          lv_quantity_menge = ls_availability-availablequantityinbaseunit.
+        CATCH cx_sy_conversion_overflow.
+          MESSAGE ID sy-msgid TYPE 'I' NUMBER sy-msgno INTO DATA(lv_dummy).
+          INSERT CORRESPONDING #( sy ) INTO TABLE et_message.
+          RETURN.
+      ENDTRY.
+
+      mo_simulation_utility->mb_unit_conversion(
+        EXPORTING
+          iv_uom               = iv_uom
+          lv_uom_from_atp      = lv_uom_from_atp
+          iv_material          = iv_material
+          lv_quantity_menge    = lv_quantity_menge
+          iv_plant             = iv_plant
+        IMPORTING
+          ev_quantity_erfmg    = lv_quantity_erfmg
+        EXCEPTIONS
+          conversion_not_found = 1
+          OTHERS               = 2
+      ).
+
+      IF sy-subrc NE 0.
+
+        MESSAGE ID sy-msgid TYPE 'I' NUMBER sy-msgno INTO lv_dummy.
+        INSERT CORRESPONDING #( sy ) INTO TABLE et_message.
+
+      ELSE.
+        ev_available_quantity = CONV bs_atp_avail_qty( lv_quantity_erfmg ).
+      ENDIF.
+    ELSE.
+      ev_available_quantity = ls_availability-availablequantityinbaseunit.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

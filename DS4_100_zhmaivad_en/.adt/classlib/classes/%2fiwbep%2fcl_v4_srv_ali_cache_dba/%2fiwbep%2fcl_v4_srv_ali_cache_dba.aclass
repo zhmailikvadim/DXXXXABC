@@ -1,0 +1,174 @@
+"! <p class="shorttext synchronized" lang="en">OData V4 Service Alias Cache - DBA</p>
+CLASS /iwbep/cl_v4_srv_ali_cache_dba DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    METHODS:
+      "! <p class="shorttext synchronized" lang="en">Write Service Alias Cache for several entries</p>
+      "! This method writes several entries depending on parameter <strong>it_service_alias</strong>.
+      "! If this parameter is not supplied an null entry will be written.
+      "! @parameter iv_service_group_id | <p class="shorttext synchronized" lang="en">Service Group ID</p>
+      "! @parameter iv_system_alias     | <p class="shorttext synchronized" lang="en">System alias</p>
+      "! @parameter iv_last_modified    | <p class="shorttext synchronized" lang="en">Last modified time stamp</p>
+      "! @parameter it_service_alias     | <p class="shorttext synchronized" lang="en">List of all service aliases</p>
+      write
+        IMPORTING
+          iv_service_group_id TYPE /iwbep/v4_med_group_id
+          iv_system_alias     TYPE /iwbep/if_v4_runtime_types=>ty_system_alias
+          iv_last_modified    TYPE timestamp
+          it_service_alias    TYPE /iwbep/t_v4_srv_alias_mapping,
+      "! <p class="shorttext synchronized" lang="en">Clear cache for specific Group ID & Sys Alias</p>
+      "! @parameter iv_service_group_id | <p class="shorttext synchronized" lang="en">Service Group ID</p>
+      "! @parameter iv_system_alias     | <p class="shorttext synchronized" lang="en">System alias</p>
+      clear_for_service_group
+        IMPORTING
+          iv_service_group_id TYPE /iwbep/v4_med_group_id
+          iv_system_alias     TYPE /iwbep/if_v4_runtime_types=>ty_system_alias,
+      "! <p class="shorttext synchronized" lang="en">Read all entries from Service Alias Cache by Group ID</p>
+      "!
+      "! @parameter iv_service_group_id | <p class="shorttext synchronized" lang="en">Service Group ID</p>
+      "! @parameter iv_system_alias     | <p class="shorttext synchronized" lang="en">System alias</p>
+      "! @parameter et_service_alias    | <p class="shorttext synchronized" lang="en">List of all service aliases</p>
+      "! @parameter ev_last_modified    | <p class="shorttext synchronized" lang="en">Last modified time stamp</p>
+      read
+        IMPORTING
+          iv_service_group_id TYPE /iwbep/v4_med_group_id
+          iv_system_alias     TYPE /iwbep/if_v4_runtime_types=>ty_system_alias
+        EXPORTING
+          et_service_alias    TYPE /iwbep/t_v4_srv_alias_mapping
+          ev_last_modified    TYPE timestamp,
+      "! <p class="shorttext synchronized" lang="en">Dequeue Service Alias Cache Table</p>
+      "! @parameter iv_service_group_id | <p class="shorttext synchronized" lang="en">Service Group ID</p>
+      "! @parameter iv_wait             | <p class="shorttext synchronized" lang="en">Wait</p>
+      "! @raising   /iwbep/cx_gateway   | <p class="shorttext synchronized" lang="en">SAP Gateway Excetpion</p>
+      enqueue
+        IMPORTING
+          iv_service_group_id TYPE /iwbep/v4_med_group_id
+          iv_wait             TYPE abap_bool OPTIONAL
+        RAISING
+          /iwbep/cx_gateway,
+      "! <p class="shorttext synchronized" lang="en">Dequeue Service Alias Cache Table</p>
+      "! @parameter iv_service_group_id | <p class="shorttext synchronized" lang="en">Service Group ID</p>
+      dequeue
+        IMPORTING
+          iv_service_group_id TYPE /iwbep/v4_med_group_id.
+
+
+    CLASS-METHODS:
+      "! <p class="shorttext synchronized" lang="en">Clear complete service alias cache</p>
+      clear.
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+ENDCLASS.
+
+
+
+CLASS /IWBEP/CL_V4_SRV_ALI_CACHE_DBA IMPLEMENTATION.
+
+
+  METHOD clear.
+
+    DELETE FROM /iwbep/l_v4_casg.                      "#EC CI_NOWHERE.
+    DELETE FROM /iwbep/l_v4_casa.                      "#EC CI_NOWHERE.
+
+  ENDMETHOD.
+
+
+  METHOD clear_for_service_group.
+
+    DELETE FROM /iwbep/l_v4_casg WHERE service_group_id = iv_service_group_id
+                                 AND   system_alias     = iv_system_alias.
+
+    DELETE FROM /iwbep/l_v4_casa WHERE service_group_id = iv_service_group_id
+                                 AND   system_alias     = iv_system_alias.
+
+  ENDMETHOD.
+
+
+  METHOD dequeue.
+
+    CALL FUNCTION 'DEQUEUE_/IWBEP/E_V4_CASA'
+      EXPORTING
+        service_group_id = iv_service_group_id.
+
+  ENDMETHOD.
+
+
+  METHOD enqueue.
+
+    CALL FUNCTION 'ENQUEUE_/IWBEP/E_V4_CASA'
+      EXPORTING
+        service_group_id = iv_service_group_id
+        _wait            = iv_wait
+      EXCEPTIONS
+        foreign_lock     = 1
+        system_failure   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE /iwbep/cx_v4_srv_alias_cache
+        EXPORTING
+          textid             = /iwbep/cx_v4_srv_alias_cache=>enqueue_failed
+          exception_category = /iwbep/cx_v4_srv_alias_cache=>gcs_excep_categories-srv_alias_cache_outdated
+          http_status_code   = /iwbep/cx_v4_srv_alias_cache=>gcs_http_status_codes-sv_service_unavailable.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD read.
+
+    CLEAR: et_service_alias,
+           ev_last_modified.
+
+    SELECT SINGLE last_modified
+      FROM  /iwbep/l_v4_casg
+      INTO  ev_last_modified
+      WHERE service_group_id = iv_service_group_id
+        AND system_alias     = iv_system_alias .
+
+    CHECK sy-subrc = 0.
+
+    SELECT service_group_id service_id service_version service_sub_version service_alias service_alias_version
+      FROM  /iwbep/l_v4_casa
+      INTO TABLE et_service_alias
+      WHERE service_group_id = iv_service_group_id
+        AND system_alias     = iv_system_alias .
+
+  ENDMETHOD.
+
+
+  METHOD write.
+
+    DATA: lt_srv_alias_cache      TYPE STANDARD TABLE OF /iwbep/l_v4_casa,
+          ls_service_group_header TYPE /iwbep/l_v4_casg.
+
+
+    ASSERT iv_service_group_id IS NOT INITIAL.
+
+
+    " Write only if data is present
+    IF it_service_alias IS NOT INITIAL.
+      " Merge importing parameters table and single ones into one table.
+      lt_srv_alias_cache = VALUE #( FOR ls_srv_alias IN it_service_alias
+                                      ( system_alias          = iv_system_alias
+                                        service_group_id      = iv_service_group_id
+                                        service_alias         = ls_srv_alias-service_alias
+                                        service_sub_version   = ls_srv_alias-service_sub_version
+                                        service_alias_version = ls_srv_alias-service_alias_version
+                                        service_id            = ls_srv_alias-service_id
+                                        service_version       = ls_srv_alias-service_version ) ).
+      INSERT /iwbep/l_v4_casa FROM TABLE  lt_srv_alias_cache.
+    ENDIF.
+
+    ls_service_group_header = VALUE #( system_alias     = iv_system_alias
+                                       service_group_id = iv_service_group_id
+                                       last_modified    = iv_last_modified ).
+    INSERT /iwbep/l_v4_casg FROM ls_service_group_header.
+
+  ENDMETHOD.
+ENDCLASS.

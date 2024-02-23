@@ -1,0 +1,332 @@
+*"* use this source file for any macro definitions you need
+*"* in the implementation part of the class
+
+" Assign <area_&1> and <&1> (e.g. <area_failed> and <failed>) to static data area
+" If &4 is set, obtain an exclusive area (IN_USE initial)
+define _get_data_area.
+  _absolute_name = '\'.
+  loop at data_area_&3 assigning <area_&1> where rootname = &2.
+    if <area_&1>-in_use is initial or &4 is initial ##BOOL_OK.
+      clear _absolute_name.  exit.  " re-use this instance
+    endif.
+  endloop.
+  if _absolute_name is not initial.
+    insert value #( rootname = &2 ) into table data_area_&3 assigning <area_&1>.
+    _ABSOLUTE_NAME = '\BDEF=' && &2 && '\TYPE=&3'.
+    try.
+      create data <area_&1>-ref type (_ABSOLUTE_NAME).
+    catch cx_sy_create_data_error.
+      create data <area_&1>-ref type tt_data_fallback_&1.
+    endtry.
+  endif.
+  <area_&1>-in_use = 1.
+  assign <area_&1>-ref->* to <&1>.
+  clear <&1>.
+end-of-definition.
+
+define get_data_area_shared.
+  _get_data_area &1 &2 &1 0.
+end-of-definition.
+
+define get_data_area.
+  _get_data_area &1 &2 &1 1.
+end-of-definition.
+
+define get_data_area_late.
+  _get_data_area &1 &2 &1_LATE 1.
+end-of-definition.
+
+define release_data_area.
+  if <area_&1> is assigned.
+    clear <area_&1>-in_use.
+  endif.
+end-of-definition.
+
+
+define get_eml_commit_log.
+  if curr_responses_genlog is not initial.
+    &1 = curr_responses_genlog.  " dynamic
+  else.
+    &1 = value #( curr_responses[ rootname = &2 ]-log optional ).  " static?
+  endif.
+end-of-definition.
+
+define set_eml_commit_log.
+  data &1 type ref to if_abap_behv_log.
+  get_eml_commit_log &1 &2.
+  if &1 = &3.
+    &1 = no_log.
+  endif.
+end-of-definition.
+
+
+define get_own.
+  assign component '%OWN' of structure &1 to &2.
+  if sy-subrc <> 0.
+    assign &1 to &2.  " (unnecessary) fallback
+  endif.
+end-of-definition.
+
+
+* <BDEF-Program>-ENTITYNAME is a structure constant with one component per BO entity
+define get_entityname_struc.
+  _ABSOLUTE_NAME = |({ &2 width = 30 pad = '=' }BD)ENTITYNAME| ##NUMBER_OK.
+  assign (_ABSOLUTE_NAME) to &1.
+end-of-definition.
+
+* &1: ENTITYNAME struct; &2: rootname; &3: FAILED|MAPPED|REPORTED; &4: log object
+define postprocess.
+  if &1 is not assigned.
+    get_entityname_struc &1 &2.
+  endif.
+  if &1 is assigned.  " else: can't go on... TODO: ASSERT (should not occur)
+    transfer_to_log( exporting log         = &4
+                               other_log   = &5
+                               smsg_log    = smsg_log
+                               kind        = cond #( when &6 is initial and &9 na 'ydv'
+                                                     then if_abap_behv_log=>&3       " HANDLER and no new det/val: FAILED etc.
+                                                     else if_abap_behv_log=>&3_LATE  " SAVER or new det/val      : FAILED_LATE etc.
+                                                   )
+                               root_name             = &2
+                               entity_name           = &1
+                               discard_afterwards    = &7
+                               flavor                = &8
+                               phase                 = &6
+                               do_map_messages       = xsdbool( &9 na 'DVydv' )
+                               set_messages_global   = xsdbool( &9 ca 'GJ' )
+                               reject_state_messages = xsdbool( &9 = '%' )
+                     importing removed_entities      = data(removed_&3)
+                     changing  src_struc             = <&3> ).
+  endif.
+end-of-definition.
+
+
+define switch_intf_base.
+  data(intf_root) = cond abp_root_entity_name(
+    when root is not initial then
+     " static EML: check if the root is an interface
+     let _hd = value cl_abap_behv_load=>t_head( )
+         _ld = cl_abap_behv_load=>get_load( exporting entity = root importing head = _hd )
+     in  cond #( when _hd-impltype = cl_abap_behv_load=>c_impltype_INTERFACE
+                 then root )
+    else
+     " dynamic EML: determine roots, check if (at most) one is an interface
+     let _nr = job->load_root_infos( )
+     in  cond #( when _nr = 1 then value #(
+                 job->root_infos[ itype = cl_abap_behv_load=>c_impltype_INTERFACE ]-root optional )
+                "else <runtime error: cannot handle multiple roots when interface is involved>
+               )
+  ).
+  if intf_root is not initial.
+    cl_abap_behv_handler_proj=>MAP_TO_BASE_JOB(
+     exporting kind          = &1
+               proj_root     = intf_root
+               job           = job
+     importing base_job      = data(base_job)
+              "all_actv_idxs = data(all_actv_idxs)
+               out_actv_idxs = data(out_actv_idxs) ).
+    data(base_log) = cast CL_ABAP_BEHV_LOG( base_job->log ).
+    data(intf_job) = job.
+    job ?= base_job.
+    base_job->m_internal        = intf_job->m_internal.
+    base_job->m_from_projection = intf_job->m_from_projection.
+    base_job->m_from_interface  = intf_root.
+    if &1 ca 'RFa'.
+      base_job->m_level = cond #( when intf_job->m_from_projection is not initial
+                                  then cl_abap_behv_job_base=>read_base
+                                  else cl_abap_behv_job_base=>read_direct ).
+    elseif &1 ca 'MLP'.
+      base_job->m_level = cond #( when intf_job->m_from_projection is not initial
+                                  then cl_abap_behv_job_base=>modify_base
+                                  else cl_abap_behv_job_base=>modify_direct ).
+    endif.
+  elseif job->m_in_local_mode  is not initial and
+         job->m_from_interface is initial.
+    job->m_from_interface = cl_abap_behv_aux=>g_curr_context-from_interface.
+  endif.
+end-of-definition.
+
+define switch_base_intf.
+  if intf_job is not initial.
+    job = intf_job.
+    cl_abap_behv_handler_proj=>MAP_FROM_BASE_JOB( kind          = &1
+                                                  proj_root     = intf_root
+                                                  base_log      = base_log
+                                                  base_job      = base_job
+                                                  job           = job
+                                                  out_actv_idxs = out_actv_idxs ).
+  endif.
+end-of-definition.
+
+define disentangle_switch_intf_base.
+  " split mixed activities before passing job to SADL
+  job->disentangle( importing entangled_refs = data(erefs) ).
+  switch_intf_base &1.
+end-of-definition.
+
+define switch_base_intf_entangle.
+  switch_base_intf &1.
+  " merge result tables of split activities
+  job->entangle( erefs ).
+end-of-definition.
+
+
+define check_compatible.
+  check_compatible_fields( exporting field1 = &1 field2 = &2 importing rc = _conv_rc ).
+  if _conv_rc <> 0.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e014 with &3
+      exporting entity = &3
+                tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+end-of-definition.
+
+define bind_key.
+  " Purpose: Always pass %KEY structure to converter, but also accept scalar value if single-component
+  " &1: KEY / PREKEY
+  " &2: entity (for exception attribute)
+  " <&1>: field-symbol with destination structure
+  " <&1_comp1>: component 1 of structure, if single-component
+  field-symbols <&1>       type data.
+  field-symbols <&1_comp1> type simple.
+  if &1_dyn is not supplied.
+* &1 (KEY or PREKEY) is an operand with a (statically checked) correct structure type
+    assign &1 to <&1>.
+  else.
+* [PRE]KEY_DYN is a TVAR with the *correct* structure type
+* [PRE]KEY is the actual operand whose type was either (1) statically unknown,
+* or (2) the type is scalar and it's the type of the single component of [PRE]KEY_DYN.
+    describe field &1 type data(_t_&1).
+    if _t_&1 ca 'uw'.
+      check_compatible &1_dyn &1 &2.
+      assign &1 to <&1>.      " case (1)
+    else.
+      assign component 1 of structure &1_dyn
+                                   to <&1_comp1>.
+      check_compatible <&1_comp1> &1 &2.
+      <&1_comp1> = &1.        " [needed for copy-out after call]
+      assign &1_dyn to <&1>.  " case (2); pass tvar structure to converter
+    endif.
+  endif.
+end-of-definition.
+
+
+define dump_on_error_pools.
+  if error_pools is not supplied and error_pools is not initial.
+    loop at error_pools assigning field-symbol(<&1>).
+      data(&1) = conv program( <&1> ).
+      overlay &1 with '==============================CP'.
+      perform nottobefound in program (&1) if found.
+    endloop.
+  endif.
+end-of-definition.
+
+
+define exec_beg.
+  call 'BEHV_EXEC' id 'OP' field 1 id 'ROOT' field root id 'KIND' field phase.  "#EC CI_CCALL
+end-of-definition.
+define exec_end.
+  call 'BEHV_EXEC' id 'OP' field 0.  "#EC CI_CCALL
+end-of-definition.
+
+
+define get_eml_processor.
+  if eml_processor is initial.
+    eml_processor = CL_RAP_EML_PROCESSOR_FACTORY=>GET( ).
+    if eml_processor is initial.
+      raise shortdump type cx_abap_behv_runtime_error
+        message e019 exporting tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+    endif.
+  endif.
+end-of-definition.
+
+define get_eml_converter.
+  get_eml_processor.
+  eml_converter = eml_processor->GET_PRELIMINARY_KEY_CONVERTER( ).
+  if eml_converter is initial.
+    raise shortdump type cx_abap_behv_runtime_error
+      message e018 exporting tadir_key = cl_abap_behv_ctrl=>get_caller( ).
+  endif.
+end-of-definition.
+
+
+define set_managed_kind.
+    &1->m_managed_kind = conv #( abs( &2 ) ). " 0:CSP_ACTIVE, 1:CSP_DRAFT, 2:BSP_DRAFT
+end-of-definition.
+
+
+define xtrace_handlers.
+  if cl_abap_behv_tracer=>xtrace_level >= cl_abap_behv_tracer=>c_xtrace-default.
+    cl_abap_behv_tracer=>tracer->trace(
+      message   = |{ text_002 } ({ lines( &1 ) })|
+      procedure = 'GET_HANDLERS'
+      content   = &1
+    ).
+  endif.
+end-of-definition.
+
+define xtrace_triggers_gen.
+  if cl_abap_behv_tracer=>xtrace_level >= cl_abap_behv_tracer=>c_xtrace-default.
+    cl_abap_behv_tracer=>tracer->trace(
+      message   = |{ text_003 } { &4 } ({ lines( &1->&3 ) })|
+      procedure = &2
+      content   = value tt_trigger_trace( for <t> in &1->&3 ( corresponding #( <t> mapping op = operation ) ) )
+      properties = value #(
+       let _props = value if_sxt_types=>ty_property_tab(
+        ( name = 'JOB' value = objectdescr( &1 ) )
+        ( name = 'CONTENT' value = cond #( when &1->m_content is not initial then &1->m_content ) ) ##TYPE
+        ( name = 'LEVEL' value = cond #( when &1->m_level is not initial then &1->m_level ) )
+        ( name = 'TOKEN' value = cond #( when &1->m_token is not initial then &1->m_token ) )
+        ( name = 'LOG' value = cond #( when &1->log is bound then objectdescr( &1->log ) ) ) )
+       in for <p> in _props where ( value is not initial ) ( <p> ) )
+    ) .
+  endif.
+end-of-definition.
+
+define xtrace_triggers.
+  xtrace_triggers_gen &1 &2 triggers ``.
+end-of-definition.
+
+define xtrace_beg_hier_eml.
+  data(&1) = cond t_trace_hier(
+   when cl_abap_behv_tracer=>xtrace_level >= cl_abap_behv_tracer=>c_xtrace-eml
+   then value #(
+    let _dummy = cl_abap_behv_tracer=>tracer->add_header_properties(
+                   value #( ( name = 'EML' value = &2 ) ) )
+    in
+    nest = cl_abap_behv_tracer=>tracer->trace_beg(
+     trace_level = cl_abap_behv_tracer=>c_xtrace-eml
+     message = |{ text_007 } { &2 }{ cond #( when &4 is not initial then ` (Dyn)` )
+                                  }{ cond #( when &5 is not initial then ` (Local)` ) }|
+     procedure = &3 ) ) ).
+end-of-definition.
+
+define xtrace_end_hier.
+  if &1 is not initial.
+    cl_abap_behv_tracer=>tracer->trace_end( hierarchy_number = &1-nest ).
+  endif.
+end-of-definition.
+
+define set_privileged_disable_ac.
+" set privileged authority context, if present
+if job->m_privileged is not initial and lines( job->activities ) > 0.
+  data root_first_actv type abp_root_entity_name.
+  cl_abap_behv_load=>get_load( exporting entity = value #( job->activities[ 1 ]-entity_name optional )
+                               importing authorization_contexts = data(auth_ctxts)
+                               changing  root_entity = root_first_actv ).
+  if line_exists( auth_ctxts[ name = ac_privi_disable_name ] ).
+    " load cl_abap_behv_auth_context, registration of gt_contexts needed by 'BEHV_EXEC' below
+    cl_abap_behv_auth_context=>rc = 42.
+    " push on block stack => not in separate method because it would be popped at endmethod
+    call 'BEHV_EXEC' id 'OP' field 27
+                     id 'BDL_NAME' field root_first_actv
+                     id 'AC_NAME' field ac_privi_disable_name. "#EC CI_CCALL
+    cl_abap_behv_auth_context=>insert(
+      p_bdef    = root_first_actv
+      p_ac      = ac_privi_disable_name
+      p_program = job->eml_position-program
+      p_include = job->eml_position-include
+      p_line    = job->eml_position-line ).
+  endif.
+endif.
+end-of-definition.

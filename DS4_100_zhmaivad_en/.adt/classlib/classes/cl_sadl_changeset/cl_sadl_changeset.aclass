@@ -1,0 +1,235 @@
+CLASS cl_sadl_changeset DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PRIVATE
+  GLOBAL FRIENDS cl_sadl_changeset_factory
+                 cl_sadl_changeset_trace
+                 th_sadl_db_doubles. " event listener
+
+  PUBLIC SECTION.
+    INTERFACES if_sadl_changeset.
+
+    METHODS constructor IMPORTING !io_sadl_api TYPE REF TO if_sadl_entity_api.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    DATA mo_sadl_api TYPE REF TO if_sadl_entity_api.
+
+    METHODS _get_mapper IMPORTING !iv_entity       TYPE sadl_entity_id
+                        RETURNING VALUE(ro_mapper) TYPE REF TO if_sadl_entity_runtime_mapper
+                        RAISING   cx_sadl_contract_violation.
+
+    METHODS _map_request IMPORTING it_create    TYPE if_sadl_changeset=>tt_create
+                                   it_update    TYPE if_sadl_changeset=>tt_update
+                                   it_delete    TYPE if_sadl_changeset=>tt_delete
+                                   it_action    TYPE if_sadl_changeset=>tt_action
+                         EXPORTING et_bo_create TYPE if_sadl_changeset~tt_create
+                                   et_bo_update TYPE if_sadl_changeset~tt_update
+                                   et_bo_delete TYPE if_sadl_changeset~tt_delete
+                                   et_bo_action TYPE if_sadl_changeset~tt_action
+                         RAISING   cx_sadl_contract_violation.
+
+    METHODS _map_response IMPORTING it_bo_create TYPE if_sadl_changeset~tt_create
+                                    it_bo_update TYPE if_sadl_changeset~tt_update
+                                    it_bo_action TYPE if_sadl_changeset~tt_action
+                                    it_create    TYPE if_sadl_changeset=>tt_create
+                                    it_update    TYPE if_sadl_changeset=>tt_update
+                                    it_action    TYPE if_sadl_changeset=>tt_action
+                          RAISING   cx_sadl_contract_violation.
+
+    METHODS _map_create_requests
+      IMPORTING
+        it_create           TYPE if_sadl_changeset=>tt_create
+      RETURNING
+        VALUE(rt_bo_create) TYPE cl_sadl_changeset=>if_sadl_changeset~tt_create
+      RAISING
+        cx_sadl_contract_violation.
+
+    METHODS _map_update_requests
+      IMPORTING
+        it_update           TYPE if_sadl_changeset=>tt_update
+      RETURNING
+        VALUE(rt_bo_update) TYPE cl_sadl_changeset=>if_sadl_changeset~tt_update
+      RAISING
+        cx_sadl_contract_violation.
+
+    METHODS _map_delete_requests
+      IMPORTING
+        it_delete           TYPE if_sadl_changeset=>tt_delete
+      RETURNING
+        VALUE(rt_bo_delete) TYPE cl_sadl_changeset=>if_sadl_changeset~tt_delete
+      RAISING
+        cx_sadl_contract_violation.
+
+    EVENTS before_modify_sadl EXPORTING VALUE(api)     TYPE REF TO if_sadl_entity_api
+                                        VALUE(creates) TYPE if_sadl_changeset=>tt_create
+                                        VALUE(updates) TYPE if_sadl_changeset=>tt_update
+                                        VALUE(deletes) TYPE if_sadl_changeset=>tt_delete
+                                        VALUE(actions) TYPE if_sadl_changeset=>tt_action.
+    CLASS-EVENTS empty_update_skipped EXPORTING VALUE(s_update) TYPE if_sadl_changeset=>ty_update.
+ENDCLASS.
+
+
+
+CLASS CL_SADL_CHANGESET IMPLEMENTATION.
+
+
+  METHOD constructor.
+    mo_sadl_api = io_sadl_api.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_changeset~modify.
+    cl_sadl_dev_assist=>log_if_doubles_are_inactive( ).
+    RAISE EVENT before_modify_sadl EXPORTING api     = mo_sadl_api
+                                             creates = it_create
+                                             updates = it_update
+                                             deletes = it_delete
+                                             actions = it_action.
+
+    _map_request( EXPORTING it_create    = it_create
+                            it_update    = it_update
+                            it_delete    = it_delete
+                            it_action    = it_action
+                  IMPORTING et_bo_create = DATA(lt_bo_create)
+                            et_bo_update = DATA(lt_bo_update)
+                            et_bo_delete = DATA(lt_bo_delete)
+                            et_bo_action = DATA(lt_bo_action) ).
+
+    IF lt_bo_create IS INITIAL AND lt_bo_update IS INITIAL AND lt_bo_delete IS INITIAL AND lt_bo_action IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lo_transaction_manager) = cl_sadl_transact_manager_fctr=>get_transaction_manager( ).
+    CAST if_sadl_changeset( lo_transaction_manager )->modify(  EXPORTING it_create                    = lt_bo_create
+                                                                         it_update                    = lt_bo_update
+                                                                         it_delete                    = lt_bo_delete
+                                                                         it_action                    = lt_bo_action
+                                                                         iv_is_sticky_session         = iv_is_sticky_session
+                                                                         iv_strict_handling_requested = iv_strict_handling_requested
+                                                               IMPORTING ev_failed                    = ev_failed
+                                                                         ev_failure_reason            = ev_failure_reason ).
+
+    _map_response( it_bo_create = lt_bo_create
+                   it_bo_update = lt_bo_update
+                   it_bo_action = lt_bo_action
+                   it_create    = it_create
+                   it_update    = it_update
+                   it_action    = it_action ).
+  ENDMETHOD.
+
+
+  METHOD _get_mapper.
+    ro_mapper = CAST if_sadl_entity_runtime_mapper( mo_sadl_api->get_runtime( CONV #( iv_entity ) ) ).
+  ENDMETHOD.
+
+
+  METHOD _map_request.
+    et_bo_create = _map_create_requests( it_create ).
+    et_bo_update = _map_update_requests( it_update ).
+    et_bo_delete = _map_delete_requests( it_delete ).
+
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      DATA(lo_entity) = mo_sadl_api->get_entity( CONV #( <s_action>-entity_id ) ).
+      _get_mapper( <s_action>-entity_id )->map_action_request( EXPORTING is_sadl_action = <s_action>
+                                                               IMPORTING es_bo_action   = DATA(ls_bo_action) ).
+      APPEND ls_bo_action TO et_bo_action.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _map_response.
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create>).
+      DATA(lv_tabix) = sy-tabix.
+      _get_mapper( <s_create>-entity_id )->map_create_response( is_bo_create   = it_bo_create[ lv_tabix ]
+                                                                is_sadl_create = <s_create> ).
+    ENDLOOP.
+
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update>)
+      WHERE NOT content_id_ref IS INITIAL. "update response needs only be mapped for content id referencing
+      lv_tabix = sy-tabix.
+      _get_mapper( <s_update>-entity_id )->map_update_response( is_bo_update   = it_bo_update[ lv_tabix ]
+                                                                is_sadl_update = <s_update> ).
+    ENDLOOP.
+
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      lv_tabix = sy-tabix.
+      _get_mapper( <s_action>-entity_id )->map_action_response( is_bo_action   = it_bo_action[ lv_tabix ]
+                                                                is_sadl_action = <s_action> ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _map_create_requests.
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create>).
+      IF <s_create>-source-association_name IS INITIAL.
+        DATA(lo_entity) = mo_sadl_api->get_entity( CONV #( <s_create>-entity_id ) ).
+        lo_entity->get_entity_control( IMPORTING es_entity_control = DATA(ls_entity_control1) ).
+        IF ls_entity_control1-create_enabled <> abap_true.
+          RAISE EXCEPTION cx_sadl_entity_cud_disabled=>create_not_enabled( lo_entity->get_id( ) ).
+        ENDIF.
+      ELSE.
+        DATA(lo_source_entity) = mo_sadl_api->get_entity( CONV #( <s_create>-source-entity_id ) ).
+        lo_source_entity->get_association_control( IMPORTING et_association_control = DATA(lt_association_control) ).
+        IF NOT line_exists( lt_association_control[ association = <s_create>-source-association_name  control-create_enabled = abap_true ] ).
+          RAISE EXCEPTION cx_sadl_entity_cud_disabled=>create_by_assoc_not_enabled( iv_entity_id        = lo_source_entity->get_id( )
+                                                                                    iv_association_name = <s_create>-source-association_name ).
+        ENDIF.
+      ENDIF.
+      _get_mapper( COND #( WHEN <s_create>-source-association_name IS INITIAL THEN <s_create>-entity_id ELSE <s_create>-source-entity_id )
+         )->map_create_request( EXPORTING is_sadl_create = <s_create>
+                                IMPORTING es_bo_create   = DATA(ls_bo_create) ).
+      APPEND ls_bo_create TO rt_bo_create.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _map_delete_requests.
+    DATA lr_sadl_keys TYPE REF TO data.
+
+    LOOP AT it_delete ASSIGNING FIELD-SYMBOL(<s_delete>).
+      DATA(lo_entity) = mo_sadl_api->get_entity( CONV #( <s_delete>-entity_id ) ).
+      lo_entity->get_entity_control( IMPORTING es_entity_control = DATA(ls_entity_control) ).
+      IF ls_entity_control-delete_enabled <> abap_true.
+        RAISE EXCEPTION cx_sadl_entity_cud_disabled=>delete_not_enabled( lo_entity->get_id( ) ).
+      ENDIF.
+      ASSIGN <s_delete>-rs_key_values->* TO FIELD-SYMBOL(<s_deref>).
+      CREATE DATA lr_sadl_keys LIKE STANDARD TABLE OF <s_deref>.
+      FIELD-SYMBOLS <t_sadl_keys> TYPE STANDARD TABLE.
+      ASSIGN lr_sadl_keys->* TO <t_sadl_keys>.
+      APPEND <s_deref> TO <t_sadl_keys>.
+      _get_mapper( <s_delete>-entity_id )->map_delete_request( EXPORTING it_sadl_keys               = <t_sadl_keys>
+                                                               IMPORTING er_bo_keys                 = DATA(lr_bo_keys)
+                                                                         ev_alternative_key         = DATA(lv_alt_key)
+                                                                         ev_referenced_sadl_entity  = DATA(lv_ref_sadl_entity) ).
+      FIELD-SYMBOLS <t_bo_keys> TYPE STANDARD TABLE.
+      DATA lr_bo_key TYPE REF TO data.
+      ASSIGN lr_bo_keys->* TO <t_bo_keys>.
+      LOOP AT <t_bo_keys> REFERENCE INTO lr_bo_key.
+        APPEND VALUE #( entity_id            = lv_ref_sadl_entity
+                        alternative_key_name = lv_alt_key
+                        rs_key_values        = lr_bo_key
+                        precondition         = <s_delete>-precondition
+                        content_id_ref       = <s_delete>-content_id_ref ) TO rt_bo_delete.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _map_update_requests.
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update>).
+      DATA(lo_entity) = mo_sadl_api->get_entity( CONV #( <s_update>-entity_id ) ).
+      lo_entity->get_entity_control( IMPORTING es_entity_control = DATA(ls_entity_control) ).
+      IF ls_entity_control-update_enabled <> abap_true.
+        RAISE EXCEPTION cx_sadl_entity_cud_disabled=>update_not_enabled( lo_entity->get_id( ) ).
+      ENDIF.
+      IF <s_update>-updated_elements IS INITIAL.
+        RAISE EVENT empty_update_skipped EXPORTING s_update = <s_update>.
+      ELSE.
+        _get_mapper( <s_update>-entity_id )->map_update_request( EXPORTING is_sadl_update = <s_update>
+                                                                 IMPORTING et_bo_updates  = DATA(lt_bo_update_single_sadl_struc) ).
+        APPEND LINES OF lt_bo_update_single_sadl_struc TO rt_bo_update.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.

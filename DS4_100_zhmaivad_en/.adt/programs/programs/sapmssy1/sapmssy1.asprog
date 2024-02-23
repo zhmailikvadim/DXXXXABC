@@ -1,0 +1,450 @@
+PROGRAM sapmssy1 MESSAGE-ID sy NO STANDARD PAGE HEADING.
+
+INCLUDE rsebcasc.
+
+* -------------------------------------------------------------------
+*                          S A P M S S Y 1
+*                  system routines for ABAP processing
+*                      RFC, CPI-C and Update Task
+* -------------------------------------------------------------------
+* Daten fuer Trace-Routine
+DATA: count LIKE sy-index.
+* Daten fuer CPIC-Verbindung
+DATA: convid(8)  TYPE c,
+      header(12) TYPE x.
+* RFC Verbindungstyp  (vgl. abrfc.h, enum RFC_TYPE )
+DATA : "rfctype_direct_cpic   TYPE i VALUE 0,
+  " rfctype_test          TYPE i VALUE 1,
+  rfctype_external_cpic TYPE i VALUE 2,
+  rfctype_internal      TYPE i VALUE 3,
+*       rfctype_external_r3   TYPE i VALUE 4,
+*       rfctype_external_tcp  TYPE i VALUE 5,
+*       rfctype_queue         TYPE i VALUE 6,
+  rfctype_abap4_exit    TYPE i VALUE 7,
+  rfctype_saptemu       TYPE i VALUE 8,
+  rfctype_rfcdia        TYPE i VALUE 9.
+
+*----------------------------------------------------------------------*
+*  MODULE %_rfc_start OUTPUT
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+MODULE %_rfc_start OUTPUT ##prefix_ok.
+  "Do not display screen !
+  CALL 'DY_INVISIBLE_SCREEN'.
+  PERFORM remote_function_call USING rfctype_internal.
+ENDMODULE.                    "%_rfc_start OUTPUT
+
+*----------------------------------------------------------------------*
+*  MODULE %_rfcdia_start OUTPUT
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+MODULE %_rfcdia_start OUTPUT ##prefix_ok .
+  "Do not display screen !
+  CALL 'DY_INVISIBLE_SCREEN'.
+  PERFORM remote_function_diastart.
+ENDMODULE.                    "%_rfcdia_start OUTPUT
+
+*----------------------------------------------------------------------*
+*  MODULE %_rfcdia_call OUTPUT
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+MODULE %_rfcdia_call OUTPUT ##prefix_ok .
+  "Do not display screen !
+  CALL 'DY_INVISIBLE_SCREEN'.
+  PERFORM remote_function_diacall.
+ENDMODULE.                    "%_rfcdia_call OUTPUT
+
+*----------------------------------------------------------------------*
+*  MODULE %_cpic_start
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+MODULE %_cpic_start  ##prefix_ok.
+  IF sy-xprog(4) = '%RFC'.
+    PERFORM remote_function_call USING rfctype_external_cpic.
+  ELSE.
+    CALL 'APPC_HD' ID 'HEADER' FIELD header ID 'CONVID' FIELD convid.
+    PERFORM cpic_call USING convid.
+  ENDIF.
+ENDMODULE.                    "%_cpic_start
+
+
+*&---------------------------------------------------------------------*
+*&      Form  cpic_call
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->CONVID     text
+*----------------------------------------------------------------------*
+FORM cpic_call USING convid TYPE c.
+  COMMUNICATION SEND ID convid BUFFER header.
+  IF sy-subrc EQ 0.
+    PERFORM (sy-xform) IN PROGRAM (sy-xprog).
+  ELSE.
+    MESSAGE a800.
+  ENDIF.
+ENDFORM.                    "cpic_call
+
+
+FORM chk_whitelist. " called from abfunc.c !!!!
+
+*  DATA: l_scope       TYPE c.
+*  DATA: ls_state      TYPE uconrfcstate.
+*  DATA: l_dca_name TYPE uconcaid.
+*  DATA: l_dcfg_name TYPE uconhttpid.
+*  DATA: l_dvhost_name TYPE uconvirthostname.
+*  DATA: lcx_ucon_not_active TYPE REF TO cx_ucon_not_active.
+*  DATA: l_err_text          TYPE c LENGTH 100.
+*  DATA: l_ucon_prerequisite_fulfilled TYPE abap_bool VALUE abap_false.
+  DATA: l_callback_security_method.
+  DATA: l_subrc TYPE sy-subrc.
+
+  FIELD-SYMBOLS:
+    <in_dest>      TYPE any,
+    <in_cb_func>   TYPE any,
+    <in_orig_func> TYPE any,
+    <out_result>   TYPE any.
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <in_dest>
+                        ID 'P2' FIELD <in_cb_func>
+                        ID 'P3' FIELD <in_orig_func>
+                        ID 'P4' FIELD <out_result>.
+
+  CALL 'C_SAPGPARAM' ID 'NAME' FIELD 'rfc/callback_security_method'
+                     ID 'VALUE' FIELD l_callback_security_method. "#EC CI_CCALL.
+
+
+  <out_result> = 'X'.
+*  clear <out_result>.
+*
+  DATA: l_dest TYPE rfcdest.
+  DATA: l_active_flag TYPE c.
+*
+  SELECT SINGLE active_flag FROM rfccbwhitelist_a INTO l_active_flag WHERE
+    destination = <in_dest>.
+*
+  SELECT SINGLE destination FROM rfccbwhitelist INTO l_dest WHERE
+    destination = <in_dest>
+     AND ( called_fm = <in_orig_func> OR called_fm = '*' )
+     AND ( called_back_fm = <in_cb_func> OR called_back_fm = '*' ). "#EC CI_GENBUFF
+  l_subrc = sy-subrc.
+*
+  CASE l_callback_security_method.
+    WHEN '1'.
+*        CLEAR <out_result>.
+      IF ( l_active_flag = 'X' AND             "Whitelist is active ...
+           l_subrc NE 0 ).                     "... and not found in whitelist.
+        CLEAR <out_result>.                    "Callback is rejected, if forbidden by active whitelist.
+      ENDIF.                                   "Otherwise callback is allowed.
+*
+    WHEN '2'.
+      IF ( l_active_flag = 'X' AND             "Whitelist is active ...
+           l_subrc NE 0 ).                     "... and not found in whitelist.
+        CLEAR <out_result>.                    "Callback is rejected, if forbidden by active whitelist.
+      ELSEIF ( l_active_flag IS INITIAL AND    "Whitelist is inactive ...
+           l_subrc NE 0 ).                     "... and not found in whitelist.
+        <out_result> = 'A'.                    "Callback is allowed in simulation mode.
+      ENDIF.                                   "Otherwise callback is allowed.
+*
+    WHEN '3'.
+      IF ( l_subrc NE 0 ).                     "Not found in whitelist (regardless whether active or not).
+        CLEAR <out_result> .                   "Callback is rejected, if forbidden by whitelist.
+      ENDIF.                                   "Otherwise callback is allowed.
+*
+    WHEN OTHERS.
+      CLEAR <out_result>.                      "Unexpected branch: Callback is forbidden.
+  ENDCASE.
+
+
+  CALL 'AB_SET_C_PARMS' ID 'P4' FIELD <out_result>. "#EC CI_CCALL CI_CCALL
+
+ENDFORM.
+
+
+FORM AFTER_LOGON_SCREEN.
+*  MESSAGE a000(s_unified_con) with 'test'.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  remote_function_call
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->VALUE      text
+*      -->(TYPE)     text
+*----------------------------------------------------------------------*
+FORM remote_function_call USING VALUE(type).
+  DATA rc             TYPE i VALUE 0.
+  DATA: l_syxform          TYPE syxform,
+        l_syxprog          TYPE syxprog.
+
+  DO.
+    CALL 'RfcImport' ID 'Type'        FIELD type
+                     ID 'SYXForm'     FIELD l_syxform
+                     ID 'SYXProg'     FIELD l_syxprog.
+
+      PERFORM (l_syxform) IN PROGRAM (l_syxprog).
+
+  ENDDO.                                                    "#EC DO_OK
+ENDFORM.                    "remote_function_call
+
+* RFC *from* sapgui, called from sapmssyd
+FORM remote_function_fromsaptemu.
+  "do. only *one* call
+  CALL 'RfcImport' ID 'Type' FIELD rfctype_saptemu.
+  PERFORM (sy-xform) IN PROGRAM (sy-xprog).
+  "rsyn >scont sysc 00011111 0. (wenn überhaupt, dann 10 oder 11?)
+  "but we leave sapmssyd the normal way.
+  "enddo.
+ENDFORM ##CALLED.                    "remote_function_fromsaptemu
+
+*&---------------------------------------------------------------------*
+*&      Form  remote_function_diastart
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM remote_function_diastart.
+  DO.
+    CALL 'RfcImport' ID 'Type' FIELD rfctype_rfcdia.
+    PERFORM (sy-xform) IN PROGRAM (sy-xprog).
+    "Parking position for next request
+    RSYN >SCONT sysc 00011111 10.
+    "ALternativ : Free mode
+    "COMMIT WORK.
+    "SYSTEM-CALL FREE MODE 0.
+  ENDDO.                                                    "#EC DO_OK
+ENDFORM.                    "remote_function_diastart
+
+*&---------------------------------------------------------------------*
+*&      Form  remote_function_diacall
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM remote_function_diacall.
+  sy-xcode = '%_@no@'.
+  PERFORM (sy-xform) IN PROGRAM (sy-xprog).
+  "Beende Call Dynpro und gehe
+  "in Warteposition (Impliziter LEAVE SCREEN)
+  RSYN >SCONT sysc 00011111 11.
+  "Never reach this point.
+ENDFORM.                    "remote_function_diacall
+
+*&---------------------------------------------------------------------*
+*&      Form  remote_call_back
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM remote_call_back.
+  IF sy-xform <> space.
+    PERFORM (sy-xform) IN PROGRAM (sy-xprog).
+    "parking position
+    RSYN >SCONT sysc 00011111 0.
+  ENDIF.
+ENDFORM.                    "remote_call_back
+
+*&---------------------------------------------------------------------*
+*&      Form  trace
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->BUF        text
+*----------------------------------------------------------------------*
+FORM trace USING buf TYPE c.
+* CHECK SY-XPROG = 'SAPLTEST'.
+  TABLES tcpic.
+  MOVE sy-datum TO tcpic-datum.
+  MOVE sy-uzeit TO tcpic-uzeit.
+  MOVE count    TO tcpic-counter.
+  MOVE sy-subrc TO tcpic-subrc.
+  MOVE buf      TO tcpic-buffer.
+  ADD 1 TO count.
+  MODIFY tcpic.
+ENDFORM.                    "trace
+
+* ----------------------------------------------------------------------
+* RFC-ABAP/4-Treiber-Ansteuerung
+* ----------------------------------------------------------------------
+
+FORM xab_open.
+  FIELD-SYMBOLS: <prog>, <dest>, <cntl>, <options>.
+
+
+  DATA : subrc TYPE i.
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <prog>       "Programmname
+                        ID 'P2' FIELD <cntl>       "Handle
+                        ID 'P3' FIELD <dest>       "Destination
+                        ID 'P4' FIELD <options>.   "RFCOPT
+
+  PERFORM rfcdrv_open IN PROGRAM (<prog>) USING <cntl>
+                                                <dest>
+                                                <options>
+                                                subrc.
+  CALL 'AB_SET_C_PARMS' ID 'P2' FIELD <cntl>.      "Handle
+  syst-subrc = subrc.
+ENDFORM.                    "xab_open
+
+*&---------------------------------------------------------------------*
+*&      Form  xab_blen
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM xab_blen.
+  FIELD-SYMBOLS: <prog>, <buffersize>.
+
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <prog>        "Programmname
+                        ID 'P2' FIELD <buffersize>. "Puffergroesse
+
+  PERFORM rfcdrv_blen IN PROGRAM (<prog>) USING <buffersize>.
+
+  CALL 'AB_SET_C_PARMS' ID 'P2' FIELD <buffersize>. "Puffergroesse
+  syst-subrc = 0.
+ENDFORM.                    "xab_blen
+
+*&---------------------------------------------------------------------*
+*&      Form  xab_accept
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM xab_accept.
+  FIELD-SYMBOLS: <prog>, <cntl>.
+  DATA : subrc TYPE i.
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <prog>       "Programmname
+                        ID 'P2' FIELD <cntl>.      "Handle
+
+  PERFORM rfcdrv_accept IN PROGRAM (<prog>) USING <cntl>
+                                                  subrc.
+  CALL 'AB_SET_C_PARMS' ID 'P2' FIELD <cntl>.      "Handle
+  syst-subrc = subrc.
+ENDFORM.                    "xab_accept
+
+*&---------------------------------------------------------------------*
+*&      Form  xab_write
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM xab_write.
+  FIELD-SYMBOLS: <prog>, <cntl>, <buffer>.
+
+
+  DATA : subrc TYPE i.
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <prog>       "Programmname
+                        ID 'P2' FIELD <cntl>       "Handle
+                        ID 'P3' FIELD <buffer>.    "Ausgabepuffer
+
+  PERFORM rfcdrv_write IN PROGRAM (<prog>) USING <cntl>
+                                                 <buffer>
+                                                 subrc.
+  CALL 'AB_SET_C_PARMS' ID 'P2' FIELD <cntl>.      "Handle
+  syst-subrc = subrc.
+ENDFORM.                    "xab_write
+
+*&---------------------------------------------------------------------*
+*&      Form  xab_read
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM xab_read.
+  FIELD-SYMBOLS: <prog>, <buffersize>, <buffer>, <cntl>.
+
+
+
+  DATA : subrc TYPE i.
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <prog>        "Programmname
+                        ID 'P2' FIELD <cntl>        "Handle
+                        ID 'P3' FIELD <buffer>      "Eingabepuffer
+                        ID 'P4' FIELD <buffersize>. "Puffergroesse
+
+  DESCRIBE FIELD <buffer> LENGTH <buffersize> IN BYTE MODE.
+
+  PERFORM rfcdrv_read IN PROGRAM (<prog>) USING <cntl>
+                                                <buffer>
+                                                <buffersize>
+                                                subrc.
+  CALL 'AB_SET_C_PARMS' ID 'P2' FIELD <cntl>        "Puffergroesse
+                        ID 'P3' FIELD <buffer>      "Puffer
+                        ID 'P4' FIELD <buffersize>. "Handle
+  syst-subrc = subrc.
+ENDFORM.                    "xab_read
+
+*&---------------------------------------------------------------------*
+*&      Form  xab_wflush
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM xab_wflush.
+  FIELD-SYMBOLS: <prog>, <cntl>.
+
+
+  DATA : subrc TYPE i.
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <prog>        "Programmname
+                        ID 'P2' FIELD <cntl>.       "Handle
+
+  PERFORM rfcdrv_wflush IN PROGRAM (<prog>) USING <cntl>
+                                                  subrc
+                        IF FOUND.
+
+  CALL 'AB_SET_C_PARMS' ID 'P2' FIELD <cntl>.      "Handle
+  syst-subrc = subrc.
+ENDFORM.                    "xab_wflush
+
+*&---------------------------------------------------------------------*
+*&      Form  xab_rflush
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM xab_rflush.
+  FIELD-SYMBOLS: <prog>, <cntl>.
+
+
+  DATA : subrc TYPE i.
+
+  CALL 'AB_GET_C_PARMS' ID 'P1' FIELD <prog>        "Programmname
+                        ID 'P2' FIELD <cntl>.       "Handle
+
+  PERFORM rfcdrv_rflush IN PROGRAM (<prog>) USING <cntl>
+                                                  subrc
+                        IF FOUND.
+
+  CALL 'AB_SET_C_PARMS' ID 'P2' FIELD <cntl>.      "Handle
+  syst-subrc = subrc.
+ENDFORM.                    "xab_rflush
+
+*&---------------------------------------------------------------------*
+*&      Form  xab_run_driver
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->PROG          text
+*      -->IF_FOUND      text
+*      -->NEW_FUNCTION  text
+*----------------------------------------------------------------------*
+FORM xab_run_driver USING prog         TYPE c
+                          if_found     TYPE i
+                          new_function TYPE c.
+  DATA : program LIKE syst-repid.
+
+  program = prog.
+  IF new_function = space.
+    CALL 'RfcImport' ID 'Push' FIELD rfctype_abap4_exit
+                     ID 'Info' FIELD program.
+  ELSE.
+    CALL 'RfcImport' ID 'Push' FIELD rfctype_abap4_exit
+                     ID 'Info' FIELD program
+                     ID 'Function' FIELD new_function.
+  ENDIF.
+  IF if_found = 0.
+    PERFORM (sy-xform) IN PROGRAM (sy-xprog).
+  ELSE.
+    PERFORM (sy-xform) IN PROGRAM (sy-xprog) IF FOUND.
+  ENDIF.
+
+ENDFORM.                    "xab_run_driver

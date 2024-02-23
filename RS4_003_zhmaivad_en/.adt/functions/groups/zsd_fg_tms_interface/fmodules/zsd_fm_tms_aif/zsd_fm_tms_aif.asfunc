@@ -1,0 +1,132 @@
+FUNCTION zsd_fm_tms_aif
+  IMPORTING
+    testrun TYPE c
+    sending_system TYPE /aif/aif_business_system_key OPTIONAL
+  CHANGING
+    data TYPE any ##ADT_PARAMETER_UNTYPED
+    curr_line TYPE any ##ADT_PARAMETER_UNTYPED
+    success TYPE /aif/successflag
+    old_messages TYPE /aif/bal_t_msg
+  TABLES
+    return_tab LIKE bapiret2.
+
+
+
+
+  " -----------------------------------------------------------------------
+  "  R E V I S I O N   H I S T O R Y                                     -
+  " -----------------------------------------------------------------------
+  " AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              -
+  "              |            | TRANSPORT REQUESTS                       -
+  " -----------------------------------------------------------------------
+  " KALSHZHA     | 27.02.2023 | 18316     : [Platform] - Inbound interfa -
+  "              |            | DS4K944595                               -
+  " -----------------------------------------------------------------------
+  " KALSHZHA     | 27.02.2023 | 19930     : [Defect] Defect for Load Infor-
+  "              |            | DS4K949496                               -
+  " -----------------------------------------------------------------------
+  " KALSHZHA     | 26.10.2023 | 26115     : [Defect] Defect for Load Infor-
+  "              |            | DS4K967671                               -
+  " -----------------------------------------------------------------------
+  " ZHMAIVAD     | 22.11.2023 | 26115     : [Defect] Defect for Load Infor-
+  "              |            | DS4K967671                               -
+  " -----------------------------------------------------------------------
+
+  CONSTANTS lc_bapiret_err_a TYPE char01 VALUE 'A'.
+  CONSTANTS lc_bapiret_err_e TYPE char01 VALUE 'E'.
+
+  DATA lt_dn            TYPE zcl_sd_delivery_events_update=>gtyp_t_data.
+  DATA ls_data          TYPE zsd_s_update_delivery_request.
+  DATA ls_dn            LIKE LINE OF lt_dn.
+  DATA lt_return        TYPE bapiret2_tab.
+  DATA ls_custom_fields TYPE zcl_sd_tms_delivery_change=>gtyp_custom_fields.
+
+  TRY.
+      ls_data = data.
+
+      SELECT deliverydocument         AS deliverynumber,         "#EC CI_SUBRC
+             shippinglocationtimezone AS deliverytimezone
+        FROM i_deliverydocument
+        FOR ALL ENTRIES IN @ls_data-tsm_update_delivery
+        WHERE deliverydocument = @ls_data-tsm_update_delivery-tms_deliverynumber
+        INTO TABLE  @FINAL(lt_delivery_timezone).
+
+      LOOP AT ls_data-tsm_update_delivery ASSIGNING FIELD-SYMBOL(<ls_data>).
+        FINAL(lv_deliverytimezone) = VALUE #( lt_delivery_timezone[
+                                                  deliverynumber = <ls_data>-tms_deliverynumber ]-deliverytimezone OPTIONAL ).
+
+        CLEAR ls_dn.
+        ls_dn-delivery_note  = <ls_data>-tms_deliverynumber.
+        ls_dn-event_type     = <ls_data>-tms_eventtype1.
+        ls_dn-plan_time_zone = <ls_data>-tms_pickupdatetimezone.
+
+        FINAL(lv_conversion_timezone_to) = COND syst_zonlo( WHEN lv_deliverytimezone = sy-zonlo
+                                                            THEN 'UTC'
+                                                            ELSE sy-zonlo ).
+
+        CONVERT TIME STAMP <ls_data>-tms_pickupdatetimestart TIME ZONE lv_conversion_timezone_to
+                INTO DATE ls_dn-begin_plan_date TIME ls_dn-begin_plan_time.
+        CONVERT TIME STAMP <ls_data>-tms_pickupdatetimeend TIME ZONE lv_conversion_timezone_to
+                INTO DATE ls_dn-end_plan_date TIME ls_dn-end_plan_time.
+        INSERT ls_dn INTO TABLE lt_dn.
+        ls_dn-event_type     = <ls_data>-tms_eventtype2.
+        ls_dn-plan_time_zone = <ls_data>-tms_deliverydatetimezone.
+        CONVERT TIME STAMP <ls_data>-tms_deliverydatestart TIME ZONE lv_conversion_timezone_to
+                INTO DATE ls_dn-begin_plan_date TIME ls_dn-begin_plan_time.
+        CONVERT TIME STAMP <ls_data>-tms_deliverydateend TIME ZONE lv_conversion_timezone_to
+                INTO DATE ls_dn-end_plan_date TIME ls_dn-end_plan_time.
+        INSERT ls_dn INTO TABLE lt_dn.
+      ENDLOOP.
+
+      IF lt_dn IS NOT INITIAL.
+        zcl_sd_delivery_events_update=>process( EXPORTING iv_test   = testrun
+                                                          it_data   = lt_dn
+                                                CHANGING  ct_return = return_tab[] ).
+      ENDIF.
+
+      SELECT deliverydocument, shippingpoint
+        INTO TABLE @DATA(lt_deliverydocument)
+        FROM i_deliverydocument
+        FOR ALL ENTRIES IN @ls_data-tsm_update_delivery
+        WHERE deliverydocument = @ls_data-tsm_update_delivery-tms_deliverynumber. "#EC CI_SUBRC
+
+      LOOP AT ls_data-tsm_update_delivery ASSIGNING <ls_data>.
+        APPEND LINES OF zcl_sd_tms_delivery_change=>lock_delivery( <ls_data>-tms_deliverynumber ) TO lt_return.
+      ENDLOOP.
+
+      INSERT LINES OF lt_return INTO TABLE return_tab[].
+
+      IF lt_return IS INITIAL.
+        LOOP AT ls_data-tsm_update_delivery ASSIGNING <ls_data>.
+          ls_custom_fields-deliv_numb             = <ls_data>-tms_deliverynumber.
+          ls_custom_fields-zz1_tms_carrierstr_dlh = <ls_data>-tms_carrierstring.
+          ls_custom_fields-zz1_tms_loadid_dlh     = <ls_data>-tms_loadid.
+          FINAL(lo_delivery_change) = NEW zcl_sd_tms_delivery_change( ).
+          lt_return = lo_delivery_change->change_delivery_custom_fields( ls_custom_fields ).
+          INSERT LINES OF lt_return INTO TABLE return_tab[].
+          DELETE lt_return WHERE type = lc_bapiret_err_a OR type = lc_bapiret_err_e.
+          IF lt_return IS NOT INITIAL.
+            zcl_sd_tms_group=>remove_instance( <ls_data>-tms_loadid ).
+          ENDIF.
+          FINAL(lo_group) = zcl_sd_tms_group=>get_instance( <ls_data>-tms_loadid ).
+          lo_group->add_delivery(
+              VALUE #(
+                  vbeln = <ls_data>-tms_deliverynumber
+                  vstel = VALUE #( lt_deliverydocument[ deliverydocument = <ls_data>-tms_deliverynumber ]-shippingpoint  OPTIONAL  ) ) ).
+        ENDLOOP.
+
+        LOOP AT zcl_sd_tms_group=>gt_instances ASSIGNING FIELD-SYMBOL(<ls_instance>).
+          WAIT UP TO 1 SECONDS.
+          lt_return = <ls_instance>-object->create_group( ).
+          INSERT LINES OF lt_return INTO TABLE return_tab[].
+        ENDLOOP.
+        CLEAR zcl_sd_tms_group=>gt_instances.
+      ENDIF.
+    CATCH cx_root INTO FINAL(lo_exp).
+      cl_bapi_msg=>add_message( EXPORTING ix_exception = lo_exp
+                                CHANGING  ct_message   = return_tab[] ).
+  ENDTRY.
+  success = SWITCH #( cl_bapi_msg=>contains_error( return_tab[] )
+                      WHEN abap_false THEN /aif/if_globals=>gc_success_flag-std_success
+                      WHEN abap_true  THEN /aif/if_globals=>gc_success_flag-std_failure ).
+ENDFUNCTION.

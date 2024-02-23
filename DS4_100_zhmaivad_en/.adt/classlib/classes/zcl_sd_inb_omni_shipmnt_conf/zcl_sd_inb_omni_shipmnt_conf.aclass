@@ -1,0 +1,191 @@
+CLASS zcl_sd_inb_omni_shipmnt_conf DEFINITION
+    PUBLIC
+    FINAL
+    CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    CONSTANTS: gc_idoctp TYPE edidc-idoctp VALUE 'FSHDLV04'.
+    CONSTANTS:
+      BEGIN OF gc_segnam,
+        header   TYPE edilsegtyp VALUE 'E1EDL20',
+        control  TYPE edilsegtyp VALUE 'E1EDL18',
+        deadline TYPE edilsegtyp VALUE 'E1EDT13',
+        hu_hdr   TYPE edilsegtyp VALUE 'E1EDL37',
+        hu_cust  TYPE edilsegtyp VALUE 'ZE1EDL37',
+        hu_item  TYPE edilsegtyp VALUE 'E1EDL44',
+      END OF gc_segnam,
+      BEGIN OF gc_qualf,
+        pgi   TYPE e1edl18-qualf VALUE 'PGI',
+        tstmp TYPE e1edl18-qualf VALUE '006',
+      END OF gc_qualf,
+      BEGIN OF gc_clissifier,
+        shpmnt_confrm TYPE zsd_t_omni_shpcf-clasfr VALUE '0001',
+        return_order  TYPE zsd_t_omni_shpcf-clasfr VALUE '0003',
+      END OF gc_clissifier.
+
+    METHODS constructor.
+    METHODS is_omni_shipment_idoc
+      IMPORTING
+        is_idoc_control  TYPE edidc
+      RETURNING
+        VALUE(rv_omni) TYPE abap_bool.
+    METHODS update_omni_shipment_confirm
+      IMPORTING
+        is_idoc_control  TYPE edidc
+        it_idoc_data     TYPE edidd_tt
+      RAISING
+        cx_uuid_error.
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    TYPES:  BEGIN OF mtyp_s_customizing,
+                sndprn TYPE edi_sndprn,
+                sndprt TYPE edi_sndprt,
+                mestyp TYPE edi_mestyp,
+                mescod TYPE edi_mescod,
+                lgort  TYPE lgort_d,
+              END OF mtyp_s_customizing,
+            mtyp_ts_edidd TYPE SORTED TABLE OF edidd WITH NON-UNIQUE KEY docnum segnam psgnum segnum.
+    DATA: ms_cust TYPE mtyp_s_customizing.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_INB_OMNI_SHIPMNT_CONF IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* TARUSVIT     | 16.02.2023 | 18054  WMS-OMNI shipment confirmation    *
+*              |            | DS4K943844                               *
+*----------------------------------------------------------------------*
+    TRY.
+        DATA(lt_cust) = zcl_pe_hm_basic=>get_table( '1209' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+    ms_cust = CORRESPONDING #( lt_cust[ 1 ] MAPPING sndprn = field1
+                                                    sndprt = field2
+                                                    mestyp = field3
+                                                    mescod = field4
+                                                    lgort  = field5 ).
+  ENDMETHOD.
+
+
+  METHOD is_omni_shipment_idoc.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* TARUSVIT     | 16.02.2023 | 18054  WMS-OMNI shipment confirmation    *
+*              |            | DS4K943844                               *
+*----------------------------------------------------------------------*
+    rv_omni = xsdbool( is_idoc_control-sndprn = ms_cust-sndprn AND
+                       is_idoc_control-sndprt = ms_cust-sndprt AND
+                       is_idoc_control-mestyp = ms_cust-mestyp AND
+                       is_idoc_control-mescod = ms_cust-mescod ).
+  ENDMETHOD.
+
+
+  METHOD update_omni_shipment_confirm.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* TARUSVIT     | 16.02.2023 | 18054  WMS-OMNI shipment confirmation    *
+*              |            | DS4K943844                               *
+*----------------------------------------------------------------------*
+    DATA: ls_hdr     TYPE e1edl20,
+          ls_ctrl    TYPE e1edl18,
+          ls_deadln  TYPE e1edt13,
+          ls_hu_cust TYPE ze1edl37,
+          ls_hu_item TYPE e1edl44,
+          lt_omni   TYPE zsd_tt_omni_shpcf.
+
+    DATA(lts_idoc_data) = CORRESPONDING mtyp_ts_edidd( it_idoc_data ).
+    READ TABLE lts_idoc_data ASSIGNING FIELD-SYMBOL(<ls_hdr>)
+          WITH KEY docnum = is_idoc_control-docnum
+                   segnam = gc_segnam-header.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    " check whether idoc contains segment L18 with QUALF=PGI. Return if not.
+    LOOP AT lts_idoc_data ASSIGNING FIELD-SYMBOL(<ls_ctrl>)
+          WHERE docnum = <ls_hdr>-docnum   AND
+                segnam = gc_segnam-control AND
+                psgnum = <ls_hdr>-segnum.
+      ls_ctrl = <ls_ctrl>-sdata.
+      IF ls_ctrl-qualf = gc_qualf-pgi.
+        DATA(lv_pgi) = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    IF lv_pgi IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    " get T13 segment with qualf=006 for deadlines
+    CLEAR: ls_deadln.
+    LOOP AT lts_idoc_data ASSIGNING FIELD-SYMBOL(<ls_deadln>)
+          WHERE docnum = <ls_hdr>-docnum   AND
+                segnam = gc_segnam-deadline AND
+                psgnum = <ls_hdr>-segnum.
+      ls_deadln = <ls_deadln>-sdata.
+      IF ls_deadln-qualf = gc_qualf-tstmp.
+        EXIT.
+      ENDIF.
+      CLEAR: ls_deadln. "to have empty deadline struc if there is no segment with QUALF=006
+    ENDLOOP.
+
+    " fill constant part of OMNI shipment confirmation
+    ls_hdr = <ls_hdr>-sdata.
+    DATA(ls_omni) = VALUE zsd_t_omni_shpcf(
+        clasfr  = gc_clissifier-shpmnt_confrm
+        ord_id  = ls_hdr-vbeln
+        wms_dt  = ls_deadln-iedd
+        wms_tm  = ls_deadln-iedz
+        werks   = substring_after( val = is_idoc_control-sndpor sub = `_` )
+        lgort   = ms_cust-lgort
+    ).
+
+    " fill items
+    CLEAR: lt_omni.
+    LOOP AT lts_idoc_data ASSIGNING FIELD-SYMBOL(<ls_hu_hdr>)
+          WHERE docnum = <ls_hdr>-docnum   AND
+                segnam = gc_segnam-hu_hdr AND
+                psgnum = <ls_hdr>-segnum.
+      ASSIGN lts_idoc_data[ docnum = <ls_hdr>-docnum
+                           segnam = gc_segnam-hu_cust
+                           psgnum = <ls_hu_hdr>-segnum ] TO FIELD-SYMBOL(<ls_hu_cust>).
+      IF sy-subrc = 0.
+        ls_hu_cust = <ls_hu_cust>-sdata.
+      ENDIF.
+      LOOP AT lts_idoc_data ASSIGNING FIELD-SYMBOL(<ls_hu_item>)  "#EC CI_NESTED
+            WHERE docnum = <ls_hdr>-docnum   AND
+                  segnam = gc_segnam-hu_item AND
+                  psgnum = <ls_hu_hdr>-segnum.
+        ls_hu_item = <ls_hu_item>-sdata.
+        APPEND VALUE #( BASE ls_omni
+                        rec_id    = cl_system_uuid=>create_uuid_c32_static( )
+                        track_num = ls_hu_cust-spe_ident_01
+                        artc_nr   = ls_hu_item-matnr
+                        qty       = ls_hu_item-vemng ) TO lt_omni.
+      ENDLOOP.
+    ENDLOOP.
+
+    " schedule insert into custom table
+    CALL FUNCTION 'ZSD_FM_OMNI_SHPMT_CONF_INS' IN UPDATE TASK
+      EXPORTING
+        it_omni_shpcf = lt_omni.
+
+  ENDMETHOD.
+ENDCLASS.

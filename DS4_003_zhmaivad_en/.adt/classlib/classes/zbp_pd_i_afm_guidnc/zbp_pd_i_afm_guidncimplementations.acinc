@@ -1,0 +1,618 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHRYSAND     | 18.01.2023 | 17079     : [Feature] [Build] - Placehol *
+*              |            | DS4K940918                               *
+*----------------------------------------------------------------------*
+* KHRYSAND     | 20.03.2023 | 17079     : [Feature] [Build] - Placehol *
+*              |            | DS4K940918                               *
+*----------------------------------------------------------------------*
+* KHRYSAND     | 12.04.2023 | 19715     : Defect - [Build] - Placehold *
+*              |            | DS4K949125                               *
+*----------------------------------------------------------------------*
+* ADAKHIKB     | 07.07.2023 | 24677     : Design change for Sourcing Gu*
+*              |            | DS4K962664                               *
+*----------------------------------------------------------------------*
+* KHRYSAND     | 20.10.2023 | 24677     : Design change for Sourcing Gu*
+*              |            | DS4K962664                               *
+*----------------------------------------------------------------------*
+* MEREKTIM     | 28.02.2024 | 29388     : Feature [CR] - Sourcing Guid *
+*              |            | DS4K980916                               *
+*----------------------------------------------------------------------*
+
+CLASS lhc_sourcingguidance DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+
+  PRIVATE SECTION.
+    CONSTANTS:
+      BEGIN OF mc_activity,
+        create  TYPE activ_auth VALUE '01',
+        change  TYPE activ_auth VALUE '02',
+        display TYPE activ_auth VALUE '03',
+      END OF mc_activity.
+
+    METHODS validate_passed_data FOR VALIDATE ON SAVE
+      IMPORTING it_keys FOR sourcingguidance~validate_passed_data.
+    METHODS get_global_authorizations FOR GLOBAL AUTHORIZATION
+      IMPORTING REQUEST requested_authorizations FOR sourcingguidance RESULT result.
+    METHODS modify_sourcing_guidence FOR MODIFY
+      IMPORTING keys FOR ACTION sourcingguidance~modify_sourcing_guidence.
+    METHODS precheck_delete FOR PRECHECK
+      IMPORTING it_keys FOR DELETE sourcingguidance.
+
+
+    METHODS check_action_allowed
+      IMPORTING iv_activity      TYPE activ_auth
+      RETURNING VALUE(rv_result) TYPE abap_boolean.
+
+
+    METHODS create_log
+      IMPORTING iv_sourcing_group   TYPE zpd_i_afm_guidnc-sourcinggroup
+                iv_article          TYPE zpd_i_afm_guidnc-article
+      RETURNING VALUE(rif_appl_log) TYPE REF TO if_bali_log
+      RAISING
+                cx_bali_runtime .
+    METHODS save_log
+      IMPORTING iif_appl_log TYPE REF TO if_bali_log
+      RAISING
+                cx_bali_runtime.
+    METHODS add_msg_to_baperet.
+
+    DATA mt_messages TYPE bapirettab .
+    DATA mv_msg TYPE string ##NEEDED .
+ENDCLASS.
+
+CLASS lhc_sourcingguidance IMPLEMENTATION.
+
+  METHOD validate_passed_data.
+    " In this method, all error messages that we put into the REPORTED
+    "   structure are marked with the severity "information"
+    "   to prevent errors on the back end side and ensure a user-friendly output on the front end.
+
+    DATA lt_range_factory           TYPE RANGE OF zpd_i_afm_guidnc-factory.
+    DATA lt_range_article           TYPE RANGE OF zpd_i_afm_guidnc-article.
+    DATA lt_range_sourcing_group    TYPE RANGE OF zpd_i_afm_guidnc-sourcinggroup.
+    DATA lt_source_guid_in_scope TYPE STANDARD TABLE OF zpd_i_afm_guidnc.
+
+    READ ENTITIES OF zpd_i_afm_guidnc IN LOCAL MODE
+      ENTITY sourcingguidance
+      FIELDS ( sourcinggroup
+               article
+               factory
+               datefrom
+               dateto
+               sourcingguidance )
+      WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_sourc_guid_check).
+
+    lt_range_factory          = VALUE #( FOR ls_guid IN lt_sourc_guid_check
+                                       ( option = 'EQ' sign = 'I' low = ls_guid-factory ) ).
+
+    lt_range_article          = VALUE #( FOR ls_guid IN lt_sourc_guid_check
+                                       ( option = 'EQ' sign = 'I' low = ls_guid-article ) ).
+
+    lt_range_sourcing_group   = VALUE #( FOR ls_guid IN lt_sourc_guid_check
+                                       ( option = 'EQ' sign = 'I' low = ls_guid-sourcinggroup ) ).
+
+    " Fetch the products
+    SELECT FROM i_product
+      FIELDS product
+      WHERE product IN @lt_range_article
+      ORDER BY product
+      INTO TABLE @DATA(lt_article).
+    IF sy-subrc <> 0.
+      CLEAR: lt_article.
+    ENDIF.
+
+    " Fetch Factories
+    SELECT FROM zpd_i_businesspartnerid
+      FIELDS businespartnerid
+      WHERE businespartnerid IN @lt_range_factory
+      ORDER BY businespartnerid
+      INTO TABLE @DATA(lt_bus_partner).
+    IF sy-subrc <> 0.
+      CLEAR: lt_bus_partner.
+    ENDIF.
+
+    " Fetch Sourcing Groups
+    SELECT FROM zpd_i_surce_grp_vh
+      FIELDS surcegrp
+      WHERE surcegrp IN @lt_range_sourcing_group
+      ORDER BY surcegrp
+      INTO TABLE @DATA(lt_sourcing_group).
+    IF sy-subrc <> 0.
+      CLEAR: lt_sourcing_group.
+    ENDIF.
+
+    " Fetch Source Guidenence records
+    SELECT FROM zpd_i_afm_guidnc
+      FIELDS sourcingguidanceuuid, sourcinggroup, article, factory, datefrom, dateto, sourcingguidance
+      WHERE sourcinggroup IN @lt_range_sourcing_group
+      AND article IN @lt_range_article
+      ORDER BY sourcinggroup, article, factory, datefrom, dateto
+      INTO TABLE @DATA(lt_sourc_guid_db).
+    IF sy-subrc <> 0.
+      CLEAR: lt_sourc_guid_db.
+    ENDIF.
+
+    lt_source_guid_in_scope = CORRESPONDING #( lt_sourc_guid_check ).
+
+
+    " Create a log instance
+    DATA(lv_sourcing_group) = VALUE #( lt_range_sourcing_group[ 1 ]-low OPTIONAL ).
+    DATA(lv_article) = VALUE #( lt_range_article[ 1 ]-low OPTIONAL ).
+
+    TRY.
+        DATA(lif_appl_log) = create_log( iv_sourcing_group = lv_sourcing_group
+                                         iv_article        = lv_article ).
+      CATCH cx_bali_runtime.
+        CLEAR lif_appl_log.
+    ENDTRY.
+
+    CLEAR: mt_messages.
+    " Creation/Edit action started for Sourcing Guidence Group &1, Article &2
+    MESSAGE i023(zpd_afm) WITH lv_sourcing_group lv_article INTO mv_msg.
+    add_msg_to_baperet( ).
+
+
+    " Compare the updated record existence from DB, if exist replace it with updated records, if not exist add it the the internal to use later for validations
+    LOOP AT lt_sourc_guid_db ASSIGNING FIELD-SYMBOL(<ls_source_guid>).
+
+      IF xsdbool( line_exists( lt_sourc_guid_check[ sourcingguidanceuuid = <ls_source_guid>-sourcingguidanceuuid ] ) ) = abap_false .
+        APPEND <ls_source_guid> TO lt_source_guid_in_scope.
+      ENDIF.
+
+    ENDLOOP.
+
+    " Perform validations against new and updated sourcing guidence records
+    LOOP AT lt_sourc_guid_check ASSIGNING FIELD-SYMBOL(<ls_sourc_guid_check>).
+
+      DATA(ls_sourc_guid_check) = CORRESPONDING zpd_i_afm_guidnc( <ls_sourc_guid_check> ).
+
+      " Validate that the sourcing guidence group exists
+      READ TABLE lt_sourcing_group TRANSPORTING NO FIELDS WITH KEY surcegrp = <ls_sourc_guid_check>-sourcinggroup BINARY SEARCH.
+      IF sy-subrc <> 0 AND <ls_sourc_guid_check>-sourcinggroup IS NOT INITIAL.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+        TO failed-sourcingguidance.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg                   = NEW zcx_pd_afm_guidnc( severity    = if_abap_behv_message=>severity-information
+                                                                        textid      = zcx_pd_afm_guidnc=>invalid_sourc_group
+                                                                        sourc_group = <ls_sourc_guid_check>-sourcinggroup )
+                        %element-sourcinggroup = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+      ENDIF.
+
+      " Validate that the sourcing guidence artice is valid
+      READ TABLE lt_article TRANSPORTING NO FIELDS WITH KEY product = <ls_sourc_guid_check>-article BINARY SEARCH.
+      IF sy-subrc <> 0.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+        TO failed-sourcingguidance.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg             = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-information
+                                                                  textid   = zcx_pd_afm_guidnc=>invalid_article
+                                                                  article  = <ls_sourc_guid_check>-article )
+                        %element-article = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+      ENDIF.
+
+      " Validate that the factory/Business Partner is valid
+      READ TABLE lt_bus_partner TRANSPORTING NO FIELDS WITH KEY businespartnerid = <ls_sourc_guid_check>-factory BINARY SEARCH.
+      IF sy-subrc <> 0 AND <ls_sourc_guid_check>-factory IS NOT INITIAL.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+        TO failed-sourcingguidance.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg             = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-information
+                                                                  textid   = zcx_pd_afm_guidnc=>invalid_vendor
+                                                                  vendor   = CONV #(  <ls_sourc_guid_check>-factory ) )
+                        %element-factory = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+      ENDIF.
+
+      " Validate that the Date From value is less than Date To value
+      IF <ls_sourc_guid_check>-datefrom > <ls_sourc_guid_check>-dateto.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+        TO failed-sourcingguidance.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg              = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-information
+                                                                   textid   = zcx_pd_afm_guidnc=>invalid_date_from )
+                        %element-datefrom = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+      ENDIF.
+
+
+      " Validate the overalapping periods within sourcing group and article level
+      IF zcl_pd_common_validations=>is_overlapping_check_db( is_sourc_guid_check = ls_sourc_guid_check
+                                                             it_source_guid_in_scope = lt_source_guid_in_scope
+                                                              ) = abap_true.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+          TO failed-sourcingguidance.
+
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg              = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-information
+                                                                   textid   = zcx_pd_afm_guidnc=>overlapping_period )
+                        %element-datefrom = if_abap_behv=>mk-on
+                        %element-dateto   = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+      ENDIF.
+
+
+      " Sourcing guidence percentage should be within 0 to 100 percent
+      IF <ls_sourc_guid_check>-sourcingguidance NOT BETWEEN 0 AND 100.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+        TO failed-sourcingguidance.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg                      = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-information
+                                                                           textid   = zcx_pd_afm_guidnc=>invalid_sourc_guid )
+                        %element-sourcingguidance = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+        CONTINUE.
+      ENDIF.
+
+      DATA lv_guidence_total TYPE zpd_src_guidance.
+
+
+      " Validate the total sourcing percentage within the combination should be 100 percent
+      LOOP AT lt_source_guid_in_scope ASSIGNING FIELD-SYMBOL(<ls_sourc_guid_sum_vldtn>) WHERE sourcinggroup = <ls_sourc_guid_check>-sourcinggroup "#EC CI_NESTED
+                                                                                          AND article       = <ls_sourc_guid_check>-article
+                                                                                          AND datefrom      = <ls_sourc_guid_check>-datefrom
+                                                                                          AND dateto        = <ls_sourc_guid_check>-dateto
+                                                                                      .
+        lv_guidence_total = lv_guidence_total + <ls_sourc_guid_sum_vldtn>-sourcingguidance.
+      ENDLOOP.
+
+      IF lv_guidence_total <> 100.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+        TO failed-sourcingguidance.
+
+        MESSAGE e020(zpd_afm) WITH <ls_sourc_guid_check>-factory <ls_sourc_guid_check>-datefrom <ls_sourc_guid_check>-dateto lv_guidence_total INTO mv_msg.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg                      = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-information
+                                                                           textid   = zcx_pd_afm_guidnc=>total_guidence_not_100
+                                                                           vendor = CONV #( <ls_sourc_guid_check>-factory )
+                                                                           date_from = <ls_sourc_guid_check>-datefrom
+                                                                           date_to =  <ls_sourc_guid_check>-dateto
+                                                                           sourcing_guidence = lv_guidence_total
+                                                                             )
+                        %element-sourcingguidance = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+
+      ENDIF.
+      CLEAR: lv_guidence_total.
+
+      " Validate that within the same Date from/Date To, there should not be duplicate Factory
+      LOOP AT lt_source_guid_in_scope ASSIGNING FIELD-SYMBOL(<ls_source_guid_vendor_vldtn>) WHERE sourcinggroup        = <ls_sourc_guid_check>-sourcinggroup "#EC CI_NESTED.
+                                                                                              AND article              = <ls_sourc_guid_check>-article
+                                                                                              AND sourcingguidanceuuid <> <ls_sourc_guid_check>-sourcingguidanceuuid
+                                                                                              AND datefrom             = <ls_sourc_guid_check>-datefrom
+                                                                                              AND dateto               = <ls_sourc_guid_check>-dateto
+                                                                                              AND factory              = <ls_sourc_guid_check>-factory.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key ) TO failed-sourcingguidance.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg             = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-error
+                                                                  textid   = zcx_pd_afm_guidnc=>duplicate_vendor_period
+                                                                  vendor   = CONV #( <ls_sourc_guid_check>-factory ) )
+                        %element-factory = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+
+        EXIT.
+
+      ENDLOOP.
+
+      " Try to identify if there is any reported error/warnings with the same record key
+      READ TABLE reported-sourcingguidance ASSIGNING FIELD-SYMBOL(<ls_reported>) WITH KEY  %key = <ls_sourc_guid_check>-%key ##PRIMKEY[ENTITY].
+      IF sy-subrc <> 0.
+        IF line_exists( lt_sourc_guid_db[ sourcingguidanceuuid = <ls_sourc_guid_check>-%key-sourcingguidanceuuid ] ).
+          " Updated Sourcing Guide with Factory &1, Period from &2 to &3, Percent &4
+          MESSAGE s024(zpd_afm) WITH <ls_sourc_guid_check>-factory <ls_sourc_guid_check>-datefrom <ls_sourc_guid_check>-dateto <ls_sourc_guid_check>-sourcingguidance INTO mv_msg.
+        ELSE.
+          " Created Sourcing Guide with Factory &1, Period from &2 to &3, Percent &4
+          MESSAGE s025(zpd_afm) WITH <ls_sourc_guid_check>-factory <ls_sourc_guid_check>-datefrom <ls_sourc_guid_check>-dateto <ls_sourc_guid_check>-sourcingguidance INTO mv_msg.
+        ENDIF.
+        add_msg_to_baperet( ).
+      ENDIF.
+
+    ENDLOOP.
+
+
+    TRY.
+        lif_appl_log->add_messages_from_bapirettab( message_table = mt_messages ).
+
+        save_log( lif_appl_log  ).
+
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD get_global_authorizations.
+    IF requested_authorizations-%create = if_abap_behv=>mk-on.
+      IF check_action_allowed( mc_activity-create ) = abap_true.
+        result-%create = if_abap_behv=>auth-allowed.
+      ELSE.
+        result-%create = if_abap_behv=>auth-unauthorized.
+      ENDIF.
+    ELSEIF requested_authorizations-%update = if_abap_behv=>mk-on OR
+           requested_authorizations-%delete = if_abap_behv=>mk-on.
+      IF check_action_allowed( mc_activity-change ) = abap_true.
+        result-%update = if_abap_behv=>auth-allowed.
+        result-%delete = if_abap_behv=>auth-allowed.
+      ELSE.
+        result-%update = if_abap_behv=>auth-unauthorized.
+        result-%delete = if_abap_behv=>auth-unauthorized.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD check_action_allowed.
+    AUTHORITY-CHECK OBJECT 'ZIS_SG_TM'
+    ID 'ACTVT' FIELD iv_activity.
+    IF sy-subrc = 0.
+      rv_result = abap_true.
+    ELSE.
+      rv_result = abap_false.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD modify_sourcing_guidence.
+
+    DATA lt_sourcing_entity TYPE STANDARD TABLE OF zpd_i_afm_guidnc.
+    DATA lt_sourcing_to_create   TYPE TABLE FOR CREATE zpd_i_afm_guidnc.
+
+
+    lt_sourcing_entity = VALUE #( FOR ls_line IN keys (
+                                  article              = ls_line-%param-matnr
+                                  factory              = ls_line-%param-lifnr
+                                  sourcingguidanceuuid = cl_soap_wsrmb_helper=>convert_uuid_hyphened_to_raw( CONV #( ls_line-%param-src_guid_uuid ) )
+                                  datefrom             = ls_line-%param-frm_dateu
+                                  dateto               = ls_line-%param-to_datef
+                                  sourcingguidance     = ls_line-%param-src_guidance
+                                  sourcinggroup        = ls_line-%param-source_grp
+                                      ) ).
+
+    READ ENTITIES OF zpd_i_afm_guidnc IN LOCAL MODE
+      ENTITY sourcingguidance
+      ALL FIELDS WITH CORRESPONDING #( lt_sourcing_entity )
+      RESULT DATA(lr_sourcing_to_update)
+      FAILED DATA(ls_failed_read).
+
+    LOOP AT lt_sourcing_entity ASSIGNING FIELD-SYMBOL(<ls_entity>).
+      READ TABLE lr_sourcing_to_update ASSIGNING FIELD-SYMBOL(<ls_sourcing_to_update>) WITH KEY sourcingguidanceuuid = <ls_entity>-sourcingguidanceuuid .
+      IF sy-subrc = 0.
+        IF <ls_entity>-factory IS NOT INITIAL.
+          <ls_sourcing_to_update>-factory =  <ls_entity>-factory.
+        ENDIF.
+
+        IF <ls_entity>-datefrom IS NOT INITIAL.
+          <ls_sourcing_to_update>-datefrom = <ls_entity>-datefrom.
+
+        ENDIF.
+
+        IF <ls_entity>-dateto IS NOT INITIAL.
+          <ls_sourcing_to_update>-dateto = <ls_entity>-dateto.
+        ENDIF.
+
+        IF <ls_entity>-sourcingguidance IS NOT INITIAL.
+          <ls_sourcing_to_update>-sourcingguidance = <ls_entity>-sourcingguidance.
+        ENDIF.
+      ELSE.
+        " Determine non-existing records for which create operation to be performed
+        APPEND INITIAL LINE TO lt_sourcing_to_create ASSIGNING FIELD-SYMBOL(<ls_sourcing_to_create>).
+        <ls_sourcing_to_create> = CORRESPONDING #( <ls_entity> ).
+      ENDIF.
+    ENDLOOP.
+
+
+    MODIFY ENTITIES OF zpd_i_afm_guidnc IN LOCAL MODE
+    ENTITY sourcingguidance
+    UPDATE FIELDS (  factory datefrom dateto sourcingguidance  )
+    WITH VALUE #( FOR ls_key IN lr_sourcing_to_update
+                (     factory   = ls_key-factory
+                      datefrom  = ls_key-datefrom
+                      dateto    = ls_key-dateto
+                      sourcingguidance = ls_key-sourcingguidance
+                      %key = ls_key-%key
+                      %control-sourcingguidance = if_abap_behv=>mk-on
+                      %control-datefrom = if_abap_behv=>mk-on
+                      %control-dateto = if_abap_behv=>mk-on
+                      %control-factory = if_abap_behv=>mk-on
+                      ) )
+    MAPPED DATA(ls_mapped_update)
+    FAILED DATA(ls_failed_update)
+    REPORTED DATA(ls_reported_update).
+
+    MODIFY ENTITIES OF zpd_i_afm_guidnc IN LOCAL MODE
+    ENTITY sourcingguidance
+    CREATE FIELDS ( factory
+                    article
+                    datefrom
+                    dateto
+                    sourcingguidance
+                    sourcinggroup  )
+    AUTO FILL CID WITH lt_sourcing_to_create
+    MAPPED DATA(ls_mapped_create)
+    FAILED DATA(ls_failed_create).
+
+  ENDMETHOD.
+
+  METHOD create_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 28.09.2023 | 24677     : Design change for Sourcing Gu*
+*              |            | DS4K962664                               *
+*----------------------------------------------------------------------*
+    DATA: lv_external_id TYPE cl_bali_header_setter=>ty_external_id.
+
+    lv_external_id = |{ iv_sourcing_group }/{ iv_article }|.
+
+
+    rif_appl_log = cl_bali_log=>create_with_header(
+      header = cl_bali_header_setter=>create(
+        object      = 'ZPD'
+        subobject   = 'ZPD_AFM_TABLE'
+        external_id = lv_external_id
+      )
+    ).
+
+  ENDMETHOD.
+
+  METHOD save_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ADAKHIKB     | 28.09.2023 | 24677     : Design change for Sourcing Gu*
+*              |            | DS4K962664                               *
+*----------------------------------------------------------------------*
+
+    cl_bali_log_db=>get_instance( )->save_log(
+      log = iif_appl_log
+      assign_to_current_appl_job = abap_true
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD add_msg_to_baperet.
+
+    mt_messages = VALUE #( BASE mt_messages
+    ( type = sy-msgty
+      id = sy-msgid
+      number = sy-msgno
+      message_v1 = sy-msgv1
+      message_v2 = sy-msgv2
+      message_v3 = sy-msgv3
+      message_v4 = sy-msgv4
+        ) ).
+
+  ENDMETHOD.
+
+  METHOD precheck_delete.
+    DATA lt_range_article           TYPE RANGE OF zpd_i_afm_guidnc-article.
+    DATA lt_range_sourcing_group    TYPE RANGE OF zpd_i_afm_guidnc-sourcinggroup.
+    DATA lt_source_guid_in_scope TYPE STANDARD TABLE OF zpd_i_afm_guidnc.
+
+    READ ENTITIES OF zpd_i_afm_guidnc IN LOCAL MODE
+      ENTITY sourcingguidance
+      FIELDS ( sourcinggroup
+               article
+               factory
+               datefrom
+               dateto
+               sourcingguidance )
+      WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_sourc_guid_check).
+
+    lt_range_article          = VALUE #( FOR ls_guid IN lt_sourc_guid_check
+                                       ( option = 'EQ' sign = 'I' low = ls_guid-article ) ).
+
+    lt_range_sourcing_group   = VALUE #( FOR ls_guid IN lt_sourc_guid_check
+                                       ( option = 'EQ' sign = 'I' low = ls_guid-sourcinggroup ) ).
+
+    " Fetch Source Guidenence records
+    SELECT FROM zpd_i_afm_guidnc
+      FIELDS sourcingguidanceuuid, sourcinggroup, article, factory, datefrom, dateto, sourcingguidance
+      WHERE sourcinggroup IN @lt_range_sourcing_group
+      AND article IN @lt_range_article
+      ORDER BY sourcinggroup, article, factory, datefrom, dateto
+      INTO TABLE @DATA(lt_sourc_guid_db).
+    IF sy-subrc <> 0.
+      CLEAR: lt_sourc_guid_db.
+    ENDIF.
+
+    lt_source_guid_in_scope = CORRESPONDING #( lt_sourc_guid_check EXCEPT sourcingguidance ).
+
+    " Create a log instance
+    DATA(lv_sourcing_group) = VALUE #( lt_range_sourcing_group[ 1 ]-low OPTIONAL ).
+    DATA(lv_article) = VALUE #( lt_range_article[ 1 ]-low OPTIONAL ).
+
+    TRY.
+        DATA(lif_appl_log) = create_log( iv_sourcing_group = lv_sourcing_group
+                                         iv_article        = lv_article ).
+      CATCH cx_bali_runtime.
+        CLEAR lif_appl_log.
+    ENDTRY.
+
+    CLEAR: mt_messages.
+
+    MESSAGE i026(zpd_afm) WITH lv_sourcing_group lv_article INTO mv_msg.
+    add_msg_to_baperet( ).
+
+    " Compare the updated record existence from DB, if exist replace it with updated records, if not exist add it the the internal to use later for validations
+    LOOP AT lt_sourc_guid_db ASSIGNING FIELD-SYMBOL(<ls_source_guid>).
+
+      IF xsdbool( line_exists( lt_sourc_guid_check[ sourcingguidanceuuid = <ls_source_guid>-sourcingguidanceuuid ] ) ) = abap_false .
+        APPEND <ls_source_guid> TO lt_source_guid_in_scope.
+      ENDIF.
+
+    ENDLOOP.
+
+    " Perform validations against deleted sourcing guidence records
+    LOOP AT lt_sourc_guid_check ASSIGNING FIELD-SYMBOL(<ls_sourc_guid_check>).
+      DATA: lv_guidence_total TYPE zpd_src_guidance.
+
+      " Validate the total sourcing percentage within the combination should be 100 percent
+      LOOP AT lt_source_guid_in_scope ASSIGNING FIELD-SYMBOL(<ls_sourc_guid_sum_vldtn>) WHERE sourcinggroup = <ls_sourc_guid_check>-sourcinggroup "#EC CI_NESTED
+                                                                                          AND article       = <ls_sourc_guid_check>-article
+                                                                                          AND datefrom      = <ls_sourc_guid_check>-datefrom
+                                                                                          AND dateto        = <ls_sourc_guid_check>-dateto .
+        lv_guidence_total = lv_guidence_total + <ls_sourc_guid_sum_vldtn>-sourcingguidance.
+      ENDLOOP.
+
+      IF lv_guidence_total <> 100 AND lv_guidence_total <> 0.
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key )
+        TO failed-sourcingguidance.
+
+        MESSAGE e020(zpd_afm) WITH <ls_sourc_guid_check>-factory <ls_sourc_guid_check>-datefrom <ls_sourc_guid_check>-dateto lv_guidence_total INTO mv_msg.
+
+        APPEND VALUE #( %key = <ls_sourc_guid_check>-%key
+                        %msg                      = NEW zcx_pd_afm_guidnc( severity = if_abap_behv_message=>severity-error
+                                                                           textid   = zcx_pd_afm_guidnc=>total_guidence_not_100
+                                                                           vendor = CONV #( <ls_sourc_guid_check>-factory )
+                                                                           date_from = <ls_sourc_guid_check>-datefrom
+                                                                           date_to =  <ls_sourc_guid_check>-dateto
+                                                                           sourcing_guidence = lv_guidence_total
+                                                                             )
+                        %element-sourcingguidance = if_abap_behv=>mk-on )
+        TO reported-sourcingguidance.
+
+      ENDIF.
+      CLEAR: lv_guidence_total.
+
+      " Try to identify if there is any reported error/warnings with the same record key
+      READ TABLE reported-sourcingguidance ASSIGNING FIELD-SYMBOL(<ls_reported>) WITH KEY  %key = <ls_sourc_guid_check>-%key ##PRIMKEY[ENTITY].
+      IF sy-subrc <> 0.
+        MESSAGE s027(zpd_afm) WITH <ls_sourc_guid_check>-factory <ls_sourc_guid_check>-datefrom <ls_sourc_guid_check>-dateto <ls_sourc_guid_check>-sourcingguidance INTO mv_msg.
+        add_msg_to_baperet( ).
+      ENDIF.
+
+    ENDLOOP.
+
+    TRY.
+        lif_appl_log->add_messages_from_bapirettab( message_table = mt_messages ).
+
+        save_log( lif_appl_log  ).
+
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+  ENDMETHOD.
+
+ENDCLASS.

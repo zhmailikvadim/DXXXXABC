@@ -1,0 +1,257 @@
+CLASS zcl_i_a_cndn_request_simulate DEFINITION
+  PUBLIC
+  INHERITING FROM /bobf/cl_lib_a_supercl_simple
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    METHODS constructor .
+
+    METHODS /bobf/if_frw_action~execute
+        REDEFINITION .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA mo_sls_api TYPE REF TO if_slsprcg_cndnrecd_api .
+    DATA mo_req_util TYPE REF TO if_cndnrecord_request_utility .
+
+    METHODS simulate_workflow
+      IMPORTING
+        !is_ctx                  TYPE /bobf/s_frw_ctx_act
+        !it_key                  TYPE /bobf/t_frw_key
+        !io_read                 TYPE REF TO /bobf/if_frw_read
+        !io_modify               TYPE REF TO /bobf/if_frw_modify
+        !is_parameters           TYPE REF TO data
+      EXPORTING
+        !eo_message              TYPE REF TO /bobf/if_frw_message
+        !et_failed_key           TYPE /bobf/t_frw_key
+        !ev_static_action_failed TYPE abap_bool
+        !et_data                 TYPE INDEX TABLE
+        !et_data_link            TYPE /bobf/t_frw_act_exp_data_link .
+ENDCLASS.
+
+
+
+CLASS ZCL_I_A_CNDN_REQUEST_SIMULATE IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_action~execute.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    CONSTANTS: lc_feature_toggle_id TYPE sftgl_ft_id VALUE 'SD_PRICE_APPROVAL_BASIC_FUNCTION'.
+
+    TEST-SEAM feature_toggle_fine.
+      IF cl_feature_toggle=>is_defined( lc_feature_toggle_id )
+        AND cl_feature_toggle=>is_active( lc_feature_toggle_id ).
+        DATA(lv_ft_fine) = abap_true.
+      ENDIF.
+    END-TEST-SEAM.
+
+    CHECK lv_ft_fine = abap_true.
+
+    simulate_workflow(
+      EXPORTING
+        is_ctx                  = is_ctx
+        it_key                  = it_key
+        io_read                 = io_read
+        io_modify               = io_modify
+        is_parameters           = is_parameters
+      IMPORTING
+        eo_message              = eo_message
+        et_failed_key           = et_failed_key
+        ev_static_action_failed = ev_static_action_failed
+        et_data                 = et_data
+        et_data_link            = et_data_link
+    ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    super->constructor( ).
+    mo_sls_api = NEW zcl_slsprcg_cndnrecord_api( ).
+    mo_req_util ?= cl_cndnrecord_request_utility=>get_instance( ).
+  ENDMETHOD.
+
+
+  METHOD simulate_workflow.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    TYPES: BEGIN OF ty_keys,
+             conditionrecord           TYPE zc_slspricingconditionrecordtp-conditionrecord,
+             conditionsequentialnumber TYPE zc_slspricingconditionrecordtp-conditionsequentialnumber,
+             conditionvalidityenddate  TYPE zc_slspricingconditionrecordtp-conditionvalidityenddate,
+           END OF ty_keys.
+
+    DATA: ls_keys                       TYPE ty_keys,
+          lt_keys                       TYPE TABLE OF ty_keys,
+          ls_set                        TYPE zc_slspricingconditionrecordtp,
+          lt_failed_key                 TYPE /bobf/t_frw_key,
+          lt_cndn_cds                   TYPE TABLE OF ZSISLSPRICINGCONDITIONRECORDT,
+          ls_cndn_cds                   LIKE LINE OF lt_cndn_cds,
+          lv_knumh                      TYPE knumh,
+          ls_condition_record           TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_record_s,
+          ls_cndnrecord_criteria_header TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_header_s,
+          lt_cndnrecord_criteria_item   TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_item_t,
+          ls_cndnrecord_criteria_item   TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_item_s,
+          ls_cndnrecord_query_option    TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_query_option_s,
+          lt_condition_validity         TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_validity_enh_t,
+          lt_condition_record           TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_record_t,
+          ls_cndn_query_option_response TYPE if_slsprcg_cndnrecd_api_types=>ty_query_option_response_s,
+          lr_data                       TYPE REF TO data,
+          lt_uuid                       TYPE TABLE OF /bobf/uuid,
+          lt_sim_result                 TYPE if_swf_flex_ifs_sim=>tt_sim_result,
+          lt_sim_result_all             TYPE if_swf_flex_ifs_sim=>tt_sim_result,
+          lv_validitycount              TYPE i,
+          lv_conditionrecorduuid        TYPE string,
+          ls_msg                        TYPE symsg.
+
+    CONSTANTS:cv_comma TYPE c VALUE ','.
+
+    FIELD-SYMBOLS:
+      <ls_parameters> TYPE sdprcg_conditionuuid,
+      <fs_cds>        TYPE any.
+
+    ev_static_action_failed = abap_false.
+    ASSIGN is_parameters->* TO <ls_parameters>.
+    IF NOT <ls_parameters> IS ASSIGNED OR <ls_parameters> IS INITIAL.
+      ev_static_action_failed = abap_true.
+      RETURN.
+    ENDIF.
+
+    IF eo_message IS NOT BOUND.
+      eo_message = /bobf/cl_frw_message_factory=>create_container( ).
+    ENDIF.
+
+    CLEAR:et_data.
+    lr_data = REF #( et_data ).
+
+**Get the non-neccessary sign, e.g. '-'
+    DATA(lv_uuid_str) = <ls_parameters>-conditionrecorduuid.
+    DATA(lv_offset) = 0.
+    DATA(lv_len) = 1.
+    DATA(lv_strlen) = strlen( lv_uuid_str ).
+    WHILE ( lv_strlen > lv_offset ).
+      DATA(lv_link_sign) = lv_uuid_str+lv_offset(lv_len).
+      IF lv_link_sign NA '0123456789'.
+        EXIT.
+      ELSE.
+        lv_offset = lv_offset + lv_len.
+        CLEAR:lv_link_sign.
+      ENDIF.
+    ENDWHILE.
+    IF lv_link_sign <> cv_comma AND lv_link_sign <> space.
+      REPLACE ALL OCCURRENCES OF lv_link_sign IN lv_uuid_str WITH space.
+    ENDIF.
+    CONDENSE lv_uuid_str NO-GAPS.
+    SPLIT lv_uuid_str AT cv_comma INTO TABLE DATA(lt_uuid_char).
+    lt_uuid = lt_uuid_char.
+    lt_keys = CONV #( lt_uuid ).
+
+    LOOP AT lt_keys INTO ls_keys.
+      APPEND VALUE #( sign = 'I' option = 'EQ' low = ls_keys-conditionrecord ) TO ls_cndnrecord_criteria_item-conditionrecord.
+    ENDLOOP.
+    APPEND ls_cndnrecord_criteria_item TO lt_cndnrecord_criteria_item.
+
+**get DB data
+    TRY.
+        mo_sls_api->get_condition_record(
+          EXPORTING
+            is_cndnrecord_criteria_header = ls_cndnrecord_criteria_header
+            it_cndnrecord_criteria_item   = lt_cndnrecord_criteria_item
+            is_cndnrecord_query_option    = ls_cndnrecord_query_option
+          IMPORTING
+            et_condition_validity_enh     = lt_condition_validity
+            et_condition_record           = lt_condition_record
+            es_cndn_query_option_response = ls_cndn_query_option_response ).
+      CATCH cx_prcg_cndnrecord_exception INTO DATA(le_cndn).
+        CLEAR ls_msg.
+        ls_msg-msgid = le_cndn->if_t100_message~t100key-msgid.
+        ls_msg-msgno = le_cndn->if_t100_message~t100key-msgno.
+        ls_msg-msgty = le_cndn->if_t100_dyn_msg~msgty.
+        ls_msg-msgv1 = le_cndn->if_t100_dyn_msg~msgv1.
+        ls_msg-msgv2 = le_cndn->if_t100_dyn_msg~msgv2.
+        ls_msg-msgv3 = le_cndn->if_t100_dyn_msg~msgv3.
+        ls_msg-msgv4 = le_cndn->if_t100_dyn_msg~msgv4.
+
+        DATA(lv_root_key) = /bopf/cl_frw_factory=>get_new_key( ).
+        lv_root_key = <ls_parameters>-conditionrecorduuid.
+        eo_message->add_message(
+          EXPORTING
+            is_msg       = ls_msg
+            iv_node      = zif_i_slspricingconditionrec_c=>sc_node-zi_slspricingconditionrecordtp
+            iv_key       = lv_root_key
+            iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition ).
+
+        ev_static_action_failed = abap_true.
+        APPEND VALUE #( key = lv_root_key ) TO et_failed_key.
+
+        RETURN.
+    ENDTRY.
+
+    "find which records satisfy workflow, if not satisfy, do nothing
+    LOOP AT lt_condition_record INTO ls_condition_record.
+      lv_validitycount = 0.
+
+      LOOP AT lt_condition_validity INTO DATA(ls_condition_validity)
+                                   WHERE conditionrecord = ls_condition_record-conditionrecord.
+        lv_validitycount = lv_validitycount + 1.
+        IF lv_validitycount = 1.
+          mo_req_util->simulate(
+            EXPORTING
+              iv_sibfboriid = CONV #( ls_condition_record-conditionrecord )
+            IMPORTING
+              es_sim_result = DATA(ls_sim_result)
+          ).
+
+        ENDIF.
+
+        lv_conditionrecorduuid = |{ ls_condition_validity-conditionrecord }|
+                               & |{ ls_condition_record-conditionsequentialnumber }|
+                               & |{ ls_condition_validity-conditionvalidityenddate }| .
+        IF ls_sim_result-selected = abap_true AND ls_sim_result-id IS NOT INITIAL.
+          MESSAGE i001(00) WITH lv_conditionrecorduuid '/' ls_sim_result-id INTO DATA(lv_message_workflow).
+        ELSE.
+          MESSAGE i001(00) WITH lv_conditionrecorduuid INTO lv_message_workflow.
+        ENDIF.
+
+        CLEAR:ls_msg.
+        MOVE-CORRESPONDING sy TO ls_msg.
+        lv_root_key = lv_conditionrecorduuid.
+        eo_message->add_message(
+          EXPORTING
+            is_msg       = ls_msg
+            iv_node      = zif_i_slspricingconditionrec_c=>sc_node-zi_slspricingconditionrecordtp
+            iv_key       = lv_root_key
+            iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition
+        ).
+      ENDLOOP.
+      CLEAR ls_sim_result.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.

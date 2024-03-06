@@ -1,0 +1,695 @@
+class ZCL_JEK_EXT_AMOUNT_TYPES_SUPER definition
+  public
+  create public .
+
+public section.
+
+  methods CONSTRUCTOR .
+  methods DEFAULT_VBRP
+    changing
+      !CT_INVOICES type ZSVAT_JEK_INVOICE_T .
+  methods DEFAULT_TAXB
+    changing
+      !CT_INVOICES type ZSVAT_JEK_INVOICE_T .
+  methods DEFAULT_FRGT
+    changing
+      !CT_INVOICES type ZSVAT_JEK_INVOICE_T .
+  methods DEFAULT_PRICING
+    importing
+      !IV_AMOUNT_TYPE type ZVAT_EXT_AMOUNT_TYPE
+    changing
+      !CT_INVOICES type ZSVAT_JEK_INVOICE_T .
+  methods CORRECT_AMOUNTS_DECIMALS
+    importing
+      !IV_AMOUNT type BAPICURR_D
+      !IV_CURRENCY type WAERS
+    returning
+      value(RV_CORRECTED) type BAPICURR_D .
+protected section.
+
+  data MT_CALC_LOGIC type ZVAT_EXT_LINE_AM_T .
+  data MT_TCURX type ZTCURX_T .
+private section.
+ENDCLASS.
+
+
+
+CLASS ZCL_JEK_EXT_AMOUNT_TYPES_SUPER IMPLEMENTATION.
+
+
+  METHOD constructor.
+
+    SELECT currkey currdec
+      FROM tcurx
+      INTO CORRESPONDING FIELDS OF TABLE mt_tcurx.
+
+  ENDMETHOD.
+
+
+  METHOD correct_amounts_decimals.
+
+    zcl_ext_utility=>correct_amounts_decimals(
+      EXPORTING
+        iv_amount    = iv_amount                 " 8(15)-character value field with 2 decimal places
+        iv_currency  = iv_currency                 " Currency Key
+      RECEIVING
+       rv_corrected = rv_corrected                 " 8(15)-character value field with 2 decimal places
+    ).
+
+*    DATA: lv_converted TYPE bapicurr_d.
+*
+*    rv_corrected = iv_amount.
+*
+*    READ TABLE me->mt_tcurx WITH KEY currkey = iv_currency TRANSPORTING NO FIELDS.
+*
+*    CHECK sy-subrc = 0.
+*
+*    CALL FUNCTION 'BAPI_CURRENCY_CONV_TO_EXTERNAL'
+*      EXPORTING
+*        currency        = iv_currency
+*        amount_internal = iv_amount
+*      IMPORTING
+*        amount_external = lv_converted.
+*
+*    rv_corrected = lv_converted.
+
+  ENDMETHOD.
+
+
+  METHOD DEFAULT_FRGT.
+* ~ Types
+
+
+* ~ Field symboles
+
+
+* ~ Tables
+
+
+* ~ Structures
+
+
+* ~ Variables
+
+    DATA: lv_pricing_enabled TYPE flag.
+
+* ~ Constants
+
+    CONSTANTS: lc_frgt TYPE zvat_ext_line_am-amount_type VALUE 'FRGT'.
+
+*===============================================
+* Implementation
+*===============================================
+
+    SELECT SINGLE pricing
+      FROM zvat_ext_line_am
+      INTO lv_pricing_enabled
+     WHERE amount_type = lc_frgt.
+
+    IF lv_pricing_enabled EQ abap_true.
+      me->default_pricing(
+        EXPORTING
+          iv_amount_type = lc_frgt                 " Deloitte Extractor: Amount Type
+        CHANGING
+          ct_invoices    = ct_invoices                 " Deloitte Extractor: Invoice
+      ).
+    ELSE.
+      " Not implemented?
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD default_pricing.
+* ~ Types
+
+    TYPES: BEGIN OF lty_prcd_elements,
+             knumv TYPE vbeln,
+             kschl TYPE kschl,
+             kposn TYPE posnr,
+             kawrt TYPE kawrt,
+             kbetr TYPE kbetr,
+             waers TYPE waers,
+             waerk TYPE waerk,
+             kwert TYPE kwert,
+           END OF lty_prcd_elements.
+
+* ~ Field symbols
+
+    FIELD-SYMBOLS: <ls_invoice> LIKE LINE OF ct_invoices,
+                   <ls_line>    LIKE LINE OF <ls_invoice>-invoice_data-invoice_lines-line_item.
+
+* ~ Tables
+
+    DATA: lt_selopt_vbeln  TYPE STANDARD TABLE OF selopt,
+          lt_selopt_cond   TYPE STANDARD TABLE OF selopt,
+          lt_vbrk          TYPE STANDARD TABLE OF vbrk,
+          lt_kalsm_landtx  TYPE STANDARD TABLE OF vbrk,
+          lt_conditions    TYPE STANDARD TABLE OF zvat_ext_line_pr,
+          lt_prcd_elements TYPE STANDARD TABLE OF lty_prcd_elements.
+
+* ~ Structures
+
+    DATA: ls_selopt        TYPE selopt,
+          ls_invoice       LIKE LINE OF ct_invoices,
+          ls_conditions    LIKE LINE OF lt_conditions,
+          ls_line_amount   TYPE zsvat_jek_line_amounts,
+          ls_vbrk          TYPE vbrk,
+          ls_prcd_elements TYPE lty_prcd_elements.
+
+* ~ Variables
+
+    DATA: lv_is_s4 TYPE flag,
+          lv_amount type bapicurr_d.
+
+* ~ Constants
+
+*===============================================
+* Implementation
+*===============================================
+
+    LOOP AT ct_invoices INTO ls_invoice.
+
+      CLEAR: ls_selopt.
+
+      ls_selopt-low = ls_invoice-invoice_data-invoice_header-header_details-invoice_number.
+      ls_selopt-option = 'EQ'.
+      ls_selopt-sign = 'I'.
+
+      APPEND ls_selopt TO lt_selopt_vbeln.
+
+    ENDLOOP.
+
+    SELECT vbeln knumv kalsm landtx waerk
+      FROM vbrk
+      INTO CORRESPONDING FIELDS OF TABLE lt_vbrk
+     WHERE vbeln IN lt_selopt_vbeln.
+
+    CHECK sy-subrc = 0.
+
+    lt_kalsm_landtx = lt_vbrk.
+    SORT lt_kalsm_landtx BY kalsm landtx.
+    DELETE ADJACENT DUPLICATES FROM lt_kalsm_landtx COMPARING kalsm landtx.
+
+    CHECK lt_kalsm_landtx IS NOT INITIAL.
+
+    SELECT amount_type rep_country pr_procedure condition_type base_value
+      FROM zvat_ext_line_pr
+      INTO CORRESPONDING FIELDS OF TABLE lt_conditions
+       FOR ALL ENTRIES IN lt_kalsm_landtx
+     WHERE amount_type  = iv_amount_type
+       AND rep_country  = lt_kalsm_landtx-landtx
+       AND pr_procedure = lt_kalsm_landtx-kalsm.
+
+    CHECK sy-subrc = 0 AND lt_vbrk IS NOT INITIAL.
+
+    LOOP AT lt_conditions INTO ls_conditions.
+      CLEAR: ls_selopt.
+
+      ls_selopt-low    = ls_conditions-condition_type.
+      ls_selopt-option = 'EQ'.
+      ls_selopt-sign   = 'I'.
+
+      APPEND ls_selopt TO lt_selopt_cond.
+    ENDLOOP.
+
+    zcl_ext_utility=>get_is_s4(
+      IMPORTING
+        ev_is_s4 = lv_is_s4                 " Is this an S/4 HANA system?
+    ).
+
+    IF lv_is_s4 EQ abap_true.
+
+      SELECT ('knumv kposn kschl kawrt kbetr waers waerk kwert')
+        FROM ('prcd_elements')
+        INTO CORRESPONDING FIELDS OF TABLE lt_prcd_elements
+         FOR ALL ENTRIES IN lt_vbrk
+       WHERE knumv = lt_vbrk-knumv
+         AND kappl = 'V'
+         AND kschl IN lt_selopt_cond.
+
+    ELSE.
+
+      SELECT knumv kposn kschl kawrt kbetr waers kwert
+        FROM konv
+        INTO CORRESPONDING FIELDS OF TABLE lt_prcd_elements
+         FOR ALL ENTRIES IN lt_vbrk
+       WHERE knumv = lt_vbrk-knumv
+         AND kappl = 'V'
+         AND kschl IN lt_selopt_cond.
+
+    ENDIF.
+
+    CHECK sy-subrc = 0.
+
+    SORT lt_prcd_elements BY knumv kposn kschl.
+    DELETE ADJACENT DUPLICATES FROM lt_prcd_elements COMPARING knumv kposn kschl.
+
+    SORT lt_vbrk BY vbeln.
+
+    LOOP AT ct_invoices ASSIGNING <ls_invoice>.
+
+      CLEAR: ls_vbrk.
+
+      READ TABLE lt_vbrk INTO ls_vbrk
+                     WITH KEY vbeln = <ls_invoice>-invoice_data-invoice_header-header_details-invoice_number
+                BINARY SEARCH.
+
+      CHECK sy-subrc = 0.
+
+      LOOP AT <ls_invoice>-invoice_data-invoice_lines-line_item ASSIGNING <ls_line>.
+
+        LOOP AT lt_conditions INTO ls_conditions WHERE pr_procedure = ls_vbrk-kalsm
+                                                   AND rep_country  = ls_vbrk-landtx.
+
+          CLEAR: ls_prcd_elements, ls_line_amount.
+
+          READ TABLE lt_prcd_elements INTO ls_prcd_elements
+                                  WITH KEY knumv = ls_vbrk-knumv
+                                           kposn = <ls_line>-line_index
+                                           kschl = ls_conditions-condition_type.
+
+          CHECK sy-subrc = 0.
+
+          ls_line_amount-amount_type = iv_amount_type.
+          ls_line_amount-source      = ls_conditions-condition_type.
+
+          IF ls_conditions-base_value = 'B'.
+            ls_line_amount-currency = ls_prcd_elements-waers.
+            ls_line_amount-amount = ls_prcd_elements-kawrt.
+          ELSEIF ls_conditions-base_value = 'V'.
+            ls_line_amount-amount = ls_prcd_elements-kwert.
+            ls_line_amount-currency = ls_vbrk-waerk.
+          ENDIF.
+
+          lv_amount = ls_line_amount-amount.
+          ls_line_amount-amount = me->correct_amounts_decimals(
+                                    iv_amount   = lv_amount
+                                    iv_currency = ls_line_amount-currency
+                                  ).
+
+          APPEND ls_line_amount TO <ls_line>-line_amounts.
+
+        ENDLOOP.
+
+      ENDLOOP.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD default_taxb.
+
+* ~ Types
+
+    TYPES: BEGIN OF lty_prcd_elements,
+             vbeln TYPE vbeln,
+             waerk TYPE waerk,
+             kposn TYPE posnr,
+             kawrt TYPE kawrt,
+             waers TYPE waers,
+             knumv TYPE knumv,
+           END OF lty_prcd_elements.
+
+* ~ Field symboles
+
+    FIELD-SYMBOLS: <ls_invoice> LIKE LINE OF ct_invoices,
+                   <ls_line>    LIKE LINE OF <ls_invoice>-invoice_data-invoice_lines-line_item.
+
+* ~ Tables
+
+    DATA: lt_selopt_vbeln  TYPE STANDARD TABLE OF selopt,
+          lt_prcd_elements TYPE STANDARD TABLE OF lty_prcd_elements.
+
+* ~ Structures
+
+    DATA: ls_selopt        LIKE LINE OF lt_selopt_vbeln,
+          ls_invoice       LIKE LINE OF ct_invoices,
+          ls_prcd_elements LIKE LINE OF lt_prcd_elements,
+          ls_amount        TYPE zsvat_jek_line_amounts.
+
+* ~ Variables
+
+    DATA: lv_is_s4 TYPE boolean.
+
+* ~ Constants
+
+    DATA: lc_amount_type TYPE zvat_ext_line_am-amount_type VALUE 'TAXB'.
+
+*===============================================
+* Implementation
+*===============================================
+
+    LOOP AT ct_invoices INTO ls_invoice.
+
+      CLEAR: ls_selopt.
+
+      ls_selopt-low = ls_invoice-invoice_data-invoice_header-header_details-invoice_number.
+      ls_selopt-option = 'EQ'.
+      ls_selopt-sign = 'I'.
+
+      APPEND ls_selopt TO lt_selopt_vbeln.
+
+    ENDLOOP.
+
+    CHECK lt_selopt_vbeln IS NOT INITIAL.
+
+    zcl_ext_utility=>get_is_s4(
+      IMPORTING
+        ev_is_s4 = lv_is_s4                 " Is this an S/4 HANA system?
+    ).
+
+    IF lv_is_s4 = abap_true.
+
+      SELECT ('a~vbeln a~waerk b~kposn b~kawrt b~waers')
+        FROM ('vbrk as a inner join prcd_elements as b on a~knumv = b~knumv')
+        INTO CORRESPONDING FIELDS OF TABLE lt_prcd_elements
+       WHERE a~vbeln IN lt_selopt_vbeln
+         AND b~kntyp = 'D'
+         AND b~kvsl1 = 'MWS'.
+
+    ELSE.
+
+      TRY.
+
+          SELECT a~vbeln a~waerk b~kposn b~kawrt b~waers
+            FROM ('vbrk AS a INNER JOIN konv AS b ON a~knumv = b~knumv')
+            INTO CORRESPONDING FIELDS OF TABLE lt_prcd_elements
+           WHERE a~vbeln IN lt_selopt_vbeln
+             AND b~kntyp = 'D'
+             AND b~kvsl1 = 'MWS'.
+
+        CATCH cx_sy_dynamic_osql_semantics.
+
+          TYPES: BEGIN OF ltY_konv,
+                   kposn TYPE konv-kposn,
+                   kawrt TYPE konv-kawrt,
+                   waers TYPE konv-waers,
+                   knumv TYPE konv-knumv,
+                 END OF lty_konv.
+
+          FIELD-SYMBOLS: <ls_prcd> LIKE LINE OF lt_prcd_elements.
+
+          DATA: lt_konv TYPE STANDARD TABLE OF lty_konv,
+                ls_konv TYPE lty_konv.
+
+          SELECT vbeln waerk knumv
+            FROM vbrk
+            INTO CORRESPONDING FIELDS OF TABLE lt_prcd_elements
+           WHERE vbeln IN lt_selopt_vbeln.
+
+          IF sy-subrc = 0 AND lt_prcd_elements IS NOT INITIAL.
+
+            SELECT kposn kawrt waers knumv
+              FROM konv
+              INTO CORRESPONDING FIELDS OF TABLE lt_konv
+               FOR ALL ENTRIES IN lt_prcd_elements
+             WHERE knumv = lt_prcd_elements-knumv
+               AND kntyp = 'D'
+               AND kvsl1 = 'MWS'.
+
+            LOOP AT lt_prcd_elements ASSIGNING <ls_prcd>.
+
+              CLEAR: ls_konv.
+
+              READ TABLE lt_konv INTO ls_konv WITH KEY knumv = ls_prcd_elements-knumv.
+
+              MOVE-CORRESPONDING ls_konv TO <ls_prcd>.
+
+            ENDLOOP.
+
+            CLEAR: ls_prcd_elements.
+
+          ENDIF.
+      ENDTRY.
+
+    ENDIF.
+
+    CHECK lt_prcd_elements IS NOT INITIAL.
+
+    LOOP AT ct_invoices ASSIGNING <ls_invoice>.
+
+      LOOP AT <ls_invoice>-invoice_data-invoice_lines-line_item ASSIGNING <ls_line>.
+
+        READ TABLE lt_prcd_elements INTO ls_prcd_elements
+                                WITH KEY vbeln = <ls_invoice>-invoice_data-invoice_header-header_details-invoice_number
+                                         kposn = <ls_line>-line_index.
+
+        CHECK sy-subrc = 0.
+
+        ls_amount-amount      = ls_prcd_elements-kawrt.
+        ls_amount-amount_type = lc_amount_type.
+
+        IF ls_prcd_elements-waers IS NOT INITIAL.
+          ls_amount-currency    = ls_prcd_elements-waers.
+        ELSE.
+          ls_amount-currency    = ls_prcd_elements-waerk.
+        ENDIF.
+
+*        ls_amount-amount = me->correct_amounts_decimals( iv_amount = ls_amount-amount iv_currency = ls_amount-currency ).
+        " -> Seems the amounts in PRCD are already converted for some reason.
+
+        APPEND ls_amount TO <ls_line>-line_amounts.
+
+      ENDLOOP.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD default_vbrp.
+
+* ~ Types
+
+    TYPES: BEGIN OF lty_vbrp,
+             vbeln TYPE vbrk-vbeln,
+             posnr TYPE vbrp-posnr,
+             netwr TYPE vbrp-netwr,
+             mwsbp TYPE vbrp-mwsbp,
+             cmpre TYPE vbrp-cmpre,
+             bonba TYPE vbrp-bonba,
+             grwrt TYPE eipo-grwrt,
+             skfbp TYPE vbrp-skfbp,
+             waerk TYPE vbrk-waerk,
+             fkimg TYPE vbrp-fkimg,
+           END OF lty_vbrp.
+
+* ~ Tables
+
+    DATA: lt_doc_selopt TYPE STANDARD TABLE OF selopt,
+          lt_vbrp       TYPE STANDARD TABLE OF lty_vbrp,
+          lt_config     TYPE STANDARD TABLE OF zvat_ext_line_am.
+
+* ~ Field symbols
+
+    FIELD-SYMBOLS: <ls_invoice>   TYPE zsvat_jek_invoice,
+                   <ls_line_item> TYPE zsvat_jek_line_item.
+
+* ~ Structures
+
+    DATA: ls_doc_selopt  LIKE LINE OF lt_doc_selopt,
+          ls_line_amount TYPE zsvat_jek_line_amounts,
+          ls_vbrp        LIKE LINE OF lt_vbrp,
+          ls_config      LIKE LINE OF lt_config.
+
+* ~ Variables
+
+    DATA: lv_amount   TYPE bapicurr_d,
+          lv_currency TYPE waers,
+          lv_is_s4    TYPE flag.
+
+* ~ Constants
+
+    DATA: lc_neta TYPE zvat_ext_line_am-amount_type VALUE 'NETA',
+          lc_taxa TYPE zvat_ext_line_am-amount_type VALUE 'TAXA',
+          lc_GRSA TYPE zvat_ext_line_am-amount_type VALUE 'GRSA',
+          lc_CREP TYPE zvat_ext_line_am-amount_type VALUE 'CREP',
+          lc_REBB TYPE zvat_ext_line_am-amount_type VALUE 'REBB',
+          lc_STAT TYPE zvat_ext_line_am-amount_type VALUE 'STAT',
+          lc_SKTO TYPE zvat_ext_line_am-amount_type VALUE 'SKTO',
+          lc_untp TYPE zvat_ext_line_am-amount_type VALUE 'UNTP'.
+
+*========================================================*
+* Implementation
+*========================================================*
+
+* ~ Get configuration
+
+    SELECT amount_type method
+      FROM zvat_ext_line_am
+      INTO CORRESPONDING FIELDS OF TABLE lt_config
+     WHERE method = 'DEFAULT_VBRP'.
+
+    CHECK sy-subrc = 0.
+
+* ~ Create select options
+
+    LOOP AT ct_invoices ASSIGNING <ls_invoice>.
+
+      CLEAR: ls_doc_selopt.
+
+      ls_doc_selopt-low    = <ls_invoice>-invoice_data-invoice_header-header_details-invoice_number.
+      ls_doc_selopt-option = 'EQ'.
+      ls_doc_selopt-sign   = 'I'.
+
+      APPEND ls_doc_selopt TO lt_doc_selopt.
+
+    ENDLOOP.
+
+* ~ Get S/4 system or not
+
+    zcl_ext_utility=>get_is_s4(
+      IMPORTING
+        ev_is_s4 = lv_is_s4                 " Is this an S/4 HANA system?
+    ).
+
+* ~ SELECT VBRP
+
+    IF lv_is_s4 EQ abap_true.
+      SELECT ('vbeln posnr netwr mwsbp cmpre bonba grwrt skfbp waerk fkimg') " GWRT & WAERK do not work on ECC!!!
+        FROM vbrp
+        INTO CORRESPONDING FIELDS OF TABLE lt_vbrp
+       WHERE vbeln IN lt_doc_selopt.
+    ELSE.
+      SELECT a~vbeln b~posnr b~netwr b~mwsbp b~cmpre b~bonba c~grwrt b~skfbp a~waerk b~fkimg
+        FROM vbrk AS a
+       INNER JOIN vbrp AS b ON a~vbeln = b~vbeln
+        LEFT OUTER JOIN eipo AS c ON a~exnum = c~exnum
+        INTO CORRESPONDING FIELDS OF TABLE lt_vbrp
+       WHERE a~vbeln IN lt_doc_selopt.
+    ENDIF.
+
+    CHECK sy-subrc = 0.
+
+    SORT lt_vbrp BY vbeln posnr.
+
+* ~ Adjust CT_INVOICES
+
+    LOOP AT ct_invoices ASSIGNING <ls_invoice>.
+
+      LOOP AT <ls_invoice>-invoice_data-invoice_lines-line_item ASSIGNING <ls_line_item>.
+
+        CLEAR: ls_vbrp.
+
+        READ TABLE lt_vbrp INTO ls_vbrp WITH KEY vbeln = <ls_invoice>-invoice_data-invoice_header-header_details-invoice_number
+                                                 posnr = <ls_line_item>-line_index
+                                        BINARY SEARCH.
+
+        CHECK sy-subrc = 0.
+
+        "NETA
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_neta.
+        IF sy-subrc = 0.
+          ls_line_amount-amount_type = lc_neta.
+          lv_amount = ls_vbrp-netwr.
+          ls_line_amount-amount      = me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = ls_vbrp-waerk ).
+          ls_line_amount-currency    = ls_vbrp-waerk.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+        "TAXA
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_taxa.
+        IF sy-subrc = 0.
+          lv_amount = ls_vbrp-mwsbp.
+          ls_line_amount-amount_type = lc_taxa.
+          ls_line_amount-amount      = me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = ls_vbrp-waerk ).
+          ls_line_amount-currency    = ls_vbrp-waerk.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+        "GRSA
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_grsa.
+        IF sy-subrc = 0.
+          lv_amount = ls_vbrp-netwr + ls_vbrp-mwsbp.
+          ls_line_amount-amount_type = lc_grsa.
+          ls_line_amount-amount      = me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = ls_vbrp-waerk ).
+          ls_line_amount-currency    = ls_vbrp-waerk.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+        "CREP
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_crep.
+        IF sy-subrc = 0.
+          lv_amount = ls_vbrp-cmpre.
+          ls_line_amount-amount_type = lc_crep.
+          ls_line_amount-amount      =  me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = ls_vbrp-waerk )."ls_vbrp-cmpre.
+          ls_line_amount-currency    = ls_vbrp-waerk.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+        "REBB
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_rebb.
+        IF sy-subrc = 0.
+          lv_amount                  = ls_vbrp-bonba.
+          ls_line_amount-amount_type = lc_rebb.
+          ls_line_amount-amount      = me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = ls_vbrp-waerk )."ls_vbrp-bonba.
+          ls_line_amount-currency    = ls_vbrp-waerk.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+        "STAT
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_stat.
+        IF sy-subrc = 0.
+          lv_amount                  = ls_vbrp-grwrt.
+          lv_currency                = <ls_invoice>-invoice_data-invoice_header-header_details-statistical_currency.
+          ls_line_amount-amount_type = lc_stat.
+          ls_line_amount-amount      = me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = lv_currency ).
+          ls_line_amount-currency    = lv_currency.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+        "SKTO
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_skto.
+        IF sy-subrc = 0.
+          lv_amount                  = ls_vbrp-skfbp.
+          ls_line_amount-amount_type = lc_skto.
+          ls_line_amount-amount      = me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = ls_vbrp-waerk ).
+          ls_line_amount-currency    = ls_vbrp-waerk.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+        "UNTP
+
+        READ TABLE lt_config TRANSPORTING NO FIELDS
+                             WITH KEY amount_type = lc_untp.
+        IF sy-subrc = 0.
+          ls_line_amount-amount_type = lc_untp.
+          ls_line_amount-currency    = ls_vbrp-waerk.
+          IF ls_vbrp-fkimg IS NOT INITIAL.
+            lv_amount = ls_vbrp-netwr / ls_vbrp-fkimg.
+            ls_line_amount-amount    = me->correct_amounts_decimals( iv_amount = lv_amount iv_currency = ls_vbrp-waerk ).
+          ENDIF.
+
+          APPEND ls_line_amount TO <ls_line_item>-line_amounts.
+        ENDIF.
+
+      ENDLOOP.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

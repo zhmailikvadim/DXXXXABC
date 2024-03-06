@@ -44,19 +44,19 @@ define view entity zsd_i_bw_stock_difference_base
               @Semantics.quantity.unitOfMeasure : 'Meins'
               cast(RLMMUUDIF  as abap.quan( 13, 3 ))                             as UnrectrictedDifferenceQty,
               @Semantics.quantity.unitOfMeasure : 'Meins'
-              cast(RLMMUURDF  as abap.quan( 13, 3 ))                             as BwUnrectrictedDifferenceQty,
+              cast(RLMMUURDF  as abap.quan( 13, 3 ))                             as RealUnrectrictedDifferenceQty,
               @Semantics.amount.currencyCode: 'CurrencyCode'
               cast(RLMMUUDFV as abap.curr( 13, 2 ) )                             as UnrectrictedDifferenceValue,
               @Semantics.quantity.unitOfMeasure : 'Meins'
               cast(RLMMBLDIF  as abap.quan( 13, 3 ))                             as BlockedDifferenceQty,
               @Semantics.quantity.unitOfMeasure : 'Meins'
-              cast(RLMMBLRDF  as abap.quan( 13, 3 ))                             as BwBlockedDifferenceQty,
+              cast(RLMMBLRDF  as abap.quan( 13, 3 ))                             as RealBlockedDifferenceQty,
               @Semantics.amount.currencyCode: 'CurrencyCode'
               cast(RLMMBLDFV  as abap.curr( 13, 2 ) )                            as BlockedDifferenceValue,
               @Semantics.quantity.unitOfMeasure : 'Meins'
               cast(RLMMQIDIF  as abap.quan( 13, 3 ))                             as InQualityInspDifferenceQty,
               @Semantics.quantity.unitOfMeasure : 'Meins'
-              cast(RLMMQIRDF  as abap.quan( 13, 3 ))                             as BwInQualityInspDifferenceQty,
+              cast(RLMMQIRDF  as abap.quan( 13, 3 ))                             as RealInQualityInspDifferenceQty,
               @Semantics.amount.currencyCode: 'CurrencyCode'
               cast(RLMMQIDFV  as abap.curr( 13, 2 ) )                            as InQualityInspDifferenceValue,
               @Semantics.quantity.unitOfMeasure : 'Meins'

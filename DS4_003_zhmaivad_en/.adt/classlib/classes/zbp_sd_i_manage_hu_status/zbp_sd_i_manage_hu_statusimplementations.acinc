@@ -1,0 +1,260 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 10.05.2023 | 20999 Manage HU Status                   *
+*              |            | DS4K951527
+* BIGVATAM     | 26.02.2024 | 29411 Adding HU Status REFUSAL           *
+*              |            | DS4K980985                               *
+************************************************************************
+
+CLASS lhc_managehustatus
+  DEFINITION
+    FINAL
+    INHERITING FROM cl_abap_behavior_handler.
+
+  PRIVATE SECTION.
+    DATA go_main TYPE REF TO zcl_sd_manage_hu_status.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING
+        keys REQUEST requested_authorizations FOR managehustatus RESULT result.
+
+    METHODS read FOR READ
+      IMPORTING
+        keys FOR READ managehustatus RESULT result.
+
+    METHODS lock FOR LOCK
+      IMPORTING
+        keys FOR LOCK managehustatus.
+
+    METHODS change_carton_status FOR MODIFY
+      IMPORTING
+        keys FOR ACTION managehustatus~changecartonstatus RESULT result.
+
+    METHODS get_helper
+      IMPORTING
+        it_ch_cart_stat_keys TYPE zcl_sd_manage_hu_status=>gtyp_t_ch_cart_stat_keys.
+
+    METHODS validate_status
+      CHANGING
+        ct_failed   TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_failed
+        ct_reported TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_reported.
+
+    METHODS update_hu_status
+      CHANGING
+        ct_reported TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_reported
+        ct_result   TYPE zcl_sd_manage_hu_status=>gtyp_t_ch_cart_stat_result.
+
+    METHODS do_goods_movement
+      CHANGING
+        ct_failed   TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_failed
+        ct_reported TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_reported
+        ct_result   TYPE zcl_sd_manage_hu_status=>gtyp_t_ch_cart_stat_result.
+
+    METHODS do_goods_reversal
+      CHANGING
+        ct_failed   TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_failed
+        ct_reported TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_reported
+        ct_result   TYPE zcl_sd_manage_hu_status=>gtyp_t_ch_cart_stat_result.
+
+    METHODS process_after_posting
+      CHANGING
+        ct_return   TYPE bapiret2_t
+        ct_failed   TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_failed
+        ct_reported TYPE zcl_sd_manage_hu_status=>gtyp_t_mng_hu_stat_reported
+        ct_result   TYPE zcl_sd_manage_hu_status=>gtyp_t_ch_cart_stat_result.
+ENDCLASS.
+
+CLASS lsc_managehustatus
+  DEFINITION
+    FINAL
+    INHERITING FROM cl_abap_behavior_saver.
+
+  PROTECTED SECTION.
+    METHODS save REDEFINITION.
+ENDCLASS.
+
+CLASS lhc_managehustatus IMPLEMENTATION.
+  METHOD get_instance_authorizations.
+    " Dummy statement to avoid ATC check errors on non-used variables.
+    IF keys IS NOT INITIAL OR result IS INITIAL OR requested_authorizations IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD read.
+    " Dummy statement to avoid ATC check errors on non-used variables.
+    IF keys IS NOT INITIAL OR result IS INITIAL.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD lock.
+    " Will always be populated.
+    DATA(lv_hu) = keys[ 1 ]-handlingunit.
+
+    CALL FUNCTION 'ENQUEUE_EVVEKPE'
+      EXPORTING
+        venum          = lv_hu
+      EXCEPTIONS
+        foreign_lock   = 1
+        system_failure = 2
+        OTHERS         = 3.
+
+    IF sy-subrc <> 0.
+      INSERT VALUE #( handlingunit = lv_hu ) INTO TABLE failed-managehustatus.
+      INSERT VALUE #( handlingunit = lv_hu
+                      %msg         = new_message(
+                        id       = sy-msgid
+                        number   = sy-msgno
+                        v1       = sy-msgv1
+                        v2       = sy-msgv2
+                        v3       = sy-msgv3
+                        v4       = sy-msgv4
+                        severity = if_abap_behv_message=>severity-error ) ) INTO TABLE reported-managehustatus.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD change_carton_status.
+    get_helper( keys ).
+
+    validate_status(
+      CHANGING
+        ct_failed   = failed-managehustatus
+        ct_reported = reported-managehustatus ).
+
+    IF failed-managehustatus IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    IF ( go_main->mv_hu_curr_status_name = go_main->mv_hu_status_init
+    AND  go_main->mv_hu_new_status_name  = go_main->mv_hu_status_inve )
+    OR ( go_main->mv_hu_curr_status_name = go_main->mv_hu_status_inve
+    AND  go_main->mv_hu_new_status_name  = go_main->mv_hu_status_init )
+    OR ( go_main->mv_hu_curr_status_name = go_main->mv_hu_status_init
+    AND  go_main->mv_hu_new_status_name  = go_main->mv_hu_status_refu ).
+      update_hu_status(
+        CHANGING
+          ct_reported = reported-managehustatus
+          ct_result   = result ).
+    ELSEIF go_main->mv_hu_curr_status_name = go_main->mv_hu_status_init
+    AND    go_main->mv_hu_new_status_name  = go_main->mv_hu_status_manc.
+      do_goods_movement(
+        CHANGING
+          ct_failed   = failed-managehustatus
+          ct_reported = reported-managehustatus
+          ct_result   = result ).
+    ELSEIF go_main->mv_hu_curr_status_name = go_main->mv_hu_status_manc
+    AND    go_main->mv_hu_new_status_name  = go_main->mv_hu_status_init.
+      do_goods_reversal(
+        CHANGING
+          ct_failed   = failed-managehustatus
+          ct_reported = reported-managehustatus
+          ct_result   = result ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_helper.
+    go_main = zcl_sd_manage_hu_status=>get_instance( it_ch_cart_stat_keys ).
+  ENDMETHOD.
+
+  METHOD validate_status.
+    IF go_main->is_new_hu_status_allowed( ) = abap_false.
+      INSERT VALUE #( handlingunit = go_main->mv_hu ) INTO TABLE ct_failed.
+
+      MESSAGE e000(zsd_manage_hu_status) INTO DATA(lv_message) ##NEEDED.
+
+      INSERT VALUE #( handlingunit = go_main->mv_hu
+                      %msg         = new_message(
+                        id       = go_main->gc_message_class
+                        number   = '0'
+                        severity = if_abap_behv_message=>severity-error ) ) INTO TABLE ct_reported.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD update_hu_status.
+    go_main->update_hu_status( ).
+
+    MESSAGE s001(zsd_manage_hu_status) INTO DATA(lv_message) ##NEEDED.
+
+    INSERT VALUE #( handlingunit = go_main->mv_hu
+                    %msg         = new_message(
+                      id       = go_main->gc_message_class
+                      number   = '1'
+                      v1       = go_main->mv_hu
+                      severity = if_abap_behv_message=>severity-success ) ) INTO TABLE ct_reported.
+    INSERT VALUE #( handlingunit = go_main->mv_hu ) INTO TABLE ct_result.
+  ENDMETHOD.
+
+  METHOD do_goods_movement.
+    DATA(lt_return) = go_main->do_goods_movement( ).
+
+    process_after_posting(
+      CHANGING
+        ct_return   = lt_return
+        ct_failed   = ct_failed
+        ct_reported = ct_reported
+        ct_result   = ct_result ).
+  ENDMETHOD.
+
+  METHOD do_goods_reversal.
+    DATA(lt_return) = go_main->do_goods_reversal( ).
+
+    process_after_posting(
+      CHANGING
+        ct_return   = lt_return
+        ct_failed   = ct_failed
+        ct_reported = ct_reported
+        ct_result   = ct_result ).
+  ENDMETHOD.
+
+  METHOD process_after_posting.
+    FIELD-SYMBOLS <ls_return> TYPE bapiret2.
+
+    IF line_exists( ct_return[ type = go_main->gc_msgty_abort ] )
+    OR line_exists( ct_return[ type = go_main->gc_msgty_error ] )
+    OR line_exists( ct_return[ type = go_main->gc_msgty_dump  ] ).
+      INSERT VALUE #( handlingunit = go_main->mv_hu ) INTO TABLE ct_failed.
+
+      LOOP AT ct_return ASSIGNING <ls_return>.
+        INSERT VALUE #( handlingunit = go_main->mv_hu
+                        %msg         = new_message(
+                          id       = <ls_return>-id
+                          number   = <ls_return>-number
+                          v1       = <ls_return>-message_v1
+                          v2       = <ls_return>-message_v2
+                          v3       = <ls_return>-message_v3
+                          v4       = <ls_return>-message_v4
+                          severity = if_abap_behv_message=>severity-error ) ) INTO TABLE ct_reported.
+      ENDLOOP.
+
+      RETURN.
+    ENDIF.
+
+    update_hu_status(
+      CHANGING
+        ct_reported = ct_reported
+        ct_result   = ct_result ).
+
+    LOOP AT ct_return ASSIGNING <ls_return>.
+      INSERT VALUE #( handlingunit = go_main->mv_hu
+                      %msg         = new_message(
+                        id       = <ls_return>-id
+                        number   = <ls_return>-number
+                        v1       = <ls_return>-message_v1
+                        v2       = <ls_return>-message_v2
+                        v3       = <ls_return>-message_v3
+                        v4       = <ls_return>-message_v4
+                        severity = if_abap_behv_message=>severity-success ) ) INTO TABLE ct_reported.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lsc_managehustatus IMPLEMENTATION.
+  METHOD save.
+    RETURN.
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,200 @@
+CLASS lcl_report DEFINITION CREATE PUBLIC FINAL.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 29.11.2021 | 9408      : Cache buster                 *
+*              |            | DS4K900417                               *
+*----------------------------------------------------------------------*
+
+  PUBLIC SECTION.
+    CLASS-METHODS start_of_selection.
+    CLASS-METHODS end_of_selection.
+
+  PRIVATE SECTION.
+
+*   Report results
+    TYPES: BEGIN OF mtyp_s_result_line,
+             program TYPE sy-repid,
+             status  TYPE icon-id,
+             text    TYPE string,
+           END OF mtyp_s_result_line.
+
+    CLASS-DATA: gt_result TYPE STANDARD TABLE OF mtyp_s_result_line.
+
+    CLASS-METHODS invalidate_global_caches.
+    CLASS-METHODS read_list_from_memory RETURNING VALUE(rt_log) TYPE zpe_tt_list.
+    CLASS-METHODS page_cache_reset.
+    CLASS-METHODS page_cache_create.
+
+ENDCLASS.
+
+CLASS lcl_report IMPLEMENTATION.
+
+  METHOD start_of_selection.
+
+    invalidate_global_caches( ).
+    page_cache_reset( ).
+    page_cache_create( ).
+
+  ENDMETHOD.
+
+  METHOD end_of_selection.
+
+    DATA: lo_column TYPE REF TO cl_salv_column.
+
+    CHECK cb_log IS NOT INITIAL.
+
+    TRY.
+        cl_salv_table=>factory( IMPORTING r_salv_table = DATA(lo_alv)
+                                CHANGING  t_table      = gt_result ).
+
+        DATA(lo_columns) = lo_alv->get_columns( ).
+        lo_columns->set_optimize( ).
+        lo_column = lo_columns->get_column( 'PROGRAM' ).
+        lo_column->set_medium_text( TEXT-o01 ).
+        lo_column = lo_columns->get_column( 'STATUS' ).
+        lo_column->set_medium_text( TEXT-o02 ).
+        lo_column = lo_columns->get_column( 'TEXT' ).
+        lo_column->set_medium_text( TEXT-o03 ).
+
+        lo_alv->get_functions( )->set_all( abap_true ).
+
+        lo_alv->display( ).
+
+      CATCH cx_salv_msg cx_salv_not_found ##NO_HANDLER.
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD invalidate_global_caches.
+
+    DATA: lt_msg_to_mem TYPE bapirettab,
+          lv_status     TYPE mtyp_s_result_line-status.
+    FIELD-SYMBOLS: <ls_result> TYPE mtyp_s_result_line.
+
+    CHECK cb_prog2 IS NOT INITIAL.
+
+*    Authorization control
+    DATA(lv_has_authority) = /ui2/cl_utils_factory=>get_auth_utils( )->has_auth_pb_chip(
+      iv_chip_name = 'X-SAP-UI2*'
+      iv_actvt     = '06' ).
+    IF lv_has_authority = abap_false.
+      INSERT INITIAL LINE INTO TABLE gt_result ASSIGNING <ls_result>.
+      <ls_result>-program = `/UI2/INVALIDATE_GLOBAL_CACHES`.
+      <ls_result>-status  = icon_red_light.
+      <ls_result>-text    = 'No authorization'(005).
+      RETURN.
+    ENDIF.
+
+*   Program execution
+    SUBMIT /ui2/invalidate_global_caches
+            WITH gv_exe   = abap_true
+            WITH gv_test  = abap_false
+            EXPORTING LIST TO MEMORY AND RETURN.
+
+
+*   Log preparation
+    IF cb_log IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lt_log) = read_list_from_memory( ).
+
+    IMPORT msg = lt_msg_to_mem FROM MEMORY ID '/UI2/INVALIDATE_GLOBAL_CACHES'.
+    IF sy-subrc = 0 AND lt_msg_to_mem IS INITIAL.
+      lv_status = icon_green_light.
+    ELSE.
+      lv_status = icon_red_light.
+    ENDIF.
+
+    IF lt_log IS INITIAL.
+      INSERT INITIAL LINE INTO TABLE gt_result ASSIGNING <ls_result>.
+      <ls_result>-program = `/UI2/INVALIDATE_GLOBAL_CACHES`.
+      <ls_result>-status  = lv_status.
+    ELSE.
+      LOOP AT lt_log ASSIGNING FIELD-SYMBOL(<lv_log>) WHERE table_line IS NOT INITIAL.
+        INSERT INITIAL LINE INTO TABLE gt_result ASSIGNING <ls_result>.
+        <ls_result>-program = `/UI2/INVALIDATE_GLOBAL_CACHES`.
+        <ls_result>-status  = lv_status.
+        <ls_result>-text    = <lv_log>.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD page_cache_reset.
+
+    CHECK cb_prog4 IS NOT INITIAL.
+
+    SUBMIT /ui2/page_cache_reset AND RETURN.
+    IF cb_log IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    INSERT INITIAL LINE INTO TABLE gt_result ASSIGNING FIELD-SYMBOL(<ls_result>).
+    <ls_result>-program = `/UI2/PAGE_CACHE_RESET`.
+    <ls_result>-status  = icon_green_light.
+
+  ENDMETHOD.
+
+  METHOD page_cache_create.
+
+    CHECK cb_prog3 IS NOT INITIAL.
+
+    SUBMIT /ui2/page_cache_create AND RETURN.
+    IF cb_log IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    INSERT INITIAL LINE INTO TABLE gt_result ASSIGNING FIELD-SYMBOL(<ls_result>).
+    <ls_result>-program = `/UI2/PAGE_CACHE_CREATE`.
+    IF sy-msgty = 'E'.
+      <ls_result>-status  = icon_red_light.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO <ls_result>-text.
+    ELSE.
+      <ls_result>-status  = icon_green_light.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD read_list_from_memory.
+
+    DATA lt_list TYPE STANDARD TABLE OF abaplist.
+
+*   Import list from memory
+    CALL FUNCTION 'LIST_FROM_MEMORY'
+      TABLES
+        listobject = lt_list
+      EXCEPTIONS
+        not_found  = 1
+        OTHERS     = 2.
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+
+*   Convert list to ASCII format
+    CALL FUNCTION 'LIST_TO_ASCI'
+      TABLES
+        listasci           = rt_log
+        listobject         = lt_list
+      EXCEPTIONS
+        empty_list         = 1
+        list_index_invalid = 2
+        OTHERS             = 3.
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+
+*   Release memory
+    CALL FUNCTION 'LIST_FREE_MEMORY'
+      TABLES
+        listobject = lt_list.
+
+  ENDMETHOD.
+
+ENDCLASS.

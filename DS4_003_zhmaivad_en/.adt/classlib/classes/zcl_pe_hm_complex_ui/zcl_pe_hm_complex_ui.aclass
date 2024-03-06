@@ -1,0 +1,567 @@
+CLASS zcl_pe_hm_complex_ui DEFINITION
+  PUBLIC
+  INHERITING FROM cl_fdt_wd_ui_simple_mode
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES if_fdt_application_settings .
+
+    TYPES:
+      BEGIN OF gtyp_s_content,
+        row       TYPE int4,
+        operation TYPE cl_fdt_decision_table_compare=>diff_operation,
+        col       TYPE int4,
+        id        TYPE if_fdt_types=>id,
+        value     TYPE RANGE OF string,
+      END OF gtyp_s_content .
+    TYPES:
+      gtyp_t_content TYPE SORTED TABLE OF gtyp_s_content WITH UNIQUE KEY row col
+                                                           WITH NON-UNIQUE SORTED KEY id COMPONENTS id .
+
+    CLASS-METHODS class_constructor .
+    CLASS-METHODS change_ui_configuration
+      IMPORTING
+        !iif_configuration       TYPE REF TO if_fdt_wd_configuration
+      RETURNING
+        VALUE(rif_configuration) TYPE REF TO if_fdt_wd_configuration .
+    CLASS-METHODS get_changes
+      IMPORTING
+        !iv_id          TYPE if_fdt_types=>id
+        !iv_object_type TYPE if_fdt_types=>object_type
+      EXPORTING
+        !ets_changes    TYPE gtyp_t_content
+        !et_messages    TYPE if_fdt_types=>t_message .
+
+    METHODS if_fdt_wd_ui_mode~get_configuration
+        REDEFINITION .
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+
+    CLASS-DATA gts_columns TYPE if_fdt_decision_table=>ts_column .
+
+    CLASS-METHODS add_content
+      IMPORTING
+        !its_row_data TYPE if_fdt_decision_table=>ts_row_data
+        !iv_operation TYPE cl_fdt_decision_table_compare=>diff_operation
+      CHANGING
+        !cts_content  TYPE gtyp_t_content .
+    CLASS-METHODS get_changed_content
+      IMPORTING
+        !io_decision_table TYPE REF TO cl_fdt_decision_table
+        !iv_timestamp      TYPE timestamp
+        !is_difference     TYPE cl_fdt_decision_table_compare=>s_diff
+      CHANGING
+        !cts_content       TYPE gtyp_t_content
+      RAISING
+        cx_fdt_input .
+    CLASS-METHODS multi_column_update
+      IMPORTING
+        !it_differences  TYPE cl_fdt_decision_table_compare=>t_diff
+        !is_difference   TYPE cl_fdt_decision_table_compare=>s_diff
+      RETURNING
+        VALUE(rs_result) TYPE cl_fdt_decision_table_compare=>s_diff .
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_HM_COMPLEX_UI IMPLEMENTATION.
+
+
+  METHOD class_constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 24.05.2022 | 11752 : Edit in Production               *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+
+    if_fdt_application_settings~gv_get_changeability = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~get_changeability.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 24.05.2022 | 11752 : Edit in Production               *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+
+*   Only relevant for non editable systems/clients
+    CHECK cv_changeable EQ abap_false.
+
+    AUTHORITY-CHECK OBJECT 'ZPE_HM_BRF'
+     ID 'FDT_UUID' FIELD iv_id.
+    IF sy-subrc = 0.
+      cv_changeable       = abap_true.
+      CLEAR ct_message.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD if_fdt_wd_ui_mode~get_configuration.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 24.05.2022 | 11752:  Catalog browser                  *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 22.09.2022 | 13695: Sharing PE UI configuration       *
+*              |            | DS4K930273                               *
+************************************************************************
+
+    ro_configuration = change_ui_configuration( super->if_fdt_wd_ui_mode~get_configuration( ) ).
+
+  ENDMETHOD.
+
+
+  METHOD get_changes.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 22.09.2022 | 13695: Authority check at record level   *
+*              |            | DS4K930273                               *
+************************************************************************
+* CANOCAR      | 10.08.2023 | 24045: Multi column update & more        *
+*              |            | DS4K960516                               *
+************************************************************************
+
+    CLEAR: et_messages, ets_changes.
+
+*-- Only relevant for decision tables
+    CHECK iv_object_type = if_fdt_constants=>gc_object_type_expression.
+    TRY.
+        DATA(lif_exp)     = cl_fdt_factory=>get_instance( )->get_expression( iv_id ).
+        DATA(lv_exp_type) = lif_exp->get_expression_type( ).
+        IF  lv_exp_type <> if_fdt_constants=>gc_exty_decision_table.
+          RETURN.
+        ENDIF.
+      CATCH cx_fdt_input cx_fdt_processing INTO DATA(lo_exc_type).
+        DATA(lo_fdt_exc) = CAST cx_fdt( lo_exc_type ).
+        et_messages = lo_fdt_exc->mt_message.
+        RETURN.
+    ENDTRY.
+
+
+*-- Get differences
+    DATA(lo_dt) = CAST cl_fdt_decision_table( lif_exp ).
+    lo_dt->if_fdt_admin_data~get_change_info( IMPORTING ev_change_timestamp = DATA(lv_change_ts) ).
+    TRY.
+        cl_fdt_decision_table_compare=>get_difference( EXPORTING iv_decision_table = iv_id
+                                                                 iv_timestamp_1    = lv_change_ts
+                                                       IMPORTING et_diff           = DATA(lt_diff) ).
+        IF lt_diff IS INITIAL.
+          RETURN.
+        ENDIF.
+      CATCH cx_fdt_input INTO DATA(lo_exc_differences).
+        et_messages = lo_exc_differences->mt_message.
+        RETURN.
+    ENDTRY.
+
+
+*-- Return changed content in readable format
+    LOOP AT lt_diff ASSIGNING FIELD-SYMBOL(<ls_diff>) WHERE target = cl_fdt_decision_table_compare=>gc_tg_row.
+
+*     When multiple columns are changed, + & - differences are converted into c.
+      DATA(ls_difference) = multi_column_update( it_differences = lt_diff
+                                                 is_difference  = <ls_diff> ).
+      IF ls_difference IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      TRY.
+          get_changed_content( EXPORTING io_decision_table       = lo_dt
+                                         iv_timestamp            = lv_change_ts
+                                         is_difference           = ls_difference
+                                CHANGING cts_content             = ets_changes ).
+
+        CATCH cx_fdt_input INTO DATA(lo_exc_check).
+          et_messages = lo_exc_check->mt_message.
+          RETURN.
+      ENDTRY.
+
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~activation_veto ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~authority_check ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~change_notification ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~check ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 22.09.2022 | 13695: Authority check at record level   *
+*              |            | DS4K930273                               *
+************************************************************************
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~delete_trace_veto ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~get_calendar ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~get_element_values ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~get_formula_functionals ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+  ENDMETHOD.
+
+
+  METHOD if_fdt_application_settings~save_notification ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 11752     : aHM Fiori UI                 *
+*              |            | DS4K918242                               *
+*----------------------------------------------------------------------*
+  ENDMETHOD.
+
+
+  METHOD change_ui_configuration.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 22.09.2022 | 13695: Sharing PE UI configuration       *
+*              |            | DS4K930273                               *
+************************************************************************
+
+    rif_configuration = iif_configuration.
+
+
+*-- Views / Screen configuration
+*------------------------------------
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_repository_view
+                                     iv_value = abap_false ).
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_favorites_view
+                                     iv_value = abap_false ).
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_catalog_view
+                                     iv_value = abap_true ).
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_history_view
+                                     iv_value = abap_false ).
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_default_view
+                                     iv_value = if_fdt_wd_user_configuration=>gc_catalog_view ).
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_configuration=>gc_parameter_left_panel_width
+                                     iv_value = 5000 ).
+
+
+*-- Object details: Configuration
+*----------------------------------------
+*   Hide Decision table settings
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_displ_dect_def
+                                     iv_value = abap_false ).
+*   Hide technical attributes
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_displ_tech_attr
+                                     iv_value = abap_false ).
+*   Hide technical names
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_technical_names
+                                     iv_value = abap_false ).
+*   Hide technical tools
+    rif_configuration->set_parameter( iv_name  = if_fdt_wd_user_configuration=>gc_parameter_displ_tech_comp
+                                     iv_value = abap_false ).
+*   Hide user settings
+    rif_configuration->set_parameter( iv_name = if_fdt_wd_configuration=>gc_parameter_hide_setting_dlg
+                                     iv_value = abap_true ).
+*   Hide Delete
+    rif_configuration->if_fdt_wd_objm_configuration~set_toolbar_button_visible( iv_button_name = :if_fdt_wd_objm_configuration=>gc_toolbar_button_delete
+                                                                               iv_is_visible  = abap_false ).
+*   Hide Save button
+    rif_configuration->if_fdt_wd_objm_configuration~set_toolbar_button_visible( iv_button_name = :if_fdt_wd_objm_configuration=>gc_toolbar_button_save
+                                                                               iv_is_visible  = abap_false ).
+
+*   Hide Mark as Obsolete
+    rif_configuration->if_fdt_wd_objm_configuration~set_toolbar_button_visible( iv_button_name = :if_fdt_wd_objm_configuration=>gc_toolbar_button_mark_obslt
+                                                                               iv_is_visible  = abap_false ).
+    rif_configuration->if_fdt_wd_objm_configuration~set_toolbar_button_visible( iv_button_name = :if_fdt_wd_objm_configuration=>gc_toolbar_button_unmark_obslt
+                                                                               iv_is_visible  = abap_false ).
+
+*   Hide General Data
+    rif_configuration->if_fdt_wd_objm_configuration~set_general_data_visible( iv_is_visible = abap_false ).
+
+  ENDMETHOD.
+
+
+  METHOD add_content.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 13695: Authority check at row level      *
+*              |            | DS4K930273                               *
+************************************************************************
+* CANOCAR      | 10.08.2023 | 24045: Multi column update & more        *
+*              |            | DS4K960516                               *
+************************************************************************
+    DATA: ls_range  TYPE LINE OF gtyp_s_content-value,
+          ls_column LIKE LINE OF cts_content.
+
+
+    LOOP AT its_row_data[ 1 ]-ts_cell_data ASSIGNING FIELD-SYMBOL(<ls_cell>).
+
+*     If there is data for that column, we update values
+      CLEAR: ls_column, ls_range.
+      READ TABLE cts_content INTO ls_column WITH TABLE KEY primary_key COMPONENTS row = its_row_data[ 1 ]-row_no
+                                                                                 col = <ls_cell>-col_no .
+      IF sy-subrc = 0.
+        DELETE cts_content INDEX sy-tabix.
+      ENDIF.
+
+*     Simple value
+      IF <ls_cell>-r_value IS NOT INITIAL AND cl_abap_datadescr=>describe_by_data( <ls_cell>-r_value->* )->kind = cl_abap_typedescr=>kind_elem.
+        ls_column-value = VALUE #( BASE ls_column-value ( sign = 'I' option = 'EQ' low = <ls_cell>-r_value->* ) ).
+*     Range
+      ELSEIF <ls_cell>-ts_range IS NOT INITIAL.
+        LOOP AT <ls_cell>-ts_range ASSIGNING FIELD-SYMBOL(<ls_range>). "#EC CI_NESTED
+          ls_range = CORRESPONDING #( <ls_range> ).
+          IF <ls_range>-r_low_value IS NOT INITIAL AND cl_abap_datadescr=>describe_by_data( <ls_range>-r_low_value->* )->kind = cl_abap_typedescr=>kind_elem.
+            ls_range-low = <ls_range>-r_low_value->*.
+            APPEND ls_range TO ls_column-value.
+          ENDIF.
+          IF <ls_range>-r_high_value IS NOT INITIAL AND cl_abap_datadescr=>describe_by_data( <ls_range>-r_high_value->* )->kind = cl_abap_typedescr=>kind_elem.
+            ls_range-high = <ls_range>-r_high_value->*.
+            APPEND ls_range TO ls_column-value.
+          ENDIF.
+        ENDLOOP.
+      ELSE.
+        IF ls_column-value IS INITIAL.
+          CONTINUE.
+        ENDIF.
+      ENDIF.
+      SORT ls_column-value.                            "#EC CI_SORTLOOP
+      DELETE ADJACENT DUPLICATES FROM ls_column-value.
+
+
+*     Get object ID & Update
+      READ TABLE gts_columns ASSIGNING FIELD-SYMBOL(<ls_column>) WITH KEY col_no = <ls_cell>-col_no.
+      IF sy-subrc EQ 0.
+        ls_column-id        = <ls_column>-object_id.
+        ls_column-col       = <ls_cell>-col_no.
+        ls_column-row       = its_row_data[ 1 ]-row_no.
+        ls_column-operation = iv_operation.
+        INSERT ls_column INTO TABLE cts_content.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get_changed_content.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.06.2022 | 13695: Authority check at row level      *
+*              |            | DS4K930273                               *
+************************************************************************
+
+    DATA: lts_row_data  TYPE if_fdt_decision_table=>ts_row_data,
+          lv_row_number TYPE int4.
+
+
+*-- Get decision table columns
+    IF gts_columns IS INITIAL.
+      io_decision_table->if_fdt_decision_table~get_columns( IMPORTING ets_column = gts_columns ).
+    ENDIF.
+
+
+*-- Read changed row(s)
+    CASE is_difference-operation.
+*     Insert
+      WHEN cl_fdt_decision_table_compare=>gc_op_insert.
+        lv_row_number = is_difference-table_2_row.
+        io_decision_table->if_fdt_decision_table~get_rows( EXPORTING iv_from_row_no = lv_row_number
+                                                                     iv_to_row_no   = lv_row_number
+                                                           IMPORTING ets_row_data   = lts_row_data ).
+        add_content( EXPORTING its_row_data = lts_row_data
+                               iv_operation = is_difference-operation
+                      CHANGING cts_content   = cts_content ).
+
+*     Changed (discard position movement)
+      WHEN cl_fdt_decision_table_compare=>gc_op_change.
+        IF is_difference-table_2_row = is_difference-table_1_row.
+          lv_row_number = is_difference-table_2_row.
+          io_decision_table->if_fdt_decision_table~get_rows( EXPORTING iv_from_row_no = lv_row_number
+                                                                       iv_to_row_no   = lv_row_number
+                                                             IMPORTING ets_row_data   = lts_row_data ).
+
+          add_content( EXPORTING its_row_data = lts_row_data
+                                 iv_operation = is_difference-operation
+                        CHANGING cts_content   = cts_content ).
+
+          io_decision_table->if_fdt_decision_table~get_rows( EXPORTING iv_timestamp   = iv_timestamp
+                                                                       iv_from_row_no = lv_row_number
+                                                                       iv_to_row_no   = lv_row_number
+                                                             IMPORTING ets_row_data   = DATA(lts_old_data) ).
+
+          add_content( EXPORTING its_row_data = lts_old_data
+                                 iv_operation = is_difference-operation
+                        CHANGING cts_content   = cts_content ).
+        ENDIF.
+
+*     Deleted
+      WHEN cl_fdt_decision_table_compare=>gc_op_delete.
+        lv_row_number = is_difference-table_1_row.
+        io_decision_table->if_fdt_decision_table~get_rows( EXPORTING iv_from_row_no = lv_row_number
+                                                                     iv_to_row_no   = lv_row_number
+                                                                     iv_timestamp   = iv_timestamp
+                                                           IMPORTING ets_row_data   = lts_row_data ).
+
+        add_content( EXPORTING its_row_data = lts_row_data
+                               iv_operation = is_difference-operation
+                      CHANGING cts_content   = cts_content ).
+
+      WHEN OTHERS.
+        RETURN.
+    ENDCASE.
+
+  ENDMETHOD.
+
+
+  METHOD multi_column_update.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 10.08.2023 | 24045: Multi column update & more        *
+*              |            | DS4K960516                               *
+************************************************************************
+
+    rs_result = is_difference.
+
+*   + record is added as a change
+    IF is_difference-operation = cl_fdt_decision_table_compare=>gc_op_insert.
+      READ TABLE it_differences TRANSPORTING NO FIELDS WITH KEY table_1_row = is_difference-table_2_row
+                                                         operation   = cl_fdt_decision_table_compare=>gc_op_delete.
+      IF sy-subrc = 0.
+        rs_result-operation   = cl_fdt_decision_table_compare=>gc_op_change.
+        rs_result-table_1_row = is_difference-table_2_row.
+      ENDIF.
+
+*   - record is skipped
+    ELSEIF is_difference-operation = cl_fdt_decision_table_compare=>gc_op_delete.
+      READ TABLE it_differences TRANSPORTING NO FIELDS WITH KEY table_2_row = is_difference-table_1_row
+                                                         operation   = cl_fdt_decision_table_compare=>gc_op_insert.
+      IF sy-subrc = 0.
+        CLEAR rs_result.
+      ENDIF.
+    ENDIF.
+
+
+  ENDMETHOD.
+ENDCLASS.

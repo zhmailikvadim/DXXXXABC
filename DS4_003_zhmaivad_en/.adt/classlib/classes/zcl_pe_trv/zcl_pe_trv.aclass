@@ -1,0 +1,228 @@
+class ZCL_PE_TRV definition
+  public
+  final
+  create public .
+
+public section.
+
+  constants GC_BLID_PREFIX type ZPE_TRV_BLID value 'PREFIX' ##NO_TEXT.
+  constants GC_BLID_WORK_ITEM type ZPE_TRV_BLID value 'WORK_ITEM' ##NO_TEXT.
+  constants GC_BLID_MODULE type ZPE_TRV_BLID value 'MODULE' ##NO_TEXT.
+  constants GC_BLID_DESCR type ZPE_TRV_BLID value 'DESCR' ##NO_TEXT.
+  constants GC_TRFUNCTION_TOC type TRFUNCTION value 'T' ##NO_TEXT.
+
+  methods CONSTRUCTOR
+    importing
+      !IV_TRKORR type TRKORR
+    raising
+      resumable(ZCX_PE_TRV_XX) .
+  class-methods GET_DESCRIPTION_BLOCKS
+    importing
+      !IV_TRKORR type TRKORR optional
+      !IV_DESCRIPTION type AS4TEXT optional
+    returning
+      value(RT_BLOCKS) type ZPE_TT_TRV_DESCR_BLOCKS
+    raising
+      resumable(ZCX_PE_TRV_XX) .
+  methods VALIDATE
+    raising
+      resumable(ZCX_PE_TRV_XX) .
+protected section.
+private section.
+
+  data MV_TRKORR type TRKORR .
+  data MV_TRFUNCTION type TRFUNCTION .
+
+  methods VALIDATE_DESCRIPTION
+    raising
+      resumable(ZCX_PE_TRV_XX) .
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_TRV IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR  | DATE       | CHANGE NUMBER & DESCRIPTION                   *
+*         |            | TRANSPORT REQUESTS                            *
+************************************************************************
+* WOHLFGUE | 17.11.2021 | TR Naming convention                         *
+*          |            | DS4K900866 / WorkItem 9573                   *
+*----------------------------------------------------------------------*
+
+*   Check if provided value is a transport request or task
+    SELECT SINGLE trkorr, strkorr, trfunction FROM e070
+      INTO @DATA(ls_e070)
+     WHERE trkorr = @iv_trkorr.
+
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_trv_xx.
+    ENDIF.
+
+    IF ls_e070-strkorr IS NOT INITIAL.
+      mv_trkorr = ls_e070-strkorr.
+    ELSE.
+      mv_trkorr = iv_trkorr.
+    ENDIF.
+
+    mv_trfunction = ls_e070-trfunction.
+
+  ENDMETHOD.
+
+
+  METHOD validate.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR  | DATE       | CHANGE NUMBER & DESCRIPTION                   *
+*         |            | TRANSPORT REQUESTS                            *
+************************************************************************
+* WOHLFGUE | 17.11.2021 | TR Naming convention                         *
+*          |            | DS4K900866 / WorkItem 9573                   *
+*----------------------------------------------------------------------*
+
+    IF mv_trfunction <> gc_trfunction_toc. " No checks for ToC
+      validate_description( ).
+    ENDIF.
+*   Do other TR validations here if required
+
+  ENDMETHOD.
+
+
+METHOD validate_description.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR  | DATE       | CHANGE NUMBER & DESCRIPTION                   *
+*         |            | TRANSPORT REQUESTS                            *
+************************************************************************
+* WOHLFGUE | 17.11.2021 | TR Naming convention                         *
+*          |            | DS4K900866 / WorkItem 9573                   *
+*----------------------------------------------------------------------*
+
+  DATA: lv_blockno_curr TYPE zpe_t_trv_nc-blocknumber.
+
+* // Get rules from customizing
+  SELECT * FROM zpe_t_trv_nc                            "#EC CI_NOWHERE
+    INTO TABLE @DATA(lt_prfx).
+  IF sy-subrc <> 0.
+    RETURN. " No rules defined
+  ENDIF.
+
+  DATA(lt_blocks) = get_description_blocks( iv_trkorr = mv_trkorr ).
+  SORT lt_prfx BY blocknumber ASCENDING.
+
+* // Perform checks as per definition in customizing table
+  LOOP AT lt_prfx ASSIGNING FIELD-SYMBOL(<ls_prfx>).
+    IF lv_blockno_curr = <ls_prfx>-blocknumber.
+      CONTINUE.
+    ENDIF.
+    lv_blockno_curr = <ls_prfx>-blocknumber.
+
+    READ TABLE lt_blocks ASSIGNING FIELD-SYMBOL(<ls_block>)
+      WITH KEY blockno = lv_blockno_curr.
+*     Block doesn´t exist in TR description
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_trv_xx
+        EXPORTING
+          textid   = zcx_pe_trv_xx=>block_mismatch
+          mv_msgv1 = |{ <ls_prfx>-blocknumber }|.
+    ENDIF.
+
+    READ TABLE lt_prfx WITH KEY blocknumber = lv_blockno_curr
+                                blocktext   = <ls_block>-text
+                       TRANSPORTING NO FIELDS.
+*     Block in TR description not in line with guideline
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_trv_xx
+        EXPORTING
+          textid   = zcx_pe_trv_xx=>block_mismatch
+          mv_msgv1 = |{ <ls_prfx>-blocknumber }|
+          mv_msgv2 = |({ <ls_block>-text })|.
+    ENDIF.
+  ENDLOOP.
+
+* // Now perform some additional checks for certain blocks
+
+*   Check Work Item
+  READ TABLE lt_blocks ASSIGNING <ls_block> WITH KEY blockid = gc_blid_work_item.
+  IF sy-subrc <> 0.
+    RAISE EXCEPTION TYPE zcx_pe_trv_xx
+      EXPORTING
+        textid = zcx_pe_trv_xx=>no_workitem.
+  ENDIF.
+  IF |{ <ls_block>-text }| CN '0123456789'.
+    RAISE EXCEPTION TYPE zcx_pe_trv_xx
+      EXPORTING
+        textid   = zcx_pe_trv_xx=>only_numbers
+        mv_msgv1 = |{ <ls_block>-text }|.
+  ENDIF.
+
+*   Check description
+  READ TABLE lt_blocks ASSIGNING <ls_block> WITH KEY blockid = gc_blid_descr.
+  IF sy-subrc <> 0.
+    RAISE EXCEPTION TYPE zcx_pe_trv_xx
+      EXPORTING
+        textid = zcx_pe_trv_xx=>no_description.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD get_description_blocks.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR  | DATE       | CHANGE NUMBER & DESCRIPTION                   *
+*         |            | TRANSPORT REQUESTS                            *
+************************************************************************
+* WOHLFGUE | 17.11.2021 | TR Naming convention                         *
+*          |            | DS4K900866 / WorkItem 9573                   *
+*----------------------------------------------------------------------*
+
+  DATA: lt_blocks  TYPE TABLE OF string.
+
+  IF iv_description IS INITIAL.
+    IF iv_trkorr IS INITIAL.
+      RAISE EXCEPTION TYPE zcx_pe_trv_xx
+        EXPORTING
+          textid = zcx_pe_trv_xx=>missing_params.
+    ENDIF.
+    SELECT SINGLE as4text FROM e07t                         ##WARN_OK
+      INTO @DATA(lv_description)
+     WHERE trkorr = @iv_trkorr.
+
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_trv_xx
+        EXPORTING
+          textid = zcx_pe_trv_xx=>no_tr_description.
+    ENDIF.
+  ELSE.
+    lv_description = iv_description.
+  ENDIF.
+
+  SELECT * FROM zpe_t_trv_block                         "#EC CI_NOWHERE
+    INTO TABLE @DATA(lt_block_def).
+  IF sy-subrc <> 0.
+    RAISE EXCEPTION TYPE zcx_pe_trv_xx
+      EXPORTING
+        textid = zcx_pe_trv_xx=>no_customizing.
+  ENDIF.
+
+  SPLIT lv_description AT '_' INTO TABLE lt_blocks.
+
+  LOOP AT lt_blocks ASSIGNING FIELD-SYMBOL(<lv_text>).
+    READ TABLE lt_block_def ASSIGNING FIELD-SYMBOL(<ls_block_def>) WITH KEY blnum = sy-tabix.
+    IF sy-subrc = 0.
+      DATA(lv_blockid) = <ls_block_def>-blid.
+    ENDIF.
+    APPEND VALUE #( blockno = sy-tabix blockid = lv_blockid text = <lv_text> )
+        TO rt_blocks.
+  ENDLOOP.
+
+ENDMETHOD.
+ENDCLASS.

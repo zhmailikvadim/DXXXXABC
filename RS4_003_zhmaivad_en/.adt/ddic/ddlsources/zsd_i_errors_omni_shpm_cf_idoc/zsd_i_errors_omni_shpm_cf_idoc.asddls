@@ -18,6 +18,9 @@
 ----------------------------------------------------------------------*
 * ZHMAIVAD     | 13.07.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 27.02.2024 | 29294     : [Feature] [Build] - Stock re *
+*              |            | DS4K980553                               *
 *----------------------------------------------------------------------*/
 @EndUserText.label: 'Errors Inb OMNI Shipmet Confirm process'
 @AccessControl.authorizationCheck: #CHECK

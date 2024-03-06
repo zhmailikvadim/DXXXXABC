@@ -1,0 +1,335 @@
+CLASS zcl_pe_hm_switch DEFINITION
+  PUBLIC
+  CREATE PRIVATE
+  INHERITING FROM zcl_pe_hm.
+
+  PUBLIC SECTION.
+
+    INTERFACES if_amdp_marker_hdb.
+
+    CONSTANTS: gc_class_name TYPE seoclsname VALUE 'ZCL_PE_HM_SWITCH',
+               gc_type       TYPE zpe_hm_type VALUE '3'.
+
+    CLASS-METHODS is_active
+      IMPORTING VALUE(iv_id)           TYPE zpe_hm_id
+                VALUE(is_filter)       TYPE any
+                VALUE(iv_mapping_type) TYPE zpe_hm_mapping_type DEFAULT 'N'
+      RETURNING VALUE(rv_active)       TYPE zpe_hm_active
+      RAISING   zcx_pe_hm .
+
+    CLASS-METHODS search
+      IMPORTING VALUE(iv_filter_ids)      TYPE string
+                VALUE(iv_filter_e070)     TYPE string
+                VALUE(iv_filter_wi)       TYPE string
+                VALUE(iv_filter_ids_used) TYPE string
+                VALUE(iv_filter_md)       TYPE string
+                VALUE(iv_type)            TYPE zpe_hm_type
+                VALUE(iv_cust_object)     TYPE string
+                VALUE(iv_in_use_yes)      TYPE icon_d
+                VALUE(iv_in_use_no)       TYPE icon_d
+                VALUE(iv_active_yes)      TYPE icon_d
+                VALUE(iv_active_no)       TYPE icon_d
+                VALUE(iv_type_in)         TYPE icon_d
+                VALUE(iv_type_out)        TYPE icon_d
+                VALUE(iv_client)          TYPE mandt
+      EXPORTING VALUE(et_main)            TYPE zpe_tt_hm_output_main
+                VALUE(et_trs)             TYPE zpe_tt_hm_output_trs
+                VALUE(et_cns)             TYPE zpe_tt_hm_output_cns
+                VALUE(et_metadata)        TYPE zpe_tt_hm_output_metadata
+      RAISING   cx_amdp_execution_failed.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_HM_SWITCH IMPLEMENTATION.
+
+
+  METHOD is_active.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.02.2022 | 9407      : Hardcode Manager             *
+*              |            | DS4K900411                               *
+*----------------------------------------------------------------------*
+
+    DATA: lv_filter_field TYPE string,
+          lv_ok           TYPE boolean,
+          lo_desc         TYPE REF TO cl_abap_structdescr,
+          lo_desc_ele     TYPE REF TO cl_abap_elemdescr,
+          ls_ddic         TYPE dfies,
+          lv_mapping_type TYPE zpe_hm_type.
+
+
+    DATA(lv_id) = |{ iv_id ALPHA = IN }|.
+
+
+*-- Check definition
+*---------------------------
+    SELECT SINGLE @abap_true INTO @DATA(lv_found)                           ##NEEDED
+      FROM zpe_t_hm_bs01
+     WHERE id = @lv_id.
+    IF sy-subrc NE 0.
+      RAISE EXCEPTION TYPE zcx_pe_hm MESSAGE e011(zpe_hm) WITH lv_id.
+    ENDIF.
+
+
+*-- Get activation values
+*---------------------------
+    SELECT id, sequence, field1, field2, field3, field4, field5, metadata1, metadata2, metadata3, metadata4, metadata5
+      FROM zpe_t_hm_bs02
+      INTO TABLE @DATA(lt_bs02)
+     WHERE id = @lv_id AND active = @abap_true.
+    IF sy-subrc NE 0.
+      RETURN.
+    ELSE.
+      SORT lt_bs02 BY id sequence.
+    ENDIF.
+
+
+
+*-- Map values from filter
+*-----------------------------
+
+*   For single value filters, mapping by data element
+    lv_mapping_type     = iv_mapping_type.
+    DATA(lo_desc_input) = cl_abap_typedescr=>describe_by_data( is_filter ).
+    IF lo_desc_input->kind = cl_abap_typedescr=>kind_elem.
+      lv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements.
+    ENDIF.
+
+*   Get components for mapping based on data elements
+    IF lv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements.
+      IF lo_desc_input->kind = cl_abap_typedescr=>kind_struct.
+        lo_desc ?= lo_desc_input.
+        DATA(lt_components) = lo_desc->get_components( ).
+      ELSEIF lo_desc_input->kind = cl_abap_typedescr=>kind_elem.
+        lo_desc_ele ?= lo_desc_input.
+      ELSE.
+        RAISE EXCEPTION TYPE zcx_pe_hm MESSAGE e041(zpe_hm) WITH lv_id.
+      ENDIF.
+    ENDIF.
+
+*   Check BD02 value combinations
+    LOOP AT lt_bs02 ASSIGNING FIELD-SYMBOL(<ls_bs02>). "#EC CI_SEL_NESTED
+      CLEAR lv_ok.
+      DO 5 TIMES.
+        ASSIGN COMPONENT |FIELD{ sy-index }| OF STRUCTURE <ls_bs02> TO FIELD-SYMBOL(<lv_bs02_value>).
+        IF sy-subrc NE 0.
+          RAISE EXCEPTION TYPE zcx_pe_hm MESSAGE e001(zpe_hm).
+        ENDIF.
+        IF <lv_bs02_value> IS INITIAL.
+          EXIT.
+        ENDIF.
+        ASSIGN COMPONENT |METADATA{ sy-index }| OF STRUCTURE <ls_bs02> TO FIELD-SYMBOL(<lv_bs02_domain>).
+        IF sy-subrc NE 0.
+          RAISE EXCEPTION TYPE zcx_pe_hm MESSAGE e001(zpe_hm).
+        ENDIF.
+
+*       Map by name or data element
+        CASE lv_mapping_type.
+          WHEN zcl_pe_hm=>gc_s_mapping_type-names.
+            lv_filter_field = to_upper( |IS_FILTER-{ <lv_bs02_domain> }| ).
+
+          WHEN zcl_pe_hm=>gc_s_mapping_type-data_elements.
+
+            IF lo_desc_input->kind = cl_abap_typedescr=>kind_struct.
+              LOOP AT lt_components ASSIGNING FIELD-SYMBOL(<ls_component>).
+                CLEAR ls_ddic.
+                IF <ls_component>-type->is_ddic_type( ) = abap_false.
+                  CONTINUE.
+                ENDIF.
+                lo_desc_ele ?= <ls_component>-type.
+                ls_ddic = lo_desc_ele->get_ddic_field( ).
+                IF sy-subrc EQ 0 AND ls_ddic-rollname = <lv_bs02_domain>.
+                  lv_filter_field = to_upper( |IS_FILTER-{ <ls_component>-name }| ).
+                  EXIT.
+                ENDIF.
+              ENDLOOP.
+
+            ELSEIF lo_desc_input->kind = cl_abap_typedescr=>kind_elem.
+              ls_ddic = lo_desc_ele->get_ddic_field( ).
+              IF sy-subrc EQ 0 AND ls_ddic-rollname = <lv_bs02_domain>.
+                lv_filter_field = `IS_FILTER`.
+              ENDIF.
+            ENDIF.
+        ENDCASE.
+
+        ASSIGN (lv_filter_field) TO FIELD-SYMBOL(<lv_filter_value>).
+        IF sy-subrc NE 0.
+          CLEAR lv_ok.
+          EXIT.
+        ENDIF.
+        IF <lv_filter_value> = <lv_bs02_value>.
+          lv_ok = abap_true.
+        ELSE .
+          lv_ok = abap_false.
+          EXIT.
+        ENDIF.
+      ENDDO.
+      IF lv_ok = abap_true.
+        rv_active = abap_true.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD search BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT USING zpe_t_hm_bs01
+                                                                       zpe_t_hm_bs02
+                                                                       e070
+                                                                       e07t
+                                                                       e071k
+                                                                       dd04t.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.02.2022 | 9407      : Hardcode Manager             *
+*              |            | DS4K900411                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 25.03.2022 | 10527      : Table logging               *
+*              |            | DS4K916071                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 22.06.2022 | 11751: Feature pack 22-2-6               *
+*              |            | DS4K921477                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 10.02.2023 | 17810: JIRA Links                        *
+*              |            | DS4K943375                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 06.11.2023 | 26417: CHARM Integration                 *
+*              |            | DS4K968701                               *
+************************************************************************
+
+*   1. TRs by Change Number
+    lt_e070 = SELECT e070.trkorr, e070.trfunction, e07t.as4text
+                from e070 as e070 inner join e07t on e070.trkorr = e07t.trkorr
+               where e07t.langu      = session_context('LOCALE_SAP') AND
+                     e070.trfunction IN ( 'W','K','T' );
+    lt_trs_by_cn = apply_filter (:lt_e070, :iv_filter_e070);
+
+
+*   2. TRs with HM entries or BRF+
+    lt_trs_and_tasks_hm = SELECT DISTINCT e071k.trkorr,
+                                          e071k.tabkey,
+                                          NULLIF( e070.strkorr, '') as strkorr
+                           from e071k inner join e070 on e071k.trkorr = e070.trkorr
+                          where objname = :iv_cust_object;
+    lt_trs_by_hm = select coalesce( strkorr, trkorr ) as trkorr, tabkey
+                    FROM :lt_trs_and_tasks_hm;
+
+
+*   3. Combine 1 & 2
+    lt_trs_hm  = SELECT hm.trkorr, hm.tabkey, cn.trfunction, cn.as4text from :lt_trs_by_hm as hm inner join :lt_trs_by_cn as cn on hm.trkorr = cn.trkorr;
+
+
+*   4. Main data
+    lt_bs01  = SELECT id, description, CONCAT( :iv_client, RPAD(id, 10) ) as tabkey,
+                      created_on, created_at, created_by, changed_on, changed_at, changed_by
+                 FROM zpe_t_hm_bs01 WHERE mandt = :iv_client ORDER BY id;
+    lt_bs02  = SELECT id, sequence, field1, field2, field3, field4, field5, metadata1, metadata2, metadata3, metadata4, metadata5
+                 FROM zpe_t_hm_bs02
+                WHERE mandt = :iv_client AND active = 'X'
+                ORDER BY id, sequence;
+
+    lt_bs01 = APPLY_FILTER (:lt_bs01, :iv_filter_ids);
+    lt_bs02 = APPLY_FILTER (:lt_bs02, :iv_filter_md);
+
+
+*   5. Transport requests
+    lt_transport_requests = SELECT DISTINCT key.id, tr.trkorr as transport_request, tr.trfunction as type,
+                                            SUBSTRING(LTRIM( SUBSTR_AFTER(SUBSTR_REGEXPR('(CRM_|FB_|CH_)\d+' IN tr.as4text),'_'),'0' ),1,10) as work_item,
+                                            tr.as4text as description
+                              FROM :lt_bs01 as key INNER JOIN :lt_trs_hm as tr ON key.tabkey = tr.tabkey
+                             order by id, transport_request, work_item;
+    lt_transport_requests = APPLY_FILTER (:lt_transport_requests, :iv_filter_wi);
+
+
+*   6. Table Used and not used
+    lt_hm_used  = apply_filter ( :lt_bs01, :iv_filter_ids_used );
+    lt_hm       = SELECT :iv_type as type, hm.id, hm.description,
+                         CASE WHEN IFNULL( used.description, 'X' ) = 'X' THEN :iv_in_use_no
+                            ELSE :iv_in_use_yes
+                         END AS in_use,
+                         hm.created_on, hm.created_at, hm.created_by, hm.changed_on, hm.changed_at, hm.changed_by
+                    FROM :lt_bs01 AS hm LEFT JOIN :lt_hm_used as used ON hm.id = used.id;
+
+
+*   7. Metadata
+    lt_metadata = SELECT DISTINCT id, :iv_type_in as type, metadata1 as metadata FROM :lt_bs02 WHERE metadata1 <> ''
+                    UNION ALL
+                  SELECT DISTINCT id, :iv_type_in as type, metadata2 as metadata FROM :lt_bs02 WHERE metadata2 <> ''
+                    UNION ALL
+                  SELECT DISTINCT id, :iv_type_in as type, metadata3 as metadata FROM :lt_bs02 WHERE metadata3 <> ''
+                    UNION ALL
+                  SELECT DISTINCT id, :iv_type_in as type, metadata4 as metadata FROM :lt_bs02 WHERE metadata4 <> ''
+                    UNION ALL
+                  SELECT DISTINCT id, :iv_type_in as type, metadata5 as metadata FROM :lt_bs02 WHERE metadata5 <> ''
+                  ORDER BY id;
+    lt_md_id    = SELECT DISTINCT id FROM :lt_metadata;
+
+
+*   8. Change numbers
+    lt_cns  = SELECT id, work_item, '' as change_number, '' AS change_status FROM :lt_transport_requests ORDER BY id;
+
+
+*   9. Output
+    et_trs  = SELECT id, transport_request, type, description FROM :lt_transport_requests ORDER BY id;
+    et_cns  = SELECT DISTINCT * FROM :lt_cns;
+    lt_main = SELECT key.type, key.id, key.description, key.in_use, IFNULL( md.id,'') as md,
+                     key.created_on, key.created_at, key.created_by, key.changed_on, key.changed_at, key.changed_by
+                FROM :lt_hm as key left join :lt_md_id as md  on key.id = md.id;
+
+    et_main = SELECT type, id, description, in_use, :iv_active_yes as active,
+                     created_on, created_at, created_by, changed_on, changed_at, changed_by
+                FROM :lt_main
+               WHERE md <> ''
+
+                     UNION
+
+              SELECT type, id, description, in_use, :iv_active_no as active,
+                     created_on, created_at, created_by, changed_on, changed_at, changed_by
+                FROM :lt_main
+               WHERE md = '' AND :iv_filter_md = '';
+
+
+    et_metadata = SELECT md.id, md.type, md.metadata, txt.scrtext_m as description
+                    FROM :lt_metadata AS md LEFT JOIN dd04t AS txt ON md.metadata  = txt.rollname AND
+                                                                      txt.as4local = 'A'          AND
+                                                                      txt.as4vers  = '0000'       AND
+                                                                      txt.ddlanguage = session_context('LOCALE_SAP');
+
+*  10. Cross filtering
+   lt_cf_cns = SELECT distinct id FROM :et_cns;
+   lt_cf_trs = SELECT distinct id FROM :et_trs;
+
+   et_trs = SELECT trs.id, trs.transport_request, trs.type, trs.description
+             FROM :et_trs AS trs INNER JOIN :lt_cf_cns AS cns ON trs.id = cns.id
+                                 INNER JOIN :et_main   AS mai ON trs.id = mai.id;
+
+   et_cns = SELECT cns.id, cns.work_item, cns.change_number, cns.change_status
+             FROM :et_cns AS cns INNER JOIN :lt_cf_trs AS trs ON cns.id = trs.id
+                                 INNER JOIN :et_main   AS mai ON cns.id = mai.id;
+
+   et_main = SELECT mai.type, mai.id, mai.description, mai.in_use, mai.active,
+                    mai.created_on, mai.created_at, mai.created_by, mai.changed_on, mai.changed_at, mai.changed_by
+              FROM :et_main AS mai INNER JOIN :lt_cf_trs AS trs ON mai.id = trs.id
+                                   INNER JOIN :lt_cf_cns AS cns ON mai.id = cns.id
+              ORDER BY id;
+
+   et_metadata = SELECT met.id, met.type, met.metadata, met.description
+                   FROM :et_metadata AS met INNER JOIN :lt_cf_trs AS trs ON met.id = trs.id
+                                            INNER JOIN :lt_cf_cns AS cns ON met.id = cns.id;
+
+  ENDMETHOD.
+ENDCLASS.

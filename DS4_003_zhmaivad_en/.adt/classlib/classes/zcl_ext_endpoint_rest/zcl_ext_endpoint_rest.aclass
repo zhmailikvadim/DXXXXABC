@@ -1,0 +1,1374 @@
+CLASS zcl_ext_endpoint_rest DEFINITION
+  PUBLIC
+  INHERITING FROM zcl_ext_endpoint_super
+  FINAL
+  CREATE PUBLIC
+
+  GLOBAL FRIENDS zcl_ext_master .
+
+  PUBLIC SECTION.
+
+    METHODS constructor
+      IMPORTING
+        !iv_type                TYPE char5 DEFAULT 'VAT'
+        !iv_company             TYPE bukrs OPTIONAL
+        !iv_country             TYPE land1_stml OPTIONAL
+        !iv_reporting_date_from TYPE vatdate OPTIONAL
+        !iv_reporting_date_to   TYPE vatdate OPTIONAL
+        !iv_posting_date_from   TYPE budat OPTIONAL
+        !iv_posting_date_to     TYPE budat OPTIONAL
+        !iv_month               TYPE numc2 OPTIONAL
+        !iv_year                TYPE numc4 OPTIONAL
+        !iv_direc               TYPE char1 DEFAULT '1'
+        !iv_sii_region          TYPE zvat_ext_sii_region OPTIONAL
+        !iv_period              TYPE rpmax OPTIONAL
+        !is_dyn_filters         TYPE zsvat_dyn_ext_filters OPTIONAL
+        !iv_model_id            TYPE numc10 OPTIONAL
+        !iv_filename_suffix     TYPE zvat_ext_file_name_suffix OPTIONAL
+      RAISING
+        zcx_ext_exception
+        cx_encrypt_error .
+    METHODS send_dynamic
+      IMPORTING
+        !iv_lines         TYPE numc15 OPTIONAL
+        !it_string_data   TYPE zvat_ext_string_t OPTIONAL
+        !it_xstring_data  TYPE zvat_ext_xstring_count OPTIONAL
+      EXPORTING
+        !ev_response      TYPE string
+        !ev_status_code   TYPE string
+        !ev_status_reason TYPE string
+      RAISING
+        zcx_ext_exception
+        cx_encrypt_error .
+
+    METHODS send
+        REDEFINITION .
+
+protected section.
+
+  methods GET_OAUTH_TOKEN
+    redefinition .
+  methods WRITE_LOG
+    redefinition .
+private section.
+
+  data MV_TOKEN_STATUS type STRING .
+  data MV_ENDPOINT type STRING .
+  class-data MV_TIMESTAMP type TIMESTAMPL .
+ENDCLASS.
+
+
+
+CLASS ZCL_EXT_ENDPOINT_REST IMPLEMENTATION.
+
+
+  METHOD constructor.
+
+    super->constructor(
+      EXPORTING
+        iv_type                = iv_type            " Export type
+        iv_company             = iv_company                 " Company Code
+        iv_country             = iv_country                 " Country for Tax Return
+        iv_reporting_date_from = iv_reporting_date_from                 " Tax Reporting Date
+        iv_reporting_date_to   = iv_reporting_date_to                 " Tax Reporting Date
+        iv_posting_date_from   = iv_posting_date_from                 " Posting Date in the Document
+        iv_posting_date_to     = iv_posting_date_to                 " Posting Date in the Document
+        iv_month               = iv_month                 " Month
+        iv_year                = iv_year                 " Year
+        iv_direc               = iv_direc              " Direction (Receipt, Dispatch)
+        iv_sii_region          = iv_sii_region                 " SII Reporting Region
+        iv_period              = iv_period
+        iv_model_id            = iv_model_id
+        iv_filename_suffix     = iv_filename_suffix
+        is_dyn_filters         = is_dyn_filters
+    ).
+
+    me->get_oauth_token( ).
+
+  ENDMETHOD.
+
+
+  METHOD get_oauth_token.
+*"----------------------------------------------------------------------
+************************************************************************
+*  METHOD              : COLLECT
+*  RICEF I D           :
+*  Author              : GDEGROOTE
+*  Date                : 29/01/2020
+*  SAP Transport Req.# : EH4K902938
+*  Release             : S4 1809
+*----------------------------------------------------------------------*
+*  Application Area    : EH4
+*  Description         : Class method
+*----------------------------------------------------------------------*
+* MODIFICATION HISTORY ( Only changes)
+*  SAP Transport Req.# : XXXXXXXXXX
+*  Change Driver       : Change Request
+*  Author              : Firstname Lastname
+*  Modification Date   : MM/DD/YYYY
+*  Description         : Description of changes
+************************************************************************
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client TYPE REF TO if_http_client,
+          lo_badi_auth   TYPE REF TO zbadi_extractor_auth_def,
+          lo_decrypter   TYPE REF TO cl_hard_wired_encryptor.
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+    DATA: ls_msg_key TYPE scx_t100key.
+
+* Variables
+
+    DATA: lv_oauth                   TYPE string,
+          lv_rest                    TYPE string,
+          lv_success                 TYPE abap_bool,
+          lv_status_code             TYPE i,
+          lv_auth_url_p              TYPE zvat_ext_param_val,
+          lv_auth_client_id_p        TYPE zvat_ext_param_val,
+          lv_auth_client_secret_p    TYPE zvat_ext_param_val,
+          lv_grant_type_p            TYPE zvat_ext_param_val,
+          lv_auth_url                TYPE string,
+          lv_auth_client_id_encr     TYPE string,
+          lv_auth_client_secret_encr TYPE string,
+          lv_auth_client_id          TYPE string,
+          lv_auth_client_secret      TYPE string,
+          lv_grant_type              TYPE string.
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    ls_msg_key-msgid = 'ZVAT_EXT'.
+
+    CREATE OBJECT lo_decrypter.
+
+* ~ Get parameters from param table via class
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TOKEN_URL'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_auth_url_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_auth_url = lv_auth_url_p.
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_CLIENT_ID'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_auth_client_id_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_auth_client_id_encr = lv_auth_client_id_p.
+    lv_auth_client_id = lo_decrypter->decrypt_string2string( the_string = lv_auth_client_id_encr ).
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_CLIENT_SECR'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_auth_client_secret_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_auth_client_secret_encr = lv_auth_client_secret_p.
+    lv_auth_client_secret = lo_decrypter->decrypt_string2string( the_string = lv_auth_client_secret_encr ).
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'GRANT_TYPE'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_grant_type_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_grant_type = lv_grant_type_p.
+
+    TRY.
+
+        GET BADI lo_badi_auth.
+
+        CALL BADI lo_badi_auth->fetch
+          EXPORTING
+            iv_client_id     = lv_auth_client_id " Client ID
+            iv_client_secret = lv_auth_client_secret " Client Secret
+            iv_grant_type    = lv_grant_type " Grant type
+          IMPORTING
+            ev_token         = mv_token. " oAuth2.0 token
+
+        IF mv_token CS 'error' OR mv_token IS INITIAL.
+          ls_msg_key-msgno = '005'.
+          RAISE EXCEPTION TYPE zcx_ext_exception
+            EXPORTING
+              textid = ls_msg_key.
+        ELSE.
+          GET TIME STAMP FIELD mv_timestamp.
+        ENDIF.
+
+      CATCH cx_badi_not_implemented.
+
+* ~ Create HTTP client from url
+
+        CALL METHOD cl_http_client=>create_by_url
+          EXPORTING
+            url                = lv_auth_url
+          IMPORTING
+            client             = lo_http_client
+          EXCEPTIONS
+            argument_not_found = 1
+            plugin_not_active  = 2
+            internal_error     = 3
+            OTHERS             = 4.
+        IF sy-subrc <> 0.
+*      Implement suitable error handling here
+        ENDIF.
+
+        IF lo_http_client IS BOUND.
+
+* ~ Set request headers
+
+          lo_http_client->request->set_method( if_http_request=>co_request_method_post ).
+          lo_http_client->request->set_form_field( EXPORTING name  = 'client_id'  value = lv_auth_client_id ).
+          lo_http_client->request->set_form_field( EXPORTING name  = 'client_secret'  value = lv_auth_client_secret ).
+          lo_http_client->request->set_form_field( EXPORTING name  = 'grant_type'  value = lv_grant_type ).
+
+* ~ Send request
+
+          CALL METHOD lo_http_client->send
+            EXCEPTIONS
+              http_communication_failure = 1
+              http_invalid_state         = 2
+              http_processing_failed     = 3
+              http_invalid_timeout       = 4
+              OTHERS                     = 5.
+          IF sy-subrc = 0.
+
+* ~ Receive response
+
+            CALL METHOD lo_http_client->receive
+              EXCEPTIONS
+                http_communication_failure = 1
+                http_invalid_state         = 2
+                http_processing_failed     = 3
+                OTHERS                     = 4.
+
+            IF sy-subrc = 0.
+              GET TIME STAMP FIELD mv_timestamp.
+
+              lv_oauth = lo_http_client->response->get_cdata( ).
+              lo_http_client->response->get_status( IMPORTING code = lv_status_code ).
+              mv_token_status = lv_status_code.
+
+              IF lv_oauth CS 'error' OR lv_oauth IS INITIAL.
+                ls_msg_key-msgno = '005'.
+                RAISE EXCEPTION TYPE zcx_ext_exception
+                  EXPORTING
+                    textid = ls_msg_key.
+              ENDIF.
+
+              SPLIT lv_oauth AT '"access_token":"' INTO lv_rest lv_oauth.
+              SPLIT lv_oauth AT '"' INTO lv_oauth lv_rest.
+
+* ~ Save token to class
+
+              mv_token = lv_oauth.
+
+            ELSE.
+
+              ls_msg_key-msgno = '005'.
+              RAISE EXCEPTION TYPE zcx_ext_exception
+                EXPORTING
+                  textid = ls_msg_key.
+
+            ENDIF.
+
+          ELSE.
+
+            ls_msg_key-msgno = '005'.
+            RAISE EXCEPTION TYPE zcx_ext_exception
+              EXPORTING
+                textid = ls_msg_key.
+
+          ENDIF.
+
+        ENDIF.
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD send.
+*"----------------------------------------------------------------------
+************************************************************************
+*  METHOD              : SEND
+*  RICEF I D           :
+*  Author              : GDEGROOTE
+*  Date                : 29/01/2020
+*  SAP Transport Req.# : EH4K902938
+*  Release             : S4 1809
+*----------------------------------------------------------------------*
+*  Application Area    : EH4
+*  Description         : Class method
+*----------------------------------------------------------------------*
+* MODIFICATION HISTORY ( Only changes)
+*  SAP Transport Req.# : XXXXXXXXXX
+*  Change Driver       : Change Request
+*  Author              : Firstname Lastname
+*  Modification Date   : MM/DD/YYYY
+*  Description         : Description of changes
+************************************************************************
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client   TYPE REF TO if_http_client,
+          lo_rest_request  TYPE REF TO if_rest_entity, " CHANGE_REST
+          lo_rest_response TYPE REF TO if_rest_entity, " CHANGE_REST
+          lo_rest_client   TYPE REF TO cl_rest_http_client, " CHANGE_REST
+          lo_post_file     TYPE REF TO cl_rest_multipart_form_data, " CHANGE_REST
+          lo_badi_api      TYPE REF TO zbadi_extractor_api_def,
+          lo_exception     TYPE REF TO zcx_ext_exception.
+
+* Tables
+
+    DATA: lt_headers        TYPE tihttpnvp.
+
+* Field Symbols
+
+    FIELD-SYMBOLS: <fs_xstring> LIKE LINE OF it_xstring_data.
+
+* Structures
+
+    DATA: ls_msg_key TYPE scx_t100key,
+          ls_config  TYPE zvat_ext_config.
+
+* Variables
+
+    DATA: lv_service_url      TYPE string,
+          lv_service_url_p    TYPE zvat_ext_param_val,
+          lv_file_mapping     TYPE zvat_ext_itc_mapping,
+          lv_file_mapping_ex  TYPE zvat_ext_itc_mapping,
+          lv_endpoint_url     TYPE string,
+          lv_endpoint_url_p   TYPE string,
+          lv_http_status      TYPE string,
+          lv_status           TYPE string,
+          lv_reason           TYPE string,
+          lv_response         TYPE string,
+          lv_success          TYPE abap_bool,
+          lv_status_code      TYPE i,
+          lv_token            TYPE string,
+          lv_param_file_map   TYPE zvat_ext_param_id,
+          lv_lines            TYPE i,
+          lv_badi_implemented TYPE flag VALUE abap_true,
+          lv_channel          TYPE zvat_ext_channel,
+          lv_channel_ex       TYPE zvat_ext_channel,
+          lv_channel_s        TYPE string,
+          lv_sftp_folder      TYPE zvat_ext_sftp_folder,
+          lv_sftp_folder_ex   TYPE zvat_ext_sftp_folder,
+          lv_sftp_folder_s    TYPE string,
+          lv_valid            TYPE boolean,
+          lv_file_name        TYPE string,
+          lv_extension        TYPE string,
+          lv_has_exception    TYPE flag.
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    ls_msg_key-msgid = 'ZVAT_EXT'.
+
+    IF mv_token IS INITIAL OR zcl_ext_utility=>is_token_valid( iv_timestamp = mv_timestamp ) EQ abap_false.
+      me->get_oauth_token( ).
+    ENDIF.
+
+    IF iv_filename_overwrite IS NOT INITIAL.
+      mv_file_name = iv_filename_overwrite.
+    ENDIF.
+
+    IF iv_extension_overwrite IS NOT INITIAL.
+      lv_extension = iv_extension_overwrite.
+    ENDIF.
+
+    IF mv_file_name IS INITIAL.
+      me->generate_file_name( ).
+    ENDIF.
+
+    IF mv_token IS NOT INITIAL AND mv_file_name IS NOT INITIAL.
+
+* ~ Get parameters
+
+      " Endpoint
+
+      zcl_ext_paramater=>get_paramater(
+        EXPORTING
+          iv_param = 'API_ENDPOINT'                 " Parameter ID for SAP Extractor parameter table
+        IMPORTING
+          ev_value = lv_service_url_p                 " Value for parameters in the SAP Extractor parameter table
+      ).
+
+      lv_service_url = lv_service_url_p.
+
+      " File map & Channel & SFTP Folder
+
+      SELECT SINGLE itc_mapping channel sftp_folder
+        FROM zvat_ext_config
+        INTO CORRESPONDING FIELDS OF ls_config
+       WHERE run_type = mv_type.
+
+      lv_file_mapping = ls_config-itc_mapping.
+      lv_channel      = ls_config-channel.
+      lv_sftp_folder  = ls_config-sftp_folder.
+
+      zcl_ext_utility=>get_exceptions(
+        EXPORTING
+          iv_lstml         = mv_country                 " Country for Tax Return
+          iv_bukrs         = mv_company                 " Company Code
+          iv_run_type      = mv_type                 " Deloitte Extractor Run Type
+        IMPORTING
+          ev_has_exception = lv_has_exception                 " General Flag
+          ev_itc_mapping   = lv_file_mapping_ex                 " Deloitte Extractor ITC Mapping
+          ev_channel       = lv_channel_ex                 " Deloitte Extractor: API Channel
+          ev_sftp_folder   = lv_sftp_folder_ex
+      ).
+
+      IF lv_has_exception = abap_true.
+        IF lv_file_mapping_ex IS NOT INITIAL. lv_file_mapping = lv_file_mapping_ex. ENDIF.
+        IF lv_channel_ex      IS NOT INITIAL. lv_channel      = lv_channel_ex.      ENDIF.
+        IF lv_sftp_folder_ex  IS NOT INITIAL. lv_sftp_folder  = lv_sftp_folder_ex.  ENDIF.
+      ENDIF.
+
+      IF lv_file_mapping IS INITIAL.
+        ls_msg_key-msgno = '010'.
+        RAISE EXCEPTION TYPE zcx_ext_exception
+          EXPORTING
+            textid = ls_msg_key.
+      ENDIF.
+
+* ~ Perform call
+
+      " Create endpoint url
+
+      IF lv_channel IS INITIAL OR lv_channel = 'SFTP'.
+
+        CONCATENATE lv_service_url '/' lv_file_mapping INTO mv_endpoint.
+
+      ELSEIF lv_channel = 'FFTP'.
+
+        mv_endpoint = lv_service_url.
+
+        REPLACE 'fileupload' IN mv_endpoint WITH 'sftpfileupload'.
+
+      ELSEIF lv_channel = 'BLOB'.
+
+      ENDIF.
+
+      " Create token string and url
+
+      CONCATENATE 'Bearer' mv_token INTO lv_token SEPARATED BY space.
+
+      DESCRIBE TABLE it_xstring_data LINES lv_lines.
+
+      LOOP AT it_xstring_data ASSIGNING <fs_xstring>.
+
+        " Complete file name
+
+        IF lv_lines > 1.
+          lv_file_name = |{ mv_file_name }{ '_PART' }{ sy-tabix }|.
+        ELSE.
+          lv_file_name = mv_file_name.
+        ENDIF.
+
+        IF iv_extension_overwrite IS INITIAL.
+          lv_extension = mc_default_extension.
+        ENDIF.
+
+        CONCATENATE lv_file_name lv_extension INTO lv_file_name.
+
+        TRY.
+            GET BADI lo_badi_api.
+          CATCH cx_badi_not_implemented.
+            lv_badi_implemented = abap_false.
+        ENDTRY.
+
+        IF lv_badi_implemented EQ abap_true AND lo_badi_api IS BOUND.
+
+          CALL BADI lo_badi_api->send
+            EXPORTING
+              iv_file_name     = lv_file_name
+              iv_mapping       = lv_file_mapping
+              iv_token         = mv_token
+              iv_type          = mv_type
+              iv_channel       = lv_channel
+              it_xstring_data  = it_xstring_data
+            IMPORTING
+              ev_response      = ev_response
+              ev_status_code   = ev_status_code
+              ev_status_reason = ev_status_reason.
+
+          " Write log to SLG1 (Obj = ZVAT_EXT, Subobj = ZAPI)
+
+          handle_status_code(
+            EXPORTING
+              iv_status_code = ev_status_code
+            IMPORTING
+              ev_exception   = lo_exception                 " Deloitte Extractor Exception Class
+          ).
+
+          write_log(
+              iv_lines         = iv_lines
+              iv_http_response = ev_response
+              iv_http_status   = ev_status_code
+              iv_exception     = lo_exception
+          ).
+
+          IF lo_exception IS BOUND.
+            RAISE EXCEPTION lo_exception.
+          ENDIF.
+
+        ELSE.
+
+          " Create instance of http client "CHANGE_REST
+
+          CLEAR lo_http_client.
+
+          CALL METHOD cl_http_client=>create_by_url
+            EXPORTING
+              url                = mv_endpoint
+            IMPORTING
+              client             = lo_http_client
+            EXCEPTIONS
+              argument_not_found = 1
+              plugin_not_active  = 2
+              internal_error     = 3
+              OTHERS             = 4.
+          IF sy-subrc <> 0.
+*      Implement suitable error handling here
+          ENDIF.
+
+          " Set request header and http method
+
+          IF lo_http_client IS BOUND.
+
+            " Add channel parameter if necesarry
+
+            IF lv_channel IS NOT INITIAL.
+              lv_channel_s = lv_channel.
+              lo_http_client->request->set_form_field(
+                EXPORTING
+                  name  = 'channel'                 " Name of form field
+                  value = lv_channel_s              " Form field value
+              ).
+              IF lv_channel_s = 'FFTP' AND lv_sftp_folder IS NOT INITIAL.
+                lv_sftp_folder_s = lv_sftp_folder.
+                lo_http_client->request->set_form_field(
+                  EXPORTING
+                    name  = 'folderName'                 " Name of form field
+                    value = lv_sftp_folder_s             " Form field value
+                ).
+              ENDIF.
+            ENDIF.
+
+            " add method and token
+
+            lo_http_client->request->set_method( if_http_request=>co_request_method_post ).
+            lo_http_client->request->set_header_field( EXPORTING  name  = 'Authorization' value = lv_token ).
+
+            " Create instance of rest client from HTTP client
+
+            CREATE OBJECT lo_rest_client
+              EXPORTING
+                io_http_client = lo_http_client.
+
+            lo_rest_request = lo_rest_client->if_rest_client~create_request_entity( ). " CHANGE_REST
+            lo_rest_request->set_content_type(
+                iv_media_type = if_rest_media_type=>gc_multipart_form_data " CHANGE_REST
+            ).
+
+            " Prerpare for posting
+
+            CREATE OBJECT lo_post_file
+              EXPORTING
+                io_entity = lo_rest_request.
+            IF iv_extension_overwrite IS NOT INITIAL AND
+               iv_filename_overwrite  IS NOT INITIAL.
+              lv_file_name = iv_filename_overwrite.
+              lv_extension = iv_extension_overwrite.
+            ENDIF.
+            CALL METHOD lo_post_file->set_file
+              EXPORTING
+                iv_name     = 'filename'
+                iv_filename = lv_file_name
+                iv_type     = lv_extension
+                iv_data     = <fs_xstring>-xstring.
+
+
+            CALL METHOD lo_post_file->if_rest_entity_provider~write_to " CHANGE_REST
+              EXPORTING
+                io_entity = lo_rest_request.
+
+            CALL METHOD lo_rest_client->if_rest_client~set_request_headers " CHANGE_REST
+              EXPORTING
+                it_header_fields = lt_headers.
+
+            "--------- ACTUAL POST REQUEST --------- "
+
+            lo_rest_client->if_rest_resource~post( lo_rest_request ). " CHANGE_REST
+
+            "--------------------------------------- "
+
+            " Process response
+
+            lo_rest_response = lo_rest_client->if_rest_client~get_response_entity( ). " CHANGE_REST
+
+            ev_status_code = lv_status = lo_rest_response->get_header_field( '~status_code' ).
+
+            ev_status_reason = lo_rest_response->get_header_field( '~status_reason' ).
+
+            ev_response = lo_rest_response->get_string_data( ).
+
+            " Close connection
+
+            lo_rest_client->if_rest_client~close( ). " CHANGE_REST
+
+          ENDIF.
+
+          " Write log to SLG1 (Obj = ZVAT_EXT, Subobj = ZAPI)
+
+          handle_status_code(
+            EXPORTING
+              iv_status_code = lv_status
+            IMPORTING
+              ev_exception   = lo_exception                 " Deloitte Extractor Exception Class
+          ).
+
+          write_log(
+              iv_lines         = iv_lines
+              iv_http_response = ev_response
+              iv_http_status   = ev_status_code
+              iv_exception     = lo_exception
+          ).
+
+          IF lo_exception IS BOUND.
+            RAISE EXCEPTION lo_exception.
+          ENDIF.
+
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD send_dynamic.
+*"----------------------------------------------------------------------
+************************************************************************
+*  METHOD              : SEND
+*  RICEF I D           :
+*  Author              : GDEGROOTE
+*  Date                : 29/01/2020
+*  SAP Transport Req.# : EH4K902938
+*  Release             : S4 1809
+*----------------------------------------------------------------------*
+*  Application Area    : EH4
+*  Description         : Class method
+*----------------------------------------------------------------------*
+* MODIFICATION HISTORY ( Only changes)
+*  SAP Transport Req.# : XXXXXXXXXX
+*  Change Driver       : Change Request
+*  Author              : Firstname Lastname
+*  Modification Date   : MM/DD/YYYY
+*  Description         : Description of changes
+************************************************************************
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client     TYPE REF TO if_http_client,
+          lo_rest_request    TYPE REF TO object, "if_rest_entity, " CHANGE_REST
+          lo_rest_request_if TYPE REF TO object,
+          lo_rest_response   TYPE REF TO object, "if_rest_entity, " CHANGE_REST
+          lo_rest_client     TYPE REF TO object, "cl_rest_http_client, " CHANGE_REST
+          lo_post_file       TYPE REF TO object, "cl_rest_multipart_form_data, " CHANGE_REST
+          lo_badi_api        TYPE REF TO zbadi_extractor_api_def,
+          lo_exception       TYPE REF TO zcx_ext_exception.
+
+* Tables
+
+    DATA: lt_headers TYPE tihttpnvp,
+          lt_ptab    TYPE abap_parmbind_tab,
+          lt_etab    TYPE abap_excpbind_tab.
+
+* Field Symbols
+
+    FIELD-SYMBOLS: <fs_xstring>        LIKE LINE OF it_xstring_data,
+                   <fs_if_rest_entity> TYPE any.
+
+* Structures
+
+    DATA: ls_msg_key TYPE scx_t100key,
+          ls_config  TYPE zvat_ext_config,
+          ls_ptab    LIKE LINE OF lt_ptab.
+
+* Variables
+
+    DATA: lv_service_url      TYPE string,
+*          lv_file_mapping     TYPE string,
+          lv_service_url_p    TYPE zvat_ext_param_val,
+          lv_file_mapping     TYPE zvat_ext_itc_mapping,
+          lv_endpoint_url     TYPE string,
+          lv_endpoint_url_p   TYPE string,
+          lv_http_status      TYPE string,
+          lv_status           TYPE string,
+          lv_reason           TYPE string,
+          lv_response         TYPE string,
+          lv_success          TYPE abap_bool,
+          lv_status_code      TYPE i,
+          lv_token            TYPE string,
+          lv_param_file_map   TYPE zvat_ext_param_id,
+          lv_lines            TYPE i,
+          lv_badi_implemented TYPE flag VALUE abap_true,
+          lv_channel          TYPE zvat_ext_channel,
+          lv_channel_s        TYPE string,
+          lv_valid            TYPE boolean,
+          lv_file_name        TYPE string,
+          lv_extension        TYPE string,
+          lv_has_exception    TYPE flag.
+
+* Constants
+
+    CONSTANTS: lc_file_map TYPE zvat_ext_param_id VALUE 'FILE_MAP_'.
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    ls_msg_key-msgid = 'ZVAT_EXT'.
+
+    IF mv_token IS INITIAL OR zcl_ext_utility=>is_token_valid( iv_timestamp = mv_timestamp ) EQ abap_false.
+      me->get_oauth_token( ).
+    ENDIF.
+
+    IF mv_file_name IS INITIAL.
+      me->generate_file_name( ).
+    ENDIF.
+
+    IF mv_token IS NOT INITIAL AND mv_file_name IS NOT INITIAL.
+
+* ~ Get parameters
+
+      " Endpoint
+
+      zcl_ext_paramater=>get_paramater(
+        EXPORTING
+          iv_param = 'API_ENDPOINT'                 " Parameter ID for SAP Extractor parameter table
+        IMPORTING
+          ev_value = lv_service_url_p                 " Value for parameters in the SAP Extractor parameter table
+      ).
+
+      lv_service_url = lv_service_url_p.
+
+      " File map & Channel
+
+      zcl_ext_utility=>get_exceptions(
+        EXPORTING
+          iv_lstml         = mv_country                 " Country for Tax Return
+          iv_bukrs         = mv_company                 " Company Code
+          iv_run_type      = mv_type                 " Deloitte Extractor Run Type
+        IMPORTING
+          ev_has_exception = lv_has_exception                 " General Flag
+          ev_itc_mapping   = lv_file_mapping                 " Deloitte Extractor ITC Mapping
+          ev_channel       = lv_channel                 " Deloitte Extractor: API Channel
+      ).
+
+      IF lv_has_exception = abap_false.
+
+        SELECT SINGLE itc_mapping channel
+          FROM zvat_ext_config
+          INTO CORRESPONDING FIELDS OF ls_config
+         WHERE run_type = mv_type.
+
+        lv_file_mapping = ls_config-itc_mapping.
+        lv_channel      = ls_config-channel.
+
+        IF sy-subrc <> 0 OR lv_file_mapping IS INITIAL.
+          ls_msg_key-msgno = '010'.
+          RAISE EXCEPTION TYPE zcx_ext_exception
+            EXPORTING
+              textid = ls_msg_key.
+        ENDIF.
+
+      ENDIF.
+
+* ~ Perform call
+
+      " Create endpoint url
+
+      CONCATENATE lv_service_url '/' lv_file_mapping INTO mv_endpoint.
+
+      " Create token string and url
+
+      CONCATENATE 'Bearer' mv_token INTO lv_token SEPARATED BY space.
+
+      DESCRIBE TABLE it_xstring_data LINES lv_lines.
+
+      LOOP AT it_xstring_data ASSIGNING <fs_xstring>.
+
+        " Complete file name
+
+        IF lv_lines > 1.
+          lv_file_name = |{ mv_file_name }{ 'PART' }{ sy-tabix }|.
+        ELSE.
+          lv_file_name = mv_file_name.
+        ENDIF.
+
+        lv_extension = mc_default_extension.
+
+        CONCATENATE lv_file_name lv_extension INTO lv_file_name.
+
+        TRY.
+            GET BADI lo_badi_api.
+          CATCH cx_badi_not_implemented.
+            lv_badi_implemented = abap_false.
+        ENDTRY.
+
+        IF lv_badi_implemented EQ abap_true AND lo_badi_api IS BOUND.
+
+          CALL BADI lo_badi_api->send
+            EXPORTING
+              iv_file_name     = lv_file_name
+              iv_mapping       = lv_file_mapping
+              iv_token         = mv_token
+              iv_type          = mv_type
+              iv_channel       = lv_channel
+              it_xstring_data  = it_xstring_data
+            IMPORTING
+              ev_response      = ev_response
+              ev_status_code   = ev_status_code
+              ev_status_reason = ev_status_reason.
+
+          " Write log to SLG1 (Obj = ZVAT_EXT, Subobj = ZAPI)
+
+          handle_status_code(
+            EXPORTING
+              iv_status_code = ev_status_code
+            IMPORTING
+              ev_exception   = lo_exception                 " Deloitte Extractor Exception Class
+          ).
+
+          write_log(
+              iv_lines         = iv_lines
+              iv_http_response = ev_response
+              iv_http_status   = ev_status_code
+              iv_exception     = lo_exception
+          ).
+
+          IF lo_exception IS BOUND.
+            RAISE EXCEPTION lo_exception.
+          ENDIF.
+
+        ELSE.
+
+          " Create instance of http client "CHANGE_REST
+
+          CLEAR lo_http_client.
+
+          CALL METHOD cl_http_client=>create_by_url
+            EXPORTING
+              url                = mv_endpoint
+            IMPORTING
+              client             = lo_http_client
+            EXCEPTIONS
+              argument_not_found = 1
+              plugin_not_active  = 2
+              internal_error     = 3
+              OTHERS             = 4.
+          IF sy-subrc <> 0.
+*      Implement suitable error handling here
+          ENDIF.
+
+          " Set request header and http method
+
+          IF lo_http_client IS BOUND.
+
+            " Add channel parameter if necesarry
+
+            IF lv_channel IS NOT INITIAL.
+              lv_channel_s = lv_channel.
+              lo_http_client->request->set_form_field(
+                EXPORTING
+                  name  = 'channel'                 " Name of form field
+                  value = lv_channel_s                 " Form field value
+              ).
+            ENDIF.
+
+            " add method and token
+
+            lo_http_client->request->set_method( if_http_request=>co_request_method_post ).
+            lo_http_client->request->set_header_field( EXPORTING  name  = 'Authorization' value = lv_token ).
+
+            " Create instance of rest client from HTTP client
+
+            CREATE OBJECT lo_rest_client TYPE ('CL_REST_HTTP_CLIENT')
+              EXPORTING
+                io_http_client = lo_http_client.
+
+            CALL METHOD lo_rest_client->('IF_REST_CLIENT~CREATE_REQUEST_ENTITY')
+              RECEIVING
+                ro_entity = lo_rest_request.
+
+            CALL METHOD lo_rest_request->('IF_REST_ENTITY~SET_CONTENT_TYPE')
+              EXPORTING
+                iv_media_type = 'multipart/form-data'.
+
+*            lo_rest_request = lo_rest_client->if_rest_client~create_request_entity( ). " CHANGE_REST
+*            lo_rest_request->set_content_type(
+*                iv_media_type = if_rest_media_type=>gc_multipart_form_data " CHANGE_REST
+*            ).
+
+            " Prerpare for posting
+
+            CREATE OBJECT lo_post_file TYPE ('CL_REST_MULTIPART_FORM_DATA')
+              EXPORTING
+                io_entity = lo_rest_request.
+
+            CALL METHOD lo_post_file->('SET_FILE')
+              EXPORTING
+                iv_name     = 'filename'
+                iv_filename = lv_file_name
+                iv_type     = lv_extension
+                iv_data     = <fs_xstring>.
+
+            CALL METHOD lo_post_file->('IF_REST_ENTITY_PROVIDER~WRITE_TO') " CHANGE_REST
+              EXPORTING
+                io_entity = lo_rest_request.
+
+            CALL METHOD lo_rest_client->('IF_REST_CLIENT~SET_REQUEST_HEADERS') " CHANGE_REST
+              EXPORTING
+                it_header_fields = lt_headers.
+
+*            CREATE OBJECT lo_post_file
+*              EXPORTING
+*                io_entity = lo_rest_request.
+*
+*            CALL METHOD lo_post_file->set_file
+*              EXPORTING
+*                iv_name     = 'filename'
+*                iv_filename = lv_file_name
+*                iv_type     = lv_extension
+*                iv_data     = <fs_xstring>.
+
+
+*            CALL METHOD lo_post_file->if_rest_entity_provider~write_to " CHANGE_REST
+*              EXPORTING
+*                io_entity = lo_rest_request.
+*
+*            CALL METHOD lo_rest_client->if_rest_client~set_request_headers " CHANGE_REST
+*              EXPORTING
+*                it_header_fields = lt_headers.
+
+            "--------- ACTUAL POST REQUEST --------- "
+
+            CALL METHOD lo_rest_client->('IF_REST_RESOURCE~POST')
+              EXPORTING
+                io_entity = lo_rest_request.
+
+*            lo_rest_client->if_rest_resource~post( lo_rest_request ). " CHANGE_REST
+
+            "--------------------------------------- "
+
+            " Process response
+
+            CALL METHOD lo_rest_client->('IF_REST_CLIENT~GET_RESPONSE_ENTITY')
+              RECEIVING
+                ro_response_entity = lo_rest_response.
+
+            CALL METHOD lo_rest_response->('GET_HEADER_FIELD')
+              EXPORTING
+                iv_name  = '~status_code'
+              RECEIVING
+                rv_value = lv_status.
+
+            ev_status_code = lv_status.
+
+            CALL METHOD lo_rest_response->('GET_HEADER_FIELD')
+              EXPORTING
+                iv_name  = '~status_reason'
+              RECEIVING
+                rv_value = ev_status_reason.
+
+            CALL METHOD lo_rest_response->('GET_STRING_DATA')
+              RECEIVING
+                rv_data = ev_status_reason.
+
+            CALL METHOD lo_rest_client->('IF_REST_CLIENT~CLOSE').
+
+*            lo_rest_response = lo_rest_client->if_rest_client~get_response_entity( ). " CHANGE_REST
+*
+*            ev_status_code = lv_status = lo_rest_response->get_header_field( '~status_code' ).
+*
+*            ev_status_reason = lo_rest_response->get_header_field( '~status_reason' ).
+*
+*            ev_response = lo_rest_response->get_string_data( ).
+
+            " Close connection
+
+*            lo_rest_client->if_rest_client~close( ). " CHANGE_REST
+
+          ENDIF.
+
+          " Write log to SLG1 (Obj = ZVAT_EXT, Subobj = ZAPI)
+
+          handle_status_code(
+            EXPORTING
+              iv_status_code = lv_status
+            IMPORTING
+              ev_exception   = lo_exception                 " Deloitte Extractor Exception Class
+          ).
+
+          write_log(
+              iv_lines         = iv_lines
+              iv_http_response = ev_response
+              iv_http_status   = ev_status_code
+              iv_exception     = lo_exception
+          ).
+
+          IF lo_exception IS BOUND.
+            RAISE EXCEPTION lo_exception.
+          ENDIF.
+
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD write_log.
+*"----------------------------------------------------------------------
+************************************************************************
+*  METHOD              : COLLECT
+*  RICEF I D           :
+*  Author              : GDEGROOTE
+*  Date                : 29/01/2020
+*  SAP Transport Req.# : EH4K902938
+*  Release             : S4 1809
+*----------------------------------------------------------------------*
+*  Application Area    : EH4
+*  Description         : Class method
+*----------------------------------------------------------------------*
+* MODIFICATION HISTORY ( Only changes)
+*  SAP Transport Req.# : XXXXXXXXXX
+*  Change Driver       : Change Request
+*  Author              : Firstname Lastname
+*  Modification Date   : MM/DD/YYYY
+*  Description         : Description of changes
+************************************************************************
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+* Tables
+
+    DATA: lt_string_tab TYPE STANDARD TABLE OF swastrtab.
+
+* Field Symbols
+
+* Structures
+
+    DATA: ls_response_abap TYPE zsvat_api_response.
+
+    DATA: ls_message          TYPE bal_s_msg,
+          ls_message_lines    TYPE bapiret2,
+          ls_message_response TYPE bapiret2,
+          ls_message_status   TYPE bapiret2,
+          ls_bal_log          TYPE bal_s_log,
+          ls_string_tab       LIKE LINE OF lt_string_tab.
+
+* Variables
+
+    DATA: lv_lines        TYPE char50,
+          lv_message_type TYPE bapireturn-type VALUE 'I',
+          lv_endpoint     TYPE string,
+          lv_endpoint_pt1 TYPE char50,
+          lv_endpoint_pt2 TYPE char50,
+          lv_endpoint_pt3 TYPE char50,
+          lv_response     TYPE string,
+          lv_response_pt1 TYPE char50,
+          lv_response_pt2 TYPE char50,
+          lv_response_pt3 TYPE char50,
+          lv_response_pt4 TYPE char50,
+          lv_status_code  TYPE char50,
+          lv_log_handle   TYPE balloghndl.
+
+* Constants
+
+    CONSTANTS: lc_message_class  TYPE sy-msgid VALUE 'ZVAT_EXT',
+               lc_msg_n_lines    TYPE sy-msgno VALUE '000',
+               lc_msg_n_response TYPE sy-msgno VALUE '001',
+               lc_msg_n_status   TYPE sy-msgno VALUE '002',
+               lc_bal_obj        TYPE balobj_d VALUE 'ZVAT_EXT',
+               lc_bal_subobj     TYPE balsubobj VALUE 'ZAPI'.
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+* ~ Convert variables
+
+    lv_lines = iv_lines.
+    lv_endpoint = mv_endpoint.
+    lv_response = iv_http_response.
+    lv_status_code = iv_http_status.
+
+    " Lines
+
+    SHIFT lv_lines LEFT DELETING LEADING '0'.
+
+    " Endpoint
+
+    CALL FUNCTION 'SWA_STRING_SPLIT'
+      EXPORTING
+        input_string         = lv_endpoint
+        max_component_length = 50
+      TABLES
+        string_components    = lt_string_tab.
+
+    READ TABLE lt_string_tab INDEX 1 INTO ls_string_tab.
+    lv_endpoint_pt1 = ls_string_tab-str.
+    CLEAR: ls_string_tab.
+    READ TABLE lt_string_tab INDEX 2 INTO ls_string_tab.
+    lv_endpoint_pt2 = ls_string_tab-str.
+    CLEAR: lt_string_tab.
+
+    " Response
+
+    zcl_ext_utility=>format_response(
+      EXPORTING
+        iv_response     = iv_http_response                 " Service Response
+        iv_status_code  = iv_http_status                  " Service Status Code
+      IMPORTING
+        es_api_response = ls_response_abap                 " Deloitte Extractor API response
+    ).
+
+    CALL FUNCTION 'SWA_STRING_SPLIT'
+      EXPORTING
+        input_string         = lv_response
+        max_component_length = 50
+      TABLES
+        string_components    = lt_string_tab.
+
+    READ TABLE lt_string_tab INDEX 1 INTO ls_string_tab.
+    lv_response_pt1 = ls_string_tab-str.
+    CLEAR: ls_string_tab.
+    READ TABLE lt_string_tab INDEX 2 INTO ls_string_tab.
+    lv_response_pt2 = ls_string_tab-str.
+    CLEAR: ls_string_tab.
+    READ TABLE lt_string_tab INDEX 3 INTO ls_string_tab.
+    lv_response_pt3 = ls_string_tab-str.
+    CLEAR: ls_string_tab.
+    READ TABLE lt_string_tab INDEX 4 INTO ls_string_tab.
+    lv_response_pt4 = ls_string_tab-str.
+    CLEAR: ls_string_tab.
+
+    FREE: lt_string_tab.
+
+* ~ Determine message type (default = 'I')
+
+    IF ls_response_abap-success EQ abap_false OR iv_http_status NE '200'.
+      lv_message_type = 'E'.
+    ENDIF.
+
+* ~ Create lines message
+
+    CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+      EXPORTING
+        type   = lv_message_type
+        cl     = lc_message_class
+        number = lc_msg_n_lines
+        par1   = lv_lines
+        par2   = lv_endpoint_pt1
+        par3   = lv_endpoint_pt2
+      IMPORTING
+        return = ls_message_lines.
+
+* ~ Create response message
+
+    CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+      EXPORTING
+        type   = lv_message_type
+        cl     = lc_message_class
+        number = lc_msg_n_response
+        par1   = lv_response_pt1
+        par2   = lv_response_pt2
+        par3   = lv_response_pt3
+        par4   = lv_response_pt4
+      IMPORTING
+        return = ls_message_response.
+
+* ~ Create http status message
+
+    CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+      EXPORTING
+        type   = lv_message_type
+        cl     = lc_message_class
+        number = lc_msg_n_status
+        par1   = lv_status_code
+      IMPORTING
+        return = ls_message_status.
+
+* ~ Create instance of BAL LOG
+
+    ls_bal_log-extnumber = mv_file_name.
+    CONDENSE ls_bal_log-extnumber.
+
+    ls_bal_log-object = lc_bal_obj.
+    ls_bal_log-subobject = lc_bal_subobj.
+    ls_bal_log-aldate = sy-datum.
+    ls_bal_log-altime = sy-uzeit.
+
+    CALL FUNCTION 'BAL_LOG_CREATE'
+      EXPORTING
+        i_s_log                 = ls_bal_log
+      IMPORTING
+        e_log_handle            = lv_log_handle
+      EXCEPTIONS
+        log_header_inconsistent = 1
+        OTHERS                  = 2.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+* ~ Add messages
+
+    " Lines
+
+    ls_message-msgid = ls_message_lines-id.
+    ls_message-msgno = ls_message_lines-number.
+    ls_message-msgty = ls_message_lines-type.
+    ls_message-msgv1 = ls_message_lines-message_v1.
+    ls_message-msgv2 = ls_message_lines-message_v2.
+    ls_message-msgv3 = ls_message_lines-message_v3.
+    ls_message-msgv4 = ls_message_lines-message_v4.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = lv_log_handle
+        i_s_msg          = ls_message
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    CLEAR: ls_message.
+
+    " Response
+
+    ls_message-msgid = ls_message_response-id.
+    ls_message-msgno = ls_message_response-number.
+    ls_message-msgty = ls_message_response-type.
+    ls_message-msgv1 = ls_message_response-message_v1.
+    ls_message-msgv2 = ls_message_response-message_v2.
+    ls_message-msgv3 = ls_message_response-message_v3.
+    ls_message-msgv4 = ls_message_response-message_v4.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = lv_log_handle
+        i_s_msg          = ls_message
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    CLEAR: ls_message.
+
+    " Status
+
+    ls_message-msgid = ls_message_status-id.
+    ls_message-msgno = ls_message_status-number.
+    ls_message-msgty = ls_message_status-type.
+    ls_message-msgv1 = ls_message_status-message_v1.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = lv_log_handle
+        i_s_msg          = ls_message
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    CLEAR: ls_message.
+
+    " Exception
+
+    IF iv_exception IS BOUND.
+
+      ls_message-msgid = iv_exception->if_t100_message~t100key-msgid.
+      ls_message-msgno = iv_exception->if_t100_message~t100key-msgno.
+      ls_message-msgty = lv_message_type.
+
+      CALL FUNCTION 'BAL_LOG_MSG_ADD'
+        EXPORTING
+          i_log_handle     = lv_log_handle
+          i_s_msg          = ls_message
+        EXCEPTIONS
+          log_not_found    = 1
+          msg_inconsistent = 2
+          log_is_full      = 3
+          OTHERS           = 4.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+
+      CLEAR: ls_message.
+
+    ENDIF.
+
+* ~ Save messages
+
+    CALL FUNCTION 'BAL_DB_SAVE'
+      EXPORTING
+        i_save_all       = abap_true
+      EXCEPTIONS
+        log_not_found    = 1
+        save_not_allowed = 2
+        numbering_error  = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    RETURN.
+
+  ENDMETHOD.
+ENDCLASS.

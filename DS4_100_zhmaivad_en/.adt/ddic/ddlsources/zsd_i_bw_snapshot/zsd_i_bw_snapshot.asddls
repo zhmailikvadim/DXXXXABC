@@ -21,7 +21,10 @@
 ----------------------------------------------------------------------*
 " ZHMAIVAD     | 21.07.2023 | 22859     : [Build] - Stock reconciliati -
 "              |            | DS4K957133                               -
-----------------------------------------------------------------------*/
+----------------------------------------------------------------------*
+* ZHMAIVAD     | 27.02.2024 | 29294     : [Feature] [Build] - Stock re *
+*              |            | DS4K980553                               *
+*----------------------------------------------------------------------*/
 @AbapCatalog.viewEnhancementCategory: [#NONE]
 @AccessControl.authorizationCheck: #CHECK
 @EndUserText.label: 'Bw Snapshot'
@@ -39,6 +42,7 @@ define view entity zsd_i_bw_snapshot
                                                                              and $projection.SalesOrderItem   = _TimingAdjustmentSum.SalesOrderItem
                                                                              and $projection.WmsSnapshotDate  = _TimingAdjustmentSum.DocumentDate
 {
+
   key            WmsSnapshotDate,
   key            Plant,
   key            StorageLocation,

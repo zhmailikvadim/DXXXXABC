@@ -12,6 +12,9 @@
 *----------------------------------------------------------------------*
 * ZHMAIVAD     | 27.02.2024 | 29294     : [Feature] [Build] - Stock re *
 *              |            | DS4K980553                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
 *----------------------------------------------------------------------*/
 @AbapCatalog.viewEnhancementCategory: [#NONE]
 @AccessControl.authorizationCheck: #CHECK
@@ -23,7 +26,7 @@
     dataClass: #MIXED
 }
 define view entity zsd_i_bw_snapshot_last_date
-  as select from zsd_i_bw_snapshot
+  as select from zsd_i_snapshot
 {
   key Plant,
   key StorageLocation,

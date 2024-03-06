@@ -1,0 +1,161 @@
+*&---------------------------------------------------------------------*
+*& Include          ZSP_R_FPS_PERFECT_PR_MATCH_F01
+*&---------------------------------------------------------------------*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ISAICSVI     | 13.12.2022 | 14172     : [BUILD] - FPS-WRICEF-010 - P *
+*              |            | DS4K932028                               *
+* ISAICSVI     | 19.04.2023 | 19817     : [CR]-FPS-WRICEF-010 - Perfec *
+*              |            | DS4K949420                               *
+*----------------------------------------------------------------------*
+
+FORM process_data.
+
+  DATA: lt_err       TYPE STANDARD TABLE OF zsp_t_pr_err,
+        lt_match     TYPE STANDARD TABLE OF zsp_t_pr_match,
+        ls_error     TYPE zsp_t_pr_err,
+        lv_error_id  TYPE zsp_error_id,
+        lv_count     TYPE i,
+        lv_row_count TYPE i,
+        lv_matnr     TYPE zsp_article_gen_small.
+
+  DELETE FROM zsp_t_pr_match.                           "#EC CI_NOWHERE
+  IF sy-subrc <> 0.
+    cl_progress_indicator=>progress_indicate( i_text = TEXT-001 ).
+  ENDIF.
+  COMMIT WORK AND WAIT.
+
+  DELETE FROM zsp_t_pr_err.                             "#EC CI_NOWHERE
+  IF sy-subrc <> 0.
+    cl_progress_indicator=>progress_indicate( i_text = TEXT-002 ).
+  ENDIF.
+  COMMIT WORK AND WAIT.
+
+  TRY.
+      lv_row_count = zcl_pe_hm_basic=>get_value( iv_id = '874' ).
+    CATCH zcx_pe_hm  ##NO_HANDLER.
+  ENDTRY.
+
+  SELECT matnr                                          "#EC CI_NOWHERE
+    FROM zsp_t_pr_mad_var
+    GROUP BY matnr
+    INTO TABLE @DATA(lt_matnr).
+
+  IF sy-subrc <> 0.
+    cl_progress_indicator=>progress_indicate( i_text = TEXT-003 ).
+  ENDIF.
+
+  LOOP AT lt_matnr ASSIGNING FIELD-SYMBOL(<ls_matnr>).
+
+    CLEAR lt_match.
+
+    lv_count = lv_count + 1.
+    lv_matnr = <ls_matnr>-matnr.
+
+    zcl_sp_fps_perfect_pr=>match_tables( EXPORTING iv_matnr = lv_matnr
+                                         IMPORTING et_err = lt_err
+                                                   et_match = lt_match ).
+
+    IF lt_err IS NOT INITIAL.
+      APPEND LINES OF lt_err TO gt_err_table.
+    ENDIF.
+
+    IF lt_match IS NOT INITIAL.
+      APPEND LINES OF lt_match TO gt_result.
+    ENDIF.
+
+    IF lv_count GE lv_row_count.
+      CLEAR lv_count.
+      PERFORM fill_table.
+    ENDIF.
+
+  ENDLOOP.
+
+  IF gt_result IS NOT INITIAL.
+    PERFORM fill_table.
+  ENDIF.
+
+  IF gt_err_table IS NOT INITIAL.
+
+    LOOP AT gt_err_table ASSIGNING FIELD-SYMBOL(<ls_err>).
+
+      CLEAR ls_error.
+      lv_error_id = lv_error_id + 1.
+      ls_error-error_id = lv_error_id.
+      MODIFY gt_err_table FROM ls_error TRANSPORTING error_id.
+
+    ENDLOOP.
+
+    INSERT zsp_t_pr_err FROM TABLE gt_err_table .
+
+    IF sy-subrc = 0.
+      COMMIT WORK AND WAIT.
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.
+
+FORM show_log.
+
+  TRY.
+
+      cl_salv_table=>factory( IMPORTING r_salv_table = DATA(lo_salv)
+                              CHANGING  t_table = gt_err_table  ).
+
+    CATCH cx_salv_msg.
+      RETURN.
+  ENDTRY.
+
+  lo_salv->display( ).
+
+ENDFORM.
+
+FORM fill_table.
+
+  DATA: lv_num    TYPE ebeln,
+        ls_result TYPE zsp_t_pr_match.
+
+  CLEAR lv_num.
+
+  SELECT MAX( ebeln )                                   "#EC CI_NOWHERE
+    FROM zsp_t_pr_match                              "#EC CI_SEL_NESTED
+    INTO lv_num.
+
+  IF sy-subrc <> 0.
+    CLEAR lv_num.
+  ENDIF.
+
+  LOOP AT gt_result ASSIGNING FIELD-SYMBOL(<ls_result>).
+
+    CLEAR ls_result.
+
+    lv_num = lv_num + 1.
+    ls_result-ebeln = lv_num.
+
+    MODIFY gt_result FROM ls_result TRANSPORTING ebeln.
+
+  ENDLOOP.
+
+  INSERT zsp_t_pr_match FROM TABLE gt_result .      "#EC CI_IMUD_NESTED
+
+  IF sy-subrc = 0.
+    COMMIT WORK AND WAIT.
+  ENDIF.
+
+  CLEAR gt_result.
+
+ENDFORM.
+
+FORM check_autority.
+
+  AUTHORITY-CHECK OBJECT 'ZIS_REPO' ID 'PROGRAM' FIELD sy-repid.
+  IF sy-subrc <> 0.
+    MESSAGE e020(zsp_pr_match).
+  ENDIF.
+
+ENDFORM.

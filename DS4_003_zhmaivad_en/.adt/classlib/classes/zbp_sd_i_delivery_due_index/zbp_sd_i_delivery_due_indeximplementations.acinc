@@ -1,0 +1,150 @@
+CLASS lhc_deliverycreation DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  PUBLIC SECTION.
+    METHODS on_end_of_creation
+      IMPORTING
+        !p_task TYPE clike .
+
+  PRIVATE SECTION.
+    CONSTANTS:
+      mc_initialize TYPE c LENGTH 3 VALUE 'XYZ',
+      mc_time_limit TYPE int2 VALUE 60.
+    DATA:
+      mt_vbsk TYPE shp_vbsk_t.
+
+    METHODS create_od_wo_treshold FOR MODIFY
+      IMPORTING it_keys FOR ACTION deliverycreation~create_od_wo_treshold.
+
+    METHODS get_list_profile
+      IMPORTING iv_ledat_high          TYPE ledat
+      RETURNING VALUE(rs_list_profile) TYPE shp_vl10_list_profil.
+
+    METHODS change_result_tab.
+
+ENDCLASS.
+
+CLASS lhc_deliverycreation IMPLEMENTATION.
+
+  METHOD create_od_wo_treshold.
+    DATA: lt_postab       TYPE shp_vl10_postab_t.
+    DATA: lv_ledat_high   TYPE ledat.
+    DATA: lv_errmsg       TYPE char255 ##NEEDED.
+
+    READ ENTITIES OF zsd_i_delivery_due_index IN LOCAL MODE
+    ENTITY deliverycreation
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_due_sales_orders).
+
+    IF lt_due_sales_orders IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CLEAR lv_ledat_high.
+    SORT lt_due_sales_orders BY deliverycreationdate DESCENDING.
+    READ TABLE lt_due_sales_orders ASSIGNING FIELD-SYMBOL(<ls_order>) INDEX 1.
+    IF sy-subrc = 0.
+      lv_ledat_high = <ls_order>-deliverycreationdate.
+    ENDIF.
+
+    lt_postab = VALUE #( BASE lt_postab FOR ls_due_sales_orders IN lt_due_sales_orders ( selkz = abap_true
+                                                                                         vstel = ls_due_sales_orders-shippingpoint
+                                                                                         ledat = ls_due_sales_orders-deliverycreationdate
+                                                                                         lprio = ls_due_sales_orders-deliverypriority
+                                                                                         route = ls_due_sales_orders-route
+                                                                                         spdnr = ls_due_sales_orders-forwardingagent
+                                                                                         wadat = ls_due_sales_orders-goodsissuedate
+                                                                                         kunwe = ls_due_sales_orders-shiptoparty
+                                                                                         vbtyp = if_sd_doc_category=>order
+                                                                                         vbelv = ls_due_sales_orders-sddocument
+                                                                                         kunnr = ls_due_sales_orders-soldtoparty
+                                                                                         vkorg = ls_due_sales_orders-salesorganization
+                                                                                         vtweg = ls_due_sales_orders-distributionchannel
+                                                                                         spart = ls_due_sales_orders-division
+                                                                                         autlf = ls_due_sales_orders-completedeliveryisdefined
+                                                                                         brgew = ls_due_sales_orders-headergrossweight
+                                                                                         gewei = ls_due_sales_orders-headerweightunit
+                                                                                         volum = ls_due_sales_orders-headervolume
+                                                                                         voleh = ls_due_sales_orders-headervolumeunit ) ).
+
+    CALL FUNCTION 'ZSD_FM_CREATE_OD_WO_THRESHOLD'
+      STARTING NEW TASK 'UPDATE' DESTINATION 'NONE'
+      CALLING on_end_of_creation ON END OF TASK
+      EXPORTING
+        it_postab             = lt_postab
+        is_list_profil        = get_list_profile( lv_ledat_high )
+      EXCEPTIONS
+        communication_failure = 1 MESSAGE lv_errmsg
+        system_failure        = 2 MESSAGE lv_errmsg ##ENH_OK ##FM_SUBRC_OK.  "#EC CI_SUBRC
+
+    WAIT UNTIL mt_vbsk IS NOT INITIAL UP TO mc_time_limit SECONDS.
+
+    change_result_tab(  ).
+  ENDMETHOD.
+
+  METHOD get_list_profile.
+    DATA: lt_enqueue      TYPE shp_vl10_package_t.
+
+    TEST-SEAM get_profile.
+      CALL FUNCTION 'SHP_PROFIL_PRESTEP'
+        EXPORTING
+          if_szenario    = if_le_common_c=>default_szenario
+        CHANGING
+          cx_list_profil = rs_list_profile.
+    END-TEST-SEAM.
+
+* do not send pop-up for parallel processing in batch in parallel processing is enforced "Dequeue-Handling" in V50R_VIEW=>Delivery_Create
+    rs_list_profile-spe_no_popup = abap_true.
+* enforce, that only sales orders from VEPVG are selected
+    rs_list_profile-selektionen = '1'.
+* Only full Sales Orders can be delivered
+    CLEAR: rs_list_profile-sel_item_only.
+* enforce that Layout is 'Sequential' (because 'Hierarchical' is not handled here)
+    rs_list_profile-darstellung = '1'.
+*  No log displayed via a new screen or in the same session
+    CLEAR: rs_list_profile-prot1_show.
+    CLEAR: rs_list_profile-prot2_show.
+
+* excute delivery creation with existing logic
+    PERFORM postab_view_init
+       IN PROGRAM saplv50r_view
+       USING mc_initialize
+             rs_list_profile
+             lt_enqueue.
+
+    CLEAR rs_list_profile-fcodes.
+    rs_list_profile-ledat_high = iv_ledat_high.
+    rs_list_profile-list_type = 1.
+  ENDMETHOD.
+
+  METHOD on_end_of_creation.
+    DATA: lv_errmsg       TYPE char255 ##NEEDED.
+
+    RECEIVE RESULTS FROM FUNCTION 'ZSD_FM_CREATE_OD_WO_THRESHOLD'
+    CHANGING ct_vbsk = mt_vbsk
+    EXCEPTIONS
+        communication_failure = 1 MESSAGE lv_errmsg
+        system_failure        = 2 MESSAGE lv_errmsg ##ENH_OK ##FM_SUBRC_OK. "#EC CI_SUBRC
+  ENDMETHOD.
+
+  METHOD change_result_tab.
+    READ ENTITIES OF zsd_i_od_create_result
+    ENTITY zsd_i_od_create_result
+    ALL FIELDS WITH VALUE #( ( resultid = '1' ) )
+    RESULT DATA(lt_create_result).
+
+    IF lt_create_result IS NOT INITIAL.
+      MODIFY ENTITY zsd_i_od_create_result
+      UPDATE
+      SET FIELDS WITH VALUE #( ( resultid = '1'
+                                 sammg    = COND #( WHEN mt_vbsk is INITIAL THEN ''
+                                                    ELSE mt_vbsk[ 1 ]-sammg ) ) ).
+    ELSE.
+      MODIFY ENTITIES OF zsd_i_od_create_result
+      ENTITY zsd_i_od_create_result
+      CREATE
+      SET FIELDS WITH VALUE #( ( resultid = '1'
+                                 sammg    = COND #( WHEN mt_vbsk is INITIAL THEN ''
+                                                    ELSE mt_vbsk[ 1 ]-sammg ) ) ).
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.

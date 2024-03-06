@@ -1,0 +1,360 @@
+class ZCL_FI_UKM_CALC_HELPER definition
+  public
+  final
+  create public .
+
+public section.
+
+  methods CALCULATE_CREDIT_LIMIT_FIELDS
+    importing
+      !IT_VECTOR_IT type UKM_T_PI_VECTOR_MSG
+      !IT_TRANSFER_TABLE type UKM_T_TRANSFER_ARV
+    returning
+      value(RT_VECTOR_IT) type ZFI_TT_UKMBP_VECTOR_IT .
+  methods GET_CREDIT_LIMIT_FIELDS
+    returning
+      value(RT_VECTOR_IT) type ZFI_TT_UKMBP_VECTOR_IT .
+  class-methods INSTANTIATE
+    returning
+      value(RO_INST) type ref to ZCL_FI_UKM_CALC_HELPER .
+  class-methods DELETE_INSTANCE .
+  methods SET_PARTNER
+    importing
+      !IV_PARTNER type BU_PARTNER .
+  methods GET_PARTNER
+    returning
+      value(RV_PARTNER) type BU_PARTNER .
+protected section.
+private section.
+
+  types:
+    BEGIN OF gtyp_kunnr_kkber,
+      kunnr TYPE kunnr,
+      kkber TYPE ukm_credit_sgmnt,
+    END OF gtyp_kunnr_kkber .
+  types:
+    gtyp_tt_kunnr_kkber TYPE STANDARD TABLE OF gtyp_kunnr_kkber .
+  types:
+    BEGIN OF gtyp_kunnr_bukrs,
+      kunnr TYPE kunnr,
+      bukrs TYPE bukrs,
+    END OF gtyp_kunnr_bukrs .
+  types:
+    gtyp_tt_kunnr_bukrs TYPE STANDARD TABLE OF gtyp_kunnr_bukrs .
+
+  data GT_VECTOR_IT type ZFI_TT_UKMBP_VECTOR_IT .
+  data GV_FROM type DATS .
+  data GV_TO type DATS .
+  data GV_FROM12 type DATS .
+  data GV_RELTYP type BU_RELTYP .
+  data:
+    gt_r_auart     TYPE RANGE OF auart .
+  data:
+    gt_r_trvog     TYPE RANGE OF trvog .
+  data:
+    gt_r_parvw     TYPE RANGE OF parvw .
+  data:
+    gt_r_bschl     TYPE RANGE OF bschl .
+  class-data GO_INST type ref to ZCL_FI_UKM_CALC_HELPER .
+  data GV_PARTNER type BU_PARTNER .
+
+  methods GET_CONFIGS .
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_UKM_CALC_HELPER IMPLEMENTATION.
+
+
+  METHOD calculate_credit_limit_fields.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 28.04.2023 | 19919_FI_Setting up 5 credit limi        *
+*              |            | DS4K949471                               *
+*----------------------------------------------------------------------*/
+
+    DATA: lv_from        TYPE dats,
+          lt_kunnr_kkber TYPE gtyp_tt_kunnr_kkber,
+          lt_kunnr_bukrs TYPE gtyp_tt_kunnr_bukrs,
+          lv_delta       TYPE  i.
+
+    get_configs( ).
+
+    LOOP AT it_transfer_table ASSIGNING FIELD-SYMBOL(<ls_tr_table>).
+      APPEND VALUE #( kunnr = <ls_tr_table>-kunnr  kkber = <ls_tr_table>-kkber ) TO lt_kunnr_kkber.
+      APPEND VALUE #( kunnr = <ls_tr_table>-kunnr  bukrs = <ls_tr_table>-bukrs ) TO lt_kunnr_bukrs.
+    ENDLOOP.
+
+    SORT lt_kunnr_kkber BY kunnr.
+    DELETE ADJACENT DUPLICATES FROM lt_kunnr_kkber.
+
+    SORT lt_kunnr_bukrs BY kunnr.
+    DELETE ADJACENT DUPLICATES FROM lt_kunnr_bukrs.
+
+    IF lt_kunnr_kkber[] IS NOT INITIAL  .
+
+      SELECT partner1, partner2 FROM but050
+        INTO TABLE @DATA(lt_but050)
+        FOR ALL ENTRIES IN @lt_kunnr_kkber
+        WHERE reltyp = @gv_reltyp AND
+              partner1 = @lt_kunnr_kkber-kunnr.
+
+      IF sy-subrc = 0.
+        LOOP AT lt_but050 ASSIGNING FIELD-SYMBOL(<ls_but050>) WHERE partner2 IS NOT INITIAL.
+          READ TABLE lt_kunnr_kkber ASSIGNING FIELD-SYMBOL(<ls_kunnr_kkber>) WITH KEY kunnr = <ls_but050>-partner1.
+          IF sy-subrc = 0.
+            <ls_kunnr_kkber>-kunnr = <ls_but050>-partner2.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+
+      SELECT businesspartner AS kunnr, creditsegment AS kkber
+        INTO TABLE @DATA(lt_kunnr)
+         FROM i_creditmanagementaccount
+          FOR ALL ENTRIES IN @lt_kunnr_kkber
+          WHERE businesspartner = @lt_kunnr_kkber-kunnr
+            AND creditsegment = @lt_kunnr_kkber-kkber.
+      IF sy-subrc = 0.
+        SORT lt_kunnr BY kunnr.
+      ENDIF.
+
+      SELECT vbep~salesdocument AS vbeln,              vbep~salesdocumentitem AS posnr,           vbep~scheduleline AS etenr,
+             vbep~schedulelineorderquantity AS wmeng,  vbap~netpriceamount AS netpr,              vbak~requesteddeliverydate AS vdatu,
+             vbak~salesdocument AS aufnr,              vbak~deliveryblockreason AS lifsk,         vbap~salesdocumentrjcnreason AS abgru,
+             vbak~soldtoparty AS kunnr
+       FROM i_salesdocument AS vbak
+       INNER JOIN i_salesdocumentitem AS vbap ON vbak~salesdocument = vbap~salesdocument
+       INNER JOIN i_salesdocumentscheduleline AS vbep ON vbap~salesdocument     = vbep~salesdocument
+                                                     AND vbap~salesdocumentitem = vbep~salesdocumentitem
+       INNER JOIN i_salesdocumentpartner AS vbpa ON vbap~salesdocument = vbpa~salesdocument
+       JOIN @lt_kunnr AS kunnr ON kunnr~kunnr = vbak~soldtoparty AND
+                                  kunnr~kkber = vbak~creditcontrolarea
+       WHERE
+             vbak~requesteddeliverydate BETWEEN @lv_from AND @gv_to
+         AND vbak~salesdocumenttype IN @gt_r_auart
+         AND vbpa~partnerfunction IN @gt_r_parvw
+         AND vbak~zz_transactiongroup  IN @gt_r_trvog
+
+         INTO TABLE @DATA(lt_so_data).
+      IF sy-subrc IS INITIAL. " Sales orders with Delivery Block shouldn’t be considered
+        DELETE lt_so_data WHERE lifsk IS NOT INITIAL OR abgru IS NOT INITIAL.
+      ENDIF.
+
+      SELECT
+         bseg~accountingdocument AS belnr,          bseg~accountingdocumentitem AS buzei,          bseg~fiscalyear AS gjahr,
+         bseg~companycode AS bukrs,                 bseg~billingdocument AS vbeln,                 bseg~customer AS kunnr,
+         bseg~debitcreditcode AS shkzg,             bseg~transactioncurrency AS waers,             bseg~postingkey AS bschl,
+         bseg~postingdate AS h_budat,               bseg~amountincompanycodecurrency AS dmbtr_orig,
+            CASE debitcreditcode
+              WHEN 'H' THEN  CAST( amountincompanycodecurrency AS D34N ) * ( -1 )  * CAST( -1 AS D34N )
+              ELSE amountincompanycodecurrency
+            END AS dmbtr
+            FROM i_operationalacctgdocitem AS bseg
+            JOIN @lt_kunnr_bukrs AS tr ON bseg~companycode = tr~bukrs AND
+                                          bseg~customer    = tr~kunnr
+              WHERE bseg~postingdate  BETWEEN @gv_from12 AND @sy-datum AND
+                    bseg~postingkey IN @gt_r_bschl AND
+                    bseg~billingdocument <> ''
+                INTO TABLE @DATA(lt_last_12_month).
+      IF sy-subrc = 0.
+        SORT lt_last_12_month.
+      ENDIF.
+
+      SELECT
+         bseg~accountingdocument AS belnr,   bseg~accountingdocumentitem AS buzei,     bseg~fiscalyear AS gjahr,
+         bseg~companycode AS bukrs,          bseg~billingdocument AS vbeln,            bseg~customer AS kunnr,
+         bseg~postingkey AS bschl,           bseg~clearingdate AS augdt,               bseg~netduedate AS netdt,
+         bseg~clearingcreationdate AS augcp, bseg~amountincompanycodecurrency AS dmbtr
+          FROM i_operationalacctgdocitem AS bseg
+            JOIN @lt_kunnr_bukrs AS tr ON bseg~companycode = tr~bukrs AND
+                                          bseg~customer    = tr~kunnr
+              WHERE bseg~postingdate  BETWEEN @gv_from12 AND @sy-datum AND
+                    bseg~dunningblockingreason = '' AND
+                    bseg~amountincompanycodecurrency >= 0 AND
+                    bseg~postingkey IN @gt_r_bschl AND
+                    bseg~debitcreditcode = 'S'
+                INTO TABLE @DATA(lt_number_due_items).
+      IF sy-subrc = 0.
+        SORT lt_number_due_items.
+      ENDIF.
+
+      LOOP AT it_vector_it ASSIGNING FIELD-SYMBOL(<ls_vect>).
+        APPEND INITIAL LINE TO rt_vector_it ASSIGNING FIELD-SYMBOL(<ls_ext>).
+        <ls_ext>-partner = <ls_vect>-partner .
+        <ls_ext>-credit_sgmnt  = <ls_vect>-credit_sgmnt.
+        LOOP AT lt_so_data ASSIGNING FIELD-SYMBOL(<ls_so_data>) WHERE kunnr = <ls_vect>-partner. "#EC CI_NESTED
+          IF <ls_so_data>-vdatu BETWEEN gv_from AND sy-datum.
+            <ls_ext>-zz1_past_6_m_net_value_uk2 = <ls_ext>-zz1_past_6_m_net_value_uk2 + <ls_so_data>-wmeng * <ls_so_data>-netpr.
+          ELSEIF <ls_so_data>-vdatu BETWEEN sy-datum AND gv_to.
+            <ls_ext>-zz1_future_6_m_net_val_uk2 = <ls_ext>-zz1_future_6_m_net_val_uk2 + <ls_so_data>-wmeng * <ls_so_data>-netpr.
+          ENDIF.
+        ENDLOOP.
+
+        IF <ls_ext>-zz1_past_6_m_net_value_uk2 IS NOT INITIAL.
+          TRY.
+              <ls_ext>-zz1_growth_uk2 =
+              ( ( <ls_ext>-zz1_future_6_m_net_val_uk2 - <ls_ext>-zz1_past_6_m_net_value_uk2 ) / <ls_ext>-zz1_past_6_m_net_value_uk2 ) * 100.
+            CATCH cx_sy_arithmetic_overflow.
+              CONTINUE.
+          ENDTRY.
+        ENDIF.
+
+        LOOP AT lt_last_12_month ASSIGNING  FIELD-SYMBOL(<ls_last_12_month>) WHERE kunnr = <ls_vect>-partner . "#EC CI_NESTED
+          TRY.
+              <ls_ext>-zz1_last_12_m_turnover_uk2 = <ls_ext>-zz1_last_12_m_turnover_uk2 + <ls_last_12_month>-dmbtr .
+            CATCH cx_sy_arithmetic_overflow.
+              CONTINUE.
+          ENDTRY.
+        ENDLOOP.
+
+        LOOP AT lt_number_due_items ASSIGNING FIELD-SYMBOL(<ls_number_due_items>)  WHERE kunnr = <ls_vect>-partner. "#EC CI_NESTED
+          TRY.
+              IF <ls_number_due_items>-augcp = '00000000' and <ls_number_due_items>-netdt <= sy-datum.
+                <ls_ext>-zz1_number_due_items_uk2 = <ls_ext>-zz1_number_due_items_uk2 + 1.
+              ENDIF.
+
+              IF <ls_number_due_items>-augdt = '00000000'.
+                lv_delta = sy-datum - <ls_number_due_items>-netdt.
+              ELSE.
+                lv_delta = <ls_number_due_items>-augdt - <ls_number_due_items>-netdt.
+              ENDIF.
+
+              IF lv_delta > 0.
+                <ls_ext>-zz1_last_12month_arrear_uk2 = <ls_ext>-zz1_last_12month_arrear_uk2 + lv_delta.
+              ENDIF.
+
+            CATCH cx_sy_arithmetic_overflow.
+              CONTINUE.
+          ENDTRY.
+        ENDLOOP.
+
+      ENDLOOP.
+    ENDIF.
+    gt_vector_it = rt_vector_it.
+
+  ENDMETHOD.
+
+
+  METHOD get_credit_limit_fields.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 28.04.2023 | 19919_FI_Setting up 5 credit limi        *
+*              |            | DS4K949471                               *
+*----------------------------------------------------------------------*/
+    rt_vector_it = gt_vector_it.
+  ENDMETHOD.
+
+
+  METHOD delete_instance.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 13.06.2023 | 19919_FI_Setting up 5 credit limi        *
+*              |            | DS4K949471                               *
+*----------------------------------------------------------------------*/
+    IF go_inst IS BOUND.
+      CLEAR go_inst.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD instantiate.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 13.06.2023 | 19919_FI_Setting up 5 credit limi        *
+*              |            | DS4K949471                               *
+*----------------------------------------------------------------------*/
+    IF go_inst IS NOT BOUND.
+      go_inst = NEW zcl_fi_ukm_calc_helper( ).
+    ENDIF.
+    ro_inst = go_inst.
+  ENDMETHOD.
+
+
+  METHOD get_configs.
+*
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 28.04.2023 | 19919_FI_Setting up 5 credit limi        *
+*              |            | DS4K949471                               *
+*----------------------------------------------------------------------*/
+
+    TRY.
+        gt_r_auart = zcl_pe_hm_basic=>get_range( iv_id = '1580' ).
+        gt_r_parvw = zcl_pe_hm_basic=>get_range( iv_id = '1581' ).
+        gt_r_trvog = zcl_pe_hm_basic=>get_range( iv_id = '1582' ).
+        gt_r_bschl = zcl_pe_hm_basic=>get_range( iv_id = '1584' ).
+        gv_reltyp = zcl_pe_hm_basic=>get_value( iv_id = '1864' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    CALL FUNCTION 'BKK_ADD_MONTH_TO_DATE'
+      EXPORTING
+        months  = 6
+        olddate = sy-datum
+      IMPORTING
+        newdate = gv_to.
+
+    CALL FUNCTION 'BKK_ADD_MONTH_TO_DATE'
+      EXPORTING
+        months  = -6
+        olddate = sy-datum
+      IMPORTING
+        newdate = gv_from.
+
+    CALL FUNCTION 'BKK_ADD_MONTH_TO_DATE'
+      EXPORTING
+        months  = -12
+        olddate = sy-datum
+      IMPORTING
+        newdate = gv_from12.
+  ENDMETHOD.
+
+
+  METHOD get_partner.
+*************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 16.09.2023 | 24992 Credit Data Review Case common     *
+*              |            | DS4K963223                               *
+*----------------------------------------------------------------------*
+    rv_partner = gv_partner.
+  ENDMETHOD.
+
+
+  METHOD set_partner.
+*************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DZESHKAT     | 16.09.2023 | 24992 Credit Data Review Case common     *
+*              |            | DS4K963223                               *
+*----------------------------------------------------------------------*
+    gv_partner = iv_partner.
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,200 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ZHMAIVAD     | 26.09.2022 | 13444     : [Build] - Stock reconciliation with WMS *
+*              |            | DS4K929106                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 19.12.2022 | 16311     : [Feature] [Build] - Stock re *
+*              |            | DS4K938447                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 19.03.2023 | 18988     : [Build] - Stock reconciliati *
+*              |            | DS4K946765                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 14.05.2023 | 19611     : [Feature] [Build] - Stock re *
+*              |            | DS4K950069                               *
+" -----------------------------------------------------------------------
+" ZHMAIVAD     | 29.09.2023 | 22859     : [Build] - Stock reconciliati -
+"              |            | DS4K957133                               -
+" -----------------------------------------------------------------------
+FUNCTION zsd_fm_stock_correction
+  IMPORTING
+    VALUE(it_stock_correction) TYPE zsd_tt_stock_corr.
+
+
+
+  CONSTANTS: lc_bapiret_err_a        TYPE char01 VALUE 'A',
+             lc_bapiret_err_e        TYPE char01 VALUE 'E',
+             lc_delaytime_shift      TYPE p VALUE '1',
+             lc_repeat_qnt           TYPE i VALUE 15,
+             lc_block_message_id     TYPE symsgid VALUE 'M3',
+             lc_block_message_number TYPE symsgno VALUE '897'.
+
+  TYPES:
+        ltyp_tt_gm_items TYPE STANDARD TABLE OF bapi2017_gm_item_create.
+  DATA:
+    lt_gm_items                 TYPE ltyp_tt_gm_items,
+    lt_return2                  TYPE TABLE OF bapiret2,  "#EC CI_STDSEQ
+    lt_stcorr_return            TYPE TABLE OF zsd_i_stock_correction_errors,
+    lt_stock_correction_history TYPE TABLE OF zsd_i_stock_correction_history,
+    ls_gmhead_ret               TYPE bapi2017_gm_head_ret,
+    ls_return2                  TYPE bapiret2,
+    ls_gm_code                  TYPE bapi2017_gm_code,
+    lv_next_number              TYPE n LENGTH 20,
+    lv_posting_date             TYPE sy-datum.
+
+  lv_posting_date = sy-datum.
+
+  DATA(ls_header) = VALUE bapi2017_gm_head_01( doc_date = sy-datum pstng_date = lv_posting_date header_txt = 'Stock Correction Report'(001) ).
+
+  IF sy-subrc = 0.
+    LOOP AT it_stock_correction ASSIGNING FIELD-SYMBOL(<ls_stock_correction>).
+      lt_gm_items = VALUE #( (  material       = <ls_stock_correction>-article
+                                plant          = <ls_stock_correction>-plant
+                                stge_loc       =  <ls_stock_correction>-storage_location
+                                entry_qnt      = abs(  <ls_stock_correction>-adjustment_qty )
+                                entry_uom      = <ls_stock_correction>-meins
+                                move_type      = <ls_stock_correction>-move_type
+                                sales_ord      = <ls_stock_correction>-sales_order_number
+                                s_ord_item     = <ls_stock_correction>-sales_order_item
+                                val_sales_ord  = <ls_stock_correction>-sales_order_number
+                                val_s_ord_item = <ls_stock_correction>-sales_order_item
+                                spec_stock     = <ls_stock_correction>-sobkz
+                                move_reas      = <ls_stock_correction>-reason_for_movement ) ).
+
+      ls_gm_code-gm_code = <ls_stock_correction>-gm_code.
+
+      DATA(lv_waiting_time) = lc_delaytime_shift.
+
+      DO lc_repeat_qnt TIMES.                            "#EC CI_NESTED
+        CLEAR lt_return2.
+        DELETE lt_stcorr_return WHERE stockcorrectionuuid = <ls_stock_correction>-uuid. "#EC CI_STDSEQ
+
+        CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+          EXPORTING
+            goodsmvt_header  = ls_header
+            goodsmvt_code    = ls_gm_code
+          IMPORTING
+            goodsmvt_headret = ls_gmhead_ret
+            materialdocument = ls_gmhead_ret-mat_doc
+            matdocumentyear  = ls_gmhead_ret-doc_year
+          TABLES
+            goodsmvt_item    = lt_gm_items
+            return           = lt_return2.
+
+        LOOP AT lt_return2 ASSIGNING FIELD-SYMBOL(<ls_return2>). "#EC CI_NESTED
+          TRY.
+              cl_numberrange_runtime=>number_get( EXPORTING nr_range_nr = '03'
+                                                            object      = 'ZSD_STOCK'
+                                                  IMPORTING number      = lv_next_number ).
+            CATCH cx_number_ranges.
+              CLEAR lv_next_number.
+          ENDTRY.
+
+          APPEND VALUE #( messagetype = <ls_return2>-type
+                          messageid = <ls_return2>-id
+                          messagenumber = <ls_return2>-number
+                          message = <ls_return2>-message
+                          parameterbapi = <ls_return2>-parameter
+                          systemclient = <ls_return2>-system
+                          stockcorrectionuuid = <ls_stock_correction>-uuid
+                          semanticcountnumber = lv_next_number
+           )
+            TO lt_stcorr_return.
+        ENDLOOP.
+
+        DELETE lt_return2 WHERE type <> lc_bapiret_err_a AND type <> lc_bapiret_err_e. "#EC CI_STDSEQ #EC CI_STDSEQ
+
+        IF lt_return2 IS INITIAL.
+          TRY.
+              cl_numberrange_runtime=>number_get( EXPORTING nr_range_nr = '03'
+                                                            object      = 'ZSD_STOCK'
+                                                  IMPORTING number      = lv_next_number ).
+            CATCH cx_number_ranges.
+              CLEAR lv_next_number.
+          ENDTRY.
+
+          MESSAGE s012(migo) WITH ls_gmhead_ret-mat_doc INTO DATA(lv_msg).
+
+          APPEND VALUE #( messagetype = 'S'
+                  messageid = 'MIGO'
+                  messagenumber = '012'
+                  message = lv_msg
+                  parameterbapi = ls_gmhead_ret-mat_doc
+                  systemclient = sy-mandt
+                  stockcorrectionuuid = <ls_stock_correction>-uuid
+                  semanticcountnumber = lv_next_number
+            )
+    TO lt_stcorr_return.
+          CLEAR ls_return2.
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait   = abap_true
+            IMPORTING
+              return = ls_return2.
+
+
+          IF ls_return2 IS NOT INITIAL.
+            TRY.
+                cl_numberrange_runtime=>number_get( EXPORTING nr_range_nr = '03'
+                                                              object      = 'ZSD_STOCK'
+                                                    IMPORTING number      = lv_next_number ).
+              CATCH cx_number_ranges.
+                CLEAR lv_next_number.
+            ENDTRY.
+
+            APPEND VALUE #( messagetype = ls_return2-type
+                            messageid = ls_return2-id
+                            messagenumber = ls_return2-number
+                            message = ls_return2-message
+                            parameterbapi = ls_return2-parameter
+                            systemclient = ls_return2-system
+                            stockcorrectionuuid = <ls_stock_correction>-uuid
+                            semanticcountnumber = lv_next_number
+             )
+              TO lt_stcorr_return.
+          ENDIF.
+          EXIT.
+        ELSE.
+          READ TABLE lt_return2 WITH KEY id = lc_block_message_id number = lc_block_message_number type = lc_bapiret_err_e TRANSPORTING NO FIELDS. "#EC CI_STDSEQ
+          IF sy-subrc = 0.
+            WAIT UP TO lv_waiting_time SECONDS.
+            lv_waiting_time = lv_waiting_time + lc_delaytime_shift.
+          ELSE.
+            EXIT.
+          ENDIF.
+        ENDIF.
+      ENDDO.
+      TRY.
+          cl_numberrange_runtime=>number_get( EXPORTING nr_range_nr = '03'
+                                                        object      = 'ZSD_STOCK'
+                                              IMPORTING number      = lv_next_number ).
+        CATCH cx_number_ranges.
+          CLEAR lv_next_number.
+      ENDTRY.
+
+      APPEND VALUE #( stockcorrectionuuid = <ls_stock_correction>-uuid
+                      status =  COND #( WHEN lt_return2 IS INITIAL THEN zcl_sd_stock_recon_base=>gc_stock_corr_status_complete
+                                        WHEN lt_return2 IS NOT INITIAL THEN zcl_sd_stock_recon_base=>gc_stock_corr_status_error )
+                      materialdocument = ls_gmhead_ret-mat_doc
+                      materialdocumentyear = ls_gmhead_ret-doc_year
+                      movetype = <ls_stock_correction>-move_type
+                      wmssnapshotdate = <ls_stock_correction>-wms_snapshot_date
+                      adjustmentqty = <ls_stock_correction>-adjustment_qty
+                      transferto = <ls_stock_correction>-transfer_to
+                      meins = <ls_stock_correction>-meins
+                      plant = <ls_stock_correction>-plant
+                      storagelocation = <ls_stock_correction>-storage_location
+                      article = <ls_stock_correction>-article
+                      salesordernumber  = <ls_stock_correction>-sales_order_number
+                      salesorderitem = <ls_stock_correction>-sales_order_item
+                      semanticcountnumber = lv_next_number )
+        TO lt_stock_correction_history.
+    ENDLOOP.
+
+    zcl_sd_stock_correction=>update_after_goods_movement( it_stock_correction = lt_stock_correction_history
+                                                          it_stock_errors     = lt_stcorr_return ).
+  ENDIF.
+ENDFUNCTION.

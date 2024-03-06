@@ -1,0 +1,893 @@
+class ZCL_SD_INVOICE_PDF_HELPER definition
+  public
+  final
+  create public .
+
+public section.
+
+  methods GET_ADDITIONAL_LAST_PAGE_DATA
+    changing
+      value(CS_HEADER) type ZSD_S_INVOICE_OUTPUT_HEADER .
+  methods CONSTRUCTOR
+    importing
+      !IV_VBELN type VBELN_VF
+      !IV_COUNTRY_COMPANY type CHAR10 .
+  methods GET_ADDITIONAL_HEADER_DATA
+    changing
+      value(CS_HEADER) type ZSD_S_INVOICE_OUTPUT_HEADER .
+  methods GET_ITEMS_DATA
+    changing
+      value(CT_ITEMS) type ZSD_TT_INVOICE_ITEMS_HEADER
+      value(CS_HEADER) type ZSD_S_INVOICE_OUTPUT_HEADER .
+  methods GET_ADDRESS
+    importing
+      !IV_LAND1 type LAND1 optional
+      !IV_ADRNR type ADRNR
+    exporting
+      !EV_NAME type CHAR50
+      !EV_STREET type ZSD_S_INV_HDR_BR-STRT_HOUSE
+      !EV_CITY type ZSD_S_INV_HDR_BR-PST_CITY
+      !EV_COUNTRY type ZSD_S_INV_HDR_BR-CITY2 .
+protected section.
+private section.
+
+  data MV_VBELN type VBELN_VF .
+  data MV_COUNTRY_COMPANY type CHAR10 .
+
+  methods GET_LOGO
+    returning
+      value(RV_RESULT) type XSTRING  ##RELAX.
+  methods GET_FIORI_TEXT
+    importing
+      !IV_FIELD_NAME type CHAR70
+    returning
+      value(RV_TEXT) type STRING .
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_INVOICE_PDF_HELPER IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KONRANAR     | 22.09.2023 | 24568 - Invoice PDF- layout              *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+    mv_vbeln = iv_vbeln.
+    mv_country_company = iv_country_company.
+  ENDMETHOD.
+
+
+  METHOD get_additional_header_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KONRANAR     | 22.09.2023 | 24568 - Invoice PDF- layout              *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 06.10.2023 | 24568 - Feature - Customer invoice bul   *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 06.12.2023 | 27376 - Feature - CR - Changes in invoice*
+*              |            | DS4K972815                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 14.12.2023 | 27560 - Feature - CR - Adjustments requir*
+*              |            | DS4K973508                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 22.01.2024 | 28307 - Tax sentence not picked up print *
+*              |            | DS4K976987                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 22.01.2024 | 27642 - Feature - Model 1 sample general *
+*              |            | DS4K974006                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 29.02.2024 | 29454 - Invoice layout Sample inv GPS-M  *
+*              |            | DS4K981203                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 01.03.2024 | 29614 - Sample invoice layout issue      *
+*              |            | DS4K981845                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 12.03.2024 | 29899: Incorrect Ref to Supplier VAT ID  *
+*              |            | DS4K982987                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 14.03.2024 | 30095: Incorrect Ref to Supplier VAT ID  *
+*              |            | DS4K983546                               *
+*----------------------------------------------------------------------*
+    CONSTANTS: lc_parvw_gs TYPE char2 VALUE 'WL', " WL = GS(alpha).
+               lc_parvw_sh TYPE char2 VALUE 'SH',
+               lc_show     TYPE char10 VALUE 'SHOW'.
+
+    TYPES: BEGIN OF ltyp_vat_filter,
+             fkart TYPE fkart,
+             vkorg TYPE vkorg,
+           END OF ltyp_vat_filter.
+    TYPES: BEGIN OF ltyp_title_filter,
+             zz1_mm_tradecomodel TYPE zz1_mm_tradecomodel,
+             vtweg TYPE vtweg,
+           END OF ltyp_title_filter.
+    DATA: ls_title_filter TYPE ltyp_title_filter,
+          ls_vat_filter TYPE ltyp_vat_filter.
+
+    DATA: lo_badi TYPE REF TO zsd_badi_invoice_pdf.
+    DATA: lt_adrc TYPE TABLE OF adrc,
+          lv_to_clear.
+    DATA: lv_text_code TYPE char70.
+
+    SELECT
+        irbkp~zz1_carton_mih           AS zzcarton,
+        irbkp~zz1_brgew_mih            AS zzbrgew,
+        irbkp~zz1_brgew_mihu           AS zzbrgew_unit,
+        irbkp~zz1_ntgew_mih            AS zzntgew,
+        irbkp~zz1_ntgew_mihu           AS zzntgew_unit,
+        irbkp~zz1_carrier_mih          AS zzcarrier,
+        irbkp~zz1_blhawb_num_mih       AS zzblhawb_num,
+        irbkp~CompanyCode              AS Company_Code,
+        iekkn~PurchaseOrder            AS Purchasing_Number,
+        ivbkd~\_IncotermsClassification\_Text[ ( language = @sy-langu ) ]-IncotermsClassificationName AS Shipping_Terms,
+        ivbkd~\_ShippingType\_Text[ ( language = @sy-langu ) ]-ShippingTypeName  AS Shipping_Type,
+        iknb1~PaymentMethodsList       AS payment_method,
+        ieket~ScheduleLineDeliveryDate AS fcr_date,
+        iadrc~\_Country\_Text[ ( language = @sy-langu ) ]-CountryName AS shipment_country,
+        dest~CountryShortName          AS Destination,
+        iekko~purchaseorder            AS ebeln,
+        iekko~zz1_mm_tradecomodel_pdh  AS tradeco_model,
+        iekko~Supplier                 AS Supplier,
+        iekko~PurchasingOrganization   AS Purchasing_Organization,
+        ibr~Customer                   AS br_kunnr,
+        ivbrp~SalesOrderDistributionChannel AS invoice_type,
+        ivbrp~TaxCode                  AS TaxCode,
+        ivbrp~SalesOrderSalesOrganization AS SalesOrganization,
+        ivbrk~BillingDocumentType      AS BillingDocumentType
+      FROM I_SupplierInvoiceAPI01 WITH PRIVILEGED ACCESS AS irbkp
+      JOIN I_SuplrInvcItemPurOrdRefAPI01 AS irseg ON irseg~SupplierInvoice = irbkp~SupplierInvoice AND
+                                                     irseg~FiscalYear = irbkp~FiscalYear
+      JOIN I_PurOrdAccountAssignmentAPI01 AS iekkn ON iekkn~PurchaseOrder     = irseg~PurchaseOrder AND
+                                                      iekkn~PurchaseOrderItem = irseg~PurchaseOrderItem
+      JOIN I_BillingDocumentItemBasic AS ivbrp ON ivbrp~SalesDocument     = iekkn~SalesOrder AND
+                                                  ivbrp~SalesDocumentItem = iekkn~SalesOrderItem
+      LEFT JOIN i_salesdocument AS ivbkd ON ivbkd~SalesDocument = ivbrp~SalesDocument
+      JOIN I_BillingDocumentBasic AS ivbrk ON ivbrk~BillingDocument = ivbrp~BillingDocument
+      LEFT OUTER JOIN i_customercompany AS iknb1 ON iknb1~Customer    = ivbrk~SoldToParty AND
+                                                    iknb1~CompanyCode = irbkp~CompanyCode
+      LEFT OUTER JOIN I_CountryText AS dest ON dest~country = ivbrk~country AND
+                                               dest~language = @sy-langu
+      LEFT OUTER JOIN I_PurOrdScheduleLineAPI01 AS ieket ON ieket~PurchaseOrder = irseg~PurchaseOrder AND     "#EC CI_PRIVACC
+                                                            ieket~PurchaseOrderItem = irseg~PurchaseOrderItem
+      LEFT OUTER JOIN I_PurchaseOrderAPI01 AS iekko ON iekko~purchaseorder = iekkn~PurchaseOrder
+      LEFT OUTER JOIN I_BillingDocumentPartner AS ibr ON ibr~BillingDocument = ivbrp~BillingDocument AND
+                                                         ibr~PartnerFunction = @lc_parvw_sh
+      LEFT OUTER JOIN I_PurchaseOrderPartnerAPI01 AS iekpa ON iekpa~PurchaseOrder   = iekkn~PurchaseOrder AND
+                                                                                     iekpa~PartnerFunction = @lc_parvw_gs
+      LEFT OUTER JOIN I_Supplier AS ilfa1  ON ilfa1~Supplier = iekpa~Supplier
+      LEFT OUTER JOIN I_Address WITH PRIVILEGED ACCESS AS iadrc ON ilfa1~AddressID = iadrc~AddressID
+      WHERE ivbrp~billingdocument = @mv_vbeln
+      INTO @DATA(ls_additional) UP TO 1 ROWS.
+    ENDSELECT.
+
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    cs_header = CORRESPONDING #( BASE ( cs_header ) ls_additional ) ##ENH_OK.
+
+   DATA(lo_class_tax) = NEW zcl_sd_tax_data(  ).
+*- Supplier VAT ID
+   lo_class_tax->get_seller_vat_id( EXPORTING iv_vbeln = mv_vbeln
+                                    IMPORTING ev_stceg = cs_header-supp_vat_id ).
+*- Tax Text
+   lo_class_tax->get_fiscrep_vattext( EXPORTING iv_vbeln = mv_vbeln
+                                      IMPORTING ev_fiscal_rep = cs_header-fiscal_rep
+                                                ev_vat_text   = cs_header-tax_code_text ).
+   IF cs_header-tax_code_text IS NOT INITIAL.
+     lv_text_code = cs_header-tax_code_text.
+     cs_header-tax_code_text = get_fiori_text( lv_text_code ).
+   ENDIF.
+   IF cs_header-fiscal_rep IS NOT INITIAL.
+     lv_text_code = cs_header-fiscal_rep.
+     cs_header-fiscal_rep = get_fiori_text( lv_text_code ).
+   ENDIF.
+*- Reference of Supplier Invoice
+    SELECT
+        irbkp~DocumentHeaderText
+      FROM i_suplrinvcitempurordrefapi01 AS irseg
+      JOIN i_supplierinvoice AS irbkp
+        ON irseg~SupplierInvoice = irbkp~SupplierInvoice
+      WHERE irseg~PurchaseOrder = @cs_header-purchasing_number
+      INTO @cs_header-supp_invoice_text UP TO 1 ROWS.
+    ENDSELECT.
+    IF sy-subrc <> 0.
+      lv_to_clear = abap_true.
+    ENDIF.
+
+*- Reference of Supplier
+    IF cs_header-supp_adrnr IS INITIAL.
+      SELECT AddressID FROM i_supplier WITH PRIVILEGED ACCESS AS ilfa1
+        JOIN I_PurchaseOrderAPI01 AS iekko
+          ON ilfa1~Supplier = iekko~Supplier
+        WHERE iekko~PurchaseOrder = @ls_additional-ebeln
+        INTO @cs_header-supp_adrnr UP TO 1 ROWS.
+      ENDSELECT.
+      IF sy-subrc <> 0.
+        CLEAR: cs_header-supp_adrnr.
+      ENDIF.
+    ENDIF.
+
+    IF cs_header-supp_adrnr IS NOT INITIAL.
+      CALL FUNCTION 'ADDR_SELECT_ADRC_SINGLE'
+        EXPORTING
+          addrnumber = cs_header-supp_adrnr
+        TABLES
+          et_adrc    = lt_adrc.
+      IF lt_adrc IS NOT INITIAL.
+        DATA(ls_ref_supplier_addr) = lt_adrc[ 1 ].
+      ENDIF.
+
+      cs_header-supp_adr_name1 = ls_ref_supplier_addr-name1.
+      cs_header-supp_adr_name2 = ls_ref_supplier_addr-name2.
+      IF ls_ref_supplier_addr-street IS INITIAL.
+        cs_header-supp_str_house = ls_ref_supplier_addr-house_num1.
+      ELSE.
+        cs_header-supp_str_house = |{ ls_ref_supplier_addr-street } { ls_ref_supplier_addr-house_num1 }|.
+      ENDIF.
+
+      IF ls_ref_supplier_addr-post_code1 IS INITIAL.
+        cs_header-supp_pst_city = ls_ref_supplier_addr-city1.
+      ELSE.
+        cs_header-supp_pst_city = |{ ls_ref_supplier_addr-post_code1 } { ls_ref_supplier_addr-city1 }|.
+      ENDIF.
+
+      SELECT SINGLE CountryShortName
+        INTO @cs_header-supp_country
+        FROM i_countrytext AS it005t
+        WHERE Language = @sy-langu AND
+              Country  = @ls_ref_supplier_addr-country.
+      IF sy-subrc <> 0.
+        CLEAR: lv_to_clear.
+      ENDIF.
+    ENDIF.
+
+*- Reference of Supplier VAT ID No:
+    IF cs_header-ref_supp_vat_id IS INITIAL.
+      SELECT  ilfa1~VATRegistration
+        UP TO 1 ROWS
+        INTO @cs_header-ref_supp_vat_id
+        FROM i_purchaseorderapi01 AS iekko
+        JOIN i_supplier AS ilfa1
+          ON ilfa1~Supplier = iekko~Supplier
+        WHERE PurchaseOrder = @cs_header-purchasing_number.
+      ENDSELECT.
+      IF sy-subrc <> 0.
+        CLEAR: lv_to_clear.
+      ENDIF.
+    ENDIF.
+
+*- Reference of Vendor:
+    SELECT  ilfa1~AddressID
+      UP TO 1 ROWS
+      INTO @DATA(lv_address_id)
+      FROM i_purchaseorderapi01 AS iekko
+      JOIN i_supplier AS ilfa1
+        ON ilfa1~Supplier = iekko~Supplier
+      WHERE PurchaseOrder = @cs_header-purchasing_number.
+    ENDSELECT.
+    IF sy-subrc <> 0.
+      CLEAR: lv_address_id.
+    ENDIF.
+
+    CLEAR: lt_adrc.
+    CALL FUNCTION 'ADDR_SELECT_ADRC_SINGLE'
+      EXPORTING
+        addrnumber = lv_address_id
+      TABLES
+        et_adrc    = lt_adrc.
+
+    IF lt_adrc IS NOT INITIAL.
+      DATA(ls_ref_vendor_addr) = lt_adrc[ 1 ].
+    ENDIF.
+
+    IF lv_to_clear = abap_true.
+      CLEAR: lv_to_clear.
+    ENDIF.
+
+    cs_header-vend_adr_name1 = ls_ref_vendor_addr-name1.
+    cs_header-vend_adr_name2 = ls_ref_vendor_addr-name2.
+    cs_header-vend_adr_name3 = ls_ref_vendor_addr-name3.
+    cs_header-vend_adr_name4 = ls_ref_vendor_addr-name4.
+
+    IF ls_ref_vendor_addr-street IS INITIAL.
+      cs_header-vend_str_house = ls_ref_vendor_addr-house_num1.
+    ELSE.
+      cs_header-vend_str_house = |{ ls_ref_vendor_addr-street } { ls_ref_vendor_addr-house_num1 }|.
+    ENDIF.
+
+    IF ls_ref_vendor_addr-post_code1 IS NOT INITIAL.
+      cs_header-vend_pst_city = ls_ref_vendor_addr-city1.
+    ELSE.
+      cs_header-vend_pst_city = |{ ls_ref_vendor_addr-post_code1 } { ls_ref_vendor_addr-city1 }|.
+    ENDIF.
+
+    SELECT SINGLE CountryShortName
+      INTO @cs_header-vend_country
+      FROM i_countrytext AS it005t
+      WHERE language = @sy-langu AND
+            Country = @ls_ref_vendor_addr-country.
+    IF sy-subrc <> 0.
+      CLEAR: lv_to_clear.
+    ENDIF.
+
+*- Invoice Title
+    TRY.
+        ls_title_filter-zz1_mm_tradecomodel = cs_header-tradeco_model.
+        ls_title_filter-vtweg               = cs_header-invoice_type.
+        zcl_pe_hm_complex=>get_value( EXPORTING iv_id     = 'EB209CAFFE131EDEA599A8C1149D9F5D'
+                                                is_filter = ls_title_filter
+                                      IMPORTING ev_value  = cs_header-invoice_title ).
+      CATCH zcx_pe_hm.
+        CLEAR: lv_to_clear.
+    ENDTRY.
+
+    get_additional_last_page_data( CHANGING cs_header = cs_header ).
+
+    TRY.
+        ls_vat_filter-fkart = cs_header-BillingDocumentType.
+        ls_vat_filter-vkorg = cs_header-salesorganization.
+        DATA(lv_vat_ind) = zcl_pe_hm_complex=>is_active( iv_id     = 'E7A829B9010C1EDEB6D9433058185F64'
+                                                         is_filter = ls_vat_filter ).
+        IF lv_vat_ind = abap_true.
+          cs_header-total_vat_hide = lc_show.
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR: lv_to_clear.
+    ENDTRY.
+
+    TRY.
+        GET BADI lo_badi FILTERS country_company = mv_country_company.
+        CALL BADI lo_badi->modify_header
+          CHANGING
+            cs_header = cs_header.
+      CATCH cx_badi_not_implemented.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD. "#EC CI_VALPAR
+
+
+  METHOD get_logo.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KONRANAR     | 22.09.2023 | 24568 - Invoice PDF- layout              *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 06.10.2023 | 24568 - Feature - Customer invoice bul   *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+
+    TYPES:BEGIN OF ltyp_forms,
+            datab           TYPE if_fdt_types=>element_timepoint,
+            datbi           TYPE if_fdt_types=>element_timepoint,
+            sfm_v_logo_name TYPE sfm_v_logo_name,
+          END OF ltyp_forms,
+          BEGIN OF ltyp_filters,
+            bukrs        TYPE bukrs,
+            ekgrp        TYPE ekgrp,
+            ekorg        TYPE ekorg,
+            fpwbformname TYPE fpwbformname,
+            seoclsname   TYPE seoclsname,
+            vkorg        TYPE vkorg,
+          END OF ltyp_filters.
+
+    DATA:
+        lt_forms   TYPE STANDARD TABLE OF ltyp_forms.
+
+    CONSTANTS: lc_logo_function TYPE if_fdt_types=>id VALUE '024F85009E261EECBBAF9B0FBFF120D2'.
+
+    TRY.
+        zcl_pe_hm_complex=>get_table(
+          EXPORTING
+            iv_id           = lc_logo_function
+            is_filter       = VALUE ltyp_filters(
+                                         fpwbformname = 'ZSD_F_SUB_INVOICE'
+                                         seoclsname   = 'HEADER' )
+            iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-names
+          IMPORTING
+            et_table        = lt_forms ).
+
+        LOOP AT lt_forms ASSIGNING FIELD-SYMBOL(<ls_form>).
+          IF <ls_form>-datab-date <= sy-datlo AND <ls_form>-datbi-date >= sy-datlo.
+            DATA(ls_logo) = cl_somu_logo=>get_instance( )->read( <ls_form>-sfm_v_logo_name ).
+            IF ls_logo-name IS NOT INITIAL.
+              rv_result = ls_logo-logo.
+              EXIT.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD get_address.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KONRANAR     | 22.09.2023 | 24568 - Invoice PDF- layout              *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 06.10.2023 | 24568 - Feature - Customer invoice bul   *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+
+    DATA:  ls_adr_new TYPE adrs_print,
+          lv_country TYPE szad_field-send_cntry.
+
+    CLEAR: ev_name, ev_street, ev_city, ev_country.
+
+    IF iv_land1 IS INITIAL.
+      lv_country = CONV #( mv_country_company ).
+    ENDIF.
+
+    CALL FUNCTION 'ADDRESS_INTO_PRINTFORM'
+      EXPORTING
+        address_type                   = '1'
+        address_number                 = iv_adrnr
+        sender_country                 = lv_country
+        iv_nation                      = sy-langu
+        number_of_lines                = 4
+      IMPORTING
+        address_printform              = ls_adr_new
+      EXCEPTIONS
+        address_blocked                = 1
+        person_blocked                 = 2
+        contact_person_blocked         = 3
+        addr_to_be_formated_is_blocked = 4
+        OTHERS                         = 5.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    ev_name    = ls_adr_new-line0.
+    ev_street  = ls_adr_new-line1.
+    ev_city    = ls_adr_new-line2.
+    ev_country = ls_adr_new-line3.
+
+  ENDMETHOD.
+
+
+  METHOD get_items_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KONRANAR     | 22.09.2023 | 24568 - Invoice PDF- layout              *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 06.10.2023 | 24568 - Feature - Customer invoice bul   *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 06.12.2023 | 27376 - Feature - CR - Changes in invoice*
+*              |            | DS4K972815                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 14.12.2023 | 27560 - Feature - CR - Adjustments requir*
+*              |            | DS4K973508                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 25.12.2023 | 27642 - Feature - Model 1 sample general *
+*              |            | DS4K974006                               *
+*----------------------------------------------------------------------*
+* SERDYSER     | 25.12.2023 | 27642 - Feature - Model 1 sample general *
+*              |            | DS4K974006                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 29.02.2024 | 29454 - Invoice layout Sample inv GPS-M  *
+*              |            | DS4K981203                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 01.03.2024 | 29614 - Sample invoice layout issue      *
+*              |            | DS4K981845                               *
+*----------------------------------------------------------------------*
+
+    DATA: lo_badi TYPE REF TO zsd_badi_invoice_pdf,
+          lv_int  TYPE i.
+    DATA: lv_po_status TYPE zsd_invoice_status.
+
+    lv_int = 1.
+
+    SELECT
+        ivbrp~BillingDocumentItem                                     AS posnr,
+        ivbrp~material                                                AS matnr,
+        isport~sports_cat_desc                                        AS zzmsc,
+        imara~zzworking                                               AS zadi_working,
+        imara~zzmmw                                                   AS zzmmw,
+        imara~zzdevloc                                                AS zzdevloc,
+        zgend~description                                             AS zgps_gender,
+        zage~description                                              AS zgps_agegroup,
+        imara~SizeOrDimensionText                                     AS zzsize,
+        imara~\_Text[ ( language = @sy-langu ) ]-ProductName          AS article_name,
+        ifashiontext~Text                                             AS Division,
+        it005t~CountryShortName                                       AS Origin,
+        ivbkd~PurchaseOrderByCustomer                                 AS po_number,
+        iekko~\_PurchasingDocumentOrigin\_Text[ ( language = @sy-langu ) ]-PurchasingDocumentOriginName AS po_status,
+        irbkp~SupplierInvoiceIDByInvcgParty                           AS internal_log,
+        imara~SizeOrDimensionText                                     AS hts_size,
+        iekpo~zz1_hts_code_pdi                                        AS hts_code,
+        icust~zcust_ifinumber                                         AS ifi_no,
+        icust~zcust_quota                                             AS quota_cat,
+        ivbrp~SalesOrderDistributionChannel                           AS invoice_type,
+        ivbrp~\_SalesOrderDistributionChannel\_Text[ ( language = @sy-langu ) ]-DistributionChannelName AS order_type,
+        iekpo~IsFinallyInvoiced                                       AS final_invoice
+      FROM i_billingdocumentitembasic AS ivbrp
+      LEFT OUTER JOIN i_salesdocument AS ivbkd ON ivbkd~SalesDocument = ivbrp~SalesDocument
+      LEFT OUTER JOIN i_product AS imara ON imara~product = ivbrp~material
+      LEFT OUTER JOIN I_BillingDocumentBasic AS ivbrk ON ivbrk~billingdocument = ivbrp~billingdocument
+      LEFT OUTER JOIN I_CountryText AS it005t ON it005t~Country  = ivbrk~Country AND
+                                                 it005t~Language = @sy-langu
+      LEFT OUTER JOIN zpd_t_gend AS zgend ON zgend~gen = imara~zzgen
+      LEFT OUTER JOIN zpd_t_agegrp AS zage ON zage~agegroup = imara~zzage AND "#EC CI_BUFFJOIN
+                                              zage~spras    = @sy-langu
+      LEFT OUTER JOIN zpd_t_mmcustom AS icust ON icust~matnr   = imara~product AND
+                                                 icust~country = @mv_country_company
+      LEFT OUTER JOIN zpd_t_sports_cat AS isport ON isport~zzsportscat = imara~zzmsc
+      LEFT OUTER JOIN zsd_i_fsh_attribute AS ifashion ON imara~product = ifashion~material
+      LEFT OUTER JOIN zpd_i_division_vh AS ifashiontext ON ifashion~fashion_info1 = ifashiontext~value
+      LEFT OUTER JOIN i_purordaccountassignmentapi01 AS iekkn ON iekkn~salesorder = ivbrp~salesdocument AND
+                                                                 iekkn~salesorderitem = ivbrp~salesdocumentitem
+      LEFT OUTER JOIN i_purchasingdocument AS iekko ON iekko~purchasingdocument = iekkn~purchaseorder
+      LEFT OUTER JOIN i_purchaseorderitemapi01 AS iekpo ON iekko~purchasingdocument = iekpo~purchaseorder
+      LEFT OUTER JOIN i_suplrinvcitempurordrefapi01 AS irseg ON irseg~PurchaseOrder     = iekkn~PurchaseOrder AND
+                                                                irseg~PurchaseOrderItem = iekkn~PurchaseOrderItem
+      LEFT OUTER JOIN i_supplierinvoice AS irbkp ON irbkp~SupplierInvoice = irseg~SupplierInvoice AND
+                                                    irbkp~FiscalYear      = irseg~FiscalYear
+      WHERE ivbrp~BillingDocument = @mv_vbeln
+      INTO TABLE @DATA(lt_items).
+    IF sy-subrc <> 0.
+      CLEAR: lt_items.
+    ENDIF.
+
+    TRY.
+        DATA(lt_freight_cond) = zcl_pe_hm_basic=>get_table( '2614' ).
+        DATA(ls_freight_cond) = lt_freight_cond[ 1 ].
+        DATA(lt_shas_cond) = zcl_pe_hm_basic=>get_table( '3172' ).
+        DATA(ls_shas_cond) = lt_shas_cond[ 1 ].
+        DATA(lt_vasshas_cond) = zcl_pe_hm_basic=>get_table( '2875' ).
+        DATA(ls_vasshas_cond) = lt_vasshas_cond[ 1 ].
+        DATA(lt_cons_cond) = zcl_pe_hm_basic=>get_table( '2876' ).
+        DATA(ls_cons_cond) = lt_cons_cond[ 1 ].
+        DATA(lt_tax_cond) = zcl_pe_hm_basic=>get_table( '2877' ).
+        DATA(ls_tax_cond) = lt_tax_cond[ 1 ].
+      CATCH zcx_pe_hm.
+        MESSAGE e001(zcl_invoice_helper) WITH '2614 3172' '2875' '2876' '2877'.
+    ENDTRY.
+
+*-- VAS/SHAS (ZPSH charge)
+    IF ls_vasshas_cond IS NOT INITIAL.
+      SELECT BillingDocumentItem, ConditionAmount
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_vasshas_cond-field1 AND
+              ConditionApplication  = @ls_vasshas_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO TABLE @DATA(lt_vasshas).
+      IF sy-subrc <> 0.
+        CLEAR: lt_vasshas.
+      ENDIF.
+    ENDIF.
+
+*-- SHAS (ZSHA charge)
+    IF ls_shas_cond IS NOT INITIAL.
+      SELECT BillingDocumentItem, ConditionAmount
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_shas_cond-field1 AND
+              ConditionApplication  = @ls_shas_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO TABLE @DATA(lt_shas).
+      IF sy-subrc <> 0.
+        CLEAR: lt_shas.
+      ENDIF.
+    ENDIF.
+
+*-- Freight
+    IF ls_freight_cond IS NOT INITIAL.
+      SELECT BillingDocumentItem, ConditionAmount
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_freight_cond-field1 AND
+              ConditionApplication  = @ls_freight_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO TABLE @DATA(lt_freight).
+      IF sy-subrc <> 0.
+        CLEAR: lt_freight.
+      ENDIF.
+    ENDIF.
+
+*-- Consolidated charge
+    IF ls_cons_cond IS NOT INITIAL.
+      SELECT BillingDocumentItem, ConditionAmount
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_cons_cond-field1 AND
+              ConditionApplication  = @ls_cons_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO TABLE @DATA(lt_consolidated).
+      IF sy-subrc <> 0.
+        CLEAR: lt_consolidated.
+      ENDIF.
+    ENDIF.
+
+*-- Output tax
+    IF ls_tax_cond IS NOT INITIAL.
+      SELECT BillingDocumentItem, ConditionAmount
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_tax_cond-field1 AND
+              ConditionApplication  = @ls_tax_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO TABLE @DATA(lt_tax).
+      IF sy-subrc <> 0.
+        CLEAR: lt_tax.
+      ENDIF.
+    ENDIF.
+
+    LOOP AT ct_items ASSIGNING FIELD-SYMBOL(<ls_item>).
+
+      LOOP AT <ls_item>-items ASSIGNING FIELD-SYMBOL(<ls_inner_item>). "#EC CI_NESTED
+
+        READ TABLE lt_items WITH KEY posnr = <ls_inner_item>-posnr ASSIGNING FIELD-SYMBOL(<ls_additional>) ##WARN_OK.
+        CHECK sy-subrc = 0.
+
+        <ls_inner_item>-posnr         = lv_int.
+        <ls_inner_item>-matnr         = <ls_additional>-matnr.
+        <ls_inner_item>-zzmsc         = <ls_additional>-zzmsc.
+        <ls_inner_item>-zadi_working  = <ls_additional>-zadi_working.
+        <ls_inner_item>-zzmmw         = <ls_additional>-zzmmw.
+        <ls_inner_item>-zgps_gender   = <ls_additional>-zgps_gender.
+        <ls_inner_item>-zgps_agegroup = <ls_additional>-zgps_agegroup.
+        <ls_inner_item>-zzsize        = <ls_additional>-zzsize.
+        <ls_inner_item>-article_name  = <ls_additional>-article_name.
+        <ls_inner_item>-Division      = <ls_additional>-Division.
+        <ls_inner_item>-Origin        = <ls_additional>-Origin.
+        <ls_inner_item>-po_number     = <ls_additional>-po_number   .
+        TRY.
+            zcl_pe_hm_complex=>get_value( EXPORTING iv_id     = 'EB209CAFFE131EDEA59A9C655230BF5D'
+                                                    is_filter = <ls_additional>-final_invoice
+                                          IMPORTING ev_value  =  lv_po_status ).
+             <ls_inner_item>-po_status = lv_po_status.
+          CATCH zcx_pe_hm.
+            CLEAR: <ls_inner_item>-po_status.
+        ENDTRY.
+        <ls_inner_item>-order_type    = <ls_additional>-order_type.
+        <ls_inner_item>-internal_log  = <ls_additional>-internal_log.
+        <ls_inner_item>-zzdevloc      = <ls_additional>-zzdevloc.
+        <ls_inner_item>-size = |{ <ls_additional>-zzsize } / { <ls_inner_item>-size } / { <ls_additional>-article_name }|.
+
+        lv_int += 1.
+
+        IF line_exists( lt_shas[ BillingDocumentItem = <ls_additional>-posnr ] ).
+          <ls_inner_item>-shas = lt_shas[ BillingDocumentItem = <ls_additional>-posnr ]-ConditionAmount.
+          cs_header-total_shas += <ls_inner_item>-shas.
+        ELSE.
+          CLEAR: <ls_inner_item>-shas.
+        ENDIF.
+
+        IF line_exists( lt_vasshas[ BillingDocumentItem = <ls_additional>-posnr ] ).
+          <ls_inner_item>-vasshas = lt_vasshas[ BillingDocumentItem = <ls_additional>-posnr ]-ConditionAmount.
+          cs_header-total_vasshas += <ls_inner_item>-vasshas.
+        ELSE.
+          CLEAR: <ls_inner_item>-vasshas.
+        ENDIF.
+
+        IF line_exists( lt_freight[ BillingDocumentItem = <ls_additional>-posnr ] ).
+          <ls_inner_item>-freight_m1 = lt_freight[ BillingDocumentItem = <ls_additional>-posnr ]-ConditionAmount.
+          cs_header-total_freight_m1 += <ls_inner_item>-freight_m1.
+        ELSE.
+          CLEAR: <ls_inner_item>-freight_m1.
+        ENDIF.
+
+        IF line_exists( lt_consolidated[ BillingDocumentItem = <ls_additional>-posnr ] ).
+          <ls_inner_item>-consolidated = lt_consolidated[ BillingDocumentItem = <ls_additional>-posnr ]-ConditionAmount.
+          cs_header-total_consolidated += <ls_inner_item>-consolidated.
+        ELSE.
+          CLEAR: <ls_inner_item>-consolidated.
+        ENDIF.
+
+        IF line_exists( lt_tax[ BillingDocumentItem = <ls_additional>-posnr ] ).
+          <ls_inner_item>-output_tax = lt_tax[ BillingDocumentItem = <ls_additional>-posnr ]-ConditionAmount.
+          cs_header-total_output_tax += <ls_inner_item>-output_tax.
+        ELSE.
+          CLEAR: <ls_inner_item>-output_tax.
+        ENDIF.
+      ENDLOOP.
+
+    ENDLOOP.
+
+    TRY.
+        GET BADI lo_badi FILTERS country_company = mv_country_company.
+        CALL BADI lo_badi->modify_items
+          CHANGING
+            ct_items = ct_items.
+      CATCH cx_badi_not_implemented.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.                                             "#EC CI_VALPAR
+
+
+  METHOD get_additional_last_page_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KURAPAND     | 30.10.2023 | 24568 - Feature - Customer invoice bul   *
+*              |            | DS4K963356                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 30.10.2023 | 27537 - Defect Insurance table for M 1.5 *
+*              |            | DS4K973439                               *
+*----------------------------------------------------------------------*
+* KURAPAND     | 29.02.2024 | 29454 - Invoice layout Sample inv GPS-M  *
+*              |            | DS4K981203                               *
+*----------------------------------------------------------------------*
+    TYPES: BEGIN OF ltyp_date,
+             date TYPE dats,
+             time TYPE tims,
+             timestamp TYPE fdt_timestamp,
+             offset_time TYPE fdt_utc_offset_time,
+             offset_sign TYPE tznutcsign,
+             type TYPE fdt_timepoint_type,
+           END OF ltyp_date.
+    TYPES: BEGIN OF ltyp_insurance_filter,
+             begda      TYPE ltyp_date,
+             bukrs      TYPE bukrs,
+             bu_partner TYPE bu_partner,
+           END OF ltyp_insurance_filter.
+
+    DATA: lv_type             TYPE i_bupaidentification-BPIdentificationType,
+          lv_insurance_perc   TYPE zsd_insurance,
+          ls_insurance_filter TYPE ltyp_insurance_filter.
+
+    TRY.
+        DATA(lt_fob_cond) = zcl_pe_hm_basic=>get_table( '2613' ).
+        DATA(lt_sam_cond) = zcl_pe_hm_basic=>get_table( '3173' ).
+        DATA(lt_freight_cond) = zcl_pe_hm_basic=>get_table( '2614' ).
+        DATA(lt_vat_rate_cond) = zcl_pe_hm_basic=>get_table( '3162' ).
+        DATA(lv_sales_org) = zcl_pe_hm_basic=>get_value( '3174' ).
+        DATA(ls_fob_cond) = lt_fob_cond[ 1 ].
+        DATA(ls_sam_cond) = lt_sam_cond[ 1 ].
+        DATA(ls_freight_cond) = lt_freight_cond[ 1 ].
+        DATA(ls_vat_rate_cond) = lt_vat_rate_cond[ 1 ].
+      CATCH zcx_pe_hm.
+        MESSAGE e001(zcl_invoice_helper) WITH '2613 3173' '2614' '3162' '3174'.
+    ENDTRY.
+
+*-- Paid VAT on these products
+    SELECT SINGLE TaxCode
+      FROM I_OperationalAcctgDocItem AS ibseg
+      WHERE BillingDocument = @cs_header-bill_number
+      INTO @DATA(lv_paid_vat).
+    IF sy-subrc = 0.
+      cs_header-paid_vat = lv_paid_vat.
+    ENDIF.
+
+*-- Total CIB
+    SELECT SINGLE TotalNetAmount
+      FROM I_BillingDocumentBasic AS ivbrk
+      WHERE ivbrk~BillingDocument = @cs_header-bill_number
+      INTO @DATA(lv_total_cib).
+    IF sy-subrc = 0.
+      cs_header-total_cib = lv_total_cib.
+    ENDIF.
+
+*-- Total FOB
+    IF ls_fob_cond IS NOT INITIAL.
+      SELECT SUM( ConditionAmount )
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_fob_cond-field1 AND
+              ConditionApplication  = @ls_fob_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO @cs_header-total_fob.
+      IF sy-subrc <> 0.
+        CLEAR: cs_header-total_fob.
+      ENDIF.
+    ENDIF.
+
+    IF cs_header-SalesOrganization = lv_sales_org AND
+      ls_sam_cond IS NOT INITIAL.
+      SELECT SUM( ConditionAmount )
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_sam_cond-field1 AND
+              ConditionApplication  = @ls_sam_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO @DATA(lv_zsam_amount).
+      IF sy-subrc = 0.
+        cs_header-total_fob += lv_zsam_amount.
+      ENDIF.
+    ENDIF.
+
+*-- Total Freight
+    IF ls_freight_cond IS NOT INITIAL.
+      SELECT SUM( ConditionAmount )
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_freight_cond-field1 AND
+              ConditionApplication  = @ls_freight_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO @cs_header-total_freight.
+      IF sy-subrc <> 0.
+        CLEAR: cs_header-total_freight.
+      ENDIF.
+    ENDIF.
+
+*-- Insurance
+    TRY.
+        lv_type = zcl_pe_hm_basic=>get_value( '2027' ).
+
+        SELECT SINGLE BusinessPartner
+          FROM i_bupaidentification
+          WHERE BPIdentificationType = @lv_type AND
+                BusinessPartner = @cs_header-cust_number
+          INTO @DATA(lv_bu_partner).
+        IF sy-subrc = 0 AND
+           lv_bu_partner IS NOT INITIAL.
+          ls_insurance_filter-begda-date = cs_header-invoice_date.
+          ls_insurance_filter-bukrs      = cs_header-company_code.
+          ls_insurance_filter-bu_partner = lv_bu_partner.
+
+          zcl_pe_hm_complex=>get_value( EXPORTING iv_id     = 'B7A9C1C0F4531EEE9FDB2FCDEE6480D5'
+                                                  is_filter = ls_insurance_filter
+                                        IMPORTING ev_value  = lv_insurance_perc ).
+          cs_header-insurance = ( cs_header-total_fob + cs_header-total_freight ) * lv_insurance_perc.
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR lv_insurance_perc.
+    ENDTRY.
+
+*-- VAT rate
+    IF ls_vat_rate_cond IS NOT INITIAL.
+      SELECT SUM( ConditionRateValue ) AS rate,
+             COUNT( * ) AS NumberOfRecords
+        FROM I_BillingDocItemPrcgElmntBasic AS prcd_elements
+        WHERE ConditionType         = @ls_vat_rate_cond-field1 AND
+              ConditionApplication  = @ls_vat_rate_cond-field2 AND
+              BillingDocument       = @cs_header-bill_number
+        INTO @DATA(ls_vat_rate).
+      IF sy-subrc = 0.
+        cs_header-vat_rate = ls_vat_rate-rate / ls_vat_rate-numberofrecords / 100.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.                                             "#EC CI_VALPAR
+
+
+  METHOD get_fiori_text.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KURAPAND     | 22.01.2024 | 27642 - Feature - Model 1 sample general *
+*              |            | DS4K974006                               *
+*----------------------------------------------------------------------*
+    TRY.
+        DATA(ls_text) = cl_somu_text=>get_instance( )->read( CONV #( iv_field_name ) ).
+        READ TABLE ls_text-language_full_tab WITH KEY language COMPONENTS language = sy-langu ASSIGNING FIELD-SYMBOL(<ls_text_language>).
+        IF sy-subrc IS INITIAL.
+          rv_text = <ls_text_language>-content.
+        ENDIF.
+      CATCH zcx_pe_hm .
+        RETURN.
+    ENDTRY.
+  ENDMETHOD.
+ENDCLASS.

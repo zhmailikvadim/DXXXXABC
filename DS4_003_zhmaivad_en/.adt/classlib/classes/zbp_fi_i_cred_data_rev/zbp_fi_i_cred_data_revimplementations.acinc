@@ -1,0 +1,297 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 24.10.2023 | 26060 Credit Data Review                 *
+*              |            | DS4K968034                               *
+************************************************************************
+
+CLASS lhc_cred_data_rev
+  DEFINITION
+    FINAL
+    INHERITING FROM cl_abap_behavior_handler.
+
+  PRIVATE SECTION.
+    TYPES: mtyp_t_failed   TYPE TABLE FOR FAILED zfi_i_cred_data_rev,
+           mtyp_t_reported TYPE TABLE FOR REPORTED zfi_i_cred_data_rev.
+
+    DATA: mv_cid       TYPE abp_behv_cid,
+          mv_case_guid TYPE sysuuid_c,
+          mv_partner   TYPE bu_partner,
+          mv_segment   TYPE ukm_credit_sgmnt,
+
+          mo_failed    TYPE REF TO mtyp_t_failed,
+          mo_reported  TYPE REF TO mtyp_t_reported.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING
+        keys   REQUEST requested_authorizations FOR cred_data_rev
+      RESULT
+        result ##NEEDED.
+
+    METHODS read FOR READ
+      IMPORTING
+        keys   FOR READ cred_data_rev
+      RESULT
+        result ##NEEDED.
+
+    METHODS lock FOR LOCK
+      IMPORTING
+        keys FOR LOCK cred_data_rev ##NEEDED.
+
+    METHODS update_bp_values FOR MODIFY
+      IMPORTING
+        keys FOR ACTION cred_data_rev~update_bp_values.
+
+    METHODS initialize_values
+      IMPORTING
+        iv_cid       TYPE abp_behv_cid
+        iv_case_guid TYPE sysuuid_c
+        io_failed    TYPE REF TO mtyp_t_failed
+        io_reported  TYPE REF TO mtyp_t_reported.
+
+    METHODS do_validations.
+    METHODS update_bp.
+    METHODS update_case.
+    METHODS set_case_failed.
+ENDCLASS.
+
+CLASS lsc_cred_data_rev
+  DEFINITION
+    FINAL
+    INHERITING FROM cl_abap_behavior_saver.
+
+  PROTECTED SECTION.
+    METHODS finalize REDEFINITION.
+    METHODS check_before_save REDEFINITION.
+    METHODS save REDEFINITION.
+    METHODS cleanup REDEFINITION.
+    METHODS cleanup_finalize REDEFINITION.
+ENDCLASS.
+
+CLASS lhc_cred_data_rev IMPLEMENTATION.
+  METHOD get_instance_authorizations.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD read.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD lock.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD update_bp_values ##NEEDED.
+    initialize_values(
+      iv_cid       = keys[ 1 ]-%cid
+      iv_case_guid = keys[ 1 ]-%param-case_guid
+      io_failed    = REF #( failed-cred_data_rev )
+      io_reported  = REF #( reported-cred_data_rev ) ).
+
+    do_validations( ).
+    IF mo_failed->* IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    update_bp( ).
+    IF mo_failed->* IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    update_case( ).
+  ENDMETHOD.
+
+  METHOD initialize_values.
+    mv_cid       = iv_cid.
+    mv_case_guid = iv_case_guid.
+    mo_failed    = io_failed.
+    mo_reported  = io_reported.
+
+    SELECT SINGLE fcr_partner, fcr_segment
+      FROM zfi_i_cred_data_rev
+      INTO (@mv_partner, @mv_segment)
+      WHERE case_guid = @mv_case_guid.
+
+    IF sy-subrc <> 0.
+      CLEAR: mv_partner,
+             mv_segment.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD do_validations.
+    DATA: lv_msgno   TYPE symsgno,
+          lv_message TYPE natxt.
+
+    IF mv_partner = space.
+      lv_msgno = '1'.
+      MESSAGE e001(zfi_credit_data_rev) INTO lv_message.
+    ELSEIF mv_segment = space.
+      lv_msgno = '2'.
+      MESSAGE e002(zfi_credit_data_rev) INTO lv_message.
+    ENDIF.
+
+    IF lv_message <> space.
+      set_case_failed( ).
+
+      INSERT VALUE #(
+        %cid      = mv_cid
+        case_guid = mv_case_guid
+        %msg      = new_message(
+                      id       = zbp_fi_i_cred_data_rev=>gc_msgid
+                      number   = lv_msgno
+                      severity = if_abap_behv_message=>severity-error ) ) INTO TABLE mo_reported->*.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD update_bp.
+    CALL FUNCTION 'ZFI_FM_UPDATE_BP'
+      EXPORTING
+        iv_partner             = mv_partner
+        iv_credit_segment      = mv_segment
+        iv_update_score        = 'X'
+        iv_update_credit_limit = 'X'
+      EXCEPTIONS
+        OTHERS                 = 1.
+
+    IF sy-subrc <> 0.
+      INSERT VALUE #(
+        %cid      = mv_cid
+        case_guid = mv_case_guid
+        %msg      = new_message(
+                      id       = sy-msgid
+                      number   = sy-msgno
+                      severity = if_abap_behv_message=>severity-error
+                      v1       = sy-msgv1
+                      v2       = sy-msgv2
+                      v3       = sy-msgv3
+                      v4       = sy-msgv4 ) ) INTO TABLE mo_reported->*.
+
+      set_case_failed( ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD update_case.
+    DATA lt_return TYPE bapiret2_t.
+
+    SELECT SINGLE
+      account~creditaccountresubmissiondate,
+      account~creditlimitcalculatedamount,
+      segment~creditsegmentcurrency,
+      rev~fcr_req_limit
+      FROM i_creditmanagementaccount AS account
+      LEFT OUTER JOIN i_creditmanagementsegment AS segment
+      ON segment~creditsegment = account~creditsegment
+      LEFT OUTER JOIN zfi_i_cred_data_rev AS rev
+      ON rev~case_guid = @mv_case_guid
+      INTO (@DATA(lv_follow_up_dt), @DATA(lv_cred_lim_calc),
+            @DATA(lv_currency),     @DATA(lv_req_limit))
+      WHERE account~businesspartner = @mv_partner
+      AND   account~creditsegment   = @mv_segment ##WARN_OK.
+
+    IF sy-subrc <> 0.
+      CLEAR lv_follow_up_dt.
+    ENDIF.
+
+    DATA(lt_case_attr) = VALUE bapiproptb_t(
+      ( name  = 'FCR_LIMIT_VALID_DATE'
+        value = lv_follow_up_dt )
+
+      ( name  = 'ZZ1_FOLLOW_UP_DT_CLC'
+        value = lv_follow_up_dt )
+
+      ( name  = 'ZZ1_CRED_LIM_CALC_CLC'
+        value = condense( CONV bapipropva( lv_cred_lim_calc ) ) )
+
+      ( name  = 'ZZ1_CRED_LIM_CALC_CLCC'
+        value = lv_currency ) ).
+
+    IF lv_req_limit IS INITIAL.
+      INSERT VALUE #(
+        name = 'FCR_REQ_LIMIT'
+        value = condense( CONV bapipropva( lv_cred_lim_calc ) ) ) INTO TABLE lt_case_attr.
+
+      INSERT VALUE #(
+        name = 'FCR_CURRENCY'
+        value = lv_currency ) INTO TABLE lt_case_attr.
+    ENDIF.
+
+    CALL FUNCTION 'BAPI_CASE_CHANGE'
+      EXPORTING
+        guid            = mv_case_guid
+      TABLES
+        return          = lt_return
+        case_attributes = lt_case_attr
+      EXCEPTIONS
+        OTHERS          = 1.
+
+    IF sy-subrc <> 0.
+      INSERT VALUE #(
+        type       = sy-msgty
+        id         = sy-msgid
+        number     = sy-msgno
+        message_v1 = sy-msgv1
+        message_v2 = sy-msgv2
+        message_v3 = sy-msgv3
+        message_v4 = sy-msgv4 ) INTO TABLE lt_return.
+    ENDIF.
+
+    IF lt_return IS INITIAL.
+      MESSAGE s003(zfi_credit_data_rev) INTO DATA(lv_message) ##NEEDED.
+
+      INSERT VALUE #(
+        %cid      = mv_cid
+        case_guid = mv_case_guid
+        %msg      = new_message(
+                      id       = zbp_fi_i_cred_data_rev=>gc_msgid
+                      number   = '3'
+                      severity = if_abap_behv_message=>severity-success ) ) INTO TABLE mo_reported->*.
+    ELSE.
+      set_case_failed( ).
+
+      LOOP AT lt_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+        INSERT VALUE #(
+          %cid      = mv_cid
+          case_guid = mv_case_guid
+          %msg      = new_message(
+                        id       = <ls_return>-id
+                        number   = <ls_return>-number
+                        severity = if_abap_behv_message=>severity-error
+                        v1       = <ls_return>-message_v1
+                        v2       = <ls_return>-message_v2
+                        v3       = <ls_return>-message_v3
+                        v4       = <ls_return>-message_v4 ) ) INTO TABLE mo_reported->*.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD set_case_failed.
+    INSERT VALUE #(
+      %cid      = mv_cid
+      case_guid = mv_case_guid ) INTO TABLE mo_failed->*.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lsc_cred_data_rev IMPLEMENTATION.
+  METHOD finalize.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD check_before_save.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD save.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD cleanup.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD cleanup_finalize.
+    RETURN.
+  ENDMETHOD.
+ENDCLASS.

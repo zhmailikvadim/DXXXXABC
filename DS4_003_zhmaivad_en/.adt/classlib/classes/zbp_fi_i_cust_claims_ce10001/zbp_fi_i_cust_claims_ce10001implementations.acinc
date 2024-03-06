@@ -1,0 +1,629 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 12.12.2022 | 15737: FI_Build Fiori App to post CoS    *
+*              |            | for Customer Claims                      *
+*              |            | DS4K936993                               *
+*----------------------------------------------------------------------*
+
+CLASS lhc_customerclaims DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  PRIVATE SECTION.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION ##NEEDED
+      IMPORTING keys REQUEST requested_authorizations FOR customerclaims RESULT result.
+
+    METHODS post FOR MODIFY
+      IMPORTING keys FOR ACTION customerclaims~post RESULT result.
+
+    METHODS simulate FOR MODIFY
+      IMPORTING keys FOR ACTION customerclaims~simulate RESULT result.
+
+    METHODS create_appl_log
+      IMPORTING
+        iv_subobject TYPE balsubobj
+        it_return    TYPE bapiret2_t
+      EXPORTING
+        ev_lognumber TYPE balognr.
+
+    METHODS get_correction_doc_num
+      IMPORTING
+        is_head                TYPE bapiache09
+        iv_ref_key             TYPE awkey
+      RETURNING
+        VALUE(rv_corr_doc_num) TYPE belnr_d.
+
+ENDCLASS.
+
+CLASS lhc_customerclaims IMPLEMENTATION.
+
+  METHOD get_instance_authorizations.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 12.12.2022 | 15737: FI_Build Fiori App to post CoS    *
+*              |            | for Customer Claims                      *
+*              |            | DS4K936993                               *
+*----------------------------------------------------------------------*
+    RETURN.
+  ENDMETHOD.
+
+  METHOD post.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 12.12.2022 | 15737: FI_Build Fiori App to post CoS    *
+*              |            | for Customer Claims                      *
+*              |            | DS4K936993                               *
+*----------------------------------------------------------------------*
+
+    DATA:
+      ls_head            TYPE bapiache09,
+      lt_acc_gl          TYPE STANDARD TABLE OF bapiacgl09,
+      lt_amnt            TYPE STANDARD TABLE OF bapiaccr09,
+      lt_copa            TYPE STANDARD TABLE OF bapiackec9,
+      lt_extension2      TYPE bapiparex_t,
+      lt_return          TYPE bapiret2_t,
+      lt_return_add      TYPE bapiret2_t,
+      lt_recipient       TYPE /iwngw/if_notif_provider=>ty_t_notification_recipient,
+      ls_ce10001         TYPE zfi_i_cust_claims_ce10001,
+      lv_to_post         TYPE abap_bool,
+      lv_message         TYPE zfi_i_cust_claims_ce10001-errormessage,
+      lv_errormessage    TYPE zfi_i_cust_claims_ce10001-errormessage,
+      lv_successmessage  TYPE zfi_i_cust_claims_ce10001-errormessage,
+      lv_no_adj_req_mess TYPE zfi_i_cust_claims_ce10001-errormessage ##NEEDED.
+
+    lv_errormessage   = TEXT-002.
+    lv_successmessage = TEXT-003.
+
+    READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+      ENTITY customerclaims
+        ALL FIELDS WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_result).
+
+    IF lt_result IS NOT INITIAL.
+
+      DATA(lo_pst_data_builder) = zcl_fi_cc_pst_data_builder=>get_instance( ).
+
+      LOOP AT lt_result ASSIGNING FIELD-SYMBOL(<ls_entry>)
+        WHERE status = zcl_fi_cc_pst_data_builder=>mc_status_new OR
+              status = zcl_fi_cc_pst_data_builder=>mc_status_error OR
+              status = zcl_fi_cc_pst_data_builder=>mc_status_posting_started.
+
+        ls_ce10001 = CORRESPONDING #( <ls_entry> ).
+
+        TRY.
+
+            lo_pst_data_builder->build_header(
+              EXPORTING
+                is_ce10001 = ls_ce10001
+              IMPORTING
+                es_head    = ls_head ).
+
+            lo_pst_data_builder->build_items(
+              EXPORTING
+                is_ce10001    = ls_ce10001
+              IMPORTING
+                ev_to_post    = lv_to_post
+                et_acc_gl     = lt_acc_gl
+                et_amnt       = lt_amnt
+                et_copa       = lt_copa
+                et_extension2 = lt_extension2 ).
+
+          CATCH BEFORE UNWIND cx_udm_message INTO DATA(lo_udm_message).
+            CALL FUNCTION 'RS_EXCEPTION_TO_BAPIRET2'
+              EXPORTING
+                i_r_exception = lo_udm_message
+              CHANGING
+                c_t_bapiret2  = lt_return_add.
+            IF lo_udm_message->is_resumable = abap_true.
+              RESUME.
+            ENDIF.
+        ENDTRY.
+
+        IF line_exists( lt_return_add[ type = 'E' ] ).
+
+          create_appl_log(
+            EXPORTING
+              iv_subobject = zcl_fi_cust_claims_notif=>gc_subobject_post
+              it_return    = lt_return_add
+            IMPORTING
+              ev_lognumber = DATA(lv_lognumber) ).
+
+          lv_message = |{ lv_errormessage } { lv_lognumber }|.
+
+          MODIFY ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            UPDATE FIELDS ( processingdate errormessage status )
+            WITH VALUE #( ( %tky-currencytype = <ls_entry>-currencytype
+                            %tky-recordtype   = <ls_entry>-recordtype
+                            %tky-planversion  = <ls_entry>-planversion
+                            %tky-periodyear   = <ls_entry>-periodyear
+                            %tky-profsegmnum  = <ls_entry>-profsegmnum
+                            %tky-profsegmchan = <ls_entry>-profsegmchan
+                            %tky-docnum       = <ls_entry>-docnum
+                            %tky-itemnum      = <ls_entry>-itemnum
+                            processingdate    = sy-datum
+                            errormessage      = lv_message
+                            status            = zcl_fi_cc_pst_data_builder=>mc_status_error ) )
+            FAILED DATA(ls_failed_u)
+            REPORTED DATA(ls_reported_u).
+
+          " Read changed data for action result
+          READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            ALL FIELDS WITH CORRESPONDING #( keys )
+            RESULT DATA(lt_result_u).
+
+          result = VALUE #( FOR ls_result_u IN lt_result_u ( %tky   = ls_result_u-%tky
+                                                             %param = ls_result_u ) ).
+
+          CLEAR:
+            lv_lognumber,
+            lt_return_add.
+
+          CONTINUE.
+
+        ENDIF.
+
+        IF lv_to_post = abap_false.
+
+          MESSAGE s017(zfi_post_cos_cc) INTO lv_no_adj_req_mess.
+          lt_return = VALUE #( BASE lt_return ( type = sy-msgty id = sy-msgid number = sy-msgno ) ).
+
+          APPEND LINES OF lt_return_add TO lt_return.
+
+          create_appl_log(
+            EXPORTING
+              iv_subobject = zcl_fi_cust_claims_notif=>gc_subobject_post
+              it_return    = lt_return
+            IMPORTING
+              ev_lognumber = lv_lognumber ).
+
+          lv_message = |{ TEXT-004 } { lv_lognumber }|.
+
+          MODIFY ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            UPDATE FIELDS ( correctiondocnum processingdate errormessage status )
+            WITH VALUE #( ( %tky-currencytype = <ls_entry>-currencytype
+                            %tky-recordtype   = <ls_entry>-recordtype
+                            %tky-planversion  = <ls_entry>-planversion
+                            %tky-periodyear   = <ls_entry>-periodyear
+                            %tky-profsegmnum  = <ls_entry>-profsegmnum
+                            %tky-profsegmchan = <ls_entry>-profsegmchan
+                            %tky-docnum       = <ls_entry>-docnum
+                            %tky-itemnum      = <ls_entry>-itemnum
+                            correctiondocnum  = TEXT-005
+                            processingdate    = sy-datum
+                            errormessage      = lv_message
+                            status            = zcl_fi_cc_pst_data_builder=>mc_status_success ) )
+            FAILED ls_failed_u
+            REPORTED ls_reported_u.
+
+          " Read changed data for action result
+          READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            ALL FIELDS WITH CORRESPONDING #( keys )
+            RESULT lt_result_u.
+
+          result = VALUE #( FOR ls_result_u IN lt_result_u ( %tky   = ls_result_u-%tky
+                                                             %param = ls_result_u ) ).
+
+          CLEAR:
+            lv_lognumber,
+            lt_return,
+            lt_return_add.
+
+          CONTINUE.
+
+        ENDIF.
+
+
+        CALL FUNCTION 'ZFI_FM_CC_DOCUMENT_POST' DESTINATION 'NONE'
+          EXPORTING
+            is_documentheader     = ls_head
+            it_accountgl          = lt_acc_gl
+            it_currencyamount     = lt_amnt
+            it_criteria           = lt_copa
+            it_extension2         = lt_extension2
+          TABLES
+            et_return             = lt_return
+          EXCEPTIONS
+            communication_failure = 1
+            system_failure        = 2 ##ENH_OK.
+
+        IF sy-subrc <> 0.
+
+          " It shouldn't happen...
+          " Set status "Posting started" if there are any communication errors
+          MODIFY ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            UPDATE FIELDS ( processingdate errormessage status )
+            WITH VALUE #( ( %tky-currencytype = <ls_entry>-currencytype
+                            %tky-recordtype   = <ls_entry>-recordtype
+                            %tky-planversion  = <ls_entry>-planversion
+                            %tky-periodyear   = <ls_entry>-periodyear
+                            %tky-profsegmnum  = <ls_entry>-profsegmnum
+                            %tky-profsegmchan = <ls_entry>-profsegmchan
+                            %tky-docnum       = <ls_entry>-docnum
+                            %tky-itemnum      = <ls_entry>-itemnum
+                            processingdate    = sy-datum
+                            errormessage      = TEXT-001
+                            status            = zcl_fi_cc_pst_data_builder=>mc_status_posting_started ) )
+            FAILED ls_failed_u
+            REPORTED ls_reported_u.
+
+          " Read changed data for action result
+          READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            ALL FIELDS WITH CORRESPONDING #( keys )
+            RESULT lt_result_u.
+
+          result = VALUE #( FOR ls_result_u IN lt_result_u ( %tky   = ls_result_u-%tky
+                                                             %param = ls_result_u ) ).
+          CLEAR:
+            lt_return,
+            lt_return_add.
+
+          CONTINUE.
+
+        ENDIF.
+
+        APPEND LINES OF lt_return_add TO lt_return.
+
+        IF line_exists( lt_return[ type = 'E' ] ).
+
+          create_appl_log(
+            EXPORTING
+              iv_subobject = zcl_fi_cust_claims_notif=>gc_subobject_post
+              it_return    = lt_return
+            IMPORTING
+              ev_lognumber = lv_lognumber ).
+
+          lv_message = |{ lv_errormessage } { lv_lognumber }|.
+
+          MODIFY ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            UPDATE FIELDS ( processingdate errormessage status )
+            WITH VALUE #( ( %tky-currencytype = <ls_entry>-currencytype
+                            %tky-recordtype   = <ls_entry>-recordtype
+                            %tky-planversion  = <ls_entry>-planversion
+                            %tky-periodyear   = <ls_entry>-periodyear
+                            %tky-profsegmnum  = <ls_entry>-profsegmnum
+                            %tky-profsegmchan = <ls_entry>-profsegmchan
+                            %tky-docnum       = <ls_entry>-docnum
+                            %tky-itemnum      = <ls_entry>-itemnum
+                            processingdate    = sy-datum
+                            errormessage      = lv_message
+                            status            = zcl_fi_cc_pst_data_builder=>mc_status_error ) )
+            FAILED ls_failed_u
+            REPORTED ls_reported_u.
+
+          " Read changed data for action result
+          READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            ALL FIELDS WITH CORRESPONDING #( keys )
+            RESULT lt_result_u.
+
+          result = VALUE #( FOR ls_result_u IN lt_result_u ( %tky   = ls_result_u-%tky
+                                                             %param = ls_result_u ) ).
+
+        ELSEIF line_exists( lt_return[ type = 'S' id = 'RW' number = '605' ] ).
+
+          create_appl_log(
+            EXPORTING
+              iv_subobject = zcl_fi_cust_claims_notif=>gc_subobject_post
+              it_return    = lt_return
+            IMPORTING
+              ev_lognumber = lv_lognumber ).
+
+          lv_message = |{ lv_successmessage } { lv_lognumber }|.
+
+          DATA(lv_reference_key) = VALUE #( lt_return[ type = 'S' id = 'RW' number = '605' ]-message_v2 OPTIONAL ).
+          DATA(lv_correction_doc_num) = get_correction_doc_num( is_head    = ls_head
+                                                                iv_ref_key = CONV #( lv_reference_key ) ).
+
+          MODIFY ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            UPDATE FIELDS ( correctiondocnum processingdate errormessage status )
+            WITH VALUE #( ( %tky-currencytype = <ls_entry>-currencytype
+                            %tky-recordtype   = <ls_entry>-recordtype
+                            %tky-planversion  = <ls_entry>-planversion
+                            %tky-periodyear   = <ls_entry>-periodyear
+                            %tky-profsegmnum  = <ls_entry>-profsegmnum
+                            %tky-profsegmchan = <ls_entry>-profsegmchan
+                            %tky-docnum       = <ls_entry>-docnum
+                            %tky-itemnum      = <ls_entry>-itemnum
+                            correctiondocnum  = lv_correction_doc_num
+                            processingdate    = sy-datum
+                            errormessage      = lv_message
+                            status            = zcl_fi_cc_pst_data_builder=>mc_status_success ) )
+            FAILED ls_failed_u
+            REPORTED ls_reported_u.
+
+          " Read changed data for action result
+          READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            ALL FIELDS WITH CORRESPONDING #( keys )
+            RESULT lt_result_u.
+
+          result = VALUE #( FOR ls_result_u IN lt_result_u ( %tky   = ls_result_u-%tky
+                                                             %param = ls_result_u ) ).
+
+        ENDIF.
+
+        CLEAR:
+          lt_return,
+          lt_return_add,
+          lt_extension2,
+          lv_correction_doc_num,
+          lv_message.
+
+      ENDLOOP.
+
+      IF sy-subrc = 0.
+        APPEND VALUE #( id = sy-uname ) TO lt_recipient.
+
+        zcl_fi_cust_claims_notif=>send_notification(
+          iv_subobject  = zcl_fi_cust_claims_notif=>gc_subobject_post
+          it_recipient  = lt_recipient ).
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD simulate.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 12.12.2022 | 15737: FI_Build Fiori App to post CoS    *
+*              |            | for Customer Claims                      *
+*              |            | DS4K936993                               *
+*----------------------------------------------------------------------*
+
+    DATA:
+      ls_head            TYPE bapiache09,
+      ls_ce10001         TYPE zfi_i_cust_claims_ce10001,
+      lt_acc_gl          TYPE STANDARD TABLE OF bapiacgl09,
+      lt_amnt            TYPE STANDARD TABLE OF bapiaccr09,
+      lt_copa            TYPE STANDARD TABLE OF bapiackec9,
+      lt_extension2      TYPE bapiparex_t,
+      lt_return          TYPE bapiret2_t,
+      lt_return_add      TYPE bapiret2_t,
+      lv_lognumber       TYPE balognr ##NEEDED,
+      lt_recipient       TYPE /iwngw/if_notif_provider=>ty_t_notification_recipient,
+      lv_to_post         TYPE abap_bool,
+      lv_message         TYPE zfi_i_cust_claims_ce10001-errormessage,
+      lv_no_adj_req_mess TYPE zfi_i_cust_claims_ce10001-errormessage ##NEEDED,
+      lv_errormessage    TYPE zfi_i_cust_claims_ce10001-errormessage,
+      lv_successmessage  TYPE zfi_i_cust_claims_ce10001-errormessage.
+
+    lv_errormessage   = TEXT-002.
+    lv_successmessage = TEXT-003.
+
+    READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+      ENTITY customerclaims
+      ALL FIELDS WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_result).
+
+    IF lt_result IS NOT INITIAL.
+
+      DATA(lo_pst_data_builder) = zcl_fi_cc_pst_data_builder=>get_instance( ).
+
+      LOOP AT lt_result ASSIGNING FIELD-SYMBOL(<ls_entry>)
+        WHERE status = zcl_fi_cc_pst_data_builder=>mc_status_new OR
+              status = zcl_fi_cc_pst_data_builder=>mc_status_error OR
+              status = zcl_fi_cc_pst_data_builder=>mc_status_posting_started.
+        TRY.
+
+            ls_ce10001 = CORRESPONDING #( <ls_entry> ).
+
+            lo_pst_data_builder->build_header(
+              EXPORTING
+                is_ce10001 = ls_ce10001
+              IMPORTING
+                es_head    = ls_head ).
+
+            lo_pst_data_builder->build_items(
+              EXPORTING
+                is_ce10001    = ls_ce10001
+              IMPORTING
+                ev_to_post    = lv_to_post
+                et_acc_gl     = lt_acc_gl
+                et_amnt       = lt_amnt
+                et_copa       = lt_copa
+                et_extension2 = lt_extension2 ).
+
+          CATCH BEFORE UNWIND cx_udm_message INTO DATA(lo_udm_message).
+            CALL FUNCTION 'RS_EXCEPTION_TO_BAPIRET2'
+              EXPORTING
+                i_r_exception = lo_udm_message
+              CHANGING
+                c_t_bapiret2  = lt_return_add.
+
+            IF lo_udm_message->is_resumable = abap_true.
+              RESUME.
+            ENDIF.
+        ENDTRY.
+
+        IF lv_to_post = abap_false AND NOT line_exists( lt_return_add[ type = 'E' ] ).
+
+          APPEND LINES OF lt_return_add TO lt_return.
+
+          MESSAGE s017(zfi_post_cos_cc) INTO lv_no_adj_req_mess.
+          lt_return = VALUE #( BASE lt_return ( type = sy-msgty id = sy-msgid number = sy-msgno ) ).
+
+          create_appl_log(
+            EXPORTING
+              iv_subobject = zcl_fi_cust_claims_notif=>gc_subobject_sim
+              it_return    = lt_return
+            IMPORTING
+              ev_lognumber = lv_lognumber ).
+
+          lv_message = |{ TEXT-004 } { lv_lognumber }|.
+
+        ELSE.
+
+          CALL FUNCTION 'BAPI_ACC_DOCUMENT_CHECK'
+            EXPORTING
+              documentheader = ls_head
+            TABLES
+              accountgl      = lt_acc_gl
+              currencyamount = lt_amnt
+              criteria       = lt_copa
+              return         = lt_return
+              extension2     = lt_extension2.
+
+          APPEND LINES OF lt_return_add TO lt_return.
+
+          create_appl_log(
+            EXPORTING
+              iv_subobject = zcl_fi_cust_claims_notif=>gc_subobject_sim
+              it_return    = lt_return
+            IMPORTING
+              ev_lognumber = lv_lognumber ).
+
+          IF line_exists( lt_return[ type = 'E' ] ).
+            lv_message = |{ lv_errormessage } { lv_lognumber }|.
+          ELSE.
+            lv_message = |{ lv_successmessage } { lv_lognumber }|.
+          ENDIF.
+
+        ENDIF.
+
+        MODIFY ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+            ENTITY customerclaims
+            UPDATE FIELDS ( processingdate errormessage )
+            WITH VALUE #( ( %tky-currencytype = <ls_entry>-currencytype
+                            %tky-recordtype   = <ls_entry>-recordtype
+                            %tky-planversion  = <ls_entry>-planversion
+                            %tky-periodyear   = <ls_entry>-periodyear
+                            %tky-profsegmnum  = <ls_entry>-profsegmnum
+                            %tky-profsegmchan = <ls_entry>-profsegmchan
+                            %tky-docnum       = <ls_entry>-docnum
+                            %tky-itemnum      = <ls_entry>-itemnum
+                            processingdate    = sy-datum
+                            errormessage      = lv_message ) )
+         FAILED DATA(ls_failed_u)
+         REPORTED DATA(ls_reported_u).
+
+        " Read changed data for action result
+        READ ENTITIES OF zfi_i_cust_claims_ce10001 IN LOCAL MODE
+          ENTITY customerclaims
+          ALL FIELDS WITH CORRESPONDING #( keys )
+          RESULT DATA(lt_result_u).
+
+        result = VALUE #( FOR ls_result_u IN lt_result_u ( %tky   = ls_result_u-%tky
+                                                           %param = ls_result_u ) ).
+
+        CLEAR:
+          lv_lognumber,
+          lt_return,
+          lt_return_add.
+
+      ENDLOOP.
+
+      IF sy-subrc = 0.
+        APPEND VALUE #( id = sy-uname ) TO lt_recipient.
+
+        zcl_fi_cust_claims_notif=>send_notification(
+          iv_subobject  = zcl_fi_cust_claims_notif=>gc_subobject_sim
+          it_recipient  = lt_recipient ).
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD get_correction_doc_num.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 12.12.2022 | 15737: FI_Build Fiori App to post CoS    *
+*              |            | for Customer Claims                      *
+*              |            | DS4K936993                               *
+*----------------------------------------------------------------------*
+
+    CLEAR: rv_corr_doc_num.
+
+    SELECT belnr UP TO 1 ROWS                        "#EC CI_SEL_NESTED
+      FROM bkpf
+      INTO @rv_corr_doc_num
+      WHERE bukrs = @is_head-comp_code AND
+            awkey = @iv_ref_key
+      ORDER BY bukrs.
+    ENDSELECT.                                            "#EC CI_SUBRC
+
+  ENDMETHOD.
+
+  METHOD create_appl_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* PISHCALI     | 12.12.2022 | 15737: FI_Build Fiori App to post CoS    *
+*              |            | for Customer Claims                      *
+*              |            | DS4K936993                               *
+*----------------------------------------------------------------------*
+
+    DATA: lt_return      TYPE bapiret2_t,
+          lts_log_handle TYPE bal_t_logh.
+
+    CLEAR: ev_lognumber.
+
+    lt_return = it_return.
+
+    SORT lt_return ASCENDING BY message_v1 message_v2
+                                message_v3 message_v4.
+
+    DELETE ADJACENT DUPLICATES FROM lt_return
+      COMPARING message_v1 message_v2 message_v3 message_v4.
+
+    TRY.
+        " Create a new Application Log
+        DATA(lif_log) = cl_bali_log=>create( ).
+        " Add a header to the log
+        lif_log->set_header( header = cl_bali_header_setter=>create( object    = zcl_fi_cust_claims_notif=>gc_logobject
+                                                                    subobject = iv_subobject ) ).
+        LOOP AT lt_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+          lif_log->add_item( item = cl_bali_message_setter=>create_from_bapiret2( <ls_return> ) ).
+        ENDLOOP.
+
+        cl_bali_log_db=>get_instance( )->save_log( log = lif_log ).
+
+        DATA(lv_log_handle) = lif_log->get_handle( ).
+        INSERT lv_log_handle INTO TABLE lts_log_handle.
+
+        cl_bal_db_search=>get_header_by_key(
+          EXPORTING
+            i_client      = sy-mandt
+            it_log_handle = lts_log_handle
+          IMPORTING
+            et_log_header = DATA(lts_log_header) ).
+
+        ev_lognumber = VALUE #( lts_log_header[ 1 ]-lognumber OPTIONAL ).
+
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+ENDCLASS.

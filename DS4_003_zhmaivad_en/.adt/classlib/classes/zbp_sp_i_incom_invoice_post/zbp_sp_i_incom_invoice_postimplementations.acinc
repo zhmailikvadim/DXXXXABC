@@ -1,0 +1,197 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHRYSAND     | 13.10.2023 | 19842     : [Build] - Z_MOCO report for  *
+*              |            | DS4K949311                               *
+*----------------------------------------------------------------------*
+CLASS lhc_zsp_i_incom_invoice_post DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  PRIVATE SECTION.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING it_keys REQUEST requested_authorizations FOR invoiceposting RESULT ct_result ##NEEDED.
+    METHODS post_clearance FOR MODIFY
+      IMPORTING it_keys FOR ACTION invoiceposting~post_clearance RESULT ct_result.
+    METHODS get_messages FOR READ
+      IMPORTING it_keys FOR FUNCTION invoiceposting~get_messages RESULT result.
+
+ENDCLASS.
+
+CLASS lhc_zsp_i_incom_invoice_post IMPLEMENTATION.
+
+  METHOD post_clearance.
+    DATA: lt_message        TYPE bal_t_msg,
+          lt_input_data     TYPE zsp_tt_buy_com_posting,
+          lv_miro_cond_type TYPE kschl.
+
+    READ ENTITIES OF zsp_i_incom_invoice_post IN LOCAL MODE
+    ENTITY invoiceposting
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_document).
+
+    lt_input_data = CORRESPONDING #( lt_document ).
+
+    TRY.
+        lv_miro_cond_type = zcl_pe_hm_basic=>get_value( iv_id = '2450' iv_sequence = 1 ).
+      CATCH zcx_pe_hm.
+        lv_miro_cond_type = ''.
+    ENDTRY.
+
+    SELECT FROM r_purchasingdocument AS po
+    JOIN        @lt_document         AS inv  ON po~purchasingdocument = inv~purchaseorder
+    FIELDS inv~purchaseorder,
+           inv~purchaseorderitem,
+           po~pricingdocument
+    INTO TABLE @DATA(lt_knumv).
+
+    IF sy-subrc = 0.
+      SELECT FROM @lt_knumv      AS kn
+             JOIN i_pricingelement WITH PRIVILEGED ACCESS AS prcd
+             ON   kn~pricingdocument                  = prcd~pricingdocument AND
+                  concat( '0', kn~purchaseorderitem ) = prcd~pricingdocumentitem AND
+                  prcd~conditiontype                  = @lv_miro_cond_type
+             FIELDS kn~purchaseorder,
+                    kn~purchaseorderitem,
+                    prcd~pricingprocedurestep,
+                    prcd~pricingprocedurecounter,
+                    prcd~conditiontype
+      INTO TABLE @DATA(lt_pricing).
+    ENDIF.
+
+    IF sy-subrc = 0.
+      LOOP AT lt_input_data ASSIGNING FIELD-SYMBOL(<ls_input_data>).
+        READ TABLE lt_pricing ASSIGNING FIELD-SYMBOL(<ls_pricing>) WITH KEY purchaseorder     = <ls_input_data>-purchaseorder
+                                                                            purchaseorderitem = <ls_input_data>-purchaseorderitem. "#EC CI_STDSEQ
+        IF sy-subrc = 0.
+          <ls_input_data>-stepnumber = <ls_pricing>-pricingprocedurestep.
+          <ls_input_data>-condcounter = <ls_pricing>-pricingprocedurecounter.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    LOOP AT lt_document ASSIGNING FIELD-SYMBOL(<ls_document>).
+      lt_message = VALUE #( ( msgid = zcl_sp_buying_commission=>gc_log_constant-mess_class
+                              msgno = zcl_sp_buying_commission=>gc_log_constant-mess_start_post_proc
+                              msgty = if_cwd_constants=>c_message_info ) ).
+
+      TRY.
+          DATA(lo_log) = NEW zcl_sd_create_ball_log( iv_extnumber = CONV #( <ls_document>-docuuid )
+                                                     iv_object    = zcl_sp_buying_commission=>gc_log_constant-object
+                                                     iv_subobject = zcl_sp_buying_commission=>gc_log_constant-subobject_post ).
+          lo_log->add_item_log( lt_message ).
+          lo_log->save_log( ).
+        CATCH zcx_sd_ball_log.
+          CONTINUE.
+      ENDTRY.
+
+      <ls_document>-status = zcl_sp_buying_commission=>gc_process_constant-proc_status_p.
+      <ls_document>-changedon = sy-datum.
+      <ls_document>-changedat = sy-uzeit.
+      <ls_document>-changedby = sy-uname.
+    ENDLOOP.
+
+    APPEND VALUE #( %msg = NEW zcx_sp_buying_commissiom( severity = if_abap_behv_message=>severity-information
+                                                         textid   = zcx_sp_buying_commissiom=>simulation_start_ui ) )
+    TO reported-invoiceposting.
+
+    MODIFY ENTITIES OF zsp_i_incom_invoice_post IN LOCAL MODE
+    ENTITY invoiceposting
+    UPDATE
+    FIELDS ( status changedon changedat changedby )
+    WITH CORRESPONDING #( lt_document )
+    FAILED DATA(ls_failed)
+    REPORTED DATA(ls_reported).
+
+    READ ENTITIES OF zsp_i_incom_invoice_post IN LOCAL MODE
+    ENTITY invoiceposting
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_document_upd).
+
+    ct_result = VALUE #( FOR ls_document_upd IN lt_document_upd ( %key   = ls_document_upd-%key
+                                                                  %param = ls_document_upd ) ).
+
+    CALL FUNCTION 'ZSP_FM_BUY_COMM_PROCESS'
+      STARTING NEW TASK 'UPDATE'
+      EXPORTING
+        it_posting_data       = lt_input_data
+        iv_process_type       = zcl_sp_buying_commission=>gc_process_constant-posting
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2 ##FM_SUBRC_OK. "#EC CI_SUBRC
+
+  ENDMETHOD.
+
+  METHOD get_instance_authorizations ##NEEDED.
+  ENDMETHOD.
+
+  METHOD get_messages.
+
+    TYPES: BEGIN OF ltyp_s_check_msg ,
+             type    TYPE symsgty,
+             message TYPE string,
+           END OF ltyp_s_check_msg .
+    DATA: lt_check_mess TYPE TABLE OF ltyp_s_check_msg.
+
+
+    TRY.
+        DATA(ls_key) = it_keys[ 1 ].
+      CATCH cx_sy_itab_line_not_found.
+        RETURN.
+    ENDTRY.
+
+    DATA: lr_ext_num TYPE RANGE OF balhdr-extnumber.
+
+    lr_ext_num = VALUE #( ( sign = 'I' option = 'EQ' low = |{ ls_key-%param-doc_uuid }| ) ).
+
+
+    " Find the most recent log
+    SELECT log_handle
+      FROM balhdr
+     WHERE object     = @zcl_sp_buying_commission=>gc_log_constant-object
+       AND subobject  = @zcl_sp_buying_commission=>gc_log_constant-subobject_post
+       AND extnumber  IN @lr_ext_num
+       AND msg_cnt_al > 0 " non empty logs only
+     ORDER BY aldate DESCENDING, altime DESCENDING, tim_stmp DESCENDING
+      INTO TABLE @DATA(lt_logs)
+     UP TO 10 ROWS.
+
+    IF sy-subrc = 0.
+      LOOP AT lt_logs ASSIGNING FIELD-SYMBOL(<ls_log>).
+        TRY.
+            DATA(lif_app_log) = cl_bali_log_db=>get_instance( )->load_log( handle = <ls_log>-log_handle ).
+
+            DATA(lts_log_items) = lif_app_log->get_all_items( ).
+          CATCH cx_bali_runtime.
+            CONTINUE.
+        ENDTRY.
+
+        LOOP AT lts_log_items ASSIGNING FIELD-SYMBOL(<ls_log_item>). "#EC CI_NESTED
+          DATA(lo_log_message) = CAST cl_bali_message_getter( <ls_log_item>-item ).
+
+          TRY.
+              DATA(lv_message) = lo_log_message->get_message_text( ).
+              APPEND INITIAL LINE TO lt_check_mess ASSIGNING FIELD-SYMBOL(<ls_check_mess>).
+              <ls_check_mess>-type    = lo_log_message->severity.
+              <ls_check_mess>-message = lv_message.
+            CATCH cx_bali_runtime.
+              CONTINUE.
+          ENDTRY.
+        ENDLOOP.
+
+        CLEAR: lts_log_items.
+      ENDLOOP.
+    ELSE.
+      APPEND INITIAL LINE TO lt_check_mess ASSIGNING <ls_check_mess>.
+      <ls_check_mess>-type    = if_cwd_constants=>c_message_info.
+      <ls_check_mess>-message = TEXT-001.
+    ENDIF.
+
+
+    INSERT VALUE #( %cid            = ls_key-%cid
+                    %param-doc_uuid    = ls_key-%param-doc_uuid
+                    %param-messages = /ui2/cl_json=>serialize( lt_check_mess ) ) INTO TABLE result.
+  ENDMETHOD.
+
+ENDCLASS.

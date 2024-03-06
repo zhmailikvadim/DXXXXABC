@@ -1,0 +1,657 @@
+    CLASS cl_pst_variable DEFINITION PUBLIC FINAL CREATE PRIVATE.
+
+      PUBLIC SECTION.
+
+        TYPES: tab TYPE STANDARD TABLE OF REF TO cl_pst_variable WITH DEFAULT KEY.
+
+        DATA:
+
+          name TYPE string READ-ONLY,
+          kind TYPE REF TO ce_pst_kind READ-ONLY,
+          node TYPE REF TO cl_pst_node READ-ONLY.
+
+        CLASS-METHODS:
+
+          create
+            IMPORTING
+              i_node          TYPE REF TO cl_pst_node
+            RETURNING
+              VALUE(r_result) TYPE REF TO cl_pst_variable.
+
+        "! Generate the code for a explicit type definition based on the type of this variable.
+        "!
+        "! @parameter i_helper_type | name for the helper type
+        "! @parameter i_flg_line_type | create line type only in case of a table type e.g: to declare a variable with type table of addition
+        "! @parameter r_result | region which contains the type defenition code
+        METHODS get_type_def
+          IMPORTING
+            i_helper_type   TYPE string
+            i_flg_line_type TYPE abap_bool DEFAULT abap_false
+          RETURNING
+            VALUE(r_result) TYPE REF TO cl_pst_region.
+
+        METHODS get_corresponding_type_info
+          RETURNING VALUE(r_result) TYPE REF TO cl_art_type_info.
+
+        METHODS is_useable_as_parameter_type
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS is_defined_with_like
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS is_defined_with_type
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS propose_name_for_type
+          RETURNING VALUE(r_name_proposal) TYPE string.
+
+        METHODS get_referenced_data_object
+          RETURNING
+            VALUE(r_result) TYPE REF TO cl_pst_node.
+
+        METHODS get_type_operator
+          RETURNING
+            VALUE(r_result) TYPE string.
+
+        METHODS get_referenced_type
+          RETURNING
+            VALUE(r_result) TYPE string.
+
+        METHODS is_declared_inline
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS is_parameter
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS is_promotable
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS is_structured
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        "! Returns true, if the variable is a local variable or a parameter.
+        METHODS has_local_scope
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS get_declaration_fragment
+          RETURNING VALUE(r_result) TYPE string.
+
+        METHODS helper_type_needed4declaration
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+        METHODS helper_type_needed4parameter
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+      PROTECTED SECTION.
+
+      PRIVATE SECTION.
+
+        DATA: type_reference   TYPE REF TO cl_pst_node,
+              type_info_buffer TYPE REF TO cl_art_type_info.
+
+        METHODS: get_type_info RETURNING VALUE(r_result) TYPE REF TO cl_art_type_info.
+        METHODS has_line_of_addition
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS has_table_of_addition
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS has_range_of_addition
+          RETURNING
+            VALUE(r_result) TYPE abap_bool.
+
+        METHODS build_fragment_from_type_info
+          RETURNING VALUE(r_result) TYPE string.
+        METHODS get_type_4_inline_decl_by_comp
+          RETURNING
+            VALUE(r_result) TYPE REF TO cl_art_type_info
+          RAISING
+            cx_pst_dynamic
+            cx_rfac_error .
+
+ENDCLASS.
+
+
+
+CLASS CL_PST_VARIABLE IMPLEMENTATION.
+
+
+      METHOD propose_name_for_type.
+        DATA: referenced_type TYPE string.
+
+        referenced_type = get_referenced_type( ).
+
+        IF referenced_type IS NOT INITIAL.
+
+          CASE abap_true.
+            WHEN has_table_of_addition( ).
+              r_name_proposal = |table_of_{ referenced_type }|.
+            WHEN has_line_of_addition( ).
+              r_name_proposal = |line_of_{ referenced_type }|.
+            WHEN has_range_of_addition( ).
+              r_name_proposal = |range_of_{ referenced_type }|.
+            WHEN OTHERS.
+              r_name_proposal = referenced_type.
+          ENDCASE.
+
+        ELSE.
+
+          DATA(art_type_info) = me->get_corresponding_type_info( ).
+          IF art_type_info->is_tabletype( ).
+            r_name_proposal = 'helper_type_tab'.
+          ELSE.
+            r_name_proposal = 'helper_type'.
+          ENDIF.
+
+
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD is_useable_as_parameter_type.
+
+        r_result = boolc( NOT helper_type_needed4parameter( ) ).
+
+      ENDMETHOD.
+
+
+      METHOD is_structured.
+
+        r_result = node->get_property( cl_pst_node=>co_properties-is_structured ).
+
+      ENDMETHOD.
+
+
+      METHOD is_promotable.
+
+        DATA: type_name       TYPE string,
+              method_imp_node TYPE REF TO cl_pst_node,
+              local_type_node TYPE REF TO cl_pst_node.
+
+        IF is_defined_with_type( ) = abap_true OR is_declared_inline( ) = abap_true.
+
+          type_name = get_referenced_type( ).
+          method_imp_node = node->find_parent( ce_pst_kind=>method_imp ).
+
+          IF method_imp_node IS BOUND.
+            local_type_node = method_imp_node->find_node_by_name( i_kind = ce_pst_kind=>local_type i_name = type_name ).
+            r_result = boolc( local_type_node IS INITIAL ).
+
+          ENDIF.
+
+        ELSEIF is_defined_with_like( ) = abap_true.
+
+          r_result = abap_false.
+
+        ELSEIF is_structured( ) = abap_true.
+
+          r_result = abap_false.
+
+        ENDIF.
+
+
+      ENDMETHOD.
+
+
+      METHOD is_parameter.
+
+        r_result = node->kind->is_kind_of( ce_pst_kind=>any_parameter ).
+
+      ENDMETHOD.
+
+
+      METHOD is_defined_with_type.
+
+        IF type_reference IS BOUND AND to_upper( type_reference->name(4) ) = 'TYPE'.
+          r_result = abap_true.
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD is_defined_with_like.
+
+        IF type_reference IS BOUND AND to_upper( type_reference->name(4) ) = 'LIKE'.
+          r_result = abap_true.
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD is_declared_inline.
+
+        r_result = xsdbool( node->kind = ce_pst_kind=>local_variable_declared_inline OR node->kind = ce_pst_kind=>fieldsymbol_declared_inline ).
+
+      ENDMETHOD.
+
+
+      METHOD helper_type_needed4parameter.
+
+        IF kind = ce_pst_kind=>local_variable_declared_inline.
+
+          IF helper_type_needed4declaration( ).
+            r_result = abap_true.
+          ELSE.
+            DATA(type_info) = get_type_info( ).
+            IF type_info IS BOUND.
+              r_result = type_info->needs_helpertype4parameter( ).
+            ENDIF.
+          ENDIF.
+
+        ELSE.
+
+          DATA(variable_region) = node->create_region( ).
+
+          IF variable_region IS BOUND.
+
+            r_result = boolc( variable_region->contains_keyword( 'table' ) = abap_true OR
+                              variable_region->contains_keyword( 'range' ) = abap_true OR
+                              ( is_defined_with_type( )  = abap_true AND to_lower( get_referenced_type( ) ) = 'c' ) OR
+                              ( is_defined_with_type( )  = abap_true AND to_lower( get_referenced_type( ) ) = 'p' ) ).
+
+          ENDIF.
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD helper_type_needed4declaration.
+
+        DATA(type_info) = me->get_type_info( ).
+
+        IF type_info IS BOUND.
+          r_result = type_info->needs_helpertype4variable( ).
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD has_table_of_addition.
+
+        IF type_reference IS BOUND AND type_reference->name CS 'TABLE OF'.
+          r_result = abap_true.
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD has_range_of_addition.
+
+        IF type_reference IS BOUND AND type_reference->name CS 'RANGE OF'.
+          r_result = abap_true.
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD has_local_scope.
+
+        r_result = boolc( kind->is_kind_of( ce_pst_kind=>any_local_declaration ) = abap_true OR
+                          kind->is_kind_of( ce_pst_kind=>any_parameter ) = abap_true ).
+
+      ENDMETHOD.
+
+
+      METHOD has_line_of_addition.
+
+        IF type_reference IS BOUND AND type_reference->name CS 'LINE OF'.
+          r_result = abap_true.
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD get_type_operator.
+        DATA: type_operator TYPE string.
+
+        IF is_declared_inline( ) = abap_true.
+
+          type_operator = get_type_info( )->get_operator( ).
+          IF me->helper_type_needed4declaration( ) = abap_true.
+            IF type_operator CS 'standard table'.
+              r_result = 'type standard table of' ##NO_TEXT.
+            ELSE.
+              r_result = 'type' ##NO_TEXT.
+            ENDIF.
+          ELSE.
+            r_result = type_operator.
+          ENDIF.
+        ELSE.
+          r_result = type_reference->name.
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD get_type_info.
+
+        IF type_info_buffer IS INITIAL.
+          TRY.
+              type_info_buffer = get_type_4_inline_decl_by_comp( ).
+            CATCH cx_rfac_error.
+              CLEAR r_result.
+          ENDTRY.
+        ENDIF.
+
+        r_result = type_info_buffer.
+
+      ENDMETHOD.
+
+
+      METHOD get_type_def.
+
+        DATA: variable_region           TYPE REF TO cl_pst_region,
+              code_for_type_declaration TYPE string.
+
+
+        IF is_declared_inline( ).
+          "calculate type definition via type info from compiler
+          DATA(type_info) = get_type_info( ).
+
+          IF type_info IS BOUND.
+            IF type_info->is_tabletype( ) AND i_flg_line_type = abap_true.
+              code_for_type_declaration = type_info->get_line_helper_type( i_helper_type )-code_snippet.
+            ELSE.
+              code_for_type_declaration = type_info->get_whole_helper_type( i_helper_type )-code_snippet.
+            ENDIF.
+            r_result = cl_pst_region=>create_from_code( code_for_type_declaration ).
+            RETURN.
+          ENDIF.
+
+        ELSEIF is_parameter( ).
+
+          DATA(type_ref_node) = node->find_first_child( ce_pst_kind=>type_reference ).
+          IF type_ref_node IS BOUND.
+
+            code_for_type_declaration = |TYPES: { i_helper_type } { type_ref_node->name } { type_ref_node->reference_node->name }.|.
+
+            r_result = cl_pst_region=>create_from_code( code_for_type_declaration ).
+            RETURN.
+          ENDIF.
+
+
+        ELSE.
+
+          "create type by adjusting the existing variable region - DATA regions only so far, should work for CONSTANTS as well
+          variable_region = node->create_region( ).
+
+          variable_region->replace_keyword( i_old_keyword = 'DATA' i_new_keyword = 'TYPES' ).
+          variable_region->replace_identifier( i_old = node->name i_new = i_helper_type ).
+
+          variable_region->remove_keyword( 'read-only' ).
+
+          IF variable_region->contains_keyword( 'header' ) = abap_true.
+            variable_region->remove_sequence_of_keywords( 'with header line' ) ##no_text.
+          ENDIF.
+
+          IF variable_region->contains_keyword( 'is' ) = abap_true.
+            variable_region->remove_sequence_of_keywords( 'value is initial' ) ##no_text.
+          ENDIF.
+
+
+
+          IF variable_region->contains_keyword( 'table' ) = abap_true AND
+             variable_region->contains_keyword( 'with' ) = abap_false AND
+             variable_region->contains_keyword( 'sorted' ) = abap_false AND
+             variable_region->contains_keyword( 'hashed' ) = abap_false.
+
+            variable_region->append_sequence_of_keywords( 'WITH DEFAULT KEY' ) ##no_text.
+
+          ENDIF.
+
+          IF variable_region->contains_keyword( 'value' ) = abap_true.
+            variable_region->remove_keyword( i_keyword = 'value' i_remove_next_token = abap_true ).
+          ENDIF.
+
+          "special handling DATA var value 'x'.
+          IF variable_region->contains_keyword( 'type' ) = abap_false AND variable_region->contains_keyword( 'like' ) = abap_false.
+            variable_region->append_sequence_of_keywords( 'TYPE c LENGTH 1' ) ##no_text.
+          ENDIF.
+
+          "special handling DATA var TYPE c. "without length addition
+          IF ( get_referenced_type( ) = 'c' OR get_referenced_type( ) = 'p' OR get_referenced_type( ) = 'x' OR get_referenced_type( ) = 'n' )
+          AND variable_region->contains_keyword( 'length' ) = abap_false.
+
+            CASE get_referenced_type( ).
+              WHEN 'p'.
+                variable_region->append_sequence_of_keywords( 'LENGTH 15' ) ##no_text.
+              WHEN OTHERS.
+                variable_region->append_sequence_of_keywords( 'LENGTH 1' ) ##no_text.
+            ENDCASE.
+          ENDIF.
+
+          variable_region->remove_comments( ).
+
+          r_result = variable_region.
+
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD get_type_4_inline_decl_by_comp.
+
+        DATA col TYPE i.
+        DATA raw_type_info TYPE cl_art_type_info=>ts_type_info.
+
+        IF node->identifier_position IS BOUND.
+          DATA(backend_pos) = node->identifier_position->get_start_position( )->get_backend_position( ).
+        ELSE.
+          backend_pos = node->source_position->get_start_position( )->get_backend_position( ).
+        ENDIF.
+
+        DATA(include) = backend_pos->include.
+        DATA(row) = backend_pos->range-start-row.
+
+        CASE node->kind.
+          WHEN ce_pst_kind=>local_variable_declared_inline.
+            "node contains data(var_name) -> so we add 5 to get at the beginning of the variable name
+            col = backend_pos->range-start-col + 5.
+          WHEN ce_pst_kind=>fieldsymbol_declared_inline.
+            "node contains field-symbol(<fs>) -> so we add 14 to get at the beginning of the variable name
+            col = backend_pos->range-start-col + 14.
+          WHEN OTHERS.
+            col = backend_pos->range-start-col.
+        ENDCASE.
+
+        DATA(compiler) = cl_art_source_repository=>get_instance( )->get_compiler_for_main_program( backend_pos->main_prog ).
+
+        compiler->get_full_name_for_position(
+          EXPORTING
+            p_include                  = include
+            p_line                     = row
+            p_column                   = col
+          IMPORTING
+            p_full_name                = DATA(fullname)
+          EXCEPTIONS
+            include_not_found          = 1
+            object_not_found           = 2
+            program_fatal_syntax_error = 3
+            OTHERS                     = 4 ).
+
+        IF sy-subrc = 0.
+
+          data(comp_symbol) = compiler->get_symbol_entry( fullname ).
+
+          IF comp_symbol IS INSTANCE OF cl_abap_comp_data.
+            raw_type_info-comp_type = CAST cl_abap_comp_data( comp_symbol )->type.
+            compiler->get_type_code( EXPORTING  p_type             = raw_type_info-comp_type
+                                     IMPORTING  p_name             = raw_type_info-name
+                                                p_type_additions   = raw_type_info-additions
+                                                p_type_operator    = raw_type_info-operator
+                                                p_type_components  = raw_type_info-components
+                                     EXCEPTIONS not_supported_type = 1 ).
+            IF sy-subrc = 0.
+              CONDENSE raw_type_info-additions.
+              r_result = cl_art_type_info=>create_by_enriched_type_info( raw_type_info ).
+            ELSE.
+
+              r_result = cl_art_type_info=>create_by_compiler_type( raw_type_info-comp_type ).
+
+            ENDIF.
+          ENDIF.
+
+        ELSE.
+          r_result = cl_art_type_info=>create_fallback_type_any( ).
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD get_referenced_type.
+
+        IF is_declared_inline( ) = abap_true.
+
+          IF helper_type_needed4declaration( ) = abap_false.
+            DATA(type_info) = get_type_info( ).
+            r_result = type_info->get_name( ).
+          ENDIF.
+
+        ELSE.
+
+          IF type_reference IS BOUND AND type_reference->reference_node IS BOUND.
+            r_result = to_lower( type_reference->reference_node->name ).
+          ENDIF.
+
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD get_referenced_data_object.
+
+        DATA: method_imp_node       TYPE REF TO cl_pst_node,
+              method_implementation TYPE REF TO cl_pst_method_implementation,
+              data_object_name      TYPE string,
+              local_var             TYPE REF TO cl_pst_node,
+              class                 TYPE REF TO cl_pst_class,
+              member                TYPE REF TO cl_pst_node,
+              method_definition     TYPE REF TO cl_pst_method_definition,
+              parameter             TYPE REF TO cl_pst_node,
+              class_def_node        TYPE REF TO cl_pst_node,
+              method_def_node       TYPE REF TO cl_pst_node.
+
+        ASSERT me->is_defined_with_like( ) = abap_true.
+
+        data_object_name = type_reference->reference_node->name.
+        method_imp_node = node->find_parent( ce_pst_kind=>method_imp ).
+
+        IF method_imp_node IS BOUND.
+
+          method_implementation = cl_pst_method_implementation=>create( method_imp_node ).
+
+          local_var = method_implementation->find_local_declaration_by_name( data_object_name ).
+          IF local_var IS BOUND.
+            r_result = local_var.
+            RETURN.
+          ENDIF.
+
+          method_definition = method_implementation->get_method_definition( ).
+          IF method_definition IS BOUND.
+            parameter = method_definition->find_parameter( data_object_name ).
+            IF parameter IS BOUND.
+              r_result = parameter.
+              RETURN.
+            ENDIF.
+          ENDIF.
+
+          class = method_implementation->get_class( ).
+          member = class->find_member( i_member_name = data_object_name ).
+          IF member IS BOUND AND member->kind->is_variable( ) = abap_true.
+            r_result = member.
+            RETURN.
+          ENDIF.
+
+        ENDIF.
+
+        method_def_node = node->find_parent( ce_pst_kind=>any_method ).
+        IF method_def_node IS BOUND.
+
+          method_definition = cl_pst_method_definition=>create( method_def_node ).
+          parameter = method_definition->find_parameter( data_object_name ).
+          IF parameter IS BOUND.
+            r_result = parameter.
+            RETURN.
+          ENDIF.
+
+        ENDIF.
+
+        class_def_node = node->find_parent( ce_pst_kind=>class ).
+        IF class_def_node IS BOUND.
+
+          class = cl_pst_class=>create( class_def_node ).
+          member = class->find_member( i_member_name = data_object_name ).
+          IF member IS BOUND AND member->kind->is_variable( ) = abap_true.
+            r_result = member.
+            RETURN.
+          ENDIF.
+
+        ENDIF.
+      ENDMETHOD.
+
+
+      METHOD get_declaration_fragment.
+
+        IF is_declared_inline( ) = abap_true.
+
+          r_result = build_fragment_from_type_info( ).
+
+        ELSE.
+
+          DATA(region) = node->create_region( ).
+          region->remove_keyword( region->get_first_keyword( ) ).
+
+          r_result = region->to_string( ).
+          r_result = replace( val = r_result sub = ':' with = space ).
+          r_result = replace( val = r_result sub = '.' with = space ).
+          CONDENSE r_result.
+
+        ENDIF.
+
+      ENDMETHOD.
+
+
+      METHOD get_corresponding_type_info.
+
+        r_result = me->get_type_info( ).
+
+      ENDMETHOD.
+
+
+      METHOD create.
+
+        CREATE OBJECT r_result.
+        r_result->node = i_node.
+        r_result->name = to_lower( i_node->name ).
+        r_result->kind = i_node->kind.
+        r_result->type_reference = i_node->find_last_child( ce_pst_kind=>type_reference ).
+
+      ENDMETHOD.
+
+
+      METHOD build_fragment_from_type_info.
+
+        DATA(type_info) = get_type_info( ).
+
+        IF type_info IS BOUND.
+          r_result = |{ to_lower( node->name ) } { type_info->get_operator( ) } { to_lower( type_info->get_name( ) ) }|.
+          DATA(additions) = type_info->get_additions( ).
+          IF additions IS NOT INITIAL.
+            r_result = |{ r_result } { additions }|.
+          ENDIF.
+        ENDIF.
+
+      ENDMETHOD.
+ENDCLASS.

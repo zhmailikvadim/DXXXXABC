@@ -1,0 +1,256 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZMM_COMIS_F01
+*&---------------------------------------------------------------------*
+FORM before_save.
+  TYPES: BEGIN OF lty_s_numbers,
+           comis_num_int TYPE zcomis_num,
+           comis_num_db  TYPE zcomis_num,
+         END OF lty_s_numbers.
+  DATA: lv_action    TYPE c,
+        lv_comis_num TYPE zcomis_num,
+        ls_zmcomish  TYPE zmcomish,
+        ls_numbers   TYPE lty_s_numbers,
+        lt_numbers   TYPE TABLE OF lty_s_numbers.
+  FIELD-SYMBOLS: <lv_line>    TYPE any,
+                 <lv_line1>   TYPE any,
+                 <ls_sellist> TYPE vimsellist.
+
+  "RM #11972(47)
+  "LOOP AT vcl_total_l_1 ASSIGNING <lv_line>.
+  LOOP AT vcl_total_vl_1 ASSIGNING <lv_line>.
+    ls_zmcomish = <lv_line>.
+    lv_action = <lv_line>+280(1).
+
+    IF lv_action = 'N'.
+      CALL FUNCTION 'NUMBER_GET_NEXT'
+        EXPORTING
+          nr_range_nr = '01'
+          object      = 'ZMCOMIS'
+        IMPORTING
+          number      = lv_comis_num
+        EXCEPTIONS
+          OTHERS      = 1.
+      IF sy-subrc <> 0.
+* Implement suitable error handling here
+      ENDIF.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = lv_comis_num
+        IMPORTING
+          output = lv_comis_num.
+      "передача взаимосвязи внутренних и внешних номеров в подчененный ракурс
+      ls_numbers-comis_num_int = ls_zmcomish-comis_num.
+      ls_numbers-comis_num_db  = lv_comis_num.
+      APPEND ls_numbers TO lt_numbers.
+
+      <lv_line>+7(10) = lv_comis_num.
+
+      READ TABLE vcl_cluster_dplsellist-sellist_1 ASSIGNING <ls_sellist> WITH KEY viewfield = 'COMIS_NUM'.
+      IF sy-subrc = 0.
+        <ls_sellist>-value = lv_comis_num.
+      ENDIF.
+      READ TABLE vcl_cluster_dplsellist-sellist_2 ASSIGNING <ls_sellist> WITH KEY viewfield = 'COMIS_NUM'.
+      IF sy-subrc = 0.
+        <ls_sellist>-value = lv_comis_num.
+      ENDIF.
+      READ TABLE vcl_cluster_dbasellist-sellist_1 ASSIGNING <ls_sellist> WITH KEY viewfield = 'COMIS_NUM'.
+      IF sy-subrc = 0.
+        <ls_sellist>-value = lv_comis_num.
+      ENDIF.
+      READ TABLE vcl_cluster_dbasellist-sellist_2 ASSIGNING <ls_sellist> WITH KEY viewfield = 'COMIS_NUM'.
+      IF sy-subrc = 0.
+        <ls_sellist>-value = lv_comis_num.
+      ENDIF.
+      LOOP AT vcl_extract_l_1 ASSIGNING <lv_line1>.
+        IF <lv_line1>+7(10) CP 'NEW*'.
+          IF ls_numbers-comis_num_int = <lv_line1>+7(10).
+            <lv_line1>+7(10) = ls_numbers-comis_num_db.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+      UNASSIGN <lv_line1>.
+      LOOP AT vcl_extract_m_2 ASSIGNING <lv_line1>.
+        IF <lv_line1>+3(10) CP 'NEW*'.
+          IF ls_numbers-comis_num_int = <lv_line1>+3(10).
+            <lv_line1>+3(10) = ls_numbers-comis_num_db.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDLOOP.
+  UNASSIGN <lv_line>.
+  LOOP AT vcl_total_m_2 ASSIGNING <lv_line>.
+    READ TABLE lt_numbers INTO ls_numbers WITH KEY comis_num_int = <lv_line>+3(10).
+    IF sy-subrc = 0.
+      <lv_line>+3(10) = ls_numbers-comis_num_db.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.                    "before_save
+
+FORM check_authority.
+  FIELD-SYMBOLS:
+                 <ls_sellist> TYPE vimsellist.
+  READ TABLE vcl_cluster_dbasellist-sellist_1 ASSIGNING <ls_sellist> WITH KEY viewfield = 'BUKRS'.
+  IF sy-subrc = 0.
+    AUTHORITY-CHECK OBJECT 'M_MATE_BUK'
+            ID 'ACTVT' FIELD '02'
+            ID 'BUKRS' FIELD <ls_sellist>-value.
+    IF sy-subrc <> 0.
+      MESSAGE e144(zmm) WITH <ls_sellist>-value.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+FORM zzenqueue_dequeue.
+  "для реализации блокировки взят стандартный код блокировки кластерного ракурса ведения
+  DATA: h_tabix      LIKE sy-tabix,
+        exit_routine LIKE vclmf-formname,
+        sellist      TYPE vcl_sellist_type WITH HEADER LINE,
+        tabix        LIKE sy-tabix,
+        old_action   TYPE flag,
+        sperrer      LIKE seqg3-guname.
+  FIELD-SYMBOLS: <dbasellist> TYPE vcl_sellist_type.
+  "FIELD-SYMBOLS: <recursive_enqueue_call> TYPE any.
+
+  IF vcl_action EQ 'U' OR vcl_action EQ 'T'.
+    "ASSIGN ('(SAPLSVCM)recursive_enqueue_call') TO <recursive_enqueue_call>.
+    LOOP AT vcl_struc_tab WHERE objpos = 1.
+      CHECK vcl_struc_tab-readonly <> 'R'.       "SW 5.2.1998
+      IF vcl_enq_action EQ 'D'.
+        CHECK vcl_struc_tab-enqueue NE space.
+      ENDIF.
+      h_tabix = sy-tabix.
+      IF vcl_struc_tab-objpos = 2.
+        ASSIGN COMPONENT 1 OF STRUCTURE vcl_cluster_dbasellist TO <dbasellist>.
+      ELSE.
+        ASSIGN COMPONENT vcl_struc_tab-objpos OF STRUCTURE vcl_cluster_dbasellist TO <dbasellist>.
+      ENDIF.
+      CHECK <dbasellist> IS NOT INITIAL.
+      REFRESH sellist. CLEAR tabix.
+      LOOP AT <dbasellist> INTO sellist.
+        IF ( sellist-ddic = 'S' OR sellist-ddic = 'B' ) AND
+           ( sellist-value <> space OR sellist-initial = 'X').
+          APPEND sellist.
+          tabix = sy-tabix.
+        ENDIF.
+      ENDLOOP.
+      IF tabix > 0.
+        READ TABLE sellist INDEX tabix.
+        CLEAR sellist-and_or.
+        MODIFY sellist INDEX tabix.
+      ENDIF.
+
+      CALL FUNCTION 'VIEW_ENQUEUE'
+        EXPORTING
+          view_name        = vcl_struc_tab-object
+          action           = vcl_enq_action
+          enqueue_mode     = 'E'
+          enqueue_range    = 'X'
+        TABLES
+          sellist          = sellist
+        EXCEPTIONS
+          foreign_lock     = 1
+          system_failure   = 2
+          table_not_found  = 5
+          client_reference = 7.
+
+      CASE sy-subrc.
+        WHEN 0.
+          IF vcl_enq_action = 'E'.
+            MOVE 'X' TO vcl_struc_tab-enqueue.
+          ELSE.                        " DEQUEUE
+            CLEAR vcl_struc_tab-enqueue.
+          ENDIF.
+          MODIFY vcl_struc_tab INDEX h_tabix.
+        WHEN 1.
+*          Die bereits gesperrten Views, copy das Name, wer sperrt hat.
+          sperrer = sy-msgv1.
+*          Die bereits gesperrten Views wieder entsperren,
+*          da die Daten nur noch angezeigt werden.
+*          <recursive_enqueue_call> = 'X'."glob. Var. statt Parameter,
+*          "um nicht alle Aufrufe anpassen zu müssen
+*          PERFORM cluster_enqueue USING 'D'
+*                                  CHANGING  vcl_action.
+*          CLEAR <recursive_enqueue_call>.
+          IF vcl_special_mode = vcl_import_mode OR
+             vcl_special_mode = vcl_compare_mode.
+            MESSAGE e049(sv) WITH sperrer RAISING foreign_lock.
+
+          ELSE.
+*           Daten sind gesperrt von Benutzer &, nur Anzeige möglich
+            PERFORM popup_e USING sperrer
+                            CHANGING vcl_action.  "action = SHOW / ' '
+            EXIT.
+          ENDIF.
+        WHEN 2.
+*         Systemfehler: Tabelle/View & konnte nicht gesperrt werden
+*          <recursive_enqueue_call> = 'X'.
+*          PERFORM cluster_enqueue USING 'D'
+*                                  CHANGING vcl_action.
+*          CLEAR <recursive_enqueue_call>.
+          IF vcl_special_mode = vcl_import_mode OR
+             vcl_special_mode = vcl_compare_mode.
+            MESSAGE e050(sv) WITH vcl_struc_tab-object
+                         RAISING enq_system_failure.
+          ELSE.
+            PERFORM popup_system_failure USING vcl_struc_tab-object
+                                         CHANGING vcl_action.
+            EXIT.
+          ENDIF.
+        WHEN 5.
+          MESSAGE e028(sv) WITH vcl_struc_tab-object
+                            RAISING object_not_found.
+        WHEN 7.
+          MESSAGE e054(sv) WITH sy-mandt RAISING client_reference.
+      ENDCASE.
+
+    ENDLOOP.
+  ENDIF.
+ENDFORM.
+
+FORM popup_e  USING user LIKE seqg3-guname
+              CHANGING action TYPE flag.
+  DATA: text(35)  TYPE c,
+        answer(1) TYPE c.
+  IF action EQ 'U'.
+    CALL FUNCTION 'POPUP_TO_DECIDE_LOCKED_DATA'
+      EXPORTING
+        i_user   = user
+      IMPORTING
+        e_answer = answer.
+    IF answer = '2'.
+      CLEAR action.
+      "CLEAR cluster_name.
+      MESSAGE s049(sv) WITH user RAISING foreign_lock.
+      EXIT.
+    ELSEIF answer = '1'.
+      MOVE 'S' TO action.
+    ENDIF.
+  ENDIF.
+ENDFORM.                               "POPUP_E
+
+FORM popup_system_failure USING VALUE(object) LIKE vclstruc-object
+                          CHANGING action TYPE flag.
+  DATA: answer(1) TYPE c.
+
+  IF action EQ 'U'.
+    CALL FUNCTION 'POPUP_TO_CONFIRM_WITH_MESSAGE'
+      EXPORTING
+        titel         = TEXT-720
+        diagnosetext1 = TEXT-721
+        diagnosetext2 = TEXT-722
+        diagnosetext3 = TEXT-723
+        textline1     = TEXT-724
+        textline2     = TEXT-725
+        defaultoption = 'Y'
+      IMPORTING
+        answer        = answer.
+    IF answer = 'A' OR answer = 'N'.
+      CLEAR action.
+      MESSAGE e050(sv) WITH object RAISING system_failure.
+    ELSEIF answer = 'J'.
+      MOVE 'S' TO action.
+    ENDIF.
+  ENDIF.
+ENDFORM.                               "POPUP_SYSTEM_FAILURE

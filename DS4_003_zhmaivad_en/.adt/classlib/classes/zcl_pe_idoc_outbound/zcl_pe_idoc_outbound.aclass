@@ -1,0 +1,547 @@
+CLASS zcl_pe_idoc_outbound DEFINITION
+  PUBLIC
+  CREATE PROTECTED.
+
+  PUBLIC SECTION.
+
+    CLASS-METHODS factory IMPORTING is_control      TYPE edidc
+                          RETURNING VALUE(ro_value) TYPE REF TO zcl_pe_idoc_outbound.
+
+    METHODS send_to_aws_s3.
+
+
+  PROTECTED SECTION.
+
+    TYPES mtyp_tt_segments_length TYPE STANDARD TABLE OF edi_le WITH DEFAULT KEY.
+    TYPES mtyp_tt_edp13           TYPE STANDARD TABLE OF edp13 WITH DEFAULT KEY.
+
+    CONSTANTS: BEGIN OF mc_s_status,
+                 triggering       TYPE edi_status VALUE '18',
+                 triggering_error TYPE edi_status VALUE '20',
+               END OF mc_s_status.
+
+
+    DATA mif_s3_handler TYPE REF TO /aws1/if_s3.
+    DATA ms_control    TYPE edidc.
+    DATA mt_data       TYPE edidd_tt.
+
+    METHODS build_file RETURNING VALUE(rv_file) TYPE xstring
+                       RAISING   zcx_pe_idoc.
+
+    METHODS close.
+    METHODS constructor IMPORTING is_control TYPE edidc.
+
+    METHODS convert_control_segment_to_v4 RETURNING VALUE(rs_control) TYPE edi_dc40
+                                          RAISING   zcx_pe_idoc.
+
+    METHODS convert_data_segments_to_v4 EXPORTING et_data            TYPE edi_dd40_tt
+                                                  et_segments_length TYPE mtyp_tt_segments_length
+                                        RAISING   zcx_pe_idoc.
+
+    METHODS get_idoc_segments RAISING zcx_pe_idoc.
+
+    METHODS get_partner IMPORTING iv_number        TYPE edipparnum
+                                  iv_type          TYPE edippartyp
+                        RETURNING VALUE(rt_values) TYPE mtyp_tt_edp13
+                        RAISING   zcx_pe_idoc.
+
+    METHODS get_port_version IMPORTING iv_portname     TYPE edi_pvrcvp
+                             RETURNING VALUE(rv_value) TYPE edi_versio
+                             RAISING   zcx_pe_idoc.
+
+    METHODS get_s3_bucket RETURNING VALUE(rv_value) TYPE /aws1/s3_bucketname
+                          RAISING   zcx_pe_idoc.
+
+    METHODS get_s3_handler RETURNING VALUE(rif_s3_handler) TYPE REF TO /aws1/if_s3
+                           RAISING   /aws1/cx_rt_technical_generic
+                                     /aws1/cx_rt_no_auth_generic
+                                     /aws1/cx_rt_service_generic
+                                     zcx_pe_hm.
+
+    METHODS get_s3_object_key RETURNING VALUE(rv_value) TYPE /aws1/s3_objectkey
+                              RAISING   zcx_pe_idoc.
+
+    METHODS open RAISING zcx_pe_idoc.
+
+    METHODS set_status IMPORTING iv_status TYPE edi_ds-status
+                                 iv_text   TYPE edi_ds-statxt OPTIONAL.
+
+  PRIVATE SECTION.
+
+    CONSTANTS mc_class_name TYPE seoclname VALUE 'ZCL_PE_IDOC_OUTBOUND'.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_IDOC_OUTBOUND IMPLEMENTATION.
+
+
+  METHOD factory.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    DATA lv_class_name TYPE seoclname.
+
+*   Class determination
+    TRY.
+        zcl_pe_hm_complex=>get_value( EXPORTING iv_id           = 'F9431F5D8B571EDE94F3AC09ACEF1F5B'
+                                                is_filter       = is_control
+                                                iv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements
+                                      IMPORTING ev_value        = lv_class_name ).
+      CATCH zcx_pe_hm.
+        lv_class_name = mc_class_name.
+    ENDTRY.
+
+*   Create instance
+    CREATE OBJECT ro_value TYPE (lv_class_name) EXPORTING is_control = is_control.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    ms_control = is_control.
+
+  ENDMETHOD.
+
+
+  METHOD send_to_aws_s3.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+        open( ).
+        get_idoc_segments( ).
+        get_s3_handler( )->putobject( iv_bucket = get_s3_bucket( )
+                                      iv_key    = get_s3_object_key( )
+                                      iv_body   = build_file( ) ).
+        set_status( mc_s_status-triggering ).
+        close( ).
+      CATCH /aws1/cx_rt_technical_generic /aws1/cx_rt_no_auth_generic /aws1/cx_rt_service_generic zcx_pe_idoc zcx_pe_hm INTO DATA(lo_exc).
+        set_status( iv_status = mc_s_status-triggering_error iv_text = CONV #( lo_exc->get_text( ) ) ).
+        close( ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD close.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    CALL FUNCTION 'EDI_DOCUMENT_CLOSE_PROCESS'
+      EXPORTING
+        document_number     = ms_control-docnum
+      EXCEPTIONS
+        document_not_open   = 1
+        failure_in_db_write = 2
+        parameter_error     = 3
+        status_set_missing  = 4
+        OTHERS              = 5.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_idoc_segments.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    CALL FUNCTION 'EDI_SEGMENTS_GET_ALL'
+      EXPORTING
+        document_number         = ms_control-docnum
+      TABLES
+        idoc_containers         = mt_data
+      EXCEPTIONS
+        document_number_invalid = 1
+        end_of_document         = 2
+        OTHERS                  = 3.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_s3_handler.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    DATA: lv_profile TYPE /aws1/rt_profile_id.
+
+    IF mif_s3_handler IS INITIAL.
+      lv_profile       = zcl_pe_hm_basic=>get_value( '3194' ).
+      DATA(lo_session) = /aws1/cl_rt_session_aws=>create( lv_profile ).
+      mif_s3_handler    = /aws1/cl_s3_factory=>create( lo_session ).
+    ENDIF.
+
+    rif_s3_handler = mif_s3_handler.
+
+  ENDMETHOD.
+
+
+  METHOD open.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    DATA ls_control TYPE edidc.
+
+    CALL FUNCTION 'EDI_DOCUMENT_OPEN_FOR_PROCESS'
+      EXPORTING
+        db_read_option           = COND edi_dbropt( WHEN ms_control-doctyp IS INITIAL THEN 'Y' ELSE 'N' )
+        document_number          = ms_control-docnum
+        enqueue_option           = 'S'
+      IMPORTING
+        idoc_control             = ls_control
+      EXCEPTIONS
+        document_foreign_lock    = 1
+        document_not_exist       = 2
+        document_number_invalid  = 3
+        document_is_already_open = 4
+        OTHERS                   = 5.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+    IF ls_control IS NOT INITIAL.
+      ms_control = ls_control.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD set_status.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    DATA(ls_status) = VALUE edi_ds( docnum = ms_control-docnum
+                                    tabnam = 'EDI_DS'
+                                    logdat = sy-datum
+                                    logtim = sy-uzeit
+                                    repid  = sy-repid
+                                    status = iv_status
+                                    statxt = iv_text ).
+
+    CALL FUNCTION 'EDI_DOCUMENT_STATUS_SET'
+      EXPORTING
+        document_number         = ms_control-docnum
+        idoc_status             = ls_status
+      EXCEPTIONS
+        document_number_invalid = 1
+        other_fields_invalid    = 2
+        status_invalid          = 3
+        OTHERS                  = 4.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      RETURN.
+    ENDIF.
+
+
+    IF iv_status <> mc_s_status-triggering_error. " Error
+      RETURN.
+    ENDIF.
+
+
+    CALL FUNCTION 'IDOC_ERROR_WORKFLOW_START'
+      EXPORTING
+        docnum                  = ms_control-docnum
+        eventcode               = 'EDIO'
+      EXCEPTIONS
+        no_entry_in_tede5       = 1
+        error_in_start_workflow = 2
+        OTHERS                  = 3.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_s3_bucket.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    DATA  BEGIN OF ls_filter.
+    INCLUDE TYPE edidc.
+    DATA: system TYPE syst_sysid,
+          END OF ls_filter.
+
+
+*   Bucket determination
+    TRY.
+        ls_filter        = CORRESPONDING #( ms_control ).
+        ls_filter-system = sy-sysid.
+        zcl_pe_hm_complex=>get_value( EXPORTING iv_id           = 'F9431F5D8B571EDE94F42D396938FF5B'
+                                                is_filter       = ls_filter
+                                                iv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements
+                                      IMPORTING ev_value        = rv_value ).
+      CATCH zcx_pe_hm.
+        RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE e001(zpe_idoc) WITH 'F9431F5D8B571EDE94F42D396938FF5B'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD build_file.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    DATA lv_file TYPE string.
+
+
+    DATA(ls_control_v4) = convert_control_segment_to_v4( ).
+    convert_data_segments_to_v4( IMPORTING et_data            = DATA(lt_data_v4)
+                                           et_segments_length = DATA(lt_segments_length) ).
+
+
+    lv_file = ls_control_v4.
+    LOOP AT lt_data_v4 ASSIGNING FIELD-SYMBOL(<ls_edidd40>).
+
+      lv_file = lv_file && cl_abap_char_utilities=>newline && |{ <ls_edidd40>-segnam WIDTH = 30 PAD = space }|
+                                                           && |{ <ls_edidd40>-mandt  WIDTH = 3  PAD = space }|
+                                                           && |{ <ls_edidd40>-docnum WIDTH = 16 PAD = space }|
+                                                           && |{ <ls_edidd40>-segnum WIDTH = 6  PAD = space }|
+                                                           && |{ <ls_edidd40>-psgnum WIDTH = 6  PAD = space }|
+                                                           && |{ <ls_edidd40>-hlevel WIDTH = 2  PAD = space }|
+                                                           && |{ <ls_edidd40>-sdata  WIDTH = lt_segments_length[
+                                                                     segnum = <ls_edidd40>-segnum ]-seglen PAD = space }|.
+    ENDLOOP.
+
+    lv_file = lv_file && cl_abap_char_utilities=>newline.
+
+    TRY.
+        rv_file = cl_bcs_convert=>string_to_xstring( lv_file ).
+      CATCH cx_bcs INTO DATA(lo_exc).
+        RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID lo_exc->msgid TYPE lo_exc->msgty NUMBER lo_exc->msgno WITH lo_exc->msgv1 lo_exc->msgv2 lo_exc->msgv3 lo_exc->msgv4.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD get_s3_object_key.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    DATA lv_folder TYPE zpe_hm_text.
+    DATA  BEGIN OF ls_filter.
+    INCLUDE TYPE edidc.
+    DATA: system TYPE syst_sysid,
+          END OF ls_filter.
+
+
+    TRY.
+        ls_filter        = CORRESPONDING #( ms_control ).
+        ls_filter-system = sy-sysid.
+
+        zcl_pe_hm_complex=>get_value( EXPORTING iv_id           = 'F9431F5D8B571EDE94F46A839BBE5F5B'
+                                                is_filter       = ls_filter
+                                                iv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements
+                                      IMPORTING ev_value        = lv_folder ).
+        rv_value = |{ lv_folder }/{ ms_control-docnum }|.
+
+      CATCH zcx_pe_hm.
+        RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE e007(zpe_idoc) WITH 'F9431F5D8B571EDE94F46A839BBE5F5B'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD convert_control_segment_to_v4.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    CALL FUNCTION 'IDOC_CONTROL_OUTBOUND_CONVERT'
+      EXPORTING
+        control_record   = ms_control
+        port_version     = get_port_version( iv_portname = ms_control-rcvpor )
+      IMPORTING
+        control_40       = rs_control
+      EXCEPTIONS
+        conversion_error = 1
+        OTHERS           = 2.
+
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_port_version.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    CALL FUNCTION 'EDI_PORT_READ'
+      EXPORTING
+        portname       = iv_portname
+      IMPORTING
+        version        = rv_value
+      EXCEPTIONS
+        port_not_exist = 1
+        OTHERS         = 2.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD convert_data_segments_to_v4.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    CLEAR: et_data,
+           et_segments_length.
+
+    DATA(lt_edp13) = get_partner( iv_number = ms_control-rcvprn
+                                  iv_type   = ms_control-rcvprt ).
+
+    CALL FUNCTION 'IDOC_DATA_OUTBOUND_CONVERT'
+      EXPORTING
+        docnum           = ms_control-docnum
+        segrelease       = lt_edp13[ 1 ]-segrel
+        segapplrel       = lt_edp13[ 1 ]-segapplrel
+        idoctyp          = ms_control-idoctp
+      TABLES
+        i_edidd          = mt_data
+        conv_edidd40     = et_data
+        int_length       = et_segments_length
+      EXCEPTIONS
+        conversion_error = 1
+        OTHERS           = 2.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_partner.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 14.03.2023 | 25184: Creation                          *
+*              |            | DS4K964157                               *
+*----------------------------------------------------------------------*
+
+    CLEAR rt_values.
+    CALL FUNCTION 'EDI_PARTNER_READ_COMPLETE'
+      EXPORTING
+        rec_edkp1       = VALUE edkp1( parnum = iv_number partyp = iv_type )
+      TABLES
+        tab_edp13       = rt_values
+      EXCEPTIONS
+        db_error        = 1
+        entry_not_exist = 2
+        OTHERS          = 3.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,229 @@
+CLASS zcl_pe_atc_code_review_lh DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES zif_pe_epss_sapevent_handle .
+
+    CONSTANTS: BEGIN OF gc_s_subtypes,
+                 transport  TYPE char02 VALUE '01',
+                 workitem   TYPE char02 VALUE '02',
+                 user_story TYPE char02 VALUE '03',
+                 defect     TYPE char02 VALUE '04',
+               END OF gc_s_subtypes.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+    METHODS get_mail_address IMPORTING iv_user_name           TYPE xubname
+                             RETURNING VALUE(rv_mail_address) TYPE ad_smtpadr.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_ATC_CODE_REVIEW_LH IMPLEMENTATION.
+
+
+  METHOD zif_pe_epss_sapevent_handle~resolve_link.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 27.10.2022 | 14170     : Code review analysis tools   *
+*              |            | DS4K932069                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 02.11.2022 | 14981: Bugfixing, exception handling     *
+*              |            | DS4K934555                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 18.01.2023 | 17080: Open TR on separate session       *
+*              |            | DS4K940925                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 06.11.2023 | 26417: CHARM Integration                 *
+*              |            | DS4K968701                               *
+************************************************************************
+
+    DATA: lv_def_url TYPE string.
+
+
+    CASE iv_doc_link+12(2).
+
+*--   Transport request
+      WHEN gc_s_subtypes-transport.
+
+        DATA(lv_transport)          = CONV trkorr( iv_doc_link+15(10) ).
+        DATA(lv_rfc_destination)    = zcl_pe_atc_code_review=>get_tm_rfc_destination( lv_transport ).
+
+        IF zcl_pe_atc_aoc_super=>is_function_in_destination( iv_function = 'ZPE_FM_OPEN_TRANSPORT_REQUEST' iv_destination = lv_rfc_destination ) = abap_false.
+          MESSAGE e016(zpe_atc).
+          RETURN.
+        ENDIF.
+        CALL FUNCTION 'ZPE_FM_OPEN_TRANSPORT_REQUEST' STARTING NEW TASK 'new' DESTINATION lv_rfc_destination
+          EXPORTING
+            iv_trkorr        = lv_transport
+          EXCEPTIONS
+            resource_failure = 1
+            system_failure   = 2
+            OTHERS           = 3.
+        IF sy-subrc NE 0.
+          MESSAGE e016(zpe_atc).
+          RETURN.
+        ENDIF.
+
+
+*--   Work item
+      WHEN gc_s_subtypes-workitem.
+
+        TRY.
+            DATA(lo_solman_connector) = NEW zcl_pe_solman_connector( ).
+            DATA(lv_wi_url)           = lo_solman_connector->get_workitem_url( iv_work_item = CONV #( iv_doc_link+15(5) ) ).
+
+            cl_gui_frontend_services=>execute(
+              EXPORTING
+                document               = lv_wi_url
+              EXCEPTIONS
+                cntl_error             = 1
+                error_no_gui           = 2
+                bad_parameter          = 3
+                file_not_found         = 4
+                path_not_found         = 5
+                file_extension_unknown = 6
+                error_execute_failed   = 7
+                synchronous_failed     = 8
+                not_supported_by_gui   = 9
+                OTHERS                 = 10 ).
+            IF sy-subrc NE 0.
+              MESSAGE e015(zpe_atc).
+              RETURN.
+            ENDIF.
+
+          CATCH zcx_pe_solman_connector.
+            MESSAGE s014(zpe_atc).
+            RETURN.
+        ENDTRY.
+
+
+*--   User story
+      WHEN gc_s_subtypes-user_story.
+
+        TRY.
+            DATA(lv_us_url) = zcl_pe_change_manager=>factory( CONV #( iv_doc_link+15(13) ) )->get_issue_url( ).
+            cl_gui_frontend_services=>execute(
+              EXPORTING
+                document               = lv_us_url
+              EXCEPTIONS
+                cntl_error             = 1
+                error_no_gui           = 2
+                bad_parameter          = 3
+                file_not_found         = 4
+                path_not_found         = 5
+                file_extension_unknown = 6
+                error_execute_failed   = 7
+                synchronous_failed     = 8
+                not_supported_by_gui   = 9
+                OTHERS                 = 10 ).
+            IF sy-subrc NE 0.
+              MESSAGE e015(zpe_atc).
+              RETURN.
+            ENDIF.
+
+          CATCH zcx_pe_jira_connector.
+            MESSAGE s014(zpe_atc).
+            RETURN.
+        ENDTRY.
+
+*--   Defect
+      WHEN gc_s_subtypes-defect.
+
+        TRY.
+
+*           Get Jira Project
+            DATA(lt_jira_project) = zcl_pe_hm_basic=>get_table( '797' ).
+            DATA(lv_object)       = substring_before( val = iv_doc_link+15 sub = '.' ).
+            DATA(lv_aux)          = substring_after( val = iv_doc_link+15 sub = '.' ).
+            DATA(lv_user)         = substring_before( val = lv_aux sub = '.' ).
+            DATA(lv_tr)           = substring_after( val = lv_aux sub = '.' ).
+
+            lv_def_url = `https://jira.tools.3stripes.net/Secure/CreateIssueDetails!Init.jspa?`.
+            lv_def_url = lv_def_url && |issuetype=1|.                                           " Defect
+            lv_def_url = lv_def_url && |&pid={ lt_jira_project[ 1 ]-field2 }|.                  " Project ID
+            lv_def_url = lv_def_url && |&customfield_13502={ lv_object }|.                      " Development object
+            lv_def_url = lv_def_url && |&customfield_10022=10055|.                              " Severity = Major
+            lv_def_url = lv_def_url && |&customfield_10002=NA|.                                 " RFC Number
+            lv_def_url = lv_def_url && |&customfield_10000=23556|.                              " Classification = Development
+            lv_def_url = lv_def_url && |&customfield_10006=23561|.                              " SubClassification = Coding
+            lv_def_url = lv_def_url && |&customfield_10003=23555|.                              " Landscape = S4
+            lv_def_url = lv_def_url && |&customfield_10008={ lv_tr }|.                          " Transport Request
+            lv_def_url = lv_def_url && |&customfield_10004=23525|.                              " Responsible Party = adidas( for the moment)
+            lv_def_url = lv_def_url && |&customfield_13900=23701|.                              " Team = Lean Delivery
+            lv_def_url = lv_def_url && |&summary=Code Review - { lv_object } / { lv_tr }|.      " Summary
+            lv_def_url = lv_def_url && |&priority=1|.                                           " Priority = Medium
+            lv_def_url = lv_def_url && |&reporter={ get_mail_address( sy-uname ) }|.            " Reporter = current user
+            lv_def_url = lv_def_url && |&assignee={ get_mail_address( CONV #( lv_user ) ) }|.   " Assignee = Exemption raiser
+
+            cl_gui_frontend_services=>execute(
+              EXPORTING
+                document               = lv_def_url
+              EXCEPTIONS
+                cntl_error             = 1
+                error_no_gui           = 2
+                bad_parameter          = 3
+                file_not_found         = 4
+                path_not_found         = 5
+                file_extension_unknown = 6
+                error_execute_failed   = 7
+                synchronous_failed     = 8
+                not_supported_by_gui   = 9
+                OTHERS                 = 10 ).
+            IF sy-subrc NE 0.
+              MESSAGE e015(zpe_atc).
+              RETURN.
+            ENDIF.
+
+          CATCH zcx_pe_jira_connector.
+            MESSAGE s014(zpe_atc).
+            RETURN.
+          CATCH zcx_pe_hm INTO DATA(lo_exc_hm).
+            MESSAGE lo_exc_hm DISPLAY LIKE 'S'.
+            RETURN.
+        ENDTRY.
+
+
+    ENDCASE.
+
+  ENDMETHOD.
+
+
+  METHOD get_mail_address.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 29.11.2022 | 14981     : Code Review & Log improvemen *
+*              |            | DS4K934555                               *
+*----------------------------------------------------------------------*
+
+    DATA: lt_return TYPE STANDARD TABLE OF bapiret2,
+          lt_mail   TYPE STANDARD TABLE OF bapiadsmtp.
+
+    CALL FUNCTION 'BAPI_USER_GET_DETAIL'
+      EXPORTING
+        username = iv_user_name
+      TABLES
+        return   = lt_return[]
+        addsmtp  = lt_mail[].
+
+    READ TABLE lt_mail INDEX 1 ASSIGNING FIELD-SYMBOL(<ls_mail>).
+    IF sy-subrc = 0.
+      rv_mail_address = <ls_mail>-e_mail.
+    ENDIF.
+
+
+  ENDMETHOD.
+ENDCLASS.

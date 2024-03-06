@@ -1,0 +1,117 @@
+class ZCL_SP_HELPER definition
+  public
+  final
+  create public .
+
+public section.
+
+  class-methods UPDATE_ITEMS_FOR_PO
+    importing
+      !IV_EBELN type EBELN
+      !ITS_EBELP type MMPUR_T_DOCITEM
+    returning
+      value(RV_IS_OK) type  ABAP_BOOLEAN .
+protected section.
+private section.
+ENDCLASS.
+
+
+
+CLASS ZCL_SP_HELPER IMPLEMENTATION.
+
+
+  METHOD update_items_for_po.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MEREKTIM     | 29.06.2023 | 22705     : Feature - [BUILD] POM report *
+*              |            | DS4K956642                               *
+*----------------------------------------------------------------------*
+
+
+    DATA lv_result TYPE mmpur_bool.
+    DATA ls_document   TYPE mepo_document.
+
+    DATA(lo_po_api) = NEW cl_po_header_handle_mm( iv_ebeln ).
+
+    IF lo_po_api IS BOUND.
+
+      lo_po_api->po_initialize( im_document = ls_document ).
+
+      lo_po_api->po_read(
+        EXPORTING
+          im_tcode     = 'ME22N'
+          im_trtyp     = 'V'
+          im_aktyp     = 'V'
+          im_po_number = iv_ebeln
+        IMPORTING
+          ex_result    = lv_result ).
+
+      IF lv_result = abap_true.
+
+        DATA lt_models TYPE mmpur_models.
+        DATA ls_model LIKE LINE OF lt_models.
+
+
+        DATA(lt_items) = lo_po_api->if_purchase_order_mm~get_items( ).
+
+        LOOP AT lt_items INTO DATA(ls_items).
+
+          DATA(lo_item) = CAST cl_po_item_handle_mm( ls_items-item ).
+          lo_item->get_data( IMPORTING ex_data = DATA(ls_item) ).
+          lo_item->get_datax( IMPORTING ex_data = DATA(ls_itemx) ).
+
+          READ TABLE its_ebelp TRANSPORTING NO FIELDS WITH KEY table_line = ls_item-ebelp.
+
+          CHECK sy-subrc = 0.
+          ls_item-elikz = 'X'.
+          ls_itemx-elikz = 'X'.
+
+          lo_item->set_data( ls_item ).
+          lo_item->set_datax( ls_itemx ).
+
+          ls_model-model ?= lo_item.
+          APPEND ls_model TO lt_models.
+        ENDLOOP.
+
+        IF lt_models[] IS NOT INITIAL.
+
+          CALL METHOD lo_po_api->if_flush_transport_mm~start
+            EXPORTING
+              im_models    = lt_models[]
+            EXCEPTIONS
+              illegal_call = 1
+              error        = 2
+              OTHERS       = 3.
+
+          IF sy-subrc <> 0.
+            MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                       WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+          ENDIF.
+        ENDIF         .
+
+        CALL METHOD lo_po_api->po_post
+          EXPORTING
+            im_uncomplete  = mmpur_no
+            im_no_commit   = mmpur_no
+            im_commit_wait = mmpur_yes
+          EXCEPTIONS
+            failure        = 1
+            OTHERS         = 2.
+
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                     WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+
+        lo_po_api->po_close( ).
+
+        rv_is_ok = abap_true.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

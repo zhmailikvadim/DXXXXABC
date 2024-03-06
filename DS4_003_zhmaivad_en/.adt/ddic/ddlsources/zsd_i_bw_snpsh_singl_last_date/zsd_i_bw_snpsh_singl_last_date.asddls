@@ -12,7 +12,10 @@
 *----------------------------------------------------------------------*
 " ZHMAIVAD     | 21.07.2023 | 22859     : [Build] - Stock reconciliati -
 "              |            | DS4K957133                               -
-----------------------------------------------------------------------*/
+----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
+*----------------------------------------------------------------------*/
 @AbapCatalog.viewEnhancementCategory: [#NONE]
 @AccessControl.authorizationCheck: #CHECK
 @EndUserText.label: 'Last Date In BW Snapshot'
@@ -23,7 +26,7 @@
     dataClass: #MIXED
 }
 define view entity zsd_i_bw_snpsh_singl_last_date
-  as select from zsd_i_bw_snapshot
+  as select from zsd_i_snapshot
 {
   key   max(WmsSnapshotDate) as MaxBwSnapshotDate
 }

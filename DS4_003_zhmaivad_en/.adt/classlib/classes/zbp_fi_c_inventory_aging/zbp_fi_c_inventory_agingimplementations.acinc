@@ -1,0 +1,734 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+* SUFIYKON     | 01.11.2023 | 26448 Inventory Allowance                *
+*              |            | DS4K968899                               *
+************************************************************************
+
+CLASS lhc_inventoryaging
+  DEFINITION
+    INHERITING FROM cl_abap_behavior_handler
+    FINAL.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF gtyp_s_aging_values,
+             prctr TYPE prctr,
+             value TYPE zfi_inventory_allow_value,
+             hkont TYPE hkont,
+             diff  TYPE int2,
+           END OF gtyp_s_aging_values.
+
+    DATA: mr_matnr                   TYPE if_rap_query_filter=>tt_range_option,
+          mr_bwkey                   TYPE if_rap_query_filter=>tt_range_option,
+          mt_accountgl               TYPE bapiacgl09_tab,
+          mt_currencyamount          TYPE bapiaccr09_tab,
+          mt_belnr_cancellation      TYPE zfi_tt_inv_allow_belnr_canc,
+          mt_aging_values            TYPE TABLE OF gtyp_s_aging_values,
+          mt_hkont_assigned          TYPE TABLE OF hkont,
+          mt_calc_grades             TYPE zif_fi_inventory_allowance_con=>gtyp_t_inv_grades,
+
+          ms_documentheader          TYPE bapiache09,
+
+          mv_bukrs                   TYPE bukrs,
+          mv_lfgja                   TYPE lfgja,
+          mv_lfmon                   TYPE lfmon,
+          mv_waers                   TYPE waers,
+          mv_curr_season             TYPE fsh_saiso,
+          mv_bktxt_prefix            TYPE bktxt,
+          mv_bktxt_static            TYPE bktxt,
+          mv_hkont_credit            TYPE hkont,
+          mv_blart                   TYPE blart,
+          mv_records_to_be_processed TYPE i,
+          mv_aging_value             TYPE zfi_inventory_allow_value,
+
+          mo_utl                     TYPE REF TO zcl_fi_inventory_allowance_utl.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys REQUEST requested_authorizations FOR inventoryaging RESULT result ##NEEDED.
+
+    METHODS read FOR READ
+      IMPORTING
+        keys FOR READ inventoryaging RESULT result ##NEEDED.
+
+    METHODS lock FOR LOCK
+      IMPORTING keys FOR LOCK inventoryaging ##NEEDED.
+
+    METHODS do_validations FOR MODIFY
+      IMPORTING
+        keys FOR ACTION inventoryaging~dovalidationsaging RESULT result.
+
+    METHODS simulate FOR MODIFY
+      IMPORTING
+        keys FOR ACTION inventoryaging~simulateaging RESULT result.
+
+    METHODS post FOR MODIFY
+      IMPORTING
+        keys FOR ACTION inventoryaging~postaging.
+
+    METHODS get_bukrs_currency.
+    METHODS calc_curr_season.
+    METHODS calc_aging.
+    METHODS build_bktxt_prefix.
+    METHODS build_bktxt_static.
+    METHODS get_blart.
+    METHODS build_header.
+    METHODS build_items.
+    METHODS get_belnr_cancellation.
+    METHODS set_utl.
+
+    METHODS get_filters
+      IMPORTING
+        it_filters TYPE if_rap_query_filter=>tt_name_range_pairs.
+
+    METHODS get_hkonts.
+ENDCLASS.
+
+CLASS lsc_inventoryaging
+  DEFINITION
+    INHERITING FROM cl_abap_behavior_saver
+    FINAL.
+
+  PROTECTED SECTION.
+    METHODS save REDEFINITION.
+ENDCLASS.
+
+CLASS lhc_inventoryaging IMPLEMENTATION.
+  METHOD get_instance_authorizations.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD read.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD lock.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD do_validations.
+    DATA lv_result_txt TYPE natxt.
+
+    set_utl( ).
+
+    " Will always be populated.
+    DATA(ls_key)     = keys[ 1 ].
+    DATA(lt_filters) = mo_utl->get_filters( ls_key-%param-filters ).
+    DATA(lv_cid)     = ls_key-%cid.
+
+    " Will always be populated; single value only.
+    mv_bukrs = lt_filters[ name = `COMPANYCODE` ]-range[ 1 ]-low.
+    AUTHORITY-CHECK OBJECT 'F_BKPF_BUK' ID 'BUKRS' FIELD mv_bukrs ID 'ACTVT' FIELD '01'.
+
+    IF sy-subrc <> 0.
+      MESSAGE e003(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        %cid            = lv_cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    " Will always be populated; single value only.
+    mv_lfgja = lt_filters[ name = `FISCALYEAR` ]-range[ 1 ]-low.
+    " Will always be populated; single value only.
+    mv_lfmon = lt_filters[ name = `CURRENTPERIOD` ]-range[ 1 ]-low.
+
+    build_bktxt_prefix( ).
+    get_blart( ).
+
+    IF mo_utl->is_belnr_exists(
+      iv_bukrs = mv_bukrs
+      iv_gjahr = mv_lfgja
+      iv_monat = mv_lfmon
+      iv_bktxt = mv_bktxt_prefix
+      iv_blart = mv_blart ).
+
+      MESSAGE w004(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        %cid            = lv_cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_warning
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    INSERT VALUE #(
+      %cid            = lv_cid
+      %param-severity = zif_fi_inventory_allowance_con=>mc_severity_success ) INTO TABLE result.
+  ENDMETHOD.
+
+  METHOD simulate.
+    DATA: lt_return     TYPE bapiret2_t,
+
+          lv_result_txt TYPE natxt.
+
+    set_utl( ).
+
+    " Will always be populated.
+    DATA(ls_key) = keys[ 1 ].
+
+    DATA(lt_filters) = mo_utl->get_filters( ls_key-%param-filters ).
+
+    get_filters( lt_filters ).
+    get_bukrs_currency( ).
+    calc_curr_season( ).
+    calc_aging( ).
+    get_hkonts( ).
+
+    LOOP AT mt_aging_values ASSIGNING FIELD-SYMBOL(<ls_aging_value>) WHERE hkont = space.
+      MESSAGE e024(zfi_inv_allowance) INTO lv_result_txt WITH <ls_aging_value>-diff.
+      INSERT VALUE #(
+        type       = zif_fi_inventory_allowance_con=>mc_severity_error
+        id         = zif_fi_inventory_allowance_con=>mc_msg_class
+        number     = '24'
+        message_v1 = <ls_aging_value>-diff
+        message    = lv_result_txt ) INTO TABLE lt_return.
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+        %param-text     = lv_result_txt ) INTO TABLE result.
+    ENDLOOP.
+
+    IF result IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT mt_aging_values ASSIGNING <ls_aging_value>.
+      IF xsdbool( line_exists( mt_hkont_assigned[ table_line = <ls_aging_value>-hkont ] ) ) = abap_false.
+        MESSAGE e019(zfi_inv_allowance) INTO lv_result_txt WITH <ls_aging_value>-hkont mv_bukrs.
+        INSERT VALUE #(
+          type       = zif_fi_inventory_allowance_con=>mc_severity_error
+          id         = zif_fi_inventory_allowance_con=>mc_msg_class
+          number     = '19'
+          message_v1 = <ls_aging_value>-hkont
+          message_v2 = mv_bukrs
+          message    = lv_result_txt ) INTO TABLE lt_return.
+        INSERT VALUE #(
+          %cid            = ls_key-%cid
+          %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+          %param-text     = lv_result_txt ) INTO TABLE result.
+      ENDIF.
+    ENDLOOP.
+
+    IF xsdbool( line_exists( mt_hkont_assigned[ table_line = mv_hkont_credit ] ) ) = abap_false.
+      MESSAGE e019(zfi_inv_allowance) INTO lv_result_txt WITH mv_hkont_credit mv_bukrs.
+      INSERT VALUE #(
+        type       = zif_fi_inventory_allowance_con=>mc_severity_error
+        id         = zif_fi_inventory_allowance_con=>mc_msg_class
+        number     = '19'
+        message_v1 = mv_hkont_credit
+        message_v2 = mv_bukrs
+        message    = lv_result_txt ) INTO TABLE lt_return.
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+        %param-text     = lv_result_txt ) INTO TABLE result.
+    ENDIF.
+
+    IF result IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    IF mv_aging_value = 0.
+      MESSAGE e014(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        type    = zif_fi_inventory_allowance_con=>mc_severity_error
+        id      = zif_fi_inventory_allowance_con=>mc_msg_class
+        number  = '14'
+        message = lv_result_txt ) INTO TABLE lt_return.
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    build_bktxt_prefix( ).
+    build_bktxt_static( ).
+    get_blart( ).
+    build_header( ).
+    build_items( ).
+    get_belnr_cancellation( ).
+
+    CALL FUNCTION 'ZFI_FM_INVENTORY_AGING_SIM' DESTINATION 'NONE'
+      EXPORTING
+        iv_bktxt_static       = mv_bktxt_static
+        is_documentheader     = ms_documentheader ##ENH_OK
+        it_accountgl          = mt_accountgl
+        it_currencyamount     = mt_currencyamount
+        it_belnr_cancellation = mt_belnr_cancellation
+      IMPORTING
+        et_return             = lt_return
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2
+        OTHERS                = 3.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO lv_result_txt.
+      INSERT VALUE #(
+        type       = sy-msgty
+        id         = sy-msgid
+        number     = sy-msgno
+        message_v1 = sy-msgv1
+        message_v2 = sy-msgv2
+        message_v3 = sy-msgv3
+        message_v4 = sy-msgv4
+        message    = lv_result_txt ) INTO TABLE lt_return.
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = sy-msgty
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+      MESSAGE ID <ls_return>-id TYPE <ls_return>-type NUMBER <ls_return>-number
+      WITH <ls_return>-message_v1 <ls_return>-message_v2 <ls_return>-message_v3 <ls_return>-message_v4
+      INTO lv_result_txt.
+
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = <ls_return>-type
+        %param-text     = lv_result_txt ) INTO TABLE result.
+    ENDLOOP.
+
+    MESSAGE i023(zfi_inv_allowance) WITH mv_aging_value INTO lv_result_txt.
+    INSERT VALUE #(
+      %cid            = ls_key-%cid
+      %param-severity = zif_fi_inventory_allowance_con=>mc_severity_info
+      %param-text     = lv_result_txt ) INTO TABLE result.
+
+    MESSAGE i021(zfi_inv_allowance) WITH mv_records_to_be_processed INTO lv_result_txt.
+    INSERT VALUE #(
+      %cid            = ls_key-%cid
+      %param-severity = zif_fi_inventory_allowance_con=>mc_severity_info
+      %param-text     = lv_result_txt ) INTO TABLE result.
+  ENDMETHOD.
+
+  METHOD post.
+    DATA: lt_return     TYPE bapiret2_t,
+
+          lv_result_txt TYPE natxt.
+
+    set_utl( ).
+
+    " Will always be populated.
+    DATA(ls_key) = keys[ 1 ].
+
+    DATA(lt_filters) = mo_utl->get_filters( ls_key-%param-filters ).
+
+    get_filters( lt_filters ).
+    get_bukrs_currency( ).
+    calc_curr_season( ).
+    calc_aging( ).
+    get_hkonts( ).
+
+    LOOP AT mt_aging_values ASSIGNING FIELD-SYMBOL(<ls_aging_value>) WHERE hkont = space.
+      MESSAGE e024(zfi_inv_allowance) INTO lv_result_txt WITH <ls_aging_value>-diff.
+      INSERT VALUE #(
+        type       = zif_fi_inventory_allowance_con=>mc_severity_error
+        id         = zif_fi_inventory_allowance_con=>mc_msg_class
+        number     = '24'
+        message_v1 = <ls_aging_value>-diff
+        message    = lv_result_txt ) INTO TABLE lt_return.
+    ENDLOOP.
+
+    IF lt_return IS NOT INITIAL.
+      mo_utl->write_appl_log(
+        iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_aging_post
+        it_return = lt_return ).
+      RETURN.
+    ENDIF.
+
+    LOOP AT mt_aging_values ASSIGNING <ls_aging_value>.
+      IF xsdbool( line_exists( mt_hkont_assigned[ table_line = <ls_aging_value>-hkont ] ) ) = abap_false.
+        MESSAGE e019(zfi_inv_allowance) INTO lv_result_txt WITH <ls_aging_value>-hkont mv_bukrs.
+        INSERT VALUE #(
+          type       = zif_fi_inventory_allowance_con=>mc_severity_error
+          id         = zif_fi_inventory_allowance_con=>mc_msg_class
+          number     = '19'
+          message_v1 = <ls_aging_value>-hkont
+          message_v2 = mv_bukrs
+          message    = lv_result_txt ) INTO TABLE lt_return.
+      ENDIF.
+    ENDLOOP.
+
+    IF xsdbool( line_exists( mt_hkont_assigned[ table_line = mv_hkont_credit ] ) ) = abap_false.
+      MESSAGE e019(zfi_inv_allowance) INTO lv_result_txt WITH mv_hkont_credit mv_bukrs.
+      INSERT VALUE #(
+        type       = zif_fi_inventory_allowance_con=>mc_severity_error
+        id         = zif_fi_inventory_allowance_con=>mc_msg_class
+        number     = '19'
+        message_v1 = mv_hkont_credit
+        message_v2 = mv_bukrs
+        message    = lv_result_txt ) INTO TABLE lt_return.
+    ENDIF.
+
+    IF lt_return IS NOT INITIAL.
+      mo_utl->write_appl_log(
+        iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_aging_post
+        it_return = lt_return ).
+      RETURN.
+    ENDIF.
+
+    IF mv_aging_value = 0.
+      MESSAGE e014(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        type    = zif_fi_inventory_allowance_con=>mc_severity_error
+        id      = zif_fi_inventory_allowance_con=>mc_msg_class
+        number  = '14'
+        message = lv_result_txt ) INTO TABLE lt_return.
+      mo_utl->write_appl_log(
+        iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_aging_post
+        it_return = lt_return ).
+      RETURN.
+    ENDIF.
+
+    build_bktxt_prefix( ).
+    build_bktxt_static( ).
+    get_blart( ).
+    build_header( ).
+    build_items( ).
+    get_belnr_cancellation( ).
+
+    CALL FUNCTION 'ZFI_FM_INVENTORY_AGING_PST' DESTINATION 'NONE'
+      EXPORTING
+        iv_bktxt_static       = mv_bktxt_static
+        is_documentheader     = ms_documentheader ##ENH_OK
+        it_accountgl          = mt_accountgl
+        it_currencyamount     = mt_currencyamount
+        it_belnr_cancellation = mt_belnr_cancellation
+      IMPORTING
+        et_return             = lt_return
+      TABLES
+        it_calc_grades        = mt_calc_grades
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2
+        OTHERS                = 3.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO lv_result_txt.
+      INSERT VALUE #(
+        type       = sy-msgty
+        id         = sy-msgid
+        number     = sy-msgno
+        message_v1 = sy-msgv1
+        message_v2 = sy-msgv2
+        message_v3 = sy-msgv3
+        message_v4 = sy-msgv4
+        message    = lv_result_txt ) INTO TABLE lt_return.
+      mo_utl->write_appl_log(
+        iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_aging_post
+        it_return = lt_return ).
+      RETURN.
+    ENDIF.
+
+    mo_utl->write_appl_log(
+      iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_aging_post
+      it_return = lt_return ).
+  ENDMETHOD.
+
+  METHOD get_bukrs_currency.
+    mv_waers = mo_utl->get_bukrs_currency( mv_bukrs ).
+  ENDMETHOD.
+
+  METHOD calc_curr_season.
+    mv_curr_season = mo_utl->calc_curr_season(
+      iv_lfmon = mv_lfmon
+      iv_lfgja = mv_lfgja ).
+  ENDMETHOD.
+
+  METHOD calc_aging.
+    TYPES: BEGIN OF ltyp_s_aging_raw,
+             totalvaluatedstock TYPE lbkum,
+             standardprice      TYPE stprs,
+             lastseason         TYPE zpd_zzmls,
+             producttype        TYPE mtart,
+             profitcenter       TYPE prctr,
+             totalvalue         TYPE salk3,
+             diff               TYPE int2,
+           END OF ltyp_s_aging_raw.
+
+    DATA: lt_aging_raw TYPE TABLE OF ltyp_s_aging_raw,
+          lr_reserve   TYPE RANGE OF int2,
+
+          lv_option(2) TYPE c,
+          lv_reserve   TYPE int2.
+
+    DATA(lv_poper) = CONV poper( mv_lfmon ).
+
+    SELECT mbewh~lbkum AS totalvaluatedstock,
+
+           ckmlcr~stprs AS standardprice,
+
+           i_product~zzmls AS lastseason,
+
+           grades~mtart AS producttype,
+
+           i_productplant~profitcenter
+      FROM mbewh
+      LEFT JOIN mbew ON  mbew~matnr = mbewh~matnr
+                     AND mbew~bwkey = mbewh~bwkey
+                     AND mbew~bwtar = mbewh~bwtar
+      LEFT JOIN ckmlcr ON  ckmlcr~kalnr  = mbew~kaln1
+                       AND ckmlcr~bdatj  = mbewh~lfgja
+                       AND ckmlcr~poper  = @lv_poper
+                       AND ckmlcr~untper = @space
+                       AND ckmlcr~curtp  = @zif_fi_inventory_allowance_con=>mc_curtp_bukrs_currency
+      LEFT JOIN i_valuationarea ON i_valuationarea~valuationarea = mbewh~bwkey
+      LEFT JOIN i_product ON i_product~product = mbewh~matnr
+      JOIN zfi_i_inventory_allow_grades AS grades ON grades~mtart = i_product~producttype
+      LEFT JOIN i_productplant ON  i_productplant~product = mbewh~matnr
+                               AND i_productplant~plant   = mbewh~bwkey
+      WHERE mbewh~matnr                 IN @mr_matnr
+      AND   mbewh~bwkey                 IN @mr_bwkey
+      AND   mbewh~lfgja                 =  @mv_lfgja
+      AND   mbewh~lfmon                 =  @mv_lfmon
+      AND   mbewh~salk3                 > '0.00'
+      AND   i_valuationarea~companycode =  @mv_bukrs
+      INTO TABLE @lt_aging_raw ##TOO_MANY_ITAB_FIELDS.
+
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    DELETE lt_aging_raw WHERE lastseason    = space.
+    DELETE lt_aging_raw WHERE standardprice = 0.
+    DELETE lt_aging_raw WHERE profitcenter  = space.
+
+    IF lt_aging_raw IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    mv_records_to_be_processed = lines( lt_aging_raw ).
+
+    LOOP AT lt_aging_raw ASSIGNING FIELD-SYMBOL(<ls_aging_raw>).
+      <ls_aging_raw>-totalvalue = <ls_aging_raw>-totalvaluatedstock * <ls_aging_raw>-standardprice.
+
+      mv_aging_value += <ls_aging_raw>-totalvalue.
+
+      <ls_aging_raw>-diff = mo_utl->calc_season_diff(
+        iv_last_season = <ls_aging_raw>-lastseason
+        iv_curr_season = mv_curr_season ).
+    ENDLOOP.
+
+    " subrc check after the following select statement is intentionally not implemented;
+    " please don't add it.
+    SELECT *
+      FROM zfi_t_inv_ag_gla
+      INTO TABLE @DATA(lt_hkont).         "#EC CI_SUBRC "#EC CI_NOWHERE
+
+    LOOP AT lt_aging_raw ASSIGNING <ls_aging_raw>
+      GROUP BY ( prctr = <ls_aging_raw>-profitcenter
+                 diff  = <ls_aging_raw>-diff ) ASSIGNING FIELD-SYMBOL(<ls_group>).
+
+      INSERT INITIAL LINE INTO TABLE mt_aging_values ASSIGNING FIELD-SYMBOL(<ls_aging_value>).
+
+      <ls_aging_value>-prctr = <ls_group>-prctr.
+      <ls_aging_value>-diff  = <ls_group>-diff.
+
+      LOOP AT GROUP <ls_group> ASSIGNING FIELD-SYMBOL(<ls_group_wa>).
+        <ls_aging_value>-value += <ls_group_wa>-totalvalue.
+      ENDLOOP.
+
+      LOOP AT lt_hkont ASSIGNING FIELD-SYMBOL(<ls_hkont>) WHERE bschl = zif_fi_inventory_allowance_con=>mc_bschl_debit. "#EC CI_NESTED
+        IF <ls_hkont>-reserve(2) = '<=' OR <ls_hkont>-reserve(2) = '>='.
+          lv_option  = <ls_hkont>-reserve(2).
+          lv_reserve = <ls_hkont>-reserve+2.
+        ELSEIF <ls_hkont>-reserve(1) = '<' OR <ls_hkont>-reserve(1) = '>' OR <ls_hkont>-reserve(1) = '='.
+          lv_option  = <ls_hkont>-reserve(1).
+          lv_reserve = <ls_hkont>-reserve+1.
+        ELSE.
+          CONTINUE.
+        ENDIF.
+
+        CASE lv_option.
+          WHEN '<='.
+            lv_option = 'LE'.
+          WHEN '>='.
+            lv_option = 'GE'.
+          WHEN '<'.
+            lv_option = 'LT'.
+          WHEN '>'.
+            lv_option = 'GT'.
+          WHEN '='.
+            lv_option = 'EQ'.
+        ENDCASE.
+
+        lr_reserve = VALUE #( ( sign = 'I' option = lv_option low = lv_reserve ) ).
+
+        IF <ls_group>-diff IN lr_reserve.
+          <ls_aging_value>-hkont = <ls_hkont>-hkont.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+
+    mv_hkont_credit = VALUE #( lt_hkont[ bschl = zif_fi_inventory_allowance_con=>mc_bschl_credit ]-hkont OPTIONAL ).
+
+    mt_calc_grades = VALUE #( FOR <ls_aging_raw_wa> IN lt_aging_raw
+      ( mtart = <ls_aging_raw_wa>-producttype ) ).
+
+    SORT mt_calc_grades BY mtart.
+
+    DELETE ADJACENT DUPLICATES FROM mt_calc_grades COMPARING mtart.
+  ENDMETHOD.
+
+  METHOD build_header.
+    ms_documentheader-username  = sy-uname.
+    ms_documentheader-comp_code = mv_bukrs.
+    ms_documentheader-doc_date  = sy-datum.
+    ms_documentheader-doc_type  = mv_blart.
+
+    SELECT accountingdocumentheadertext
+      FROM i_accountingdocument
+      WHERE companycode                  =    @mv_bukrs
+      AND   fiscalyear                   =    @mv_lfgja
+      AND   fiscalperiod                 =    @mv_lfmon
+      AND   accountingdocumenttype       =    @mv_blart
+      AND   accountingdocumentheadertext LIKE @mv_bktxt_prefix
+      ORDER BY CAST( substring( accountingdocumentheadertext, 24, 2 ) AS NUMC ) DESCENDING
+      INTO @ms_documentheader-header_txt
+      UP TO 1 ROWS.
+    ENDSELECT.
+
+    IF sy-subrc <> 0.
+      DATA(lv_initial_counter) = abap_true.
+      ms_documentheader-header_txt = mv_bktxt_prefix.
+    ENDIF.
+
+    mo_utl->increment_post_counter(
+      EXPORTING
+        iv_initial = lv_initial_counter
+      CHANGING
+        cv_bktxt   = ms_documentheader-header_txt ).
+
+    CALL FUNCTION 'RP_LAST_DAY_OF_MONTHS'
+      EXPORTING
+        day_in            = CONV syst_datum( |{ mv_lfgja }{ mv_lfmon }01| )
+      IMPORTING
+        last_day_of_month = ms_documentheader-pstng_date
+      EXCEPTIONS
+        day_in_no_date    = 1
+        OTHERS            = 2. "#EC CI_SUBRC
+  ENDMETHOD.
+
+  METHOD build_items.
+    DATA: lv_posnr_acc         TYPE posnr_acc,
+          lv_aging_value_total TYPE zfi_inventory_allow_value.
+
+    LOOP AT mt_aging_values ASSIGNING FIELD-SYMBOL(<ls_aging_value>).
+      lv_posnr_acc += 1.
+
+      INSERT VALUE #(
+        itemno_acc = lv_posnr_acc
+        gl_account = <ls_aging_value>-hkont
+        item_text  = ms_documentheader-header_txt
+        profit_ctr = <ls_aging_value>-prctr ) INTO TABLE mt_accountgl.
+
+      DATA(lv_aging_value) = CONV zfi_inventory_allow_value( |{ <ls_aging_value>-value CURRENCY = mv_waers }| ).
+
+      INSERT VALUE #(
+        itemno_acc = lv_posnr_acc
+        curr_type  = zif_fi_inventory_allowance_con=>mc_curtp_doc_currency
+        currency   = mv_waers
+        amt_doccur = lv_aging_value ) INTO TABLE mt_currencyamount.
+
+      lv_aging_value_total += lv_aging_value.
+    ENDLOOP.
+
+    lv_posnr_acc         +=  1.
+    lv_aging_value_total = - lv_aging_value_total.
+
+    INSERT VALUE #(
+      itemno_acc = lv_posnr_acc
+      gl_account = mv_hkont_credit
+      item_text  = ms_documentheader-header_txt ) INTO TABLE mt_accountgl.
+
+    INSERT VALUE #(
+      itemno_acc = lv_posnr_acc
+      curr_type  = zif_fi_inventory_allowance_con=>mc_curtp_doc_currency
+      currency   = mv_waers
+      amt_doccur = lv_aging_value_total ) INTO TABLE mt_currencyamount.
+  ENDMETHOD.
+
+  METHOD get_belnr_cancellation.
+    mt_belnr_cancellation = mo_utl->get_belnr_cancellation(
+      iv_bukrs        = mv_bukrs
+      iv_gjahr        = mv_lfgja
+      iv_monat        = mv_lfmon
+      iv_bktxt_prefix = mv_bktxt_prefix
+      iv_bktxt_static = mv_bktxt_static
+      iv_blart        = mv_blart ).
+  ENDMETHOD.
+
+  METHOD set_utl.
+    mo_utl = zcl_fi_inventory_allowance_utl=>get_instance( ).
+  ENDMETHOD.
+
+  METHOD get_filters.
+    " Will always be populated.
+    mr_matnr = it_filters[ name = `PRODUCT` ]-range.
+    " Will always be populated.
+    mr_bwkey = it_filters[ name = `PLANT` ]-range.
+
+    " Will always be populated; single value only.
+    mv_bukrs = it_filters[ name = `COMPANYCODE` ]-range[ 1 ]-low.
+    " Will always be populated; single value only.
+    mv_lfgja = it_filters[ name = `FISCALYEAR` ]-range[ 1 ]-low.
+    " Will always be populated; single value only.
+    mv_lfmon = it_filters[ name = `CURRENTPERIOD` ]-range[ 1 ]-low.
+  ENDMETHOD.
+
+  METHOD build_bktxt_prefix.
+    mv_bktxt_prefix = |{ zif_fi_inventory_allowance_con=>mc_bktxt_aging_src_prefix } { mv_lfmon }.{ mv_lfgja }-%|.
+  ENDMETHOD.
+
+  METHOD build_bktxt_static.
+    mv_bktxt_static = |{ zif_fi_inventory_allowance_con=>mc_bktxt_aging_rev_prefix } { mv_lfmon }.{ mv_lfgja }|.
+  ENDMETHOD.
+
+  METHOD get_blart.
+    mv_blart = mo_utl->get_blart( ).
+  ENDMETHOD.
+
+  METHOD get_hkonts.
+    DATA lr_hkont TYPE RANGE OF hkont.
+
+    lr_hkont = VALUE #( ( sign = 'I' option = 'EQ' low = mv_hkont_credit ) ).
+
+    lr_hkont = VALUE #( BASE lr_hkont
+    FOR <ls_aging_value> IN mt_aging_values sign = 'I' option = 'EQ' ( low = <ls_aging_value>-hkont ) ).
+
+    SORT lr_hkont BY low.
+    DELETE ADJACENT DUPLICATES FROM lr_hkont COMPARING low.
+
+    SELECT glaccount
+      FROM i_glaccountincompanycode
+      INTO TABLE @mt_hkont_assigned
+      WHERE glaccount   IN @lr_hkont
+      AND   companycode =  @mv_bukrs.
+
+    IF sy-subrc <> 0.
+      CLEAR mt_hkont_assigned.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lsc_inventoryaging IMPLEMENTATION.
+  METHOD save.
+    RETURN.
+  ENDMETHOD.
+ENDCLASS.

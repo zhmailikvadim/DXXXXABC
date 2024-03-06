@@ -12,6 +12,9 @@
 *----------------------------------------------------------------------*
 * ZHMAIVAD     | 13.07.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
 *----------------------------------------------------------------------*/
 @EndUserText.label: 'Errors Inventory Postings Batch WMS->S4'
 @AccessControl.authorizationCheck: #CHECK
@@ -20,7 +23,6 @@
 define view entity zsd_i_errors_inventory_pst_aif
   as select from zsd_i_errors_inventory_prepare as AifErrorsBase
 {
-  key               WmsDate,
   key               AifErrorsBase.Plant,
   key               StorageLocation,
   key               Product,
@@ -33,7 +35,6 @@ define view entity zsd_i_errors_inventory_pst_aif
 }
 union select from zsd_i_errors_inventory_prepare as AifErrorsBase
 {
-  key               WmsDate,
   key               AifErrorsBase.Plant,
   key               ReceivingStorageLocation as StorageLocation,
   key               Product,
@@ -47,7 +48,6 @@ where
   ReceivingStorageLocation <> ''
 union select from zsd_i_errors_inventory_prepare as AifErrorsBase
 {
-  key               WmsDate,
   key               AifErrorsBase.Plant,
   key               StorageLocation,
   key               ReceivingArticle as Product,
@@ -61,7 +61,6 @@ where
   ReceivingArticle <> ''
 union select from zsd_i_errors_inventory_prepare as AifErrorsBase
 {
-  key               WmsDate,
   key               AifErrorsBase.Plant,
   key               StorageLocation,
   key               Product,
@@ -75,7 +74,6 @@ where
   MoveTo <> ''
 union select from zsd_i_errors_inventory_prepare as AifErrorsBase
 {
-  key               WmsDate,
   key               AifErrorsBase.Plant,
   key               StorageLocation,
   key               Product,

@@ -30,7 +30,13 @@
 *----------------------------------------------------------------------*
 * ZHMAIVAD     | 29.09.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
-*----------------------------------------------------------------------*/
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
+*----------------------------------------------------------------------*
+" ZHMAIVAD     | 03.04.2024 | 30615     : [Feature] [Build] - Stock re -
+"              |            | DS4K985600                                -
+" ----------------------------------------------------------------------*/
 @EndUserText.label: 'Stock Difference Report - Projection'
 @AccessControl.authorizationCheck: #CHECK
 @Metadata.allowExtensions: true
@@ -79,7 +85,7 @@ define root view entity zsd_c_stock_difference_report
       GenericArticle,
       Price,
       HasDifference,
-      ArticleExistInBothSystems,
+      ArticleExistInSap,
       ErrorsGoodsReceiptUUQuantity,
       ErrorsGoodsReceiptQiQuantity,
       ErrorsGoodsReceiptBlQuantity,

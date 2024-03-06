@@ -18,11 +18,14 @@
 ----------------------------------------------------------------------*
 * ZHMAIVAD     | 13.07.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
 *----------------------------------------------------------------------*/
 @EndUserText.label: 'Errors from Inbound OMNI Shipment Confrm'
 @AccessControl.authorizationCheck: #CHECK
 define view entity zsd_i_errors_omni_shpm_cf_sum
-  as select from zsd_i_errors_omni_shpm_cf_idoc
+  as select from zsd_i_errors_omni_shpm_cf_pers
 {
   key Plant,
   key StorageLocation,

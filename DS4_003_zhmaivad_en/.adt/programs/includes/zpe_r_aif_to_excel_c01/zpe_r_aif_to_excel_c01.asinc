@@ -1,0 +1,398 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.01.2024 | 28106: Creation                          *
+*              |            | DS4K976224                               *
+************************************************************************
+CLASS lcl_main DEFINITION CREATE PUBLIC.
+
+  PUBLIC SECTION.
+
+    METHODS at_selection_screen.
+    METHODS at_selection_screen_output.
+    METHODS initialization.
+    METHODS on_f4_for_path.
+    METHODS start_of_selection.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+
+    DATA: mv_html TYPE abap_boolean.
+
+    METHODS add_logs IMPORTING io_excel TYPE REF TO zcl_excel
+                               it_logs  TYPE /aif/tt_msg_log
+                     RAISING   zcx_excel.
+
+    METHODS add_messages IMPORTING io_excel    TYPE REF TO zcl_excel
+                                   io_messages TYPE REF TO data
+                         RAISING   zcx_excel.
+
+
+    METHODS build_excel IMPORTING io_excel TYPE REF TO zcl_excel
+                        EXPORTING et_data  TYPE solix_tab
+                                  ev_bytes TYPE i
+                        RAISING   zcx_excel.
+
+    METHODS check_authorization.
+
+    METHODS get_keyfields       RETURNING VALUE(rv_data) TYPE string.
+
+    METHODS get_data EXPORTING eo_messages TYPE REF TO data
+                               et_logs     TYPE /aif/tt_msg_log
+                     RAISING   /aif/cx_aif_engine_not_found /aif/cx_error_handling_general.
+
+
+    METHODS output IMPORTING io_messages TYPE REF TO data
+                             it_logs     TYPE /aif/tt_msg_log
+                   RAISING   cx_sy_file_io zcx_excel.
+
+    METHODS set_screen_attributes.
+    METHODS set_subscreen.
+
+
+ENDCLASS.
+
+CLASS lcl_main IMPLEMENTATION.
+
+  METHOD initialization.
+
+*   Check UI
+    CALL FUNCTION 'GUI_IS_ITS'
+      IMPORTING
+        return = mv_html.
+
+*   Default date
+    IF p_dfrom IS INITIAL.
+      p_dfrom = sy-datum - 60.
+    ENDIF.
+
+*   Empty subscreen
+    sub3-prog  = sy-repid.
+    sub3-dynnr = '0999'.
+
+*   File
+    p_file = |{ sy-datum }_{ sy-timlo }.xlsx|.
+
+*   Path
+    IF mv_html = abap_false.
+      cl_gui_frontend_services=>get_temp_directory( CHANGING   temp_dir             = p_path
+                                                    EXCEPTIONS cntl_error           = 1
+                                                               error_no_gui         = 2
+                                                               not_supported_by_gui = 3
+                                                               OTHERS               = 4 ).
+      IF sy-subrc = 0.
+        cl_gui_cfw=>flush( EXCEPTIONS cntl_system_error = 1
+                                      cntl_error        = 2
+                                      OTHERS            = 3 ).
+        IF sy-subrc <> 0.
+          CLEAR p_path.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD at_selection_screen_output.
+
+    set_subscreen( ).
+    set_screen_attributes( ).
+
+  ENDMETHOD.
+
+  METHOD at_selection_screen.
+
+    TRY.
+*       Check interface
+        /aif/cl_aif_engine_factory=>get_engine( iv_ns        = p_ns
+                                                iv_ifname    = p_ifname
+                                                iv_ifversion = p_ifvers ).
+
+      CATCH /aif/cx_error_handling_general /aif/cx_aif_engine_not_found.
+        MESSAGE TEXT-e02 TYPE 'E'.
+    ENDTRY.
+
+    check_authorization( ).
+
+  ENDMETHOD.
+
+  METHOD check_authorization.
+
+    TRY.
+        DATA(lif_auth) = /aif/cl_authchk_controller=>get_instance(
+                             iv_ns         = p_ns
+                             iv_ifname     = p_ifname
+                             iv_ifversion  = p_ifvers
+                             iv_actvt      = /aif/if_globals=>gc_eh_actvts-select
+                             iv_check_type = /aif/if_globals=>gc_eh_auth_check_type-id ).
+        lif_auth->check_authority( ).
+      CATCH /aif/cx_error_handling_general /aif/cx_aif_engine_not_found.
+        MESSAGE TEXT-e01 TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD set_subscreen.
+
+    TRY.
+        DATA(ls_inf_table) = /aif/cl_db_access_inf_tbl=>get_instance( )->read_single( iv_ns        = p_ns
+                                                                                      iv_ifname    = p_ifname
+                                                                                      iv_ifversion = p_ifvers ).
+
+        sub3-prog  = SWITCH #( ls_inf_table-module_name WHEN space THEN sy-repid ELSE ls_inf_table-module_name ) .
+        sub3-dynnr = SWITCH #( ls_inf_table-screen_number WHEN space THEN '0999' ELSE ls_inf_table-screen_number ) .
+
+      CATCH /aif/cx_error_handling_general.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD get_data.
+
+    DATA ls_filter_range TYPE /aif/s_filter_range.
+
+*--     Get messages
+    DATA(lif_sel_engine) = /aif/cl_aif_engine_factory=>get_selection_engine_by_ifkeys( iv_ns        = p_ns
+                                                                                       iv_ifname    = p_ifname
+                                                                                       iv_ifversion = p_ifvers ).
+    ls_filter_range-ns           = VALUE #( ( sign = 'I' option = 'EQ' low = p_ns ) ).
+    ls_filter_range-ifname       = VALUE #( ( sign = 'I' option = 'EQ' low = p_ifname ) ).
+    ls_filter_range-ifver        = VALUE #( ( sign = 'I' option = 'EQ' low = p_ifvers ) ).
+    ls_filter_range-process_date = VALUE #( ( sign = 'I' option = 'BT' low = |{ p_dfrom }{ p_tfrom }| high = |{ p_dto }{ p_tto }| ) ).
+    ls_filter_range-status       = CORRESPONDING #( s_status[] ).
+    DATA(lv_keyfields)           = get_keyfields( ).
+    ls_filter_range-keyfields    = COND #( WHEN lv_keyfields IS NOT INITIAL
+                                           THEN VALUE #( ( sign = 'I' option = 'EQ' low = lv_keyfields ) ) ).
+    lif_sel_engine->/aif/if_data_selection~get_message_entries( EXPORTING is_filter_range    = ls_filter_range
+                                                                IMPORTING er_message_entries = eo_messages
+                                                                          ev_total           = DATA(lv_count) ).
+    IF lv_count = 0.
+      RAISE EXCEPTION TYPE /aif/cx_error_handling_general MESSAGE e095(/aif/mes).
+    ENDIF.
+
+
+*-- Get logs
+    DATA(lo_log_reader) = NEW /aif/cl_msg_log_reader( ).
+    LOOP AT eo_messages->* ASSIGNING FIELD-SYMBOL(<ls_data>).
+
+      ASSIGN COMPONENT 'MSGGUID' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_guid>).
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+      lo_log_reader->/aif/if_msg_log_reader~read_log( EXPORTING is_interface_key = VALUE #( ns     = p_ns
+                                                                                            ifname = p_ifname
+                                                                                            ifver  = p_ifvers )
+                                                                iv_msgguid       = <lv_guid>
+                                                      IMPORTING et_msg_log       = DATA(lt_msg_log)
+                                                                ev_count         = DATA(lv_count_log) ).
+      IF lv_count_log > 0.
+        APPEND LINES OF lt_msg_log TO et_logs.
+      ENDIF.
+    ENDLOOP.
+
+
+  ENDMETHOD.
+
+  METHOD start_of_selection.
+
+    TRY.
+        get_data( IMPORTING eo_messages = DATA(lo_messages)
+                            et_logs     = DATA(lt_logs) ).
+
+        output( io_messages = lo_messages
+                it_logs     = lt_logs ).
+
+      CATCH /aif/cx_aif_engine_not_found /aif/cx_error_handling_general cx_sy_file_io zcx_excel INTO DATA(lo_exc).
+        MESSAGE lo_exc->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD get_keyfields.
+
+    FIELD-SYMBOLS: <lt_value> TYPE ANY TABLE.
+
+    TRY.
+        DATA(lts_key_fields) = /aif/cl_db_access_inf_kflds=>get_instance( )->read_single_interface( iv_ns        = p_ns
+                                                                                                    iv_ifname    = p_ifname
+                                                                                                    iv_ifversion = p_ifvers ).
+        LOOP AT lts_key_fields ASSIGNING FIELD-SYMBOL(<ls_field>).
+          DATA(lv_key_field) = |"KEY_FIELD_{ <ls_field>-fieldnr+1(2) }":[|.
+          DATA(lv_name) = |({ sub3-prog }){ <ls_field>-sp_name }[]|.
+          ASSIGN (lv_name) TO <lt_value>.
+          IF sy-subrc = 0 AND <lt_value> IS NOT INITIAL.
+            LOOP AT <lt_value> ASSIGNING FIELD-SYMBOL(<ls_value>).
+              DATA(lv_val_index) = sy-tabix.
+              ASSIGN COMPONENT 'SIGN' OF STRUCTURE <ls_value> TO FIELD-SYMBOL(<lv_sign>).
+              CHECK sy-subrc = 0.
+              ASSIGN COMPONENT 'OPTION' OF STRUCTURE <ls_value> TO FIELD-SYMBOL(<lv_option>).
+              CHECK sy-subrc = 0.
+              ASSIGN COMPONENT 'LOW' OF STRUCTURE <ls_value> TO FIELD-SYMBOL(<lv_low>).
+              CHECK sy-subrc = 0.
+              ASSIGN COMPONENT 'HIGH' OF STRUCTURE <ls_value> TO FIELD-SYMBOL(<lv_high>).
+              CHECK sy-subrc = 0.
+              lv_key_field = lv_key_field && |\{"SIGN":"{ <lv_sign> }","OPTION":"{ <lv_option> }","LOW":"{ <lv_low> }","HIGH":"{ <lv_high> }"\}|.
+              IF lv_val_index < lines( <lt_value> ).
+                lv_key_field = lv_key_field && |,|.
+              ENDIF.
+            ENDLOOP.
+            lv_key_field  = lv_key_field && |]|.
+            rv_data = COND #( WHEN rv_data IS INITIAL THEN lv_key_field ELSE |{ rv_data },{ lv_key_field }| ).
+          ENDIF.
+        ENDLOOP.
+
+        rv_data = COND #( WHEN rv_data IS NOT INITIAL THEN |\{"FILTERS":\{{ rv_data }\}\}| ).
+
+      CATCH /aif/cx_error_handling_general.
+        CLEAR rv_data.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD output.
+
+    DATA(lo_excel) = NEW zcl_excel( ).
+
+*-- Messages
+    add_messages( io_excel    = lo_excel
+                  io_messages = io_messages ).
+*-- Logs
+    add_logs( io_excel = lo_excel
+              it_logs  = it_logs ).
+
+*-- Build Excel
+    build_excel( EXPORTING io_excel = lo_excel
+                 IMPORTING et_data  = DATA(lt_data)
+                           ev_bytes = DATA(lv_bytes) ).
+
+*-- Download...
+    DATA(lv_path) = COND #( WHEN mv_html = abap_true THEN p_file ELSE |{ p_path }\\{ p_file }| ).
+
+    cl_gui_frontend_services=>gui_download( EXPORTING  bin_filesize = lv_bytes
+                                                       filename     = lv_path
+                                                       filetype     = 'BIN'
+                                            CHANGING   data_tab     = lt_data
+                                            EXCEPTIONS OTHERS       = 1 ).
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION NEW cx_sy_file_io( textid = cx_sy_file_io=>write_error ).
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD add_messages.
+
+    FIELD-SYMBOLS <lt_data> TYPE STANDARD TABLE.
+    DATA lt_fc TYPE zexcel_t_fieldcatalog.
+
+
+    ASSIGN io_messages->* TO <lt_data>.
+
+    DATA(lo_w1) = io_excel->get_active_worksheet( ).
+    lo_w1->set_title( ip_title = CONV #( TEXT-003 ) ).
+
+    DATA(lt_field_catalog) = zcl_excel_common=>get_fieldcatalog( ip_table = <lt_data> ).
+    LOOP AT lt_field_catalog ASSIGNING FIELD-SYMBOL(<ls_fc>) WHERE     fieldname <> 'KEYFIELDS'
+                                                                   AND fieldname <> 'LOG_MESSAGE'
+                                                                   AND fieldname <> 'ASSIGNED_PROCESSOR'
+                                                                   AND fieldname <> 'ASSIGNED_PROCESS_STATUS'
+                                                                   AND fieldname <> 'FORMATTEDNAME'
+                                                                   AND fieldname <> 'SUB_STATUS'.
+      IF <ls_fc>-fieldname = 'PROCESS_DATE' OR <ls_fc>-fieldname = 'LAST_PROCESS_DATE'.
+        <ls_fc>-abap_type = cl_abap_typedescr=>typekind_num.
+      ENDIF.
+
+      DATA(lv_col) = zcl_excel_common=>convert_column2alpha( <ls_fc>-position ).
+      DATA(lo_col) = lo_w1->get_column( lv_col ).
+      lo_col->set_auto_size( abap_true ).
+      INSERT <ls_fc> INTO TABLE lt_fc.
+    ENDLOOP.
+
+    lo_w1->bind_table( ip_table         = <lt_data>
+                       it_field_catalog = lt_fc ).
+
+    lo_w1->calculate_column_widths( ).
+
+  ENDMETHOD.
+
+
+  METHOD add_logs.
+
+
+    DATA(lo_w2)            = io_excel->add_new_worksheet( ip_title = CONV #( TEXT-005 ) ).
+    DATA(lt_field_catalog) = zcl_excel_common=>get_fieldcatalog( ip_table = it_logs ).
+
+    DELETE lt_field_catalog WHERE    fieldname = 'COUNTER'
+                                  OR fieldname = 'COUNTER2'
+                                  OR fieldname = 'CUST_TEXT'
+                                  OR fieldname = 'MSGV1'
+                                  OR fieldname = 'MSGV2'
+                                  OR fieldname = 'MSGV3'
+                                  OR fieldname = 'MSGV4'
+                                  OR fieldname = 'TIMESTAMP'
+                                  OR fieldname = 'HAS_DETAIL_TEXT'
+                                  OR fieldname = 'MAINCOMPONENT'
+                                  OR fieldname = 'RECTYPENR'
+                                  OR fieldname = 'GLOBALROWNR'
+                                  OR fieldname = 'FIELDNAME'
+                                  OR fieldname = 'DL_RECTYPE_LABEL'
+                                  OR fieldname = 'DL_FIELD_LABEL'.
+
+    lo_w2->bind_table( ip_table         = it_logs
+                       it_field_catalog = lt_field_catalog ).
+
+*-- Set auto-size
+    LOOP AT lt_field_catalog ASSIGNING FIELD-SYMBOL(<ls_fc>).
+      DATA(lv_col) = zcl_excel_common=>convert_column2alpha( <ls_fc>-position ).
+      DATA(lo_col) = lo_w2->get_column( lv_col ).
+      lo_col->set_auto_size( abap_true ).
+    ENDLOOP.
+    lo_w2->calculate_column_widths( ).
+
+
+  ENDMETHOD.
+
+
+  METHOD build_excel.
+
+    io_excel->set_active_sheet_index( 1 ).
+    DATA(lo_writer) = NEW zcl_excel_writer_2007( ).
+    DATA(lv_data)   = lo_writer->zif_excel_writer~write_file( io_excel ).
+    et_data         = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_data ).
+    ev_bytes        = xstrlen( lv_data ).
+
+
+  ENDMETHOD.
+
+  METHOD set_screen_attributes.
+
+    LOOP AT SCREEN.
+      IF screen-group1 = 'PAT' AND mv_html = abap_true.
+        screen-active = 0.
+        MODIFY SCREEN.
+      ELSEIF screen-group1 = 'PAT' AND mv_html = abap_false.
+        screen-active = 1.
+        MODIFY SCREEN.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD on_f4_for_path.
+
+    cl_gui_frontend_services=>directory_browse( CHANGING   selected_folder      = p_path
+                                                EXCEPTIONS cntl_error           = 1
+                                                           error_no_gui         = 2
+                                                           not_supported_by_gui = 3
+                                                           OTHERS               = 4 ).
+    IF sy-subrc <> 0.
+      MESSAGE e000(/aif/mes) WITH 'Unknown error'(014).
+    ENDIF.
+
+  ENDMETHOD.
+
+ENDCLASS.

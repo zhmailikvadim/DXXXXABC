@@ -8,6 +8,10 @@
 *              |            | implementation class                     *
 *              |            | DS4K932127                               *
 *----------------------------------------------------------------------*
+* KHADDFAD     | 25.10.2023 | 25466: Updated handling for resetting    *
+*              |            | markdowns                                *
+*              |            | DS4K967503                               *
+*----------------------------------------------------------------------*
 ##CLASS_FINAL CLASS lhc_header DEFINITION INHERITING FROM cl_abap_behavior_handler.
   PUBLIC SECTION.
 
@@ -17,8 +21,10 @@
   PRIVATE SECTION.
 
 
-    DATA: mv_processed TYPE xfeld,
+    DATA: mv_processed TYPE abap_boolean,
           mt_return    TYPE tt_bapiret2.
+
+    CONSTANTS: mc_message_class TYPE symsgid VALUE 'ZSD_MD_VALIDATION'.
 
     METHODS read FOR READ
       IMPORTING keys FOR READ header RESULT result.
@@ -30,15 +36,18 @@
     METHODS activate_promotion FOR MODIFY
       IMPORTING keys FOR ACTION header~activate_promotion.
 
-    METHODS deactivate_promotion FOR MODIFY
-      IMPORTING keys FOR ACTION header~deactivate_promotion.
-
     METHODS delete_promotion FOR MODIFY
       IMPORTING keys FOR ACTION header~delete_promotion.
 
     METHODS get_instance_features FOR INSTANCE FEATURES
  ##NEEDED IMPORTING keys REQUEST requested_features FOR header
  ##NEEDED RESULT result.
+
+    ##NEEDED METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+    ##NEEDED     IMPORTING keys REQUEST requested_authorizations FOR header RESULT result.
+
+    ##NEEDED METHODS lock FOR LOCK
+    ##NEEDED    IMPORTING keys FOR LOCK header.
 
 ENDCLASS.
 
@@ -59,9 +68,9 @@ CLASS lhc_header IMPLEMENTATION.
           OTHERS                        = 9.
     IF sy-subrc IS NOT INITIAL.
       APPEND VALUE #( type = 'E'
-                  id = 'ZSD_MD_VALIDATION'
-                  number = '011'
-                  message_v1 = lv_message_rfc ) TO mt_return.
+                      id = mc_message_class
+                      number = '011'
+                      message_v1 = lv_message_rfc ) TO mt_return.
     ENDIF.
 
     mv_processed = abap_on.
@@ -79,18 +88,27 @@ CLASS lhc_header IMPLEMENTATION.
 
   METHOD activate_promotion.
 
-    DATA:  lv_message_rfc TYPE char100.
-    LOOP AT keys ASSIGNING FIELD-SYMBOL(<ls_keys>).
-
-      CLEAR: mv_processed,
-             mt_return[].
+    DATA: lv_message_rfc TYPE char100,
+          lv_lines       TYPE i,
+          lt_aktnr       TYPE zsd_tt_aktnr.
 
 
-      CALL FUNCTION 'ZSD_FM_MARKDOWN_VALIDATION' STARTING NEW TASK 'DEACTIVATE'
-        CALLING rfc_callback ON END OF TASK
+  ##ENH_OK  lt_aktnr = CORRESPONDING #( keys MAPPING aktnr = promotion ).
+
+    lv_lines = lines( keys ).
+    IF lv_lines > 10. " use background processing when more than 10 promotions are selected.
+##NEEDED  MESSAGE s002(zsd_md_validation) WITH lv_message_rfc INTO DATA(lv_dummy).
+      APPEND VALUE #( %msg         = new_message( id = mc_message_class
+                                                  number = '02'
+                                                  severity = if_abap_behv_message=>severity-success )
+                                                )      TO reported-header.
+
+
+
+      CALL FUNCTION 'ZSD_FM_MARKDOWN_VALIDATION' STARTING NEW TASK 'ACTIVATE_BACKGROUND'
         EXPORTING
-          iv_aktnr              = <ls_keys>-promotion
-          iv_deactivate         = ''
+          it_aktnr              = lt_aktnr
+          iv_background         = abap_true
         EXCEPTIONS
           system_failure        = 1 MESSAGE lv_message_rfc
           communication_failure = 2 MESSAGE lv_message_rfc
@@ -98,18 +116,45 @@ CLASS lhc_header IMPLEMENTATION.
           OTHERS                = 4.
 
       IF sy-subrc IS NOT INITIAL.
-        ##NEEDED  MESSAGE e011(zsd_md_validation) WITH lv_message_rfc INTO DATA(lv_dummy).
+        ##NEEDED  MESSAGE e007(zsd_md_validation) WITH lv_message_rfc INTO lv_dummy.
         APPEND VALUE #( type = 'E'
-                        id = 'ZSD_MD_VALIDATION'
-                        number = '011'
+                        id = mc_message_class
+                        number = '07'
+                        message_v1 = lv_message_rfc ) TO mt_return.
+
+
+      ENDIF.
+
+
+    ELSE. "process online
+
+
+      CLEAR: mv_processed,
+             mt_return[].
+
+      CALL FUNCTION 'ZSD_FM_MARKDOWN_VALIDATION' STARTING NEW TASK 'ACTIVATE'
+        CALLING rfc_callback ON END OF TASK
+        EXPORTING
+          it_aktnr              = lt_aktnr
+        EXCEPTIONS
+          system_failure        = 1 MESSAGE lv_message_rfc
+          communication_failure = 2 MESSAGE lv_message_rfc
+          resource_failure      = 3
+          OTHERS                = 4.
+
+      IF sy-subrc IS NOT INITIAL.
+        ##NEEDED  MESSAGE e007(zsd_md_validation) WITH lv_message_rfc INTO lv_dummy.
+        APPEND VALUE #( type = 'E'
+                        id = mc_message_class
+                        number = '07'
                         message_v1 = lv_message_rfc ) TO mt_return.
       ENDIF.
 
       WAIT FOR ASYNCHRONOUS TASKS UNTIL mv_processed = abap_on.
 
-      LOOP AT mt_return ASSIGNING FIELD-SYMBOL(<ls_return>). "#EC CI_NESTED
+      LOOP AT mt_return ASSIGNING FIELD-SYMBOL(<ls_return>).
         IF sy-subrc IS INITIAL.
-          APPEND VALUE #( %tky         = <ls_keys>-%tky
+          APPEND VALUE #(
                           %msg         = new_message( id = <ls_return>-id
                                                       number = <ls_return>-number
                                                       v1 = <ls_return>-message_v1
@@ -120,52 +165,8 @@ CLASS lhc_header IMPLEMENTATION.
         ENDIF.
       ENDLOOP.
 
+    ENDIF.
 
-    ENDLOOP.
-  ENDMETHOD.
-
-  METHOD deactivate_promotion.
-    DATA:  lv_message_rfc TYPE char100.
-    LOOP AT keys ASSIGNING FIELD-SYMBOL(<ls_keys>).
-
-      CLEAR: mv_processed,
-             mt_return[].
-
-
-      CALL FUNCTION 'ZSD_FM_MARKDOWN_VALIDATION' STARTING NEW TASK 'DEACTIVATE'
-        CALLING rfc_callback ON END OF TASK
-        EXPORTING
-          iv_aktnr              = <ls_keys>-promotion
-          iv_deactivate         = 'X'
-        EXCEPTIONS
-          system_failure        = 1 MESSAGE lv_message_rfc
-          communication_failure = 2 MESSAGE lv_message_rfc
-          resource_failure      = 3
-          OTHERS                = 4.
-
-      IF sy-subrc IS NOT INITIAL.
-        APPEND VALUE #( type = 'E'
-                        id = 'ZSD_MD_VALIDATION'
-                        number = '011'
-                        message_v1 = lv_message_rfc ) TO mt_return.
-      ENDIF.
-
-      WAIT FOR ASYNCHRONOUS TASKS UNTIL mv_processed = abap_on.
-
-      LOOP AT mt_return ASSIGNING FIELD-SYMBOL(<ls_return>). "#EC CI_NESTED
-        IF sy-subrc IS INITIAL.
-          APPEND VALUE #( %tky         = <ls_keys>-%tky
-                          %msg         = new_message( id = <ls_return>-id
-                                                      number = <ls_return>-number
-                                                      v1 = <ls_return>-message_v1
-                                                      severity = COND #( WHEN <ls_return>-type = 'E'
-                                                                         THEN if_abap_behv_message=>severity-error
-                                                                         ELSE if_abap_behv_message=>severity-success  ) )
-                           )      TO reported-header.
-        ENDIF.
-      ENDLOOP.
-
-    ENDLOOP.
   ENDMETHOD.
 
   METHOD delete_promotion.
@@ -189,7 +190,7 @@ CLASS lhc_header IMPLEMENTATION.
 
         APPEND VALUE #( %tky         = <ls_keys>-%tky
                         %msg         = new_message( severity   = if_abap_behv_message=>severity-success
-                                                    id     = 'ZSD_MD_VALIDATION'
+                                                    id     = mc_message_class
                                                     number = '001'
                                                     v1  = <ls_keys>-promotion
                                                     ) )
@@ -222,11 +223,16 @@ CLASS lhc_header IMPLEMENTATION.
 
       IF <ls_promotions>-status = 'Open'.
         ls_result-%action-delete_promotion = if_abap_behv=>fc-o-enabled.
-        ls_result-%action-deactivate_promotion = if_abap_behv=>fc-o-disabled.
       ELSE.
         ls_result-%action-delete_promotion = if_abap_behv=>fc-o-disabled.
-        ls_result-%action-deactivate_promotion = if_abap_behv=>fc-o-enabled.
       ENDIF.
+
+      IF <ls_promotions>-status = 'Processed'.
+        ls_result-%action-activate_promotion = if_abap_behv=>fc-o-disabled.
+      ELSE.
+        ls_result-%action-activate_promotion = if_abap_behv=>fc-o-enabled.
+      ENDIF.
+
 
 
       APPEND ls_result TO result.
@@ -234,17 +240,20 @@ CLASS lhc_header IMPLEMENTATION.
 
   ENDMETHOD.
 
+  ##NEEDED METHOD get_instance_authorizations.
+    RETURN.
+  ENDMETHOD.
+
+##NEEDED METHOD lock.
+  ENDMETHOD.
+
 ENDCLASS.
 
 ##CLASS_FINAL CLASS lhc_item DEFINITION INHERITING FROM cl_abap_behavior_handler.
   PUBLIC SECTION.
 
-    METHODS rfc_callback
-      IMPORTING p_task TYPE clike.
-
   PRIVATE SECTION.
-    DATA: mv_processed TYPE xfeld,
-          mt_return    TYPE tt_bapiret2.
+    CONSTANTS: mc_message_class TYPE symsgid VALUE 'ZSD_MD_VALIDATION'.
 
     METHODS read FOR READ
       IMPORTING keys FOR READ item RESULT result.
@@ -253,11 +262,6 @@ ENDCLASS.
       ##NEEDED IMPORTING keys_rba FOR READ item\_header FULL result_requested
       ##NEEDED RESULT result LINK association_links.
 
-    METHODS activate_article FOR MODIFY
-      IMPORTING keys FOR ACTION item~activate_article.
-
-    METHODS deactivate_article FOR MODIFY
-      IMPORTING keys FOR ACTION item~deactivate_article.
 
     METHODS delete_article FOR MODIFY
       IMPORTING keys FOR ACTION item~delete_article. " RESULT ct_result.
@@ -265,6 +269,9 @@ ENDCLASS.
     METHODS get_instance_features FOR INSTANCE FEATURES
      ##NEEDED IMPORTING keys REQUEST requested_features FOR item
      ##NEEDED RESULT result.
+
+    ##NEEDED METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+    ##NEEDED  IMPORTING keys REQUEST requested_authorizations FOR item RESULT result.
 
 
 ENDCLASS.
@@ -279,104 +286,6 @@ CLASS lhc_item IMPLEMENTATION.
   ENDMETHOD.
 
   ##NEEDED METHOD rba_header.
-  ENDMETHOD.
-
-  METHOD activate_article.
-
-    DATA: lt_articles    TYPE zsd_tt_matnr,
-          lv_message_rfc TYPE char100.
-
-    lt_articles = CORRESPONDING #( keys MAPPING matnr = materialnumber ).
-    SORT lt_articles BY matnr.
-    DELETE ADJACENT DUPLICATES FROM lt_articles COMPARING matnr.
-
-    READ TABLE keys ASSIGNING FIELD-SYMBOL(<ls_keys>) INDEX 1.
-    IF sy-subrc IS INITIAL.
-      CALL FUNCTION 'ZSD_FM_MARKDOWN_VALIDATION' STARTING NEW TASK 'ACTIVATE'
-        DESTINATION 'NONE'
-        CALLING rfc_callback ON END OF TASK
-        EXPORTING
-          iv_aktnr              = <ls_keys>-promotion
-          it_artnr              = lt_articles
-          iv_deactivate         = ''
-        EXCEPTIONS
-          system_failure        = 1 MESSAGE lv_message_rfc
-          communication_failure = 2 MESSAGE lv_message_rfc
-          resource_failure      = 3
-          OTHERS                = 4.
-      IF sy-subrc IS NOT INITIAL.
-        APPEND VALUE #( type = 'E'
-                  id = 'ZSD_MD_VALIDATION'
-                  number = '011'
-                  message_v1 = lv_message_rfc ) TO mt_return.
-      ENDIF.
-
-      WAIT FOR ASYNCHRONOUS TASKS UNTIL mv_processed = abap_on.
-
-      IF mt_return[] IS NOT INITIAL.
-        LOOP AT mt_return[] ASSIGNING FIELD-SYMBOL(<ls_return>).
-          APPEND VALUE #( %tky         = <ls_keys>-%tky
-                         %msg         = new_message( id = <ls_return>-id
-                                                     number = <ls_return>-number
-                                                     v1 = <ls_return>-message_v1
-                                                     severity = COND #( WHEN <ls_return>-type = 'E'
-                                                                       THEN if_abap_behv_message=>severity-error
-                                                                       ELSE if_abap_behv_message=>severity-success  ) )
-                          )      TO reported-header.
-        ENDLOOP.
-
-
-
-      ENDIF.
-    ENDIF.
-  ENDMETHOD.
-
-  METHOD deactivate_article.
-
-    DATA: lt_articles    TYPE zsd_tt_matnr,
-          lv_message_rfc TYPE char100.
-
-    lt_articles = CORRESPONDING #( keys MAPPING matnr = materialnumber ).
-    SORT lt_articles BY matnr.
-    DELETE ADJACENT DUPLICATES FROM lt_articles COMPARING matnr.
-
-
-    READ TABLE keys ASSIGNING FIELD-SYMBOL(<ls_keys>) INDEX 1.
-    IF sy-subrc IS INITIAL.
-      CALL FUNCTION 'ZSD_FM_MARKDOWN_VALIDATION' STARTING NEW TASK 'DEACTIVATE'
-        DESTINATION 'NONE'
-        CALLING rfc_callback ON END OF TASK
-        EXPORTING
-          iv_aktnr              = <ls_keys>-promotion
-          it_artnr              = lt_articles
-          iv_deactivate         = 'X'
-        EXCEPTIONS
-          system_failure        = 1 MESSAGE lv_message_rfc
-          communication_failure = 2 MESSAGE lv_message_rfc
-          resource_failure      = 3
-          OTHERS                = 4.
-      IF sy-subrc IS NOT INITIAL.
-        APPEND VALUE #( type = 'E'
-            id = 'ZSD_MD_VALIDATION'
-            number = '011'
-            message_v1 = lv_message_rfc ) TO mt_return.
-      ENDIF.
-
-      WAIT FOR ASYNCHRONOUS TASKS UNTIL mv_processed = abap_on.
-
-      IF mt_return[] IS NOT INITIAL.
-        LOOP AT mt_return[] ASSIGNING FIELD-SYMBOL(<ls_return>).
-          APPEND VALUE #( %tky         = <ls_keys>-%tky
-                         %msg         = new_message( id = <ls_return>-id
-                                                     number = <ls_return>-number
-                                                     v1 = <ls_return>-message_v1
-                                                     severity = COND #( WHEN <ls_return>-type = 'E'
-                                                                       THEN if_abap_behv_message=>severity-error
-                                                                       ELSE if_abap_behv_message=>severity-success  ) )
-                          )      TO reported-header.
-        ENDLOOP.
-      ENDIF.
-    ENDIF.
   ENDMETHOD.
 
   METHOD delete_article.
@@ -403,7 +312,7 @@ CLASS lhc_item IMPLEMENTATION.
         ##NEEDED  MESSAGE s006(zsd_md_validation) WITH <ls_articles>-materialnumber INTO DATA(lv_dummy).
         APPEND VALUE #( %tky         = <ls_articles>-%tky
                         %msg         = new_message( severity   = if_abap_behv_message=>severity-success
-                                                    id     = 'ZSD_MD_VALIDATION'
+                                                    id     = mc_message_class
                                                     number = '006'
                                                     v1  = <ls_articles>-materialnumber
                                                     ) )
@@ -414,29 +323,6 @@ CLASS lhc_item IMPLEMENTATION.
 
   ENDMETHOD.
 
-  METHOD rfc_callback.
-    DATA:  lv_message_rfc TYPE char100.
-
-    RECEIVE RESULTS FROM FUNCTION 'ZSD_FM_MARKDOWN_VALIDATION'
-        CHANGING
-          ct_return = mt_return
-        EXCEPTIONS
-          no_data_found                 = 1
-          obligatory_parameter_missing  = 2
-          not_all_defaults_maintained   = 3
-          system_failure                = 4 MESSAGE lv_message_rfc
-          communication_failure         = 5 MESSAGE lv_message_rfc
-          resource_failure              = 6
-          OTHERS                        = 9.
-    IF sy-subrc IS NOT INITIAL.
-      APPEND VALUE #( type = 'E'
-                  id = 'ZSD_MD_VALIDATION'
-                  number = '011'
-                  message_v1 = lv_message_rfc ) TO mt_return.
-    ENDIF.
-
-    mv_processed = abap_on.
-  ENDMETHOD.
 
   METHOD get_instance_features.
 
@@ -451,14 +337,12 @@ CLASS lhc_item IMPLEMENTATION.
                  ##NO_TEXT      %features-%action-delete_article = COND #( WHEN ls_articles-status = 'Open'
                                                                             THEN if_abap_behv=>fc-o-enabled
                                                                             ELSE if_abap_behv=>fc-o-disabled )
-
-                 ##NO_TEXT      %features-%action-deactivate_article = COND #( WHEN ls_articles-status = 'Open'
-                                                                                THEN if_abap_behv=>fc-o-disabled
-                                                                                ELSE if_abap_behv=>fc-o-enabled )
-
                             ) ).
 
 
+  ENDMETHOD.
+
+  ##NEEDED METHOD get_instance_authorizations.
   ENDMETHOD.
 
 ENDCLASS.

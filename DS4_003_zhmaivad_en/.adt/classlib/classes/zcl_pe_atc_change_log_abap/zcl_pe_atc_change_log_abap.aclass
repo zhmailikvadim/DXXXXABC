@@ -1,0 +1,599 @@
+CLASS zcl_pe_atc_change_log_abap DEFINITION
+  PUBLIC
+  INHERITING FROM zcl_pe_atc_aoc_super
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    METHODS check REDEFINITION.
+    METHODS constructor .
+
+  PRIVATE SECTION.
+
+    TYPES: BEGIN OF mtyp_s_includes_list,
+             include       TYPE programm,
+             v_object_type TYPE versobjtyp,
+             v_object_name TYPE versobjnam,
+           END OF mtyp_s_includes_list .
+    TYPES: mtyp_t_includes_list TYPE STANDARD TABLE OF mtyp_s_includes_list .
+
+    CONSTANTS: BEGIN OF mc_s_class_category,
+                 abap_unit       TYPE seocategry VALUE 05,
+                 exception_class TYPE seocategry VALUE 40,
+               END OF mc_s_class_category.
+
+    CONSTANTS mc_type_class TYPE trobjtype VALUE 'CLAS'.
+
+
+    DATA: mt_statements  TYPE zcl_aoc_scan=>ty_statements,
+          mt_change_log  TYPE STANDARD TABLE OF string,
+          mv_destination TYPE rfcdest.
+
+    METHODS get_obj_component_includes
+      IMPORTING iv_object_type   TYPE trobjtype
+                iv_object_name   TYPE sobj_name
+                iv_destination   TYPE rfcdest
+                io_scan          TYPE REF TO zcl_aoc_scan
+      EXPORTING et_includes_list TYPE mtyp_t_includes_list
+      RAISING   zcx_pe_atc_not_relevant.
+
+    METHODS extract_unified_header
+      IMPORTING iv_from           TYPE level_from
+                iv_to             TYPE level_to
+                io_scan           TYPE REF TO zcl_aoc_scan
+      EXPORTING et_unified_header TYPE string_table
+      RAISING   zcx_pe_atc_error.
+
+    METHODS get_checksum_from_scan
+      IMPORTING iv_from     TYPE level_from
+                iv_to       TYPE level_to
+                io_scan     TYPE REF TO zcl_aoc_scan
+      EXPORTING ev_checksum TYPE int4.
+
+
+    METHODS get_quickfix
+      IMPORTING
+        io_scan              TYPE REF TO zcl_aoc_scan
+        iv_index             TYPE slevel-from
+        iv_object_type       TYPE trobjtype
+        iv_transport_request TYPE trkorr OPTIONAL
+        iv_change_number     TYPE string OPTIONAL
+        iv_rfc_destination   TYPE rfcdest OPTIONAL
+      RETURNING
+        VALUE(rv_result)     TYPE xstring.
+
+    METHODS is_declaration IMPORTING iv_code           TYPE string
+                           RETURNING VALUE(rv_boolean) TYPE boolean.
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_ATC_CHANGE_LOG_ABAP IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 30.01.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+
+    super->constructor( ).
+
+    description         = 'Change Log for Classic ABAP'(001).
+    category            = zcl_pe_atc_category_002=>gc_my_name.
+    position            = '010'.
+    version             = '001'.
+    remote_rfc_enabled  = abap_true.
+    has_documentation   = abap_true.
+    uses_checksum       = abap_true.
+
+    fill_message '0001' c_error 'Change log not found'(008)             c_exceptn_imposibl.
+    fill_message '0002' c_error 'Transport request error: &1'(006)      c_exceptn_imposibl.
+    fill_message '0003' c_error 'Change log error: &1'(004)             c_exceptn_imposibl.
+
+  ENDMETHOD.
+
+
+  METHOD get_obj_component_includes.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 30.01.2022 | 9784: ATC Development                    *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 12.08.2022 | 12913: Remove duplicates for performance *
+*              |            | DS4K926986                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 27.10.2022 | 14815: Bug fixing                        *
+*              |            | DS4K934149                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 22.12.2022 | 16320: Handle class local implementation *
+*              |            | DS4K938346                               *
+************************************************************************
+
+    DATA: lv_class_category   TYPE seocategry,
+          lt_methods_includes TYPE zpe_tt_global_class_methods.
+    FIELD-SYMBOLS <ls_includes_list>  LIKE LINE OF et_includes_list.
+    DATA: ls_rc TYPE if_sca_repository_proxy_type=>ty_exception_info.
+
+
+    CLEAR et_includes_list.
+
+    CASE iv_object_type.
+
+*---  Program / Include program
+*---------------------------------------------------------------------
+      WHEN c_type_include OR c_type_program OR c_type_incl_wo_main.
+        et_includes_list[] = VALUE #( FOR ls_include IN io_scan->levels[]
+                                  ( include = ls_include-name
+                                    v_object_type = 'REPS'
+                                    v_object_name = ls_include-name ) ).
+
+*---  Function group
+      WHEN c_type_function_group.
+        DATA(lif_proxy) = cl_sca_repository_proxy=>get_remote_access( i_rfc_destination = iv_destination ).
+        lif_proxy->get_main_program_names(  EXPORTING i_object_keys   = VALUE if_sca_repository_proxy_type=>ty_object_keys( ( pgmid = 'R3TR'
+                                                                                                                              obj_type = iv_object_type
+                                                                                                                              obj_name = iv_object_name ) )
+                                            IMPORTING e_program_names = DATA(lts_program_names)
+                                             CHANGING p_return_code   = ls_rc ).
+        IF ls_rc IS NOT INITIAL.
+          MESSAGE e011(zpe_atc) WITH 'CL_SCA_REPOSITORY_PROXY' INTO DATA(lv_msg2)    ##NEEDED.
+          zcl_pe_atc_logger=>log_message( ).
+          RAISE EXCEPTION TYPE zcx_pe_atc_not_relevant.
+        ENDIF.
+
+        et_includes_list[] = VALUE #( FOR ls_include IN io_scan->levels[]
+                                        WHERE ( name <> lts_program_names[ 1 ]-main_program_name )
+                                      ( include = ls_include-name
+                                        v_object_type = 'REPS'
+                                        v_object_name = ls_include-name ) ).
+
+*---  Class
+*---------------------------------------------------------------------
+      WHEN mc_type_class.
+        IF zcl_pe_atc_aoc_super=>is_function_in_destination( iv_function = 'ZPE_FM_GET_CLASS_DATA' iv_destination = iv_destination ) = abap_false.
+          RETURN.
+        ENDIF.
+        CALL FUNCTION 'ZPE_FM_GET_CLASS_DATA' DESTINATION iv_destination
+          EXPORTING
+            iv_classname           = CONV seoclsname( iv_object_name )
+          IMPORTING
+            ev_category            = lv_class_category
+            et_method_includes     = lt_methods_includes
+          EXCEPTIONS
+            not_found              = 1
+            not_authorized         = 3
+            communication_failure_ = 4
+            system_failure         = 5
+            OTHERS                 = 6.
+        CASE sy-subrc.
+          WHEN 0.
+            IF  lv_class_category = mc_s_class_category-abap_unit OR lv_class_category = mc_s_class_category-exception_class.
+              RAISE EXCEPTION TYPE zcx_pe_atc_not_relevant.
+            ENDIF.
+            LOOP AT lt_methods_includes ASSIGNING FIELD-SYMBOL(<ls_method_includ>).
+              INSERT INITIAL LINE INTO TABLE et_includes_list ASSIGNING <ls_includes_list>.
+              <ls_includes_list>-include = <ls_method_includ>-incname.
+              IF <ls_method_includ>-cpdkey IS INITIAL.
+                <ls_includes_list>-v_object_name = <ls_method_includ>-incname.  "Local implementation
+                <ls_includes_list>-v_object_type = 'CINC'.
+              ELSE.
+                <ls_includes_list>-v_object_name = <ls_method_includ>-cpdkey.
+                <ls_includes_list>-v_object_type = 'METH'.
+              ENDIF.
+            ENDLOOP.
+          WHEN 1.
+            RAISE EXCEPTION TYPE zcx_pe_atc_not_relevant.
+          WHEN OTHERS.
+            MESSAGE e011(zpe_atc) WITH 'ZPE_FM_GET_CLASS_DATA' INTO DATA(lv_msg)    ##NEEDED.
+            zcl_pe_atc_logger=>log_message( ).
+        ENDCASE.
+
+    ENDCASE.
+
+    SORT et_includes_list BY include.
+    DELETE ADJACENT DUPLICATES FROM et_includes_list COMPARING include.
+
+  ENDMETHOD.
+
+
+  METHOD extract_unified_header.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 30.01.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 20.12.2022 | 16320: remove parameter by value         *
+*              |            | DS4K938346                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 01.02.2023 | 17538: Remove modification assistant     *
+*              |            | DS4K942351                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 01.03.2023 | 18601: Empty line causing runtime error  *
+*              |            | DS4K945528                               *
+*----------------------------------------------------------------------*
+
+    DATA lv_from TYPE stmnt_from.
+    DATA lv_to   TYPE stmnt_to.
+
+    FIELD-SYMBOLS <ls_statements> LIKE LINE OF ref_scan->statements[].
+
+
+*-- Obtain the beginning and the end of the code block
+    READ TABLE io_scan->statements ASSIGNING <ls_statements> INDEX iv_from.
+    IF sy-subrc = 0.
+      lv_from = <ls_statements>-from.
+    ENDIF.
+
+    READ TABLE io_scan->statements ASSIGNING <ls_statements> INDEX iv_to.
+    IF sy-subrc = 0.
+      lv_to = <ls_statements>-to.
+    ENDIF.
+
+
+*-- Code scanning
+    CLEAR et_unified_header.
+    LOOP AT io_scan->tokens ASSIGNING FIELD-SYMBOL(<ls_tokens>) FROM lv_from TO lv_to.
+
+      DATA(lv_token_line) = sy-tabix.
+
+*     Skip code block declaration
+      IF is_declaration( <ls_tokens>-str ).
+        READ TABLE io_scan->statements ASSIGNING FIELD-SYMBOL(<ls_eod>) WITH KEY from = lv_token_line.
+        IF sy-subrc = 0.
+          DATA(lv_eod) = <ls_eod>-to.
+        ENDIF.
+      ENDIF.
+      IF lv_eod IS NOT INITIAL AND lv_token_line LE lv_eod.
+        CONTINUE.
+      ENDIF.
+
+*     Consider comments only
+      IF <ls_tokens>-type <> zcl_aoc_scan=>gc_token-comment.
+        EXIT.
+      ENDIF.
+
+*     Empty comments-lines? Bad format but we continue...
+      IF <ls_tokens>-len1 = 1.
+        CONTINUE.
+      ENDIF.
+
+*     Skip modification assistant lines
+      IF <ls_tokens>-str(2) = '*{'.
+        CONTINUE.
+      ENDIF.
+
+*     Copy header lines
+      INSERT INITIAL LINE INTO TABLE et_unified_header ASSIGNING FIELD-SYMBOL(<lv_unified_header>).
+      <lv_unified_header> = <ls_tokens>-str.
+    ENDLOOP.
+
+    IF et_unified_header IS INITIAL OR lines( et_unified_header ) = 1.  "Single comment cannot be a header
+      RAISE EXCEPTION TYPE zcx_pe_atc_error.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD check.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 30.01.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 12.08.2022 | 12913: FM required instead of include    *
+*              |            |        for version calculation           *
+*              |            | DS4K926986                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 14.10.2022 | 14159: Check sequence changed            *
+*              |            | DS4K931981                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 27.10.2022 | 14815      : ATC Quickfix bug            *
+*              |            | DS4K934149                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 21.03.2022 | 16320: Remove lines to avoid some object *
+*              |            |        being discarded by SAP standard   *
+*              |            | DS4K938346                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 17.01.2023 | 17077: False positive for empty object   *
+*              |            | DS4K940912                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 20.01.2023 | 16832: Use ATC Transport request         *
+*              |            | DS4K940184                               *
+************************************************************************
+
+    DATA: lt_header   TYPE string_table,
+          lv_trkorr   TYPE trkorr,
+          lv_cn       TYPE string,
+          lv_checksum TYPE int4.
+
+
+
+    TEST-SEAM rfccall.
+      mv_destination = zcl_pe_atc_aoc_super=>get_rfc_destination( ).
+    END-TEST-SEAM.
+
+
+*--  Get source code includes for all relevant objects/components
+    TEST-SEAM progs.
+      TRY.
+          get_obj_component_includes( EXPORTING iv_object_type   = object_type
+                                                iv_object_name   = object_name
+                                                iv_destination   = mv_destination
+                                                io_scan          = io_scan
+                                      IMPORTING et_includes_list = DATA(lt_includes_list) ).
+        CATCH zcx_pe_atc_not_relevant.
+          RETURN.
+      ENDTRY.
+    END-TEST-SEAM.
+
+
+*-- Get ATC transport request
+    TEST-SEAM transport_number.
+      lv_trkorr = zcl_pe_atc_aoc_super=>get_atc_transport_request( mv_destination ).
+      IF lv_trkorr IS INITIAL.
+        RETURN.
+      ENDIF.
+    END-TEST-SEAM.
+
+
+*-- Check objects
+    LOOP AT io_scan->levels ASSIGNING FIELD-SYMBOL(<ls_levels>) WHERE type <> 'D'.                                              "Skip macros
+      READ TABLE lt_includes_list INTO DATA(ls_includes_list) WITH KEY include = <ls_levels>-name BINARY SEARCH.
+      IF sy-subrc NE 0 OR zcl_pe_atc_aoc_super=>is_relevant( iv_program = <ls_levels>-name ) = abap_false.
+        CONTINUE.
+      ENDIF.
+
+*     Prevent overlapping for e.g. programs with includes
+      DATA(lv_from) = <ls_levels>-from.
+      DATA(lv_to)   = <ls_levels>-to.
+      LOOP AT io_scan->levels ASSIGNING FIELD-SYMBOL(<ls_overlaps>) WHERE from LT <ls_levels>-to AND from GT <ls_levels>-from. "#EC CI_NESTED
+        lv_to = <ls_overlaps>-from - 1.
+        EXIT.
+      ENDLOOP.
+
+*     Empty object?
+      IF lv_from IS INITIAL OR lv_to IS INITIAL OR lv_from GE lv_to.
+        CONTINUE.
+      ENDIF.
+
+      TRY.
+
+*         Get checksum
+          CLEAR lv_checksum.
+          get_checksum_from_scan( EXPORTING iv_from     = lv_from
+                                            iv_to       = lv_to
+                                            io_scan     = io_scan
+                                  IMPORTING ev_checksum = lv_checksum ).
+
+
+
+*         Get Unified Header
+          CLEAR lt_header.
+          extract_unified_header( EXPORTING iv_from           = lv_from
+                                            iv_to             = lv_to
+                                            io_scan           = io_scan
+                                  IMPORTING et_unified_header = lt_header ).
+
+
+*         Get Change Management Reference (RFC/RTI)
+          TEST-SEAM change_number.
+            CLEAR lv_cn.
+            lv_cn = zcl_pe_atc_change_log=>get_tr_change_management_ref( iv_trkorr = lv_trkorr
+                                                                         iv_destination = mv_destination ).
+          END-TEST-SEAM.
+
+*         Check Header Data
+          zcl_pe_atc_change_log=>check_unified_header_data( iv_trkorr       = lv_trkorr
+                                                            iv_cm_ref_value = lv_cn
+                                                            it_header       = lt_header ).
+
+        CATCH zcx_pe_atc_error INTO DATA(lo_exc_atc) .
+
+*         Change log not found
+          IF lt_header IS INITIAL.
+
+            DATA(lv_quickfix) = get_quickfix( io_scan               = io_scan
+                                              iv_index              = lv_from
+                                              iv_object_type        = object_type
+                                              iv_transport_request  = lv_trkorr
+                                              iv_change_number      = lv_cn
+                                              iv_rfc_destination    = mv_destination ).
+
+            inform( p_sub_obj_name = ls_includes_list-include
+                    p_kind         = c_error
+                    p_checksum_1   = lv_checksum    "get_checksum( io_scan )
+                    p_test         = myname
+                    p_detail       = lv_quickfix
+                    p_code         = '0001' ).
+            CONTINUE.
+          ENDIF.
+
+*         Change log incorrect format
+          inform( p_sub_obj_name = ls_includes_list-include
+                  p_kind         = c_error
+                  p_checksum_1   = lv_checksum "get_checksum( io_scan )
+                  p_test         = myname
+                  p_code         = '0003'
+                  p_param_1      = lo_exc_atc->get_text( ) ).
+          CONTINUE.
+
+        CATCH zcx_pe_atc_not_relevant.
+          CONTINUE.
+
+        CATCH zcx_pe_trv_xx INTO DATA(lo_exc_trv).
+*         Incorrect transport request description
+          inform( p_sub_obj_name = ls_includes_list-include
+                  p_kind         = c_error
+                  p_checksum_1   = lv_checksum "get_checksum( io_scan )
+                  p_test         = myname
+                  p_code         = '0002'
+                  p_param_1      = lo_exc_trv->get_text( ) ).
+          CONTINUE.
+      ENDTRY.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get_quickfix.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 30.01.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 27.10.2022 | 14815      : Bug fixing                  *
+*              |            | DS4K934149                               *
+************************************************************************
+
+    DATA: lv_declaration TYPE string,
+          lt_quick_fix   TYPE STANDARD TABLE OF string.
+
+
+*   For Function Groups does not work yet
+    CHECK iv_object_type NE 'FUGR'.
+
+*   Get statements to rebuild the block declaration
+    IF mt_statements IS INITIAL.
+      mt_statements = io_scan->build_statements( abap_true ).
+    ENDIF.
+
+*   Get change log
+    IF mt_change_log IS INITIAL.
+      mt_change_log = NEW zcl_pe_change_log( )->get_change_log_new( iv_transport_request = iv_transport_request
+                                                                    iv_change_number     = iv_change_number
+                                                                    iv_rfc_destination   = iv_rfc_destination ).
+      IF mt_change_log IS INITIAL.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+*   Create quickfix
+    TRY.
+        DATA(lo_factory)  = cl_ci_quickfix_creation=>create_quickfix_alternatives( ).
+        DATA(lif_fix_new) = lo_factory->create_quickfix( ).
+        DATA(lif_context) = cl_ci_quickfix_abap_context=>create_from_scan_stmt( p_tokens     = CORRESPONDING #( io_scan->tokens )
+                                                                                p_statements = io_scan->statements
+                                                                                p_levels     = io_scan->levels
+                                                                                p_structures = io_scan->structures
+                                                                                p_stmt_idx   = iv_index ).
+
+        lif_fix_new->enable_automatic_execution( ).
+
+        READ TABLE mt_statements ASSIGNING FIELD-SYMBOL(<ls_declaration>) WITH KEY index = iv_index.
+        IF sy-subrc NE 0.
+          RETURN.
+        ENDIF.
+
+        lv_declaration = <ls_declaration>-str && <ls_declaration>-terminator.
+        IF is_declaration( lv_declaration ).
+          APPEND lv_declaration TO lt_quick_fix.
+          APPEND LINES OF mt_change_log TO lt_quick_fix.
+        ELSE.
+          APPEND LINES OF mt_change_log TO lt_quick_fix.
+          APPEND lv_declaration TO lt_quick_fix.
+        ENDIF.
+        lif_fix_new->if_ci_quickfix_abap_actions~replace_by( p_new_code_tab = lt_quick_fix
+                                                             p_context      = lif_context ).
+
+*       Add adidas change log
+        MESSAGE s003(zpe_atc) INTO DATA(lv_msg) ##NEEDED.
+        lif_fix_new->add_docu_from_msgclass( p_msg_class = 'ZPE_ATC' p_msg_number = '003' ).
+        rv_result = lo_factory->export_to_xstring( ).
+
+      CATCH cx_ci_quickfix_failed.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD is_declaration.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 30.01.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 05.10.2022 | 14159: Include program with routines     *
+*              |            | DS4K931981                               *
+************************************************************************
+
+    IF iv_code CP 'REPORT*'     OR
+       iv_code CP 'METHOD*'     OR
+       iv_code CP 'CLASS*'      OR
+       iv_code CP 'FUNCTION*'   OR
+       iv_code CP 'FORM*'       OR
+       iv_code EQ '##NEEDED'.       "Pragma for empty methods
+      rv_boolean = abap_true.
+    ELSE.
+      rv_boolean = abap_false.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_checksum_from_scan.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 20.12.2022 | 16320: creation                          *
+*              |            | DS4K938346                               *
+*----------------------------------------------------------------------*
+
+
+    DATA lv_from TYPE stmnt_from.
+    DATA lv_to   TYPE stmnt_to.
+    DATA lv_source TYPE string.
+
+    FIELD-SYMBOLS <ls_statements> LIKE LINE OF ref_scan->statements[].
+
+*-- Obtain the beginning and the end of the code block
+    READ TABLE io_scan->statements ASSIGNING <ls_statements> INDEX iv_from.
+    IF sy-subrc = 0.
+      lv_from = <ls_statements>-from.
+    ENDIF.
+
+    READ TABLE io_scan->statements ASSIGNING <ls_statements> INDEX iv_to.
+    IF sy-subrc = 0.
+      lv_to = <ls_statements>-to.
+    ENDIF.
+
+*-- Generate checksum for the code unit
+    LOOP AT io_scan->tokens ASSIGNING FIELD-SYMBOL(<ls_tokens_src>) FROM lv_from TO lv_to.
+      lv_source = lv_source && <ls_tokens_src>-str.
+    ENDLOOP.
+    ev_checksum = zcl_pe_atc_aoc_super=>generate_checksum_from_string( lv_source ).
+
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,194 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHRYSAND     | 20.04.2023 | 19842     : [Build] - Z_MOCO report for  *
+*              |            | DS4K949311                               *
+*----------------------------------------------------------------------*
+CLASS lsc_zsp_i_incom_invoice_rec DEFINITION INHERITING FROM cl_abap_behavior_saver FINAL.
+
+  PROTECTED SECTION.
+
+    METHODS save_modified REDEFINITION ##NEEDED.
+
+ENDCLASS.
+
+CLASS lsc_zsp_i_incom_invoice_rec IMPLEMENTATION.
+
+  METHOD save_modified ##NEEDED.
+  ENDMETHOD.
+
+ENDCLASS.
+
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHRYSAND     | 04.12.2023 | 19842     : [Build] - Z_MOCO report for  *
+*              |            | DS4K949311                               *
+*----------------------------------------------------------------------*
+CLASS lhc_incominvoice DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  PRIVATE SECTION.
+
+    METHODS simulate_posting FOR MODIFY
+      IMPORTING it_keys FOR ACTION invoicesimulation~simulate_posting RESULT ct_result.
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING it_keys REQUEST requested_authorizations FOR invoicesimulation RESULT ct_result ##NEEDED.
+    METHODS get_messages FOR READ
+      IMPORTING it_keys FOR FUNCTION invoicesimulation~get_messages RESULT result.
+
+ENDCLASS.
+
+CLASS lhc_incominvoice IMPLEMENTATION.
+
+  METHOD simulate_posting.
+    DATA: lt_message        TYPE bal_t_msg,
+          lt_input_data     TYPE zsp_tt_buy_com_simulate,
+          lv_month_last_day TYPE datum.
+
+    READ ENTITIES OF zsp_i_incom_invoice_receipt IN LOCAL MODE
+    ENTITY invoicesimulation
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_invoice).
+
+    lt_input_data = CORRESPONDING #( lt_invoice ).
+
+    LOOP AT lt_invoice ASSIGNING FIELD-SYMBOL(<ls_invoice>).
+      lt_message = VALUE #( ( msgid = zcl_sp_buying_commission=>gc_log_constant-mess_class
+                              msgno = zcl_sp_buying_commission=>gc_log_constant-mess_start_sim_proc
+                              msgty = if_abap_behv_message=>severity-information ) ##TYPE
+                            ( msgid = zcl_sp_buying_commission=>gc_log_constant-mess_class
+                              msgno = zcl_sp_buying_commission=>gc_log_constant-mess_proc_parameters
+                              msgty = if_abap_behv_message=>severity-information
+                              msgv1 = <ls_invoice>-supplierinvoice
+                              msgv2 = <ls_invoice>-invoiceline
+                              msgv3 = <ls_invoice>-postingyear ) ).
+
+      TRY.
+          DATA(lo_log) = NEW zcl_sd_create_ball_log( iv_extnumber = CONV #( |{ <ls_invoice>-supplierinvoice }{ <ls_invoice>-invoiceline }{ <ls_invoice>-postingyear }|  )
+                                                     iv_object    = zcl_sp_buying_commission=>gc_log_constant-object
+                                                     iv_subobject = zcl_sp_buying_commission=>gc_log_constant-subobject_sim ).
+          lo_log->add_item_log( lt_message ).
+          lo_log->save_log( ).
+        CATCH zcx_sd_ball_log.
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+
+    READ ENTITIES OF zsp_i_incom_invoice_receipt IN LOCAL MODE
+    ENTITY invoicesimulation
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_invoice_upd).
+
+    APPEND VALUE #( %msg = NEW zcx_sp_buying_commissiom( severity = if_abap_behv_message=>severity-information
+                                                         textid   = zcx_sp_buying_commissiom=>simulation_start_ui ) )
+    TO reported-invoicesimulation.
+
+    LOOP AT lt_input_data ASSIGNING FIELD-SYMBOL(<ls_input_data>).
+      CALL FUNCTION 'RP_LAST_DAY_OF_MONTHS'
+        EXPORTING
+          day_in            = CONV datum( |{ <ls_input_data>-postingyear }{ it_keys[ 1 ]-%param-postingmonth }01| )
+        IMPORTING
+          last_day_of_month = lv_month_last_day
+        EXCEPTIONS
+          day_in_no_date    = 1
+          OTHERS            = 2.
+      IF sy-subrc = 0.
+        <ls_input_data>-lastmonthday = lv_month_last_day.
+      ENDIF.
+    ENDLOOP.
+
+    CALL FUNCTION 'ZSP_FM_BUY_COMM_PROCESS'
+      STARTING NEW TASK 'UPDATE'
+      EXPORTING
+        it_simulation_data    = lt_input_data
+        iv_process_type       = zcl_sp_buying_commission=>gc_process_constant-simulation
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2.
+    IF sy-subrc = 0.
+      ct_result = VALUE #( FOR ls_invoice_upd IN lt_invoice_upd ( %key   = ls_invoice_upd-%key
+                                                                  %param = ls_invoice_upd ) ).
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD get_instance_authorizations ##NEEDED.
+  ENDMETHOD.
+
+  METHOD get_messages.
+
+    TYPES: BEGIN OF ltyp_s_check_msg ,
+             type    TYPE symsgty,
+             message TYPE string,
+           END OF ltyp_s_check_msg .
+    DATA: lt_check_mess TYPE TABLE OF ltyp_s_check_msg.
+
+
+    TRY.
+        DATA(ls_key) = it_keys[ 1 ].
+      CATCH cx_sy_itab_line_not_found.
+        RETURN.
+    ENDTRY.
+
+    DATA: lr_ext_num TYPE RANGE OF balhdr-extnumber.
+
+    lr_ext_num = VALUE #( ( sign = 'I' option = 'CP' low = |{ ls_key-%param-belnr ALPHA = IN }{ ls_key-%param-rblgp ALPHA = IN }{ ls_key-%param-gjahr }*| ) ).
+
+
+    " Find the most recent log
+    SELECT log_handle
+      FROM balhdr
+     WHERE object     = @zcl_sp_buying_commission=>gc_log_constant-object
+       AND subobject  = @zcl_sp_buying_commission=>gc_log_constant-subobject_sim
+       AND extnumber  IN @lr_ext_num
+       AND msg_cnt_al > 0 " non empty logs only
+     ORDER BY aldate DESCENDING, altime DESCENDING, tim_stmp DESCENDING
+      INTO TABLE @DATA(lt_logs)
+     UP TO 10 ROWS.
+
+    IF sy-subrc = 0.
+      LOOP AT lt_logs ASSIGNING FIELD-SYMBOL(<ls_log>).
+        TRY.
+            DATA(lif_app_log) = cl_bali_log_db=>get_instance( )->load_log( handle = <ls_log>-log_handle ).
+
+            DATA(lts_log_items) = lif_app_log->get_all_items( ).
+          CATCH cx_bali_runtime.
+            CONTINUE.
+        ENDTRY.
+
+        LOOP AT lts_log_items ASSIGNING FIELD-SYMBOL(<ls_log_item>). "#EC CI_NESTED
+          DATA(lo_log_message) = CAST cl_bali_message_getter( <ls_log_item>-item ).
+
+          TRY.
+              DATA(lv_message) = lo_log_message->get_message_text( ).
+              APPEND INITIAL LINE TO lt_check_mess ASSIGNING FIELD-SYMBOL(<ls_check_mess>).
+              <ls_check_mess>-type    = lo_log_message->severity.
+              <ls_check_mess>-message = lv_message.
+            CATCH cx_bali_runtime.
+              CONTINUE.
+          ENDTRY.
+        ENDLOOP.
+
+        CLEAR: lts_log_items.
+      ENDLOOP.
+    ELSE.
+      APPEND INITIAL LINE TO lt_check_mess ASSIGNING <ls_check_mess>.
+      <ls_check_mess>-type    = if_cwd_constants=>c_message_info.
+      <ls_check_mess>-message = TEXT-001.
+    ENDIF.
+
+
+    INSERT VALUE #( %cid            = ls_key-%cid
+                    %param-belnr    = ls_key-%param-belnr
+                    %param-gjahr    = ls_key-%param-gjahr
+                    %param-rblgp    = ls_key-%param-rblgp
+                    %param-messages = /ui2/cl_json=>serialize( lt_check_mess ) ) INTO TABLE result.
+
+  ENDMETHOD.
+
+ENDCLASS.

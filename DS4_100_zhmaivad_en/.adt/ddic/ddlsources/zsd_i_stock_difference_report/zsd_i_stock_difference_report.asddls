@@ -30,7 +30,11 @@
 *----------------------------------------------------------------------*
 * ZHMAIVAD     | 19.09.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
 *----------------------------------------------------------------------*/
+
 @AccessControl.authorizationCheck: #CHECK
 @EndUserText.label: 'Stock Difference report'
 @Metadata:{ignorePropagatedAnnotations: true, allowExtensions: false}
@@ -72,7 +76,7 @@ define root view entity zsd_i_stock_difference_report
                                                                                      and $projection.Plant   = _ErrorsPartialGoodsReceipt.Plant
   association [1..*] to zsd_i_errors_inventory_pst_bas as _ErrorsInventoryPosting    on  $projection.Article = _ErrorsInventoryPosting.Product
                                                                                      and $projection.Plant   = _ErrorsInventoryPosting.Plant
-  association [1..*] to zsd_i_errors_omni_shpm_cf_idoc as _ErrorsOmniShipmentConfirm on  $projection.Plant           = _ErrorsOmniShipmentConfirm.Plant
+  association [1..*] to zsd_i_errors_omni_shpm_cf_pers as _ErrorsOmniShipmentConfirm on  $projection.Plant           = _ErrorsOmniShipmentConfirm.Plant
                                                                                      and $projection.StorageLocation = _ErrorsOmniShipmentConfirm.StorageLocation
                                                                                      and $projection.Article         = _ErrorsOmniShipmentConfirm.Product
 {

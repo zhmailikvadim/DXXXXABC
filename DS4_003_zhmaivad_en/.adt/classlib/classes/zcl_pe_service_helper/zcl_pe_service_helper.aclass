@@ -1,0 +1,373 @@
+CLASS zcl_pe_service_helper DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    METHODS constructor IMPORTING it_filter_select_options TYPE /iwbep/t_mgw_select_option OPTIONAL
+                                  it_key_tab               TYPE /iwbep/t_mgw_name_value_pair OPTIONAL
+                                  it_navigation_path       TYPE /iwbep/t_mgw_navigation_path OPTIONAL
+                                  it_header_parameters     TYPE tihttpnvp OPTIONAL.
+
+    METHODS get_input_parameter IMPORTING iv_name       TYPE string
+                                          iv_mandatory  TYPE char01 OPTIONAL
+                                          iv_conversion TYPE char01 DEFAULT 'X'
+                                EXPORTING ev_value      TYPE any
+                                          et_range      TYPE STANDARD TABLE
+                                RAISING   /iwbep/cx_mgw_busi_exception
+                                          /iwbep/cx_mgw_tech_exception.
+
+    METHODS paging IMPORTING !is_paging TYPE /iwbep/s_mgw_paging
+                   CHANGING  !ct_data   TYPE STANDARD TABLE .
+
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA mt_filter_select_options TYPE /iwbep/t_mgw_select_option .
+    DATA mt_key_tab TYPE /iwbep/t_mgw_name_value_pair .
+    DATA mt_navigation_path TYPE /iwbep/t_mgw_navigation_path .
+    DATA mt_request_header_parameters TYPE tihttpnvp.
+
+
+ENDCLASS.
+
+
+
+CLASS zcl_pe_service_helper IMPLEMENTATION.
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 20.04.2023 | 20753: Creation                          *
+*              |            | DS4K951074                               *
+*----------------------------------------------------------------------*
+
+*   $filter
+    mt_filter_select_options = it_filter_select_options.
+    SORT mt_filter_select_options BY property.
+
+*   Get entity
+    mt_key_tab = it_key_tab.
+    SORT mt_key_tab BY name.
+
+*   Navigation properties
+    mt_navigation_path = it_navigation_path.
+    READ TABLE mt_navigation_path ASSIGNING FIELD-SYMBOL(<ls_navigation_path>) INDEX 1.
+    IF sy-subrc EQ 0.
+      SORT <ls_navigation_path>-key_tab BY name.
+    ENDIF.
+
+*   HTTP Request Header parameters
+    mt_request_header_parameters = it_header_parameters.
+    SORT mt_request_header_parameters BY name.
+
+  ENDMETHOD.
+
+
+  METHOD get_input_parameter.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 20.04.2023 | 20753: Creation                          *
+*              |            | DS4K951074                               *
+*----------------------------------------------------------------------*
+
+    DATA: lv_records TYPE i,
+          lv_routine TYPE string,
+          lv_fm      TYPE string,
+          lv_toupper TYPE abap_boolean,
+          lv_text    TYPE string.
+
+    FIELD-SYMBOLS: <ls_key_tab> TYPE /iwbep/s_mgw_name_value_pair,
+                   <ls_range>   TYPE any,
+                   <ls_field>   TYPE any.
+
+
+
+
+
+
+*-- Check if conversion to upper case is required
+*--------------------------------------------------------
+    READ TABLE mt_request_header_parameters ASSIGNING FIELD-SYMBOL(<ls_request_header_parameter>)
+                                            WITH KEY name = 'x-toupper'
+                                            BINARY SEARCH.
+    IF sy-subrc EQ 0 AND <ls_request_header_parameter>-value CS iv_name.
+      lv_toupper = abap_true.
+    ENDIF.
+
+
+
+*-- Check any return parameter is provided
+*-------------------------------------------------------------------
+    CLEAR: ev_value, et_range.
+    IF ev_value IS NOT SUPPLIED AND et_range IS NOT SUPPLIED.
+      MESSAGE e001(zpe_gh) WITH iv_name INTO lv_text.
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          textid            = /iwbep/cx_mgw_busi_exception=>failure
+          message_unlimited = lv_text.
+    ENDIF.
+
+
+
+*-- Search for conversion routine (if requested)
+*-------------------------------------------------
+    IF iv_conversion = abap_true.
+
+      CLEAR: lv_routine, lv_fm.
+
+*     Assign field symbol to ex_value or ex_range-low
+      IF ev_value IS SUPPLIED.
+        ASSIGN ev_value TO <ls_field>.
+      ELSEIF et_range IS SUPPLIED.
+        APPEND INITIAL LINE TO et_range ASSIGNING <ls_range>.     " We are adding a temporary entry to get a valid pointing reference
+        IF <ls_range> IS ASSIGNED.
+          ASSIGN ('<ls_range>-low') TO <ls_field>.
+          IF sy-subrc NE 0.
+            MESSAGE e002(zpe_gh) INTO lv_text.
+            RAISE EXCEPTION TYPE /iwbep/cx_mgw_tech_exception EXPORTING msg_code = lv_text.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+*     Get conversion routine and function module
+      IF <ls_field> IS ASSIGNED.
+        DESCRIBE FIELD <ls_field> EDIT MASK lv_routine.
+        CLEAR et_range.                                          " Removing the temporary entry
+        IF lv_routine IS NOT INITIAL.
+          lv_fm = |CONVERSION_EXIT_{ lv_routine+2 }_INPUT|.
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+
+
+
+*-- Input parameter for GET_ENTITYSET
+*----------------------------------------------------------------------
+    IF mt_filter_select_options[] IS NOT INITIAL.
+      READ TABLE mt_filter_select_options ASSIGNING FIELD-SYMBOL(<ls_filter_select_options>)
+                                           WITH KEY property = iv_name
+                                           BINARY SEARCH.
+      IF sy-subrc EQ 0.
+
+        CLEAR lv_records.
+        lv_records = lines( <ls_filter_select_options>-select_options ).
+
+        LOOP AT <ls_filter_select_options>-select_options ASSIGNING FIELD-SYMBOL(<ls_select_options>).
+*       Move data range to range
+          IF et_range IS SUPPLIED.
+            APPEND INITIAL LINE TO et_range ASSIGNING <ls_range>.
+            <ls_range> = CORRESPONDING #( <ls_select_options> ).
+            IF lv_fm IS NOT INITIAL.                                        " Apply conversion
+              ASSIGN ('<ls_range>-low') TO <ls_field>.
+              IF sy-subrc EQ 0.
+                CALL FUNCTION lv_fm
+                  EXPORTING
+                    input  = <ls_select_options>-low
+                  IMPORTING
+                    output = <ls_field>.
+              ENDIF.
+              ASSIGN ('<ls_range>-high') TO <ls_field>.
+              IF sy-subrc EQ 0.
+                CALL FUNCTION lv_fm
+                  EXPORTING
+                    input  = <ls_select_options>-high
+                  IMPORTING
+                    output = <ls_field>.
+              ENDIF.
+            ENDIF.
+
+
+*         Move data to parameter (in case there is one single IEQ record)
+          ELSEIF ev_value IS SUPPLIED AND lv_records = 1 AND <ls_select_options>-sign = 'I' AND <ls_select_options>-option = 'EQ'.
+            IF lv_fm IS NOT INITIAL.  " Apply conversion
+              CALL FUNCTION lv_fm
+                EXPORTING
+                  input  = <ls_select_options>-low
+                IMPORTING
+                  output = ev_value.
+            ELSE.
+              ev_value = <ls_select_options>-low.
+            ENDIF.
+
+*           Error reading parameter
+            MESSAGE e001(zpe_gh) WITH iv_name INTO lv_text.
+            RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+              EXPORTING
+                textid            = /iwbep/cx_mgw_busi_exception=>failure
+                message_unlimited = lv_text.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+
+
+*-- Input parameter for GET_ENTITY or EXPAND
+*----------------------------------------------------------
+    IF mt_key_tab[] IS NOT INITIAL.
+      READ TABLE mt_key_tab ASSIGNING <ls_key_tab> WITH KEY name = iv_name
+                            BINARY SEARCH.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+
+*     Move data to parameter
+      IF ev_value IS SUPPLIED.
+        IF lv_fm IS NOT INITIAL.                                    " Apply conversion
+          CALL FUNCTION lv_fm
+            EXPORTING
+              input  = <ls_key_tab>-value
+            IMPORTING
+              output = ev_value.
+        ELSE.
+          ev_value = <ls_key_tab>-value.
+        ENDIF.
+
+
+*     Move data to range
+      ELSEIF et_range IS SUPPLIED.
+        APPEND INITIAL LINE TO et_range ASSIGNING <ls_range>.
+        <ls_range>     = 'IEQ'.
+        IF lv_fm IS NOT INITIAL.                                    " Apply conversion
+          ASSIGN ('<ls_range>-low') TO <ls_field>.
+          IF sy-subrc EQ 0.
+            CALL FUNCTION lv_fm
+              EXPORTING
+                input  = <ls_key_tab>-value
+              IMPORTING
+                output = <ls_field>.
+          ENDIF.
+        ELSE.
+          <ls_range>+3 = <ls_key_tab>-value.
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+
+
+
+*-- Input parameter from Navigation Path
+*----------------------------------------------------------
+    IF mt_navigation_path[] IS NOT INITIAL.
+      LOOP AT mt_navigation_path ASSIGNING FIELD-SYMBOL(<ls_navigation_path>).
+        READ TABLE <ls_navigation_path>-key_tab ASSIGNING <ls_key_tab>
+                                                 WITH KEY name = iv_name.
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+
+*       Move data to parameter
+        IF ev_value IS SUPPLIED.
+          IF lv_fm IS NOT INITIAL.                                    " Apply conversion
+            CALL FUNCTION lv_fm
+              EXPORTING
+                input  = <ls_key_tab>-value
+              IMPORTING
+                output = ev_value.
+          ELSE.
+            ev_value = <ls_key_tab>-value.
+          ENDIF.
+          EXIT.
+
+*       Move data to range
+        ELSEIF et_range IS SUPPLIED.
+          APPEND INITIAL LINE TO et_range ASSIGNING <ls_range>.
+          <ls_range>     = 'IEQ'.
+          IF lv_fm IS NOT INITIAL.                                    " Apply conversion
+            ASSIGN ('<ls_range>-low') TO <ls_field>.
+            IF sy-subrc EQ 0.
+              CALL FUNCTION lv_fm
+                EXPORTING
+                  input  = <ls_key_tab>-value
+                IMPORTING
+                  output = <ls_field>.
+            ENDIF.
+          ELSE.
+            <ls_range>+3 = <ls_key_tab>-value.
+          ENDIF.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+
+
+*-- Remove duplicates just in case
+*----------------------------------------------
+    IF et_range IS NOT INITIAL.
+      SORT et_range.
+      DELETE ADJACENT DUPLICATES FROM et_range.
+    ENDIF.
+
+
+
+*-- Conversion to upper case
+*----------------------------------------------
+    IF lv_toupper = abap_true AND ev_value IS SUPPLIED.
+      ev_value = to_upper( ev_value ).
+
+    ELSEIF lv_toupper = abap_true AND et_range IS SUPPLIED.
+      LOOP AT et_range ASSIGNING <ls_range>.
+        ASSIGN ('<ls_range>-low') TO <ls_field>.
+        IF sy-subrc EQ 0.
+          <ls_field> = to_upper( <ls_field> ).
+        ENDIF.
+        ASSIGN ('<ls_range>-high') TO <ls_field>.
+        IF sy-subrc EQ 0.
+          <ls_field> = to_upper( <ls_field> ).
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+
+
+*-- Is mandatory? - Raise exception
+*------------------------------------------------------------
+    IF ev_value IS INITIAL AND et_range IS INITIAL AND iv_mandatory = abap_true.
+      MESSAGE e000(zpe_gh) WITH iv_name INTO lv_text.
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          textid            = /iwbep/cx_mgw_busi_exception=>failure
+          message_unlimited = lv_text.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD paging.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 20.04.2023 | 20753: Creation                          *
+*              |            | DS4K951074                               *
+*----------------------------------------------------------------------*
+
+*   50 records if not specified
+    DATA(ls_paging) = is_paging.
+    IF ls_paging-top IS INITIAL.
+      ls_paging-top = 50.
+    ENDIF.
+
+*   Standard paging
+    /iwbep/cl_mgw_data_util=>paging( EXPORTING is_paging = ls_paging
+                                      CHANGING ct_data   = ct_data ).
+
+  ENDMETHOD.
+
+ENDCLASS.

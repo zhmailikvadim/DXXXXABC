@@ -1,0 +1,137 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KHRYSAND     | 30.11.2022 | 15601     : [BUILD] PR creation from pos *
+*              |            | DS4K936641                               *
+*----------------------------------------------------------------------*
+* KHRYSAND     | 28.06.2023 | 22765     : With postprocessing step -   *
+*              |            | DS4K956961                               *
+*----------------------------------------------------------------------*
+* KAWATHIM     | 03.10.2023 | 24838     : [BUILD] - TLT Design change - Impact on PR *
+*              |            | DS4K962813                               *
+*----------------------------------------------------------------------*
+CLASS lhc_prgroup DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+
+  PRIVATE SECTION.
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING it_keys REQUEST requested_authorizations FOR prgroup RESULT ct_result ##NEEDED.
+
+    METHODS create_purchase_requisition FOR MODIFY
+      IMPORTING it_keys FOR ACTION prgroup~create_purchase_requisition RESULT ct_result.
+
+ENDCLASS.
+
+CLASS lhc_prgroup IMPLEMENTATION.
+
+  METHOD get_instance_authorizations ##NEEDED.
+  ENDMETHOD.
+
+  METHOD create_purchase_requisition.
+    DATA: lt_input_data     TYPE STANDARD TABLE OF zsp_t_pr_group.
+
+    READ ENTITIES OF zsp_i_pr_group IN LOCAL MODE
+    ENTITY prgroup
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_filtered_pr_group).
+
+    SORT lt_filtered_pr_group BY purchaserequisition.
+
+    SELECT FROM zsp_i_pr_group
+    FIELDS purchaserequisition, purchaserequisitionitem
+    FOR ALL ENTRIES IN @it_keys
+    WHERE purchaserequisition = @it_keys-purchaserequisition
+    ORDER BY PRIMARY KEY
+    INTO TABLE @DATA(lt_pr_group).              "#EC CI_FAE_NO_LINES_OK
+
+    IF sy-subrc = 0.
+      IF lines( lt_pr_group ) <> lines( lt_filtered_pr_group ).
+        LOOP AT lt_pr_group ASSIGNING FIELD-SYMBOL(<ls_pr_group>).
+          READ TABLE lt_filtered_pr_group TRANSPORTING NO FIELDS WITH KEY purchaserequisition     = <ls_pr_group>-purchaserequisition
+                                                                          purchaserequisitionitem = <ls_pr_group>-purchaserequisitionitem BINARY SEARCH.
+          IF sy-subrc <> 0.
+            APPEND VALUE #( %tky = it_keys[ 1 ]-%tky ) TO failed-prgroup.
+            APPEND VALUE #( %msg = NEW zcx_sp_fps_pr_creation( severity = if_abap_behv_message=>severity-error
+                                                               textid   = zcx_sp_fps_pr_creation=>not_all_items
+                                                               pr_ibp   = <ls_pr_group>-purchaserequisition ) )
+            TO reported-prgroup.
+
+            DELETE lt_pr_group                          "#EC CI_SEL_DEL
+            WHERE purchaserequisition = <ls_pr_group>-purchaserequisition. "#EC CI_STDSEQ
+          ENDIF.
+        ENDLOOP.
+        ct_result = VALUE #( FOR ls_filtered_pr_group IN lt_filtered_pr_group ( %key   = ls_filtered_pr_group-%key
+                                                                                %param = ls_filtered_pr_group ) ).
+        RETURN.
+      ENDIF.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_filtered_pr_group ASSIGNING FIELD-SYMBOL(<ls_filtered_pr_group>) WHERE processingstatus = zcl_sp_fps_perfect_pr_postproc=>gc_process_param-success. "#EC CI_STDSEQ
+      APPEND VALUE #( %tky = <ls_filtered_pr_group>-%tky ) TO failed-prgroup.
+      APPEND VALUE #( %msg = NEW zcx_sp_fps_pr_creation( severity = if_abap_behv_message=>severity-error
+                                                         textid   = zcx_sp_fps_pr_creation=>invalid_proc_status ) )
+      TO reported-prgroup.
+      ct_result = VALUE #( FOR ls_filtered_pr_group IN lt_filtered_pr_group ( %key   = ls_filtered_pr_group-%key
+                                                                              %param = ls_filtered_pr_group ) ).
+      RETURN.
+    ENDLOOP.
+
+    lt_input_data = VALUE #( FOR ls_filtered_pr_group IN lt_filtered_pr_group ( ebeln               = ls_filtered_pr_group-purchaserequisition
+                                                                                ebelp               = ls_filtered_pr_group-purchaserequisitionitem
+                                                                                zebeln              = ls_filtered_pr_group-purchaserequisitions4
+                                                                                matnr               = ls_filtered_pr_group-genericarticle
+                                                                                matnr_v             = ls_filtered_pr_group-variantarticle
+                                                                                planned_qty         = ls_filtered_pr_group-quantity
+                                                                                werks               = ls_filtered_pr_group-plant
+                                                                                lifnr               = ls_filtered_pr_group-supplier
+                                                                                rel_date            = ls_filtered_pr_group-releasedate
+                                                                                startprod_date      = ls_filtered_pr_group-startproddate
+                                                                                planned_date        = ls_filtered_pr_group-planneddate
+                                                                                xfactory_date       = ls_filtered_pr_group-xfactorydate
+                                                                                mad_date            = ls_filtered_pr_group-materialavailabddate
+                                                                                del_date            = ls_filtered_pr_group-deliverydate
+                                                                                custid              = ls_filtered_pr_group-customerid
+                                                                                custid_t4m = ls_filtered_pr_group-customeridt4m
+                                                                                motid               = ls_filtered_pr_group-modoftransid
+                                                                                pleadtime           = ls_filtered_pr_group-manufactleadtime
+                                                                                zz1_mm_scmsegment   = ls_filtered_pr_group-scsegment
+                                                                                zz1_ordprio         = ls_filtered_pr_group-orderpriority
+                                                                                zz1_adi_m_promoflag = ls_filtered_pr_group-promofactory
+                                                                                proc_status         = ls_filtered_pr_group-processingstatus
+                                                                                proc_message        = ls_filtered_pr_group-processingmessage
+                                                                                erdat               = ls_filtered_pr_group-createdon
+                                                                                erzet               = ls_filtered_pr_group-createdat ) ).
+
+    CALL FUNCTION 'ZSP_FM_IBP_PR_POSTPROC'
+      STARTING NEW TASK 'UPDATE'
+      EXPORTING
+        it_input_data         = lt_input_data
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2 ##FM_SUBRC_OK. "#EC CI_SUBRC
+
+    LOOP AT lt_filtered_pr_group ASSIGNING <ls_filtered_pr_group>.
+      <ls_filtered_pr_group>-processingstatus = zcl_sp_fps_perfect_pr_postproc=>gc_process_param-in_progress.
+    ENDLOOP.
+
+    MODIFY ENTITIES OF zsp_i_pr_group IN LOCAL MODE
+    ENTITY prgroup
+    UPDATE
+    FIELDS ( processingstatus )
+    WITH CORRESPONDING #( lt_filtered_pr_group )
+    FAILED DATA(ls_failed)
+    REPORTED DATA(ls_reported).
+
+    READ ENTITIES OF zsp_i_pr_group IN LOCAL MODE
+    ENTITY prgroup
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_pr_group_upd).
+
+    ct_result = VALUE #( FOR ls_pr_group_upd IN lt_pr_group_upd ( %key   = ls_pr_group_upd-%key
+                                                                  %param = ls_pr_group_upd ) ).
+  ENDMETHOD.
+ENDCLASS.

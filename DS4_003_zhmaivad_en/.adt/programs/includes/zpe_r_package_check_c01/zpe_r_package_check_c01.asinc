@@ -1,0 +1,314 @@
+*&---------------------------------------------------------------------*
+*& Include zpe_r_package_check_c01
+*&---------------------------------------------------------------------*
+
+CLASS lcl_report DEFINITION CREATE PUBLIC.
+
+  PUBLIC SECTION.
+
+    TYPES: gtyp_t_type   TYPE RANGE OF tadir-object,
+           gtyp_t_name   TYPE RANGE OF tadir-obj_name,
+           gtyp_t_author TYPE RANGE OF tadir-author,
+           gtyp_t_dc     TYPE RANGE OF tadir-devclass.
+
+    METHODS constructor IMPORTING it_type   TYPE gtyp_t_type
+                                  it_name   TYPE gtyp_t_name
+                                  it_dc     TYPE gtyp_t_dc
+                                  it_author TYPE gtyp_t_author.
+    METHODS run.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    TYPES: BEGIN OF mtyp_s_development_object,
+             object     TYPE tadir-object,
+             obj_name   TYPE tadir-obj_name,
+             srcsystem  TYPE tadir-srcsystem,
+             author     TYPE tadir-author,
+             devclass   TYPE tadir-devclass,
+             created_on TYPE tadir-created_on,
+             trkorr     TYPE e071-trkorr,
+             strkorr    TYPE e070-strkorr,
+             as4date    TYPE e070-as4date,
+             as4time    TYPE e070-as4time,
+             text1      TYPE e07t-as4text,
+             text2      TYPE e07t-as4text,
+             text       TYPE e07t-as4text,
+           END OF mtyp_s_development_object,
+           mtyp_t_development_objects TYPE SORTED TABLE OF mtyp_s_development_object WITH UNIQUE KEY object obj_name.
+
+    TYPES: BEGIN OF mtyp_s_output,
+             object          TYPE trobjtype,
+             obj_name        TYPE sobj_name,
+             srcsystem       TYPE srcsystem,
+             author          TYPE responsibl,
+             devclass        TYPE devclass,
+             created_on      TYPE creationdt,
+             trkorr          TYPE trkorr,
+             work_item       TYPE string,
+             team            TYPE string,
+             correct_package TYPE string,
+             error           TYPE string,
+           END OF mtyp_s_output,
+           mtyp_t_output TYPE SORTED TABLE OF mtyp_s_output WITH UNIQUE KEY object obj_name.
+
+    DATA: mt_type   TYPE gtyp_t_type,
+          mt_name   TYPE gtyp_t_name,
+          mt_dc     TYPE gtyp_t_dc,
+          mt_author TYPE gtyp_t_author.
+
+    METHODS display_data IMPORTING it_data TYPE lcl_report=>mtyp_t_output.
+
+    METHODS get_development_objects IMPORTING it_dc            TYPE gtyp_t_dc
+                                    RETURNING VALUE(rt_result) TYPE mtyp_t_development_objects.
+    METHODS get_package_hierarchy RETURNING VALUE(rt_result) TYPE gtyp_t_dc.
+
+    METHODS get_user_stories IMPORTING it_wis           TYPE zpe_tt_work_items
+                             RETURNING VALUE(rt_result) TYPE zcl_pe_jira_connector=>gtyp_t_user_stories.
+
+    METHODS get_work_items IMPORTING it_dos           TYPE lcl_report=>mtyp_t_development_objects
+                           RETURNING VALUE(rt_result) TYPE zpe_tt_work_items.
+
+    METHODS run_analysis IMPORTING it_dos           TYPE lcl_report=>mtyp_t_development_objects
+                                   it_uss           TYPE zcl_pe_jira_connector=>gtyp_t_user_stories
+                         RETURNING VALUE(rt_result) TYPE mtyp_t_output.
+ENDCLASS.
+
+CLASS lcl_report IMPLEMENTATION.
+
+  METHOD constructor.
+
+    mt_author   = it_author.
+    mt_dc       = it_dc.
+    mt_name     = it_name.
+    mt_type     = it_type.
+
+  ENDMETHOD.
+
+  METHOD run.
+
+    DATA(lt_dc)     = get_package_hierarchy( ).
+    DATA(lt_dos)    = get_development_objects( lt_dc ).
+    DATA(lt_wis)    = get_work_items( lt_dos ).
+    DATA(lt_uss)    = get_user_stories( lt_wis ).
+    DATA(lt_out)    = run_analysis( it_dos = lt_dos
+                                    it_uss = lt_uss ).
+    display_data( lt_out ).
+
+  ENDMETHOD.
+
+  METHOD get_package_hierarchy.
+
+    LOOP AT mt_dc ASSIGNING FIELD-SYMBOL(<ls_dc>).
+      DATA(lt_hierarchy) = cl_cts_devclass_api=>get_hierarchy( iv_root_devclass = <ls_dc>-low ).
+      LOOP AT lt_hierarchy ASSIGNING FIELD-SYMBOL(<ls_child>).
+        INSERT VALUE #( sign = 'I' option = 'EQ' low = <ls_child>-devclass ) INTO TABLE rt_result.
+      ENDLOOP.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get_development_objects.
+
+    SELECT tadir~object, tadir~obj_name, tadir~srcsystem, tadir~author, tadir~devclass, tadir~created_on,
+           e071~trkorr, e070~strkorr, e070~as4date, e070~as4time,
+           txt1~as4text AS text1 , txt2~as4text AS text2,
+           CASE WHEN txt1~as4text IS NULL THEN txt2~as4text
+                ELSE txt1~as4text
+           END AS text
+      FROM tadir LEFT JOIN e071           ON tadir~pgmid    = e071~pgmid AND
+                                             tadir~object   = e071~object AND
+                                             tadir~obj_name = e071~obj_name
+                 LEFT JOIN e070           ON e071~trkorr    = e070~trkorr
+                 LEFT JOIN e07t AS txt1   ON e070~strkorr   = txt1~trkorr AND
+                                             txt1~langu     = 'E'
+                 LEFT JOIN e07t AS txt2   ON e070~trkorr    = txt2~trkorr AND
+                                             txt2~langu     = 'E'
+
+     WHERE tadir~object     IN @mt_type     AND
+           tadir~obj_name   IN @mt_name     AND
+           tadir~author     IN @mt_author   AND
+           tadir~devclass   IN @it_dc       AND
+           tadir~delflag    EQ ''           AND
+           e070~trfunction  NE 'T'          AND
+           e070~trfunction  NE 'F'
+      ORDER BY tadir~object, tadir~obj_name, e070~as4date, e070~as4time
+      INTO TABLE @DATA(lt_dos).
+    IF sy-subrc = 0.
+      SORT lt_dos BY object obj_name.
+      DELETE ADJACENT DUPLICATES FROM lt_dos COMPARING object obj_name.
+      rt_result = lt_dos.
+    ELSE.
+      MESSAGE e000(ad) WITH 'No data'(001).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_work_items.
+
+    rt_result = VALUE zpe_tt_work_items( FOR ls_tadir IN it_dos ( |{ substring_before( val = substring_after( val = ls_tadir-text sub = '_' ) sub = '_' ) WIDTH = 10 ALPHA = IN  }| ) ).
+    SORT rt_result.
+    DELETE ADJACENT DUPLICATES FROM rt_result.
+    DELETE rt_result WHERE table_line IS INITIAL.
+    IF rt_result IS INITIAL.
+      MESSAGE e000(ad) WITH 'No data'(001).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_user_stories.
+
+    TYPES: BEGIN OF ltyp_s_project,
+             project TYPE zpe_project,
+           END OF ltyp_s_project.
+    DATA: lt_projects TYPE STANDARD TABLE OF ltyp_s_project.
+
+    DATA: lt_wi_pack   TYPE zpe_tt_work_items,
+          lt_jira_pack TYPE zcl_pe_jira_connector=>gtyp_t_user_stories.
+
+
+*   Get relevant JIRA Projects
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDD97E95051E5BC3F59'
+                                                iv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements
+                                      IMPORTING et_table        = lt_projects ).
+      CATCH zcx_pe_hm INTO DATA(lo_exc_hm).
+        MESSAGE lo_exc_hm TYPE 'E'.
+        RETURN.
+    ENDTRY.
+
+
+*   Search users stories grouping WI to avoid too long URI error
+    LOOP AT it_wis INTO DATA(ls_wi).
+      INSERT ls_wi INTO TABLE lt_wi_pack.
+      IF lines( lt_wi_pack ) = 20 OR lines( it_wis ) = sy-tabix.   "End of package OR last record
+        TRY.
+            CLEAR lt_jira_pack.
+            lt_jira_pack = NEW zcl_pe_jira_connector( )->search_issues( it_work_items     = lt_wi_pack
+                                                                        it_projects       =  CONV #( lt_projects )
+                                                                        iv_issue_fields   = 'summary,status,customfield_15200,customfield_13506' ).
+            INSERT LINES OF lt_jira_pack INTO TABLE rt_result.
+            CLEAR lt_wi_pack.
+          CATCH zcx_pe_jira_connector INTO DATA(lo_jira).
+            MESSAGE lo_jira->get_text( ) TYPE 'E'.
+        ENDTRY.
+      ENDIF.
+    ENDLOOP.
+
+    SORT rt_result BY wi.
+    DELETE ADJACENT DUPLICATES FROM rt_result COMPARING wi.
+
+  ENDMETHOD.
+
+
+  METHOD run_analysis.
+
+    TYPES: BEGIN OF ltyp_s_filter,
+             system TYPE syst_sysid,
+             team   TYPE zpe_hm_team,
+           END OF ltyp_s_filter.
+    TYPES: BEGIN OF ltyp_s_package_root_exp,
+             package TYPE devclass,
+           END OF ltyp_s_package_root_exp.
+    TYPES: BEGIN OF ltyp_s_package_exp,
+             parent TYPE devclass,
+             child  TYPE devclass,
+           END OF ltyp_s_package_exp.
+
+    DATA: lt_packages_root_exp TYPE STANDARD TABLE OF ltyp_s_package_root_exp,
+          lt_packages_exp      TYPE SORTED TABLE OF ltyp_s_package_exp WITH UNIQUE KEY parent child,
+          ls_package_exp       LIKE LINE OF lt_packages_exp.
+
+
+
+    LOOP AT it_dos ASSIGNING FIELD-SYMBOL(<ls_dos>).
+
+      INSERT CORRESPONDING mtyp_s_output( <ls_dos> ) INTO TABLE rt_result ASSIGNING FIELD-SYMBOL(<ls_output>).
+
+      <ls_output>-trkorr = COND #( WHEN <ls_dos>-strkorr IS INITIAL THEN <ls_dos>-trkorr
+                                   ELSE <ls_dos>-strkorr ).
+
+      <ls_output>-work_item = |{ substring_before( val = substring_after( val = <ls_dos>-text sub = '_' ) sub = '_' ) WIDTH = 10 ALPHA = IN  }|.
+      READ TABLE it_uss WITH KEY wi = <ls_output>-work_item
+                         ASSIGNING FIELD-SYMBOL(<ls_jira>)
+                         BINARY SEARCH.
+      IF sy-subrc NE 0.
+        <ls_output>-error = 'Work item not found in Jira'(002).
+        CONTINUE.
+      ELSE.
+        <ls_output>-team = <ls_jira>-team.
+      ENDIF.
+
+      TRY.
+          CLEAR: lt_packages_root_exp, lt_packages_exp.
+          zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '024F85009E261EEDADD2BB64D7B320D2'
+                                                  is_filter       = VALUE ltyp_s_filter( system = sy-sysid team = <ls_jira>-team  )
+                                                  iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-data_elements
+                                        IMPORTING et_table        = lt_packages_root_exp ).
+
+          LOOP AT lt_packages_root_exp ASSIGNING FIELD-SYMBOL(<ls_root>).
+            DATA(lt_hierarchy_exp) = cl_cts_devclass_api=>get_hierarchy( iv_root_devclass = <ls_root>-package ).
+            IF lt_hierarchy_exp IS NOT INITIAL.
+              LOOP AT lt_hierarchy_exp ASSIGNING FIELD-SYMBOL(<ls_hierarchy_exp>).
+                CLEAR ls_package_exp.
+                ls_package_exp-parent = <ls_root>-package.
+                ls_package_exp-child  = <ls_hierarchy_exp>-devclass.
+                INSERT ls_package_exp INTO TABLE lt_packages_exp.
+              ENDLOOP.
+            ELSE.
+              <ls_output>-correct_package = <ls_root>-package.
+              <ls_output>-error = 'Expected package not found in system'(003).
+              EXIT.
+            ENDIF.
+          ENDLOOP.
+
+          CHECK <ls_output>-error IS INITIAL.
+
+          READ TABLE lt_packages_exp WITH KEY child = <ls_dos>-devclass TRANSPORTING NO FIELDS.
+          IF sy-subrc NE 0.
+            <ls_output>-correct_package = REDUCE #( INIT str TYPE string FOR ls_package IN lt_packages_root_exp NEXT str = COND #( WHEN str IS INITIAL THEN ls_package-package ELSE |{ str } or { ls_package-package }| ) ).
+            <ls_output>-error = 'Wrong package or Team'(004).
+          ENDIF.
+        CATCH zcx_pe_hm.
+          <ls_output>-error = 'No package found for team in BRF+'(005).
+      ENDTRY.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD display_data.
+
+    DATA: lt_data TYPE STANDARD TABLE OF mtyp_s_output.
+
+    lt_data = it_data.
+
+    TRY.
+        cl_salv_table=>factory( IMPORTING r_salv_table = DATA(lo_alv)
+                                CHANGING  t_table      = lt_data ).
+
+        DATA(lo_columns) = lo_alv->get_columns( ).
+        DATA(lo_column)  = lo_columns->get_column( 'WORK_ITEM' ).
+        lo_column->set_medium_text( 'Work item'(006)  ).
+        lo_column        = lo_columns->get_column( 'TEAM' ).
+        lo_column->set_medium_text( 'Team (Jira)'(007)  ).
+        lo_column        = lo_columns->get_column( 'CORRECT_PACKAGE' ).
+        lo_column->set_medium_text( 'Package (Correct)'(008)  ).
+        lo_column        = lo_columns->get_column( 'DEVCLASS' ).
+        lo_column->set_medium_text( 'Package (Current)'(009)  ).
+        lo_column        = lo_columns->get_column( 'ERROR' ).
+        lo_column->set_medium_text( 'Error'(010) ).
+
+        lo_alv->get_functions( )->set_all( abap_true ).
+        lo_alv->display( ).
+
+      CATCH cx_salv_msg cx_salv_not_found.
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+ENDCLASS.

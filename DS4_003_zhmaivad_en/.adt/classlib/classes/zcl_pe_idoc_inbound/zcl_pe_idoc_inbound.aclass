@@ -1,0 +1,334 @@
+CLASS zcl_pe_idoc_inbound DEFINITION
+  PUBLIC
+  CREATE PROTECTED.
+
+  PUBLIC SECTION.
+
+    CLASS-METHODS factory IMPORTING iv_full_key     TYPE string OPTIONAL
+                          RETURNING VALUE(ro_value) TYPE REF TO zcl_pe_idoc_inbound.
+
+    METHODS create_from_aws RETURNING VALUE(rv_idoc_number) TYPE edi_docnum
+                            RAISING   zcx_pe_idoc.
+
+  PROTECTED SECTION.
+
+    CONSTANTS: BEGIN OF mc_s_tags,
+                 counter  TYPE string VALUE 'error-counter',
+                 last_exe TYPE string VALUE 'error-last_execution',
+               END OF mc_s_tags.
+
+    CLASS-DATA gif_s3_handler TYPE REF TO /aws1/if_s3.
+
+    DATA mv_full_key TYPE string.
+    DATA mv_bucket   TYPE string.
+    DATA mv_key      TYPE string.
+    DATA mv_folder   TYPE string.
+    DATA mv_name     TYPE string.
+
+
+    METHODS backup_file IMPORTING iv_bucket TYPE /aws1/s3_bucketname
+                                  iv_key    TYPE string
+                        RAISING   zcx_pe_idoc.
+
+
+    METHODS change_body CHANGING cv_body TYPE /aws1/s3_streamingblob.
+
+    METHODS constructor IMPORTING iv_full_key TYPE string OPTIONAL
+                                  iv_bucket   TYPE string OPTIONAL
+                                  iv_key      TYPE string OPTIONAL
+                                  iv_folder   TYPE string OPTIONAL
+                                  iv_name     TYPE string OPTIONAL.
+
+
+    METHODS error_file IMPORTING iv_bucket TYPE /aws1/s3_bucketname
+                                 iv_key    TYPE string
+                       RAISING   zcx_pe_idoc.
+
+    METHODS get_s3_handler RETURNING VALUE(rif_s3_handler) TYPE REF TO /aws1/if_s3
+                           RAISING   /aws1/cx_rt_technical_generic
+                                     /aws1/cx_rt_no_auth_generic
+                                     /aws1/cx_rt_service_generic
+                                     zcx_pe_hm.
+
+    METHODS get_sap_temp_path IMPORTING iv_file          TYPE string
+                              RETURNING VALUE(rv_result) TYPE string.
+
+  PRIVATE SECTION.
+
+    CONSTANTS mc_class_name TYPE seoclname VALUE 'ZCL_PE_IDOC_INBOUND'.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_IDOC_INBOUND IMPLEMENTATION.
+
+
+  METHOD factory.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+
+    TYPES: BEGIN OF ltyp_s_filter,
+             bucket TYPE /aws1/s3_bucketname,
+             folder TYPE /aws1/s3_prefix,
+           END OF ltyp_s_filter.
+
+    DATA lv_class_name TYPE seoclname.
+
+
+*   AWS IDOC File
+    IF iv_full_key IS NOT INITIAL.
+      DATA(lv_bucket) = substring_before( val = iv_full_key sub = '/' ).
+      DATA(lv_key)    = substring_after( val = iv_full_key sub = '/' ).
+      DATA(lv_name)   = substring_after( val = iv_full_key sub = '/' ).
+      DO.
+        IF lv_name CS '/'.
+          lv_name = substring_after( val = lv_name sub = '/' ).
+        ELSE.
+          EXIT.
+        ENDIF.
+      ENDDO.
+      DATA(lv_folder) = substring_before( val = lv_key sub = |/{ lv_name }| ).
+    ENDIF.
+
+
+*   Class determination
+    TRY.
+        zcl_pe_hm_complex=>get_value(
+          EXPORTING iv_id           = 'B7A9C1C0F4531EEE95C3362C210380D4'
+                    is_filter       = VALUE ltyp_s_filter( bucket = lv_bucket folder = lv_folder )
+                    iv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements
+          IMPORTING ev_value        = lv_class_name ).
+      CATCH zcx_pe_hm.
+        lv_class_name = mc_class_name.
+    ENDTRY.
+
+
+*   Create instance
+    CREATE OBJECT ro_value TYPE (lv_class_name)
+      EXPORTING iv_full_key = iv_full_key
+                iv_bucket   = lv_bucket
+                iv_key      = lv_key
+                iv_folder   = lv_folder
+                iv_name     = lv_name.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+
+    mv_full_key = iv_full_key.
+    mv_bucket   = iv_bucket.
+    mv_key      = iv_key.
+    mv_folder   = iv_folder.
+    mv_name     = iv_name.
+
+  ENDMETHOD.
+
+
+  METHOD create_from_aws.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+*-- Read file from AWS
+    TRY.
+        DATA(lif_s3)  = get_s3_handler( ).
+        DATA(lo_obj)  = lif_s3->getobject( iv_bucket = mv_bucket
+                                          iv_key    = mv_key ).
+        DATA(lv_body) = lo_obj->get_body( ).
+
+      CATCH /aws1/cx_s3_invalidobjectstate /aws1/cx_s3_nosuchkey /aws1/cx_s3_clientexc
+            /aws1/cx_s3_serverexc /aws1/cx_rt_technical_generic /aws1/cx_rt_service_generic
+            /aws1/cx_rt_no_auth_generic zcx_pe_hm INTO DATA(lo_exc_get).
+        RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE e004(zpe_idoc) WITH lo_exc_get->get_text( ).
+    ENDTRY.
+
+
+*-- Change body: User-exit
+    change_body( CHANGING cv_body = lv_body ).
+
+
+*-- Transfer to SAP Application Server
+    TRY.
+        DATA lv_message TYPE string.
+        DATA(lv_file_temp) = get_sap_temp_path( mv_name ).
+
+        OPEN DATASET lv_file_temp FOR OUTPUT IN BINARY MODE MESSAGE lv_message.
+        IF sy-subrc <> 0 OR lv_message IS NOT INITIAL.
+          RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE e002(zpe_idoc).
+        ENDIF.
+
+        TRANSFER lv_body TO lv_file_temp.
+        CLOSE DATASET lv_file_temp.
+
+      CATCH cx_sy_codepage_converter_init cx_sy_conversion_codepage cx_sy_file_authority cx_sy_file_io cx_sy_file_close
+            cx_sy_file_open cx_sy_file_open_mode cx_sy_pipe_reopen cx_sy_too_many_files  INTO DATA(lo_exc_sap).
+        RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE e005(zpe_idoc) EXPORTING previous = lo_exc_sap.
+    ENDTRY.
+
+
+*-- Create IDOC & backup files
+    DATA lv_port TYPE edi_pvrcvp.
+    lv_port = |SAP{ sy-sysid(3) }|.
+
+    CALL FUNCTION 'EDI_DATA_INCOMING'
+      EXPORTING
+        pathname      = CONV edi_pthnam( lv_file_temp )
+        port          = lv_port
+      EXCEPTIONS
+        error_message = 1.
+
+    IF sy-subrc = 0.
+      rv_idoc_number = sy-msgv1.
+      backup_file( iv_bucket = mv_bucket
+                   iv_key    = mv_key ).
+    ELSE.
+      error_file( iv_bucket = mv_bucket
+                  iv_key    = mv_key ).
+      RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE ID sy-msgid NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_s3_handler.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+    DATA: lv_profile TYPE /aws1/rt_profile_id.
+
+    IF gif_s3_handler IS INITIAL.
+      lv_profile       = zcl_pe_hm_basic=>get_value( '3245' ).
+      DATA(lo_session) = /aws1/cl_rt_session_aws=>create( lv_profile ).
+      gif_s3_handler    = /aws1/cl_s3_factory=>create( lo_session ).
+    ENDIF.
+
+    rif_s3_handler = gif_s3_handler.
+
+  ENDMETHOD.
+
+
+  METHOD backup_file.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+        gif_s3_handler->deleteobject( iv_bucket = iv_bucket
+                                     iv_key    = iv_key ).
+      CATCH /aws1/cx_rt_technical_generic /aws1/cx_rt_service_generic INTO DATA(lo_exc_del).
+        RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE e003(zpe_idoc) WITH lo_exc_del->get_text( ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD error_file.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+
+    DATA lv_error_counter TYPE i VALUE 1.
+
+    TRY.
+        DATA(lo_tags) = gif_s3_handler->getobjecttagging( iv_bucket = iv_bucket
+                                                         iv_key    = iv_key ).
+        DATA(lt_tags) = lo_tags->get_tagset( ).
+
+        LOOP AT lt_tags ASSIGNING FIELD-SYMBOL(<lo_tag>).
+          IF <lo_tag>->get_key( ) = mc_s_tags-counter.
+            lv_error_counter = CONV i( <lo_tag>->get_value( ) ) + 1.
+            DELETE lt_tags INDEX sy-tabix.
+            CONTINUE.
+          ENDIF.
+          IF <lo_tag>->get_key( ) = mc_s_tags-last_exe.
+            DELETE lt_tags INDEX sy-tabix.
+            CONTINUE.
+          ENDIF.
+        ENDLOOP.
+        INSERT NEW /aws1/cl_s3_tag( iv_key = mc_s_tags-counter iv_value = CONV #( lv_error_counter ) ) INTO TABLE lt_tags.
+        INSERT NEW /aws1/cl_s3_tag( iv_key = mc_s_tags-last_exe iv_value = CONV #( sy-datum ) ) INTO TABLE lt_tags.
+
+        gif_s3_handler->deleteobjecttagging( iv_bucket = iv_bucket
+                                            iv_key    = iv_key ).
+
+        gif_s3_handler->putobjecttagging( iv_bucket  = iv_bucket
+                                         iv_key     = iv_key
+                                         io_tagging = NEW /aws1/cl_s3_tagging( it_tagset = lt_tags ) ).
+
+      CATCH /aws1/cx_rt_technical_generic /aws1/cx_rt_service_generic INTO DATA(lo_exc_tag).
+        RAISE EXCEPTION TYPE zcx_pe_idoc MESSAGE e006(zpe_idoc) WITH lo_exc_tag->get_text( ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD change_body ##NEEDED.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+
+  ENDMETHOD.
+
+
+  METHOD get_sap_temp_path.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+
+    rv_result = |/tmp/{ iv_file }|.
+
+  ENDMETHOD.
+ENDCLASS.

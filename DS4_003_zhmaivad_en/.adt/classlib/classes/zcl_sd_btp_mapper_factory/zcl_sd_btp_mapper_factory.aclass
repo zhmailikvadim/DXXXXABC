@@ -1,0 +1,220 @@
+class ZCL_SD_BTP_MAPPER_FACTORY definition
+  public
+  final
+  create public .
+
+public section.
+
+  types:
+    BEGIN OF gtyp_s_po_item,
+        ebelp TYPE ebelp,
+        pstyp TYPE pstyp,
+        knttp TYPE knttp,
+        sobkz TYPE sobkz,
+        lgort TYPE lgort_d,
+        loekz TYPE loekz,
+      END OF gtyp_s_po_item .
+  types:
+    BEGIN OF gtyp_s_item_ded_order_settings,
+        t_rn_pstyp TYPE RANGE OF pstyp,
+        t_rn_knttp TYPE RANGE OF knttp,
+        t_rn_sobkz TYPE RANGE OF sobkz,
+        t_rn_lgort TYPE RANGE OF lgort_d,
+      END OF gtyp_s_item_ded_order_settings .
+  types:
+    BEGIN OF gtyp_s_item,
+        pstyp TYPE pstyp,
+        knttp TYPE knttp,
+        sobkz TYPE sobkz,
+        lgort TYPE lgort_d,
+      END OF gtyp_s_item .
+
+  data GV_BSART type BSART .
+  data:
+    gt_items TYPE STANDARD TABLE OF gtyp_s_po_item .
+  data GV_EBELN type EBELN .
+
+  methods CONSTRUCTOR .
+  methods GET_INSTANCE
+    importing
+      !IS_INBOUND_MESSAGE type MMPUR_S_PO_MESSAGE_INBOUND
+    exporting
+      !ET_RETURN_TAB type BAPIRETTAB
+    changing
+      !CV_SUCCESS type ABAP_BOOL
+    returning
+      value(RO_MAPPER) type ref to ZCL_SD_MMPUR_BASE_MAPPER .
+  methods SELECT_DATA
+    raising
+      CX_MMPUR_INTERGRATION_PO_LOG .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA mif_msg_log TYPE REF TO if_mmpur_po_msg_log .
+    DATA mt_rn_bsart TYPE RANGE OF bsart.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_BTP_MAPPER_FACTORY IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 10.11.2023 | 23979     : Feature - [BUILD]Operational *
+*              |            | DS4K959907                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+        DATA(lt_rn_bsart) = zcl_pe_hm_basic=>get_range( iv_id = '2442' ).
+      CATCH zcx_pe_hm.
+        CLEAR mt_rn_bsart.
+    ENDTRY.
+    mt_rn_bsart = CORRESPONDING #( lt_rn_bsart ).
+    mif_msg_log = NEW cl_mmpur_po_msg_log( ).
+
+  ENDMETHOD.
+
+
+  METHOD get_instance.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 10.11.2023 | 23979     : Feature - [BUILD]Operational *
+*              |            | DS4K959907                               *
+*----------------------------------------------------------------------*
+    DATA: lv_dedicated_order TYPE abap_bool.
+    DATA lv_action TYPE i.
+
+    TRY .
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = is_inbound_message-purchase_order-purchase_order_id
+          IMPORTING
+            output = gv_ebeln.
+
+        IF gv_ebeln IS INITIAL.
+          mif_msg_log->add_messages_to_log(
+               is_mepo_message  = VALUE #(
+                           msgty = if_mmpur_po_constants=>gc_msg-type_error
+                           msgid = if_mmpur_po_constants=>gc_msg-id
+                           msgno = if_mmpur_po_constants=>gc_msg-no_003
+                           msgv1 = CONV #( gv_ebeln )
+                         )
+                         check_msg_log_for_errors = abap_true
+          ).
+        ENDIF.
+
+        select_data( ).
+
+        IF gv_bsart IS NOT INITIAL AND gt_items IS NOT INITIAL.
+          LOOP AT is_inbound_message-purchase_order-purchase_order_item ASSIGNING FIELD-SYMBOL(<ls_prx_item>).
+            lv_action = <ls_prx_item>-action_code.
+            READ TABLE gt_items ASSIGNING FIELD-SYMBOL(<ls_item>)
+            WITH KEY ebelp = <ls_prx_item>-purchase_order_item_id ##WARN_OK.
+            IF sy-subrc EQ 0.
+              lv_dedicated_order = zcl_sd_check_dedicated_po=>check_dedicated_po( is_item = CORRESPONDING gtyp_s_item( <ls_item> )  ).
+              IF lv_dedicated_order NE abap_true.
+                EXIT.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+
+          IF lv_dedicated_order = abap_true
+            AND is_inbound_message-purchase_order-zz_process_type_codes IS NOT INITIAL.
+            ro_mapper = NEW zcl_sd_mmpur_dedicated_process( NEW zcl_sd_btp_return_status( ) ).
+          ELSEIF lv_dedicated_order = abap_true
+            AND is_inbound_message-purchase_order-zz_process_type_codes IS INITIAL.
+            ro_mapper = NEW zcl_sd_mmpur_dedicated_so( NEW zcl_sd_btp_dedicated_status( ) ).
+          ELSEIF mt_rn_bsart IS NOT INITIAL AND gv_bsart IN mt_rn_bsart.
+            CASE lv_action.
+              WHEN zif_sd_po_btp_mapper_const=>gc_create.
+                ro_mapper = NEW zcl_sd_mmpur_interim_so( NEW zcl_sd_btp_interim_so_status( ) ).
+              WHEN OTHERS.
+                ro_mapper = NEW zcl_sd_mmpur_bulk_po_in( NEW zcl_sd_btp_return_status( ) ).
+            ENDCASE.
+          ELSE.
+            ro_mapper = NEW zcl_sd_mmpur_soa_po_in( NEW zcl_sd_btp_return_status( ) ).
+          ENDIF.
+          cv_success = if_mmpur_po_constants=>gc_aif_rc-success.
+        ELSE.
+          MESSAGE e001(zsd_btp_integ) WITH gv_ebeln INTO DATA(lv_message).
+          IF lv_message IS NOT INITIAL.
+            mif_msg_log->add_messages_to_log(
+                  is_mepo_message  = VALUE #(
+                              msgty = if_mmpur_po_constants=>gc_msg-type_error
+                              msgid = 'ZSD_BTP_INTEG'
+                              msgno = '001'
+                              msgv1 = CONV #( gv_ebeln )
+                            )
+             ).
+          ENDIF.
+        ENDIF.
+        mif_msg_log->get_message_log(
+         IMPORTING et_msg_bapi_ret2 = et_return_tab
+        ).
+      CATCH cx_mmpur_intergration_po_log.
+        mif_msg_log->get_message_log(
+          IMPORTING et_msg_bapi_ret2 = et_return_tab
+         ).
+
+        ro_mapper = NEW zcl_sd_mmpur_soa_po_in( NEW zcl_sd_btp_return_status( ) ).
+        ro_mapper->go_kafka_message->set_po_id( gv_ebeln ).
+        ro_mapper->go_kafka_message->set_reference_id( CONV #( is_inbound_message-purchase_order-zzticket_number ) ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD select_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 21.11.2023 | 23979     : Feature - [BUILD]Operational *
+*              |            | DS4K959907                               *
+*----------------------------------------------------------------------*
+
+    SELECT SINGLE purchasingdocumenttype
+    FROM i_purchasingdocument WITH PRIVILEGED ACCESS
+    WHERE purchasingdocument EQ @gv_ebeln
+    INTO @gv_bsart.
+    IF sy-subrc NE 0.
+      CLEAR gv_bsart.
+      mif_msg_log->add_messages_to_log(
+                 is_mepo_message  = VALUE #(
+                             msgty = if_mmpur_po_constants=>gc_msg-type_error
+                             msgid = '06'
+                             msgno = '019'
+                             msgv1 = CONV #( gv_ebeln )
+                           )
+                 check_msg_log_for_errors = abap_true
+            ).
+    ENDIF.
+
+    IF gv_ebeln IS NOT INITIAL.
+      SELECT
+        purchasingdocumentitem,
+        purchasingdocumentitemcategory,
+        accountassignmentcategory,
+        inventoryspecialstocktype,
+        storagelocation,
+        purchasingdocumentdeletioncode
+      FROM i_purchasingdocumentitem
+      WHERE purchasingdocument EQ @gv_ebeln
+      INTO TABLE @gt_items.
+      IF sy-subrc NE 0.
+        CLEAR gt_items.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

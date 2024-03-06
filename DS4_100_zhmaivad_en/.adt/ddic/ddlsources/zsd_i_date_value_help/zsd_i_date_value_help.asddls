@@ -15,7 +15,10 @@
 ----------------------------------------------------------------------*
 " ZHMAIVAD     | 21.07.2023 | 22859     : [Build] - Stock reconciliati -
 "              |            | DS4K957133                               -
-----------------------------------------------------------------------*/
+----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
+*----------------------------------------------------------------------*/
 @EndUserText.label: 'Value Help For WMS  Dates'
 @AccessControl.authorizationCheck: #CHECK
 @UI: { presentationVariant: [
@@ -28,11 +31,13 @@
                             ]
     }
 
+
 /*+[hideWarning] { "IDS" : [ "KEY_CHECK" ]  } */
 define view entity zsd_i_date_value_help
   as select distinct from zsd_i_stock_difference_report
 {
-  key WmsSnapshotDate
+  key WmsSnapshotDate,
+  key Plant
 }
-//where
-//  WmsSnapshotDate > dats_add_months($session.system_date,-1,'NULL')
+where
+  WmsSnapshotDate > dats_add_months($session.system_date,-12,'NULL')

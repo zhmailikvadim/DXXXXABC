@@ -30,7 +30,14 @@
 *----------------------------------------------------------------------*
 * ZHMAIVAD     | 19.09.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
-*----------------------------------------------------------------------*/
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
+*----------------------------------------------------------------------*
+" ZHMAIVAD     | 03.04.2024 | 30615     : [Feature] [Build] - Stock re -
+"              |            | DS4K985600                                -
+" ----------------------------------------------------------------------*/
+
 @AccessControl.authorizationCheck: #CHECK
 @EndUserText.label: 'Stock Difference report'
 @Metadata:{ignorePropagatedAnnotations: true, allowExtensions: false}
@@ -70,9 +77,9 @@ define root view entity zsd_i_stock_difference_report
                                                                                      and $projection.StorageLocation = _ErrorsGoodsIssueIdoc.StorageLocation
   association [1..*] to zsd_i_errors_goods_receipt_aif as _ErrorsPartialGoodsReceipt on  $projection.Article = _ErrorsPartialGoodsReceipt.Product
                                                                                      and $projection.Plant   = _ErrorsPartialGoodsReceipt.Plant
-  association [1..*] to zsd_i_errors_inventory_pst_bas as _ErrorsInventoryPosting    on  $projection.Article = _ErrorsInventoryPosting.Product
+  association [1..*] to zsd_i_errors_inventory_pst_asc as _ErrorsInventoryPosting    on  $projection.Article = _ErrorsInventoryPosting.Product
                                                                                      and $projection.Plant   = _ErrorsInventoryPosting.Plant
-  association [1..*] to zsd_i_errors_omni_shpm_cf_idoc as _ErrorsOmniShipmentConfirm on  $projection.Plant           = _ErrorsOmniShipmentConfirm.Plant
+  association [1..*] to zsd_i_errors_omni_shpm_cf_pers as _ErrorsOmniShipmentConfirm on  $projection.Plant           = _ErrorsOmniShipmentConfirm.Plant
                                                                                      and $projection.StorageLocation = _ErrorsOmniShipmentConfirm.StorageLocation
                                                                                      and $projection.Article         = _ErrorsOmniShipmentConfirm.Product
 {
@@ -147,9 +154,9 @@ define root view entity zsd_i_stock_difference_report
                case when SalesOrderNumber = ''
                     then cast( ''  as boolean preserving type ) else
                     cast( 'X'  as boolean preserving type ) end                                                           as DisplayOnlySOrdersOrViceVersa,
-               case when WmsTimeStamp > 0 and SapTimeStamp > 0
+               case when SapTimeStamp > 0
                     then cast( 'X'  as boolean preserving type ) else
-                    cast( ''  as boolean preserving type ) end                                                            as ArticleExistInBothSystems,
+                    cast( ''  as boolean preserving type ) end                                                            as ArticleExistInSap,
                cast(ErrorsGoodsReceiptUUQuantity as zsd_stock_recon_qnt_int)                                              as ErrorsGoodsReceiptUUQuantity,
                cast(ErrorsGoodsReceiptQiQuantity as zsd_stock_recon_qnt_int)                                              as ErrorsGoodsReceiptQiQuantity,
                cast(ErrorsGoodsReceiptBlQuantity as zsd_stock_recon_qnt_int)                                              as ErrorsGoodsReceiptBlQuantity,

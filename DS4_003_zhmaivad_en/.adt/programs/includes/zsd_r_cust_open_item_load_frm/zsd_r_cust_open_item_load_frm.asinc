@@ -1,0 +1,353 @@
+*&---------------------------------------------------------------------------------------*
+*& Include          ZSD_R_CUST_OPEN_ITEM_LOAD_FRM
+*&---------------------------------------------------------------------------------------*
+******************************************************************************************
+*  R E V I S I O N   H I S T O R Y                                                       *
+******************************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION                                *
+*              |            | TRANSPORT REQUESTS                                         *
+******************************************************************************************
+* ZAICHART     | 01.02.2024 | 28498_SD_Feature - Build - Create a AR upload functionality*
+*              |            | DS4K977727                                                 *
+*----------------------------------------------------------------------------------------*
+FORM f4_help CHANGING cv_file TYPE localfile .
+
+  DATA: lt_file_tab    TYPE filetable,
+        lv_rc          TYPE i,
+        lv_user_action TYPE i.
+
+  cl_gui_frontend_services=>file_open_dialog(
+    EXPORTING
+      window_title            = CONV #( TEXT-001 )
+      default_extension       = CONV #( TEXT-002 )
+      multiselection          = abap_false
+      file_filter             = |{ TEXT-003 }{ cl_gui_frontend_services=>filetype_all }|
+    CHANGING
+      file_table              = lt_file_tab
+      rc                      = lv_rc
+      user_action             = lv_user_action
+    EXCEPTIONS
+      file_open_dialog_failed = 1
+      cntl_error              = 2
+      error_no_gui            = 3
+      not_supported_by_gui    = 4
+      OTHERS                  = 5 ).
+  IF sy-subrc <> 0.
+    CLEAR: sy-subrc.
+  ENDIF.
+
+  IF lv_user_action = cl_gui_frontend_services=>action_ok.
+    cv_file = lt_file_tab[ 1 ]-filename.
+  ENDIF.
+ENDFORM.
+
+FORM download_template.
+
+  DATA: lt_mime       TYPE w3mimetabtype,
+        ls_key        TYPE wwwdatatab,
+        lv_filesize   TYPE i,
+        lv_excel_data TYPE xstring,
+        lv_name       TYPE char50.
+
+  ls_key-relid = 'MI'.
+  ls_key-objid = 'Z_CUST_OI_TEMPLATE'.
+
+  CALL FUNCTION 'WWWDATA_IMPORT'
+    EXPORTING
+      key               = ls_key
+    TABLES
+      mime              = lt_mime
+    EXCEPTIONS
+      wrong_object_type = 1
+      import_error      = 2
+      OTHERS            = 3.
+  IF sy-subrc <> 0.
+    CLEAR: lt_mime.
+    RETURN.
+  ENDIF.
+
+  lv_name = TEXT-004.
+
+  SELECT SINGLE *
+    FROM wwwparams
+    INTO @DATA(ls_params)
+    WHERE relid = @ls_key-relid
+      AND objid = @ls_key-objid
+      AND name  = @lv_name.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  lv_filesize = ls_params-value.
+
+  CALL FUNCTION 'SCMS_BINARY_TO_XSTRING'
+    EXPORTING
+      input_length = lv_filesize
+    IMPORTING
+      buffer       = lv_excel_data
+    TABLES
+      binary_tab   = lt_mime
+    EXCEPTIONS
+      failed       = 1
+      OTHERS       = 2.
+  IF sy-subrc <> 0.
+    CLEAR: lv_excel_data.
+    RETURN.
+  ENDIF.
+
+  DATA: lv_file_name TYPE string,
+        lv_fullpath  TYPE string,
+        lv_path      TYPE string,
+        lv_action    TYPE i.
+
+  cl_gui_frontend_services=>file_save_dialog(
+    EXPORTING
+      default_extension = CONV #( TEXT-002 )
+      default_file_name = CONV #( TEXT-005 )
+      file_filter       = |{ TEXT-003 }{ cl_gui_frontend_services=>filetype_all }|
+    CHANGING
+      filename          = lv_file_name
+      path              = lv_path
+      fullpath          = lv_fullpath
+      user_action       = lv_action ).
+
+  IF lv_action = cl_gui_frontend_services=>action_ok.
+    DATA(lt_raw_data) = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_excel_data ).
+    cl_gui_frontend_services=>gui_download(
+      EXPORTING
+        bin_filesize = xstrlen( lv_excel_data )
+        filename     = lv_fullpath
+        filetype     = 'BIN'
+      CHANGING
+        data_tab     = lt_raw_data ).
+  ENDIF.
+ENDFORM.
+
+FORM check_before_start .
+  IF p_file IS INITIAL.
+    MESSAGE e000(zsd_cust_o_item_load).
+  ENDIF.
+ENDFORM.
+
+FORM get_data_from_excel.
+  DATA(lo_excel_upl) = NEW lcl_excel_uploader( ).
+  lo_excel_upl->upload( p_file ).
+ENDFORM.
+
+FORM process_data.
+
+  TYPES: BEGIN OF ltyp_s_bseg,
+           bukrs TYPE zsd_s_cust_o_item_upl-bukrs,
+           bschl TYPE zsd_s_cust_o_item_upl-bschl,
+           sgtxt TYPE zsd_s_cust_o_item_upl-sgtxt,
+           gsber TYPE zsd_s_cust_o_item_upl-gsber,
+           prctr TYPE zsd_s_cust_o_item_upl-prctr,
+           zuonr TYPE zsd_s_cust_o_item_upl-zuonr,
+           mwskz TYPE zsd_s_cust_o_item_upl-mwskz,
+           hkont TYPE zsd_s_cust_o_item_upl-hkont,
+           waers TYPE zsd_s_cust_o_item_upl-waers,
+           wrbtr TYPE zsd_s_cust_o_item_upl-wrbtr,
+           dmbtr TYPE zsd_s_cust_o_item_upl-dmbtr,
+           zfbdt TYPE zsd_s_cust_o_item_upl-zfbdt,
+           zterm TYPE zsd_s_cust_o_item_upl-zterm,
+           kunnr TYPE zsd_s_cust_o_item_upl-kunnr,
+           vbund TYPE zsd_s_cust_o_item_upl-vbund,
+           aufnr TYPE zsd_s_cust_o_item_upl-aufnr,
+           kostl TYPE zsd_s_cust_o_item_upl-kostl,
+         END OF ltyp_s_bseg,
+         ltyp_t_bseg TYPE STANDARD TABLE OF ltyp_s_bseg.
+
+  DATA: lt_doc_to_post TYPE TABLE FOR ACTION IMPORT i_journalentrytp~post,
+        lt_bseg        TYPE ltyp_t_bseg,
+        lv_error       TYPE abap_boolean.
+
+
+  data : lv_line_item TYPE docln6.
+
+  IF gt_cust_o_item_upl IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  LOOP AT gt_cust_o_item_upl ASSIGNING FIELD-SYMBOL(<ls_cust_o_item_upl>).
+
+    IF <ls_cust_o_item_upl>-bldat IS INITIAL.
+      MESSAGE e001(zsd_cust_o_item_load) INTO DATA(lv_text) ##NEEDED.
+      APPEND VALUE #( id      = sy-msgid
+                      type    = sy-msgty
+                      number  = sy-msgno
+                      message = lv_text ) TO gt_return.
+      lv_error = abap_true.
+    ENDIF.
+
+    IF <ls_cust_o_item_upl>-budat IS INITIAL.
+      MESSAGE e002(zsd_cust_o_item_load) INTO lv_text.
+      APPEND VALUE #( id      = sy-msgid
+                      type    = sy-msgty
+                      number  = sy-msgno
+                      message = lv_text ) TO gt_return.
+      lv_error = abap_true.
+    ENDIF.
+
+    IF <ls_cust_o_item_upl>-blart IS INITIAL.
+      MESSAGE e003(zsd_cust_o_item_load) INTO lv_text.
+      APPEND VALUE #( id      = sy-msgid
+                      type    = sy-msgty
+                      number  = sy-msgno
+                      message = lv_text ) TO gt_return.
+      lv_error = abap_true.
+    ENDIF.
+
+    IF <ls_cust_o_item_upl>-bschl IS INITIAL.
+      MESSAGE e004(zsd_cust_o_item_load) INTO lv_text.
+      APPEND VALUE #( id      = sy-msgid
+                      type    = sy-msgty
+                      number  = sy-msgno
+                      message = lv_text ) TO gt_return.
+      lv_error = abap_true.
+    ENDIF.
+
+    IF <ls_cust_o_item_upl>-waers IS INITIAL.
+      MESSAGE e005(zsd_cust_o_item_load) INTO lv_text.
+      APPEND VALUE #( id      = sy-msgid
+                      type    = sy-msgty
+                      number  = sy-msgno
+                      message = lv_text ) TO gt_return.
+      lv_error = abap_true.
+    ENDIF.
+
+    IF <ls_cust_o_item_upl>-wrbtr IS INITIAL.
+      MESSAGE e006(zsd_cust_o_item_load) INTO lv_text.
+      APPEND VALUE #( id      = sy-msgid
+                      type    = sy-msgty
+                      number  = sy-msgno
+                      message = lv_text ) TO gt_return.
+      lv_error = abap_true.
+    ENDIF.
+
+  ENDLOOP.
+
+  IF lv_error = abap_true.
+    RETURN.
+  ENDIF.
+
+  LOOP AT gt_cust_o_item_upl ASSIGNING <ls_cust_o_item_upl>.
+
+    APPEND INITIAL LINE TO lt_bseg ASSIGNING FIELD-SYMBOL(<ls_bseg>).
+    <ls_bseg> = CORRESPONDING #( <ls_cust_o_item_upl> ).
+
+    IF <ls_cust_o_item_upl>-end_flag = abap_true.
+      lv_line_item = '000000'.
+
+      TRY.
+        APPEND INITIAL LINE TO lt_doc_to_post ASSIGNING FIELD-SYMBOL(<ls_doc_to_bseg>).
+          <ls_doc_to_bseg> = VALUE #(  %cid   = to_upper( cl_uuid_factory=>create_system_uuid( )->create_uuid_x16( ) )
+                                      %param = VALUE #( accountingdocumenttype       = <ls_cust_o_item_upl>-blart
+                                                        createdbyuser                = sy-uname
+                                                        documentdate                 = <ls_cust_o_item_upl>-bldat
+                                                        companycode                  = <ls_cust_o_item_upl>-bukrs
+                                                        postingdate                  = <ls_cust_o_item_upl>-budat
+                                                        accountingdocumentheadertext = <ls_cust_o_item_upl>-bktxt
+                                                        documentreferenceid          = <ls_cust_o_item_upl>-xblnr ) ) .
+          LOOP AT lt_bseg ASSIGNING FIELD-SYMBOL(<ls_bseg_map>). "#EC CI_NESTED
+            lv_line_item = lv_line_item + 10.
+            IF <ls_bseg_map>-kunnr is INITIAL.
+              <ls_doc_to_bseg>-%param-_glitems =  VALUE #( BASE <ls_doc_to_bseg>-%param-_glitems
+                                                 ( glaccountlineitem   = lv_line_item
+                                                   documentitemtext    = <ls_bseg_map>-sgtxt
+                                                   businessplace       = <ls_bseg_map>-gsber
+                                                   assignmentreference = <ls_bseg_map>-zuonr
+                                                   taxcode             = <ls_bseg_map>-mwskz
+                                                   glaccount           = <ls_bseg_map>-hkont
+                                                   profitcenter        = <ls_bseg_map>-prctr
+                                                   costcenter          = <ls_bseg_map>-kostl
+                                                   PartnerCompany      = <ls_bseg_map>-vbund
+                                                    _currencyamount   = VALUE #( ( currency               = <ls_bseg_map>-waers
+                                                                                   journalentryitemamount = <ls_bseg_map>-wrbtr ) ) ) ).
+
+            ELSE.
+
+              <ls_doc_to_bseg>-%param-_aritems =  VALUE #( BASE <ls_doc_to_bseg>-%param-_aritems
+                                                 ( glaccountlineitem      = lv_line_item
+                                                   documentitemtext       = <ls_bseg_map>-sgtxt
+                                                   businessplace          = <ls_bseg_map>-gsber
+                                                   assignmentreference    = <ls_bseg_map>-zuonr
+                                                   glaccount              = <ls_bseg_map>-hkont
+                                                   customer               = <ls_bseg_map>-kunnr
+                                                   duecalculationbasedate = <ls_bseg_map>-zfbdt
+                                                   paymentterms           = <ls_bseg_map>-zterm
+                                                   _currencyamount   = VALUE #( ( currency               = <ls_bseg_map>-waers
+                                                                                  journalentryitemamount = <ls_bseg_map>-wrbtr ) ) ) ).
+
+            ENDIF.
+
+
+          ENDLOOP.
+       CATCH cx_uuid_error.
+          CLEAR: lt_doc_to_post.
+      ENDTRY.
+
+      CLEAR: lt_bseg.
+
+      IF lt_doc_to_post IS NOT INITIAL.
+        MODIFY ENTITIES OF i_journalentrytp
+        ENTITY journalentry
+        EXECUTE post FROM lt_doc_to_post
+        FAILED DATA(ls_post_failed)
+        REPORTED DATA(ls_post_reported)
+        MAPPED DATA(ls_post_mapped).
+
+        IF ls_post_failed IS INITIAL.
+          COMMIT ENTITIES
+            RESPONSE OF i_journalentrytp
+             FAILED DATA(ls_failed_commit)
+             REPORTED DATA(ls_reported_commit).
+          LOOP AT ls_reported_commit-journalentry ASSIGNING FIELD-SYMBOL(<ls_je_commit>). "#EC CI_NESTED
+            IF ls_failed_commit IS INITIAL.
+              MESSAGE s007(zsd_cust_o_item_load) WITH <ls_je_commit>-accountingdocument INTO lv_text.
+              APPEND VALUE #( id      = sy-msgid
+                              type    = sy-msgty
+                              number  = sy-msgno
+                              message = lv_text ) TO gt_return.
+            ELSE.
+              APPEND VALUE #( id      = <ls_je_commit>-%msg->if_t100_message~default_textid-msgid
+                              type    = <ls_je_commit>-%msg->if_t100_dyn_msg~msgty
+                              number  = <ls_je_commit>-%msg->if_t100_message~default_textid-msgno
+                              message = <ls_je_commit>-%msg->if_message~get_longtext( ) ) TO gt_return.
+            ENDIF.
+          ENDLOOP.
+        ELSE.
+          LOOP AT ls_post_reported-journalentry ASSIGNING FIELD-SYMBOL(<ls_je>). "#EC CI_NESTED
+            APPEND VALUE #( id      = <ls_je>-%msg->if_t100_message~default_textid-msgid
+                            type    = <ls_je>-%msg->if_t100_dyn_msg~msgty
+                            number  = <ls_je>-%msg->if_t100_message~default_textid-msgno
+                            message = <ls_je>-%msg->if_message~get_longtext( ) ) TO gt_return.
+          ENDLOOP.
+          ROLLBACK ENTITIES.                           "#EC CI_ROLLBACK
+          MESSAGE e009(zsd_cust_o_item_load) INTO lv_text.
+          APPEND VALUE #( id      = sy-msgid
+                          type    = sy-msgty
+                          number  = sy-msgno
+                          message = lv_text ) TO gt_return.
+        ENDIF.
+      ENDIF.
+      CLEAR lt_doc_to_post.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.
+
+FORM display.
+  TRY.
+      cl_salv_table=>factory(
+        IMPORTING
+          r_salv_table = DATA(lo_alv)
+        CHANGING
+          t_table      = gt_return ).
+
+      lo_alv->display( ).
+    CATCH cx_salv_msg.
+      RETURN.
+  ENDTRY.
+
+ENDFORM.

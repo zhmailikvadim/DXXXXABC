@@ -1,0 +1,333 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* USTINKON     | 20.04.2023 | 19855     : Feature - [Build] Shipment C *
+*              |            | DS4K949335                               *
+*----------------------------------------------------------------------*/
+CLASS lsc_zsc_i_shipment_items DEFINITION INHERITING FROM cl_abap_behavior_saver FINAL.
+  PUBLIC SECTION.
+    METHODS on_end_of_task_eta
+      IMPORTING !p_task TYPE clike.
+  PROTECTED SECTION.
+    DATA: gt_mess TYPE bal_t_msg.
+    METHODS save_modified REDEFINITION.
+
+ENDCLASS.
+
+CLASS lsc_zsc_i_shipment_items IMPLEMENTATION.
+
+  METHOD save_modified.
+
+    DATA: lt_cons_params TYPE zsc_tt_cons_params.
+
+    IF update IS NOT INITIAL.
+      LOOP AT update-shipment ASSIGNING FIELD-SYMBOL(<ls_shipment>).
+        APPEND CORRESPONDING zsc_s_cons_param( <ls_shipment> ) TO lt_cons_params ##ENH_OK.
+      ENDLOOP.
+
+      IF lines( lt_cons_params ) > 0.
+        CALL FUNCTION 'ZSC_FM_SHIPMENT_CONS_TOOL'
+          STARTING NEW TASK 'UPDATE'
+          DESTINATION 'NONE'
+          CALLING on_end_of_task_eta ON END OF TASK
+          CHANGING
+            ct_consolidation      = lt_cons_params
+            ct_messages           = gt_mess
+          EXCEPTIONS
+            communication_failure = 1
+            system_failure        = 2.
+        IF sy-subrc NE 0.
+          APPEND VALUE #( %msg = new_message_with_text( text = TEXT-m03 ) )
+                                        TO reported-shipment.
+        ENDIF.
+        WAIT UNTIL gt_mess IS NOT INITIAL UP TO 15 SECONDS ##NUMBER_OK.
+        LOOP AT gt_mess ASSIGNING FIELD-SYMBOL(<ls_mess>).
+          IF <ls_mess>-msgty = 'E'.
+            APPEND VALUE #( %msg = new_message_with_text( severity = CONV #( <ls_mess>-msgty ) text = TEXT-m03 ) )
+                            TO reported-shipment.
+          ELSE.
+            APPEND VALUE #( %msg = new_message_with_text( severity = if_abap_behv_message=>severity-success text = TEXT-m04 ) )
+                            TO reported-shipment.
+          ENDIF.
+        ENDLOOP.
+        IF lines( gt_mess[] ) > 0.
+          APPEND VALUE #( %msg = new_message_with_text( severity = if_abap_behv_message=>severity-success text = TEXT-m04 ) )
+                          TO reported-shipment.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+  METHOD on_end_of_task_eta.
+    RECEIVE RESULTS FROM FUNCTION 'ZSC_FM_SHIPMENT_CONS_TOOL'
+    CHANGING
+       ct_messages           = gt_mess
+    EXCEPTIONS
+      communication_failure = 1
+      system_failure        = 2.
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS lhc_shipment DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  PRIVATE SECTION.
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING it_keys REQUEST requested_authorizations FOR shipment RESULT result ##NEEDED.
+
+    METHODS lock FOR LOCK
+      IMPORTING it_keys FOR LOCK shipment ##NEEDED.
+
+    METHODS assign_cont FOR MODIFY
+      IMPORTING it_keys FOR ACTION shipment~assign_cont RESULT ct_result.
+
+    METHODS consolidate FOR MODIFY
+      IMPORTING it_keys FOR ACTION shipment~consolidate RESULT ct_result.
+
+    METHODS create_cont FOR MODIFY
+      IMPORTING it_keys FOR ACTION shipment~create_cont RESULT ct_result.
+
+    METHODS mass_change FOR MODIFY
+      IMPORTING it_keys FOR ACTION shipment~mass_change RESULT ct_result.
+
+    METHODS discard_draft FOR MODIFY
+      IMPORTING it_keys FOR ACTION shipment~discard_draft RESULT ct_result.
+
+ENDCLASS.
+
+CLASS lhc_shipment IMPLEMENTATION.
+
+  METHOD get_instance_authorizations.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD lock.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD discard_draft.
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+      ENTITY shipment
+      EXECUTE discard FROM
+      VALUE #( FOR <ls_active_key> IN it_keys USING KEY draft
+      WHERE ( %is_draft = if_abap_behv=>mk-on )
+      ( %key = <ls_active_key>-%key ) )
+      REPORTED DATA(ls_reported)
+      FAILED DATA(ls_failed)
+      MAPPED DATA(ls_mapped).
+
+    READ ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+     ALL FIELDS
+    WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_shipment).
+
+    ct_result = VALUE #( FOR ls_ship IN lt_shipment ( %tky = ls_ship-%tky
+                                                      %param = CORRESPONDING #( ls_ship ) ) ).
+
+  ENDMETHOD.
+
+  METHOD assign_cont.
+
+    IF it_keys IS INITIAL.
+      RETURN.
+    ENDIF.
+    SELECT item~containerid, item~inboundshipmentnum
+     INTO TABLE @DATA(lt_ship)
+     FROM zsc_i_shipment_items AS item
+      FOR ALL ENTRIES IN @it_keys
+      WHERE containerid = @it_keys-%param-conteinerid.    "#EC CI_SUBRC
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+      ENTITY shipment
+      EXECUTE edit FROM
+      VALUE #( FOR <ls_active_key> IN it_keys USING KEY draft
+      WHERE ( %is_draft = if_abap_behv=>mk-off )
+      ( %key = <ls_active_key>-%key
+        %param-preserve_changes = 'X' ) )
+      REPORTED DATA(ls_reported)
+      FAILED DATA(ls_failed)
+      MAPPED DATA(ls_mapped).
+    IF ls_failed IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT it_keys ASSIGNING FIELD-SYMBOL(<ls_keys>).
+      DATA(lv_ship_count) = 0.
+      LOOP AT lt_ship ASSIGNING FIELD-SYMBOL(<ls_ship>) WHERE containerid = <ls_keys>-%param-conteinerid. "#EC CI_STDSEQ "#EC CI_NESTED
+        lv_ship_count += 1.
+        IF lv_ship_count >= 2.
+          APPEND VALUE #( %msg = new_message_with_text( text = TEXT-m02 ) ) TO reported-shipment.
+          APPEND VALUE #( %msg = new_message_with_text( text = TEXT-m01 ) ) TO reported-shipment.
+          RETURN.                                       "#EC CI_NOORDER
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+
+    " we always work with draft entities
+    DATA(lt_draft_keys) = it_keys.
+    LOOP AT lt_draft_keys ASSIGNING FIELD-SYMBOL(<ls_draft_keys>).
+      <ls_draft_keys>-%is_draft = if_abap_behv=>mk-on.
+    ENDLOOP.
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+    UPDATE FIELDS ( newcontainerid )
+    WITH VALUE #( FOR ls_keys IN lt_draft_keys ( %tky           = ls_keys-%tky
+                                                 %is_draft      = if_abap_behv=>mk-on
+                                                 newcontainerid = ls_keys-%param-conteinerid
+                                               ) )
+      REPORTED ls_reported
+      FAILED ls_failed
+      MAPPED ls_mapped.
+
+    READ ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+     ALL FIELDS
+    WITH CORRESPONDING #( lt_draft_keys )
+    RESULT DATA(lt_shipment).
+
+    ct_result = VALUE #( FOR ls_ship IN lt_shipment ( %tky = ls_ship-%tky
+                                                      %param = CORRESPONDING #( ls_ship ) ) ).
+
+  ENDMETHOD.
+
+  METHOD consolidate.
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+      ENTITY shipment
+      EXECUTE activate FROM
+      VALUE #( FOR <ls_active_key> IN it_keys USING KEY draft
+      WHERE ( %is_draft = if_abap_behv=>mk-on )
+      ( %key = <ls_active_key>-%key ) )
+      REPORTED DATA(ls_reported)
+      FAILED DATA(ls_failed)
+      MAPPED DATA(ls_mapped).
+
+    READ ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+     ALL FIELDS
+    WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_shipment).
+
+    ct_result = VALUE #( FOR ls_ship IN lt_shipment ( %tky = ls_ship-%tky
+                                                      %param = CORRESPONDING #( ls_ship ) ) ).
+
+  ENDMETHOD.
+
+  METHOD create_cont.
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+      ENTITY shipment
+      EXECUTE edit FROM
+      VALUE #( FOR <ls_active_key> IN it_keys USING KEY draft
+      WHERE ( %is_draft = if_abap_behv=>mk-off )
+      ( %key = <ls_active_key>-%key
+        %param-preserve_changes = 'X' ) )
+      REPORTED DATA(ls_reported)
+      FAILED DATA(ls_failed)
+      MAPPED DATA(ls_mapped).
+    IF ls_failed IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    " we always work with draft entities
+    DATA(lt_draft_keys) = it_keys.
+    LOOP AT lt_draft_keys ASSIGNING FIELD-SYMBOL(<ls_draft_keys>).
+      <ls_draft_keys>-%is_draft = if_abap_behv=>mk-on.
+    ENDLOOP.
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+    UPDATE FIELDS ( newcontainerid
+                    newshippingtype
+                    neweta
+                    newdestinationpoint
+                    newdeparturepoint
+                    newetd
+                    carrcode
+                    plcarrcode )
+    WITH VALUE #( FOR ls_keys IN it_keys ( %tky                = ls_keys-%tky
+                                           %is_draft           = if_abap_behv=>mk-on
+                                           newcontainerid      = ls_keys-%param-conteinerid
+                                           newshippingtype     = ls_keys-%param-shippingtype
+                                           neweta              = ls_keys-%param-eta
+                                           newdestinationpoint = ls_keys-%param-destport
+                                           newdeparturepoint   = ls_keys-%param-depport
+                                           newetd              = ls_keys-%param-etd
+                                           carrcode            = ls_keys-%param-carrcode
+                                           plcarrcode          = ls_keys-%param-plcarrcode ) )
+    REPORTED ls_reported
+    FAILED ls_failed
+    MAPPED ls_mapped.
+
+    READ ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+     ALL FIELDS
+    WITH CORRESPONDING #( lt_draft_keys )
+    RESULT DATA(lt_shipment).
+
+    ct_result = VALUE #( FOR ls_ship IN lt_shipment ( %tky = ls_ship-%tky
+                                                      %param = ls_ship ) ).
+
+  ENDMETHOD.
+
+  METHOD mass_change.
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+      ENTITY shipment
+      EXECUTE edit FROM
+      VALUE #( FOR <ls_active_key> IN it_keys USING KEY draft
+      WHERE ( %is_draft = if_abap_behv=>mk-off )
+      ( %key = <ls_active_key>-%key
+        %param-preserve_changes = 'X' ) )
+      REPORTED DATA(ls_reported)
+      FAILED DATA(ls_failed)
+      MAPPED DATA(ls_mapped).
+    IF ls_failed IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    MODIFY ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+    UPDATE FIELDS ( newcontainerid
+                    newshippingtype
+                    neweta
+                    newdestinationpoint
+                    newdeparturepoint
+                    newetd
+                    carrcode
+                    plcarrcode )
+    WITH VALUE #( FOR ls_keys IN it_keys ( %tky                = ls_keys-%tky
+                                           %is_draft           = if_abap_behv=>mk-on
+                                           newcontainerid      = ls_keys-%param-conteinerid
+                                           newshippingtype     = ls_keys-%param-shippingtype
+                                           neweta              = ls_keys-%param-eta
+                                           newdestinationpoint = ls_keys-%param-destport
+                                           newdeparturepoint   = ls_keys-%param-depport
+                                           newetd              = ls_keys-%param-etd
+                                           carrcode            = ls_keys-%param-carrcode
+                                           plcarrcode          = ls_keys-%param-plcarrcode ) )
+    REPORTED ls_reported
+    FAILED ls_failed
+    MAPPED ls_mapped.
+
+    DATA(lt_draft_keys) = it_keys.
+    LOOP AT lt_draft_keys ASSIGNING FIELD-SYMBOL(<ls_draft_keys>).
+      <ls_draft_keys>-%is_draft = if_abap_behv=>mk-on.
+    ENDLOOP.
+
+    READ ENTITIES OF zsc_i_shipment_items IN LOCAL MODE
+    ENTITY shipment
+     ALL FIELDS
+    WITH CORRESPONDING #( lt_draft_keys )
+    RESULT DATA(lt_shipment).
+
+    ct_result = VALUE #( FOR ls_ship IN lt_shipment ( %tky = ls_ship-%tky
+                                                      %param = ls_ship ) ).
+
+  ENDMETHOD.
+ENDCLASS.

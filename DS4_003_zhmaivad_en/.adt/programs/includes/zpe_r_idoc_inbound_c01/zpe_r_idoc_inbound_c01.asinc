@@ -1,0 +1,136 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 15.03.2023 | 25223: Creation                          *
+*              |            | DS4K964360                               *
+*----------------------------------------------------------------------*
+CLASS lcl_program DEFINITION CREATE PUBLIC.
+
+  PUBLIC SECTION.
+
+    METHODS at_selection_screen_on IMPORTING iv_value TYPE any.
+    METHODS constructor.
+    METHODS end_of_selection.
+    METHODS start_of_selection.
+
+  PRIVATE SECTION.
+
+    DATA mt_output     TYPE STANDARD TABLE OF zpe_s_idoc_inbound_aws.
+    DATA mif_s3_handler TYPE REF TO /aws1/if_s3.
+
+    METHODS validate_bucket IMPORTING iv_bucket TYPE string.
+
+ENDCLASS.
+
+
+CLASS lcl_program IMPLEMENTATION.
+
+  METHOD constructor.
+
+    DATA: lv_profile TYPE /aws1/rt_profile_id.
+
+    TRY.
+        lv_profile       = zcl_pe_hm_basic=>get_value( '3245' ).
+        DATA(lo_session) = /aws1/cl_rt_session_aws=>create( lv_profile ).
+        mif_s3_handler    = /aws1/cl_s3_factory=>create( lo_session ).
+      CATCH /aws1/cx_rt_technical_generic /aws1/cx_rt_no_auth_generic /aws1/cx_rt_service_generic zcx_pe_hm INTO DATA(lo_exc).
+        MESSAGE lo_exc TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD at_selection_screen_on.
+
+    CASE cl_abap_datadescr=>describe_by_data( iv_value )->get_relative_name( ).
+      WHEN '/AWS1/S3_BUCKETNAME'.
+        validate_bucket( iv_value ).
+    ENDCASE.
+
+  ENDMETHOD.
+
+
+  METHOD validate_bucket.
+
+    TRY.
+        mif_s3_handler->headbucket( iv_bucket = iv_bucket ).
+      CATCH /aws1/cx_rt_technical_generic /aws1/cx_rt_service_generic INTO DATA(lo_exc).
+        MESSAGE lo_exc TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD start_of_selection.
+
+    TRY.
+
+*--     Search files in folder
+        DATA(lif_pag) = mif_s3_handler->get_paginator( ).
+        DATA(lif_ite) = lif_pag->listobjectsv2( iv_bucket    = p_bucket
+                                              iv_prefix    = |{ p_fold_s }/|
+                                              iv_delimiter = '/' ).             " To skip files in subfolders e.g Archive
+        WHILE lif_ite->has_next( ).
+          DATA(lo_objects) = lif_ite->get_next( ).
+          LOOP AT lo_objects->get_contents( ) INTO DATA(lo_object).
+
+            DATA(lv_key) = lo_object->get_key( ).
+
+*           Discard "folder file"
+            IF lo_object->get_size( ) <= 0.
+              CONTINUE.
+            ENDIF.
+
+*           Filter by creation date
+            CONVERT TIME STAMP lo_object->get_lastmodified( ) TIME ZONE sy-zonlo INTO DATE DATA(lv_date).
+            IF lv_date NOT IN s_date.
+              CONTINUE.
+            ENDIF.
+
+*--         Create IDOC
+            TRY.
+                DATA(lo_idoc)        = zcl_pe_idoc_inbound=>factory( |{ p_bucket }/{ lv_key }| ).
+                DATA(lv_idoc_number) = lo_idoc->create_from_aws( ).
+
+                INSERT VALUE #( key    = lv_key
+                                status = icon_green_light
+                                idoc   = lv_idoc_number ) INTO TABLE mt_output.
+
+              CATCH zcx_pe_idoc INTO DATA(lo_exc_idoc).
+                INSERT VALUE #( key    = lv_key
+                                status = icon_red_light
+                                error  = lo_exc_idoc->get_text( ) ) INTO TABLE mt_output.
+            ENDTRY.
+
+          ENDLOOP.
+
+        ENDWHILE.
+
+      CATCH /aws1/cx_rt_technical_generic /aws1/cx_rt_service_generic INTO DATA(lo_exc_sel).
+        MESSAGE lo_exc_sel TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+
+  METHOD end_of_selection.
+
+    TRY.
+        cl_salv_table=>factory( IMPORTING r_salv_table = DATA(lo_alv)
+                                CHANGING  t_table      = mt_output ).
+        DATA(lo_columns) = lo_alv->get_columns( ).
+        lo_columns->set_optimize( abap_true ).
+        lo_alv->display( ).
+
+      CATCH cx_salv_msg INTO DATA(lo_exc).
+        MESSAGE lo_exc TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+
+ENDCLASS.

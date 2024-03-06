@@ -1,0 +1,500 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* USTINKON     | 11.05.2023 | 19967     : Feature - [Build] - BE - Fio *
+*              |            | DS4K949517                               *
+*----------------------------------------------------------------------*
+* LINGARAG     | 05.03.2024 | 28662    :  Feature- P&FE -SHAS Monitor  *
+*              |            | DS4K978321                               *
+*----------------------------------------------------------------------*
+* USTINKON     | 18.03.2024 | 28656     : SHAS Monitor - Part 5        *
+*              |            | DS4K983974                               *
+*----------------------------------------------------------------------*
+CLASS lhc_shas DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PRIVATE SECTION.
+    DATA: gt_keys TYPE zsp_tt_shas_update.
+    DATA: gt_keys_fallback TYPE zsp_tt_shas_update.
+    DATA: gv_err(1),
+          gs_shas TYPE zsp_i_shas_item.
+    CONSTANTS: gc_mess_class(20) VALUE 'ZSP_SHAS_MONITOR'.
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING it_keys REQUEST requested_authorizations FOR shas RESULT ct_result ##NEEDED.
+    METHODS change_stat FOR MODIFY
+      IMPORTING it_keys FOR ACTION shas~change_stat RESULT ct_result.
+    METHODS redetermine FOR MODIFY
+      IMPORTING it_keys FOR ACTION shas~redetermine RESULT ct_result.
+
+
+ENDCLASS.
+
+CLASS lhc_shas IMPLEMENTATION.
+
+  METHOD get_instance_authorizations.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD change_stat.
+    TYPES ltyp_elements TYPE SORTED TABLE OF string WITH UNIQUE DEFAULT KEY .
+    DATA: lts_elem TYPE ltyp_elements.
+    DATA: lt_message   TYPE bal_t_msg,
+          lv_skip_line TYPE abap_bool,
+          lv_return    TYPE abap_bool VALUE abap_false.
+
+    DATA(lo_virtual_calc) = NEW zcl_sp_virtual_calc( ).
+
+    READ ENTITIES OF zsp_i_shas_item IN LOCAL MODE
+        ENTITY shas
+         ALL FIELDS
+        WITH CORRESPONDING #( it_keys )
+        RESULT DATA(lt_shas).
+
+    TRY.
+        lo_virtual_calc->if_sadl_exit_calc_element_read~calculate( EXPORTING it_original_data           = lt_shas
+                                                                             it_requested_calc_elements = lts_elem
+                                                                   CHANGING  ct_calculated_data         = lt_shas ).
+      CATCH cx_sadl_exit.
+        RETURN.
+    ENDTRY.
+
+    TRY.
+        DATA(lv_service_id) = zcl_pe_hm_basic=>get_value( iv_id = '2668' iv_sequence = '1' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    TRY.
+        DATA(lv_vasreadiness) = zcl_pe_hm_basic=>get_value( iv_id = '3190' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+
+    DATA(lt_shas_fae) = lt_shas.
+    SORT lt_shas_fae BY purchaseorder ebelp.
+    DELETE ADJACENT DUPLICATES FROM lt_shas_fae COMPARING purchaseorder ebelp.
+    IF lt_shas_fae[] IS NOT INITIAL.
+      SELECT ebeln, ebelp, addedservicetext1
+      FROM zsp_i_vas_codes INTO TABLE @DATA(lt_service_g01)
+      FOR ALL ENTRIES IN @lt_shas_fae
+      WHERE ebeln  = @lt_shas_fae-purchaseorder AND
+            ebelp  = @lt_shas_fae-ebelp AND
+            sevice = @lv_service_id.
+      IF sy-subrc EQ 0.
+        SORT lt_service_g01 BY ebeln ebelp.
+      ENDIF.
+    ENDIF.
+    FREE lt_shas_fae.
+
+    LOOP AT lt_shas ASSIGNING FIELD-SYMBOL(<ls_shas>).
+      gs_shas = CORRESPONDING #( <ls_shas> ).
+      READ TABLE lt_service_g01 ASSIGNING FIELD-SYMBOL(<ls_service_g01>) WITH KEY ebeln = gs_shas-purchaseorder
+                                                                                  ebelp = gs_shas-ebelp.
+      IF sy-subrc NE 0 OR <ls_service_g01>-addedservicetext1 IS INITIAL.
+        MESSAGE e024(zsp_shas_monitor) WITH gs_shas-purchaseorder gs_shas-ebelp INTO DATA(lv_dummy) ##NEEDED.
+        lt_message = VALUE #(   ( msgid = sy-msgid
+                                  msgno = sy-msgno
+                                  msgty = sy-msgty
+                                  msgv1 = sy-msgv1
+                                  msgv2 = sy-msgv2 ) ).
+
+        zcl_sp_virtual_calc=>fill_log(
+          it_messages = lt_message
+          iv_ebeln    = <ls_shas>-purchaseorder
+          iv_ebelp    = <ls_shas>-ebelp ).
+        CONTINUE.
+      ENDIF.
+      TRY.
+          IF <ls_shas>-knttp IS NOT INITIAL AND <ls_shas>-vbeln IS NOT INITIAL.
+            lo_virtual_calc->check_vas_sd( CHANGING cs_calculated_data = gs_shas ).
+          ELSE.
+            lo_virtual_calc->check_vas_mm( CHANGING cs_calculated_data = gs_shas ).
+          ENDIF.
+        CATCH cx_sadl_exit.
+          RETURN.
+      ENDTRY.
+*      Checking for Vas Readyness
+      IF <ls_shas>-zz1_custin_pdi <> 'Y'.
+        DATA(lv_err_count) = gs_shas-erros_num.
+      ENDIF.
+      CLEAR: gs_shas.
+      lv_skip_line = abap_false.
+
+      IF <ls_shas>-zz1_custin_pdi = 'Y'.
+        MESSAGE e010(zsp_shas_monitor) INTO DATA(lv_text).
+        lt_message = VALUE #( BASE lt_message
+                              ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = sy-msgty
+                                msgv1 = sy-msgv1
+                                msgv2 = sy-msgv2 ) ).
+
+        APPEND VALUE #( %msg = new_message( id = 'SABP_BEHV' number = 100 severity = if_abap_behv_message=>severity-success v1 = lv_text ) )
+                           TO reported-shas.
+
+        lv_skip_line = abap_true.
+      ENDIF.
+
+
+      IF  <ls_shas>-vasreadiness_v = lv_vasreadiness.
+        MESSAGE e007(zsp_shas_monitor) INTO lv_text.
+
+        APPEND VALUE #( %msg = new_message( id = 'SABP_BEHV' number = 100 severity = if_abap_behv_message=>severity-information v1 = lv_text ) )
+                           TO reported-shas.
+        ct_result = VALUE #( FOR ls_shas IN lt_shas ( %tky = ls_shas-%tky
+                                                      %param = ls_shas ) ).
+        lv_return = abap_true.
+
+        MESSAGE e017(zsp_shas_monitor) INTO lv_text.
+
+        lt_message = VALUE #( BASE lt_message
+                              ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = sy-msgty
+                                msgv1 = sy-msgv1
+                                msgv2 = sy-msgv2 ) ).
+      ENDIF.
+
+**********************************************************************
+*      For fallback scenario, cutoff date should not be in future
+*      and VasReadiness status should be Missing required data
+**********************************************************************
+      IF  sy-datum < <ls_shas>-cutoff  AND <ls_shas>-vasreadiness_v = lv_vasreadiness. "Missing required data
+        MESSAGE e007(zsp_shas_monitor) INTO lv_text.
+
+        APPEND VALUE #( %msg = new_message( id = 'SABP_BEHV' number = 100 severity = if_abap_behv_message=>severity-information v1 = lv_text ) )
+                           TO reported-shas.
+        ct_result = VALUE #( FOR ls_shas IN lt_shas ( %tky = ls_shas-%tky
+                                                      %param = ls_shas ) ).
+        lv_return = abap_true.
+
+        MESSAGE e018(zsp_shas_monitor) INTO lv_text.
+
+        lt_message = VALUE #( BASE lt_message
+                              ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = sy-msgty
+                                msgv1 = sy-msgv1
+                                msgv2 = sy-msgv2 ) ).
+      ENDIF.
+
+**********************************************************************
+*        Checking if VAS-Readiness has still required missing data
+**********************************************************************
+      IF lv_err_count > 0 AND <ls_shas>-vasreadiness_v = lv_vasreadiness.
+        MESSAGE e007(zsp_shas_monitor) INTO lv_text.
+
+        APPEND VALUE #( %msg = new_message( id = 'SABP_BEHV' number = 100 severity = if_abap_behv_message=>severity-information v1 = lv_text ) )
+                           TO reported-shas.
+        ct_result = VALUE #( FOR ls_shas IN lt_shas ( %tky = ls_shas-%tky
+                                                      %param = ls_shas ) ).
+        lv_return = abap_true.
+
+        MESSAGE e023(zsp_shas_monitor) INTO lv_text.
+
+        lt_message = VALUE #( BASE lt_message
+                              ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = sy-msgty
+                                msgv1 = sy-msgv1
+                                msgv2 = sy-msgv2 ) ).
+      ENDIF.
+      CLEAR lv_err_count.
+
+      IF  <ls_shas>-vasreadiness_v = 'O'.
+
+        MESSAGE e008(zsp_shas_monitor) INTO lv_text.
+
+        lt_message = VALUE #( BASE lt_message
+                              ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = sy-msgty
+                                msgv1 = sy-msgv1
+                                msgv2 = sy-msgv2 ) ).
+
+        APPEND VALUE #( %msg = new_message( id = 'SABP_BEHV' number = 100 severity = if_abap_behv_message=>severity-information v1 = lv_text ) )
+                           TO reported-shas.
+        ct_result = VALUE #( FOR ls_shas IN lt_shas ( %tky = ls_shas-%tky
+                                                      %param = ls_shas ) ).
+        lv_return = abap_true.
+      ENDIF.
+
+      IF lv_skip_line = abap_true OR
+         lv_return = abap_true.
+
+        MESSAGE e016(zsp_shas_monitor) INTO lv_text.
+
+        lt_message = VALUE #( BASE lt_message
+                              ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = sy-msgty
+                                msgv1 = sy-msgv1
+                                msgv2 = sy-msgv2 ) ).
+
+
+        zcl_sp_virtual_calc=>fill_log(
+          it_messages = lt_message
+          iv_ebeln    = <ls_shas>-purchaseorder
+          iv_ebelp    = <ls_shas>-ebelp ).
+      ENDIF.
+
+      IF lv_skip_line = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      IF lv_return = abap_true.
+        READ ENTITIES OF zsp_i_shas_item IN LOCAL MODE
+              ENTITY shas
+                  ALL FIELDS WITH CORRESPONDING #( it_keys )
+                  RESULT DATA(lt_result).
+
+        ct_result = VALUE #( FOR ls_result IN lt_result
+                                 ( %tky   = ls_result-%tky
+                                   %param = CORRESPONDING #( ls_result ) ) ).
+        RETURN.
+      ENDIF.
+
+      IF <ls_shas>-vasreadiness_v <> lv_vasreadiness.
+        APPEND INITIAL LINE TO gt_keys ASSIGNING FIELD-SYMBOL(<ls_key>).
+      ELSE.
+        APPEND INITIAL LINE TO gt_keys_fallback ASSIGNING <ls_key>.
+      ENDIF.
+
+      <ls_key> = CORRESPONDING #( <ls_shas> ) ##ENH_OK.
+      <ls_key>-ebeln = <ls_shas>-purchaseorder.
+      IF lv_skip_line = abap_false AND lv_return = abap_false.
+        MESSAGE i012(zsp_shas_monitor) INTO lv_text WITH <ls_shas>-purchaseorder <ls_shas>-ebelp.
+      ENDIF.
+      lt_message = VALUE #( ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = if_abap_behv_message=>severity-information ) ##TYPE
+                              ( msgid = sy-msgid
+                                msgno = sy-msgno
+                                msgty = sy-msgty
+                                msgv1 = sy-msgv1
+                                msgv2 = sy-msgv2 ) ).
+
+      zcl_sp_virtual_calc=>fill_log(
+        it_messages = lt_message
+        iv_ebeln    = <ls_shas>-purchaseorder
+        iv_ebelp    = <ls_shas>-ebelp ).
+
+    ENDLOOP.
+
+    IF gt_keys IS NOT INITIAL.
+      CALL FUNCTION 'ZSP_FM_SHAS_UPDATE_STATUS'
+        STARTING NEW TASK 'UPDATE'
+        DESTINATION 'NONE'
+        EXPORTING
+          it_tab                = gt_keys[]
+          iv_custin             = 'Y'
+        CHANGING
+          ev_err                = gv_err
+        EXCEPTIONS
+          communication_failure = 1
+          system_failure        = 2.
+
+      IF sy-subrc <> 0 OR gv_err IS NOT INITIAL.
+        DATA(lif_behv_message) = new_message(
+          id       = gc_mess_class
+          number   = '007'
+          severity = if_abap_behv_message=>severity-information
+        ).
+      ELSE.
+        DATA(lv_in_proc) = lines( gt_keys ).
+        DATA(lv_total_lines) = lines( it_keys ).
+        lif_behv_message = new_message(
+          id       = gc_mess_class
+          number   = '011'
+          severity = if_abap_behv_message=>severity-information
+          v1       = lv_in_proc
+          v2       = lv_total_lines
+        ).
+      ENDIF.
+    ENDIF.
+
+*    Executing Fallback where changing status to Blank
+    IF gt_keys_fallback IS NOT INITIAL.
+      CALL FUNCTION 'ZSP_FM_SHAS_UPDATE_STATUS'
+        STARTING NEW TASK 'UPDATE'
+        DESTINATION 'NONE'
+        EXPORTING
+          it_tab                = gt_keys_fallback[]
+          iv_custin             = space
+        CHANGING
+          ev_err                = gv_err
+        EXCEPTIONS
+          communication_failure = 1
+          system_failure        = 2.
+
+      IF sy-subrc <> 0 OR gv_err IS NOT INITIAL.
+        MESSAGE e022(zsp_shas_monitor) INTO lv_text.
+        lif_behv_message = new_message(
+          id       = gc_mess_class
+          number   = '022'
+          severity = if_abap_behv_message=>severity-information
+        ).
+      ELSE.
+        lv_in_proc = lines( gt_keys_fallback ).
+        lv_total_lines = lines( it_keys ).
+        MESSAGE e021(zsp_shas_monitor) INTO lv_text.
+        lif_behv_message = new_message(
+          id       = gc_mess_class
+          number   = '021'
+          severity = if_abap_behv_message=>severity-information
+          v1       = lv_in_proc
+          v2       = lv_total_lines
+        ).
+      ENDIF.
+    ENDIF.
+
+
+    READ ENTITIES OF zsp_i_shas_item IN LOCAL MODE
+      ENTITY shas
+          ALL FIELDS WITH CORRESPONDING #( it_keys )
+          RESULT DATA(lt_result2).
+    IF lif_behv_message IS NOT INITIAL.
+      APPEND lif_behv_message TO reported-%other.
+    ENDIF.
+    ct_result = VALUE #( FOR ls_result IN lt_result2
+                             ( %tky   = ls_result-%tky
+                               %param = CORRESPONDING #( ls_result ) ) ).
+  ENDMETHOD.
+
+
+  METHOD redetermine.
+    DATA: lt_message TYPE bal_t_msg.
+    TYPES      ltyp_elements TYPE SORTED TABLE OF string WITH UNIQUE DEFAULT KEY.
+    DATA: lts_elem TYPE ltyp_elements .
+    DATA(lo_virtual_calc) = NEW zcl_sp_virtual_calc( ).
+    READ ENTITIES OF zsp_i_shas_item IN LOCAL MODE
+    ENTITY shas
+     ALL FIELDS
+    WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_shas).
+
+    TRY.
+        lo_virtual_calc->if_sadl_exit_calc_element_read~calculate( EXPORTING it_original_data           = lt_shas
+                                                                             it_requested_calc_elements = lts_elem
+                                                                   CHANGING  ct_calculated_data         = lt_shas ).
+      CATCH cx_sadl_exit.
+        RETURN.
+    ENDTRY.
+
+    TRY.
+        DATA(lv_service_id) = zcl_pe_hm_basic=>get_value( iv_id = '2668' iv_sequence = '1' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    DATA(lt_shas_fae) = lt_shas.
+    SORT lt_shas_fae BY purchaseorder ebelp.
+    DELETE ADJACENT DUPLICATES FROM lt_shas_fae COMPARING purchaseorder ebelp.
+    IF lt_shas_fae[] IS NOT INITIAL.
+      SELECT ebeln, ebelp, addedservicetext1
+      FROM zsp_i_vas_codes INTO TABLE @DATA(lt_service_g01)
+      FOR ALL ENTRIES IN @lt_shas_fae
+      WHERE ebeln  = @lt_shas_fae-purchaseorder AND
+            ebelp  = @lt_shas_fae-ebelp AND
+            sevice = @lv_service_id.
+      IF sy-subrc EQ 0.
+        SORT lt_service_g01 BY ebeln ebelp.
+      ENDIF.
+    ENDIF.
+    FREE lt_shas_fae.
+
+    LOOP AT lt_shas ASSIGNING FIELD-SYMBOL(<ls_shas>).
+      gs_shas = CORRESPONDING #( <ls_shas> ).
+      READ TABLE lt_service_g01 ASSIGNING FIELD-SYMBOL(<ls_service_g01>) WITH KEY ebeln = gs_shas-purchaseorder
+                                                                                  ebelp = gs_shas-ebelp.
+      IF sy-subrc NE 0 OR <ls_service_g01>-addedservicetext1 IS INITIAL.
+        MESSAGE e024(zsp_shas_monitor) WITH gs_shas-purchaseorder gs_shas-ebelp INTO DATA(lv_dummy) ##NEEDED.
+        lt_message = VALUE #(   ( msgid = sy-msgid
+                                  msgno = sy-msgno
+                                  msgty = sy-msgty
+                                  msgv1 = sy-msgv1
+                                  msgv2 = sy-msgv2 ) ).
+
+        zcl_sp_virtual_calc=>fill_log(
+          it_messages = lt_message
+          iv_ebeln    = <ls_shas>-purchaseorder
+          iv_ebelp    = <ls_shas>-ebelp ).
+        CONTINUE.
+      ENDIF.
+      TRY.
+          IF <ls_shas>-knttp IS NOT INITIAL AND <ls_shas>-vbeln IS NOT INITIAL.
+            lo_virtual_calc->check_vas_sd( CHANGING cs_calculated_data = gs_shas ).
+          ELSE.
+            lo_virtual_calc->check_vas_mm( CHANGING cs_calculated_data = gs_shas ).
+          ENDIF.
+          lo_virtual_calc->fill_log( it_messages = lo_virtual_calc->get_log_message( )
+                                     iv_ebeln    = gs_shas-purchaseorder
+                                     iv_ebelp    = gs_shas-ebelp ).
+        CATCH cx_sadl_exit.
+          RETURN.
+      ENDTRY.
+      CLEAR: gs_shas.
+      APPEND INITIAL LINE TO gt_keys ASSIGNING FIELD-SYMBOL(<ls_key>).
+      <ls_key> = CORRESPONDING #( <ls_shas> ) ##ENH_OK.
+      <ls_key>-ebeln = <ls_shas>-purchaseorder.
+
+
+      MESSAGE i012(zsp_shas_monitor) INTO DATA(lv_text) WITH <ls_shas>-purchaseorder <ls_shas>-ebelp.
+      IF lv_text IS NOT INITIAL.
+        lt_message = VALUE #( ( msgid = sy-msgid
+                                  msgno = sy-msgno
+                                  msgty = if_abap_behv_message=>severity-information ) ##TYPE
+                                ( msgid = sy-msgid
+                                  msgno = sy-msgno
+                                  msgty = sy-msgty
+                                  msgv1 = sy-msgv1
+                                  msgv2 = sy-msgv2 ) ).
+      ENDIF.
+      zcl_sp_virtual_calc=>fill_log(
+        it_messages = lt_message
+        iv_ebeln    = <ls_shas>-purchaseorder
+        iv_ebelp    = <ls_shas>-ebelp ).
+    ENDLOOP.
+    CALL FUNCTION 'ZSP_FM_SHAS_REDETERMINE'
+      STARTING NEW TASK 'UPDATE'
+      DESTINATION 'NONE'
+      EXPORTING
+        it_tab                = gt_keys[]
+      CHANGING
+        ev_err                = gv_err
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2.
+    IF sy-subrc <> 0 OR gv_err IS NOT INITIAL.
+      MESSAGE e007(zsp_shas_monitor) INTO lv_text ##NEEDED.
+      DATA(lif_behv_message) = new_message(
+        id       = gc_mess_class
+        number   = '007'
+        severity = if_abap_behv_message=>severity-information
+      ).
+    ELSE.
+      DATA(lv_in_proc) = lines( gt_keys ).
+      DATA(lv_total_lines) = lines( it_keys ).
+      MESSAGE i011(zsp_shas_monitor) INTO lv_text WITH lv_in_proc lv_total_lines.
+      lif_behv_message = new_message(
+        id       = gc_mess_class
+        number   = '011'
+        severity = if_abap_behv_message=>severity-information
+        v1       = lv_in_proc
+        v2       = lv_total_lines
+      ).
+    ENDIF.
+    APPEND lif_behv_message TO reported-%other.
+    READ ENTITIES OF zsp_i_shas_item IN LOCAL MODE
+      ENTITY shas
+          ALL FIELDS WITH CORRESPONDING #( it_keys )
+          RESULT DATA(lt_result).
+
+    ct_result = VALUE #( FOR ls_result IN lt_result
+                             ( %tky   = ls_result-%tky
+                               %param = CORRESPONDING #( ls_result ) ) ).
+  ENDMETHOD.
+
+ENDCLASS.

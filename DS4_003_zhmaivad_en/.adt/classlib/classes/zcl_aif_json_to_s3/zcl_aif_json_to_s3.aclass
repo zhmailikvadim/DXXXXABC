@@ -1,0 +1,831 @@
+class ZCL_AIF_JSON_TO_S3 definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_BADI_INTERFACE .
+  interfaces /AIF/IF_POST_MESSAGE_PROCESS .
+
+  methods DYNAMIC_MAP
+    importing
+      value(IS_STRUCT) type ANY optional
+      !IT_PATH_WITH_FIELD_TARGET type STRING_TABLE optional
+      !IT_PATH_WITH_FIELD_SOURCE type STRING_TABLE optional
+    changing
+      !CS_MAIN_JSON type ZPE_S_AIF_LOG optional .
+  methods LOGATTRIBUTE_MAP
+    importing
+      !IV_INDEX_STRUCTURE type I
+      !IS_ANY_DATA type ANY optional
+      !IV_COMPONENT_TO_ASSING type STRING
+      !IV_TO_STOP type I
+      !IT_PATH_WITH_FIELD_SOURCE type STRING_TABLE
+      !IT_PATH_WITH_FIELD_TARGET type STRING_TABLE
+      !IV_LOG_ATTRIBUTES type ABAP_BOOL
+      !IV_NAME_VALUE type STRING
+    changing
+      !CS_MAIN_JSON type ZPE_S_AIF_LOG optional .
+  methods HARDCODED_MAP
+    importing
+      value(IS_STRUCT) type ANY optional
+      !IT_PATH_WITH_FIELD type STRING_TABLE optional
+      !IV_VALUE type STRING optional
+    changing
+      !CS_MAIN_JSON type ZPE_S_AIF_LOG optional .
+  methods VARIABLES_MAP
+    importing
+      value(IS_STRUCT) type ANY optional
+      !IT_PATH type STRING_TABLE optional
+      !IV_VARIABLE type STRING optional
+      !IS_MESSAGE_DATA type ANY optional
+    changing
+      !CS_MAIN_JSON type ZPE_S_AIF_LOG optional .
+  methods GET_BRF_LOGATTRIBUTES_DATA
+    importing
+      !IV_NAMESPACE type /AIF/NS
+      !IV_VERSION type /AIF/IFVERSION
+      !IV_IFNAME type /AIF/IFNAME .
+  methods GET_BRF_HARDCODED_DATA
+    importing
+      !IV_NAMESPACE type /AIF/NS
+      !IV_VERSION type /AIF/IFVERSION
+      !IV_IFNAME type /AIF/IFNAME .
+  methods GET_BRF_S3_CONFIG
+    importing
+      !IV_NAMESPACE type /AIF/NS
+      !IV_VERSION type /AIF/IFVERSION
+      !IV_IFNAME type /AIF/IFNAME .
+  methods REMOVE_EMPTY_FIELDS .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    TYPES:
+      BEGIN OF  mtyp_logattributes,
+        name         TYPE string,
+        source_xpath TYPE string,
+        target_xpath TYPE string,
+      END OF mtyp_logattributes .
+    TYPES:
+      BEGIN OF  mtyp_hardcoded,
+        hardcode     TYPE string,
+        target_xpath TYPE string,
+      END OF mtyp_hardcoded .
+    TYPES:
+      BEGIN OF  mtyp_s3_config,
+        path     TYPE string,
+        filename TYPE string,
+        bucket   TYPE string,
+        profile  TYPE /aws1/rt_profile_id,
+      END OF mtyp_s3_config .
+
+    CONSTANTS lc_logattributes TYPE string VALUE 'LOGATTRIBUTES' ##NO_TEXT.
+    CONSTANTS lc_split TYPE string VALUE '/' ##NO_TEXT.
+    DATA ms_s3_config TYPE mtyp_s3_config .
+    DATA:
+      mt_logattributes TYPE TABLE OF mtyp_logattributes .
+    DATA:
+      mt_hardcoded     TYPE TABLE OF mtyp_hardcoded .
+
+    METHODS process_filename
+      IMPORTING
+        !iv_replace1 TYPE string
+        !iv_replace2 TYPE string
+        !iv_replace3 TYPE string
+        !iv_replace4 TYPE string .
+    METHODS check_run
+      IMPORTING
+        !iv_namespace    TYPE /aif/ns
+        !iv_version      TYPE /aif/ifversion
+        !iv_ifname       TYPE /aif/ifname
+      RETURNING
+        VALUE(rv_to_run) TYPE abap_bool.
+ENDCLASS.
+
+
+
+CLASS ZCL_AIF_JSON_TO_S3 IMPLEMENTATION.
+
+
+  METHOD /aif/if_post_message_process~post_message_processing.
+
+
+    TYPES: BEGIN OF ltyp_table_brf_result,
+             xpath        TYPE string,
+             mappingfield TYPE string,
+           END OF ltyp_table_brf_result.
+
+    TYPES: BEGIN OF ltyp_table_brf_input,
+             /aif/ifname    TYPE /aif/ifname,
+             /aif/ns        TYPE /aif/ns,
+             /aif/ifversion TYPE /aif/ifversion,
+           END OF ltyp_table_brf_input.
+
+    DATA:
+      lr_source_data            TYPE REF TO data,
+      ls_xml_parse              TYPE /aif/xmlparse_data,
+      lo_appl_engine            TYPE REF TO /aif/if_application_engine,
+      ls_ifkeys                 TYPE /aif/ifkeys,
+      lv_sxmsguid               TYPE sxmsguid,
+      ls_data                   TYPE sdsls_esr_sales_order_bulk_mes,
+      ls_main_json              TYPE zpe_s_aif_log,
+      lv_lines_target           TYPE i,
+      lv_lines_source           TYPE i,
+      lv_component              TYPE string,
+      lv_data_final_string      TYPE string,
+      lv_data_xstring           TYPE xstring,
+      lt_path_with_field_source TYPE string_table,
+      lt_path_with_field_target TYPE string_table,
+      lv_replace1               TYPE string ##NEEDED,
+      lv_replace2               TYPE string ##NEEDED,
+      lv_replace3               TYPE string ##NEEDED,
+      lv_replace4               TYPE string ##NEEDED,
+      lv_log_attributes_bool    TYPE abap_bool,
+      lt_component              TYPE string_table.
+    DATA:
+      ld_table     TYPE REF TO data,
+      lo_table     TYPE REF TO cl_abap_tabledescr,
+      lo_structure TYPE REF TO cl_abap_structdescr.
+    DATA: datatype TYPE REF TO cl_abap_datadescr,
+          field(5) TYPE c.
+
+
+    FIELD-SYMBOLS:
+      <lv_ns>        TYPE /aif/ns,
+      <lv_ifname>    TYPE /aif/ifname,
+      <lv_ifver>     TYPE /aif/ifversion,
+      <lv_status>    TYPE any,
+      <lv_msgguid>   TYPE any,
+      <ls_main_json> TYPE zpe_s_aif_log,
+      <lt_table>     TYPE data.
+
+    ASSIGN COMPONENT /aif/if_globals=>gc_eh_fix_key_flds-msgguid OF STRUCTURE is_message_data TO <lv_msgguid>.
+    ASSIGN COMPONENT /aif/if_globals=>gc_eh_fix_key_flds-status OF STRUCTURE is_message_data TO <lv_status>.
+    ASSIGN COMPONENT /aif/if_globals=>gc_eh_fix_key_flds-namespace OF STRUCTURE is_message_data TO <lv_ns>.
+    ASSIGN COMPONENT /aif/if_globals=>gc_eh_fix_key_flds-interface OF STRUCTURE is_message_data TO <lv_ifname>.
+    ASSIGN COMPONENT /aif/if_globals=>gc_eh_fix_key_flds-interface_ver OF STRUCTURE is_message_data TO <lv_ifver>.
+
+    ls_ifkeys-ns     = <lv_ns>.
+    ls_ifkeys-ifname = <lv_ifname>.
+    ls_ifkeys-ifver  = <lv_ifver>.
+
+    DATA(lv_to_run) = check_run(
+       EXPORTING
+         iv_namespace = ls_ifkeys-ns
+         iv_version   =  ls_ifkeys-ifver
+         iv_ifname    = ls_ifkeys-ifname
+
+     ).
+    CHECK lv_to_run EQ abap_true.
+    lo_appl_engine = /aif/cl_aif_engine_factory=>get_engine(
+        iv_ns            = ls_ifkeys-ns
+        iv_ifname        = ls_ifkeys-ifname
+        iv_ifversion     = ls_ifkeys-ifver
+           ).
+
+
+    lo_appl_engine->get_buffer_msg_ver(
+      IMPORTING
+        et_msg_buffer = DATA(test)
+    ).
+    lo_appl_engine->get_log_history(
+      EXPORTING
+        is_aif_keys    = ls_ifkeys
+        iv_msgguid     = <lv_msgguid>
+      RECEIVING
+        rs_log_history =  DATA(log_history)
+    ).
+
+
+    TRY.
+        IF is_post_proc-ref_to_raw IS NOT BOUND.
+          lo_appl_engine = /aif/cl_aif_engine_factory=>get_engine(
+              iv_ns            = ls_ifkeys-ns
+              iv_ifname        = ls_ifkeys-ifname
+              iv_ifversion     = ls_ifkeys-ifver
+                 ).
+
+          lv_sxmsguid = <lv_msgguid>.
+
+          lo_appl_engine->read_msg_from_persistency(
+             EXPORTING
+               iv_msgguid  = lv_sxmsguid
+               iv_ns       = ls_ifkeys-ns
+               iv_ifname   = ls_ifkeys-ifname
+               iv_ifver    = ls_ifkeys-ifver
+             CHANGING
+               cs_xmlparse = ls_xml_parse
+               cref_data = lr_source_data
+               ).
+
+        ELSE.
+          lr_source_data = is_post_proc-ref_to_raw.
+        ENDIF.
+      CATCH /aif/cx_error_handling_general.
+        RETURN.
+      CATCH /aif/cx_aif_engine_not_found.
+        RETURN.
+
+
+    ENDTRY.
+    IF <lv_status> IS ASSIGNED.
+      CASE <lv_status>.
+        WHEN /aif/if_globals=>gc_eh_file_status-canceled.
+          "Send Negtive Acknowledgement Out
+        WHEN /aif/if_globals=>gc_eh_file_status-successful.
+          "Send Positive Acknowledgement Out
+        WHEN /aif/if_globals=>gc_eh_file_status-successful_w_warning.
+          "Send Positive Acknowledgement with Reservation Out
+      ENDCASE.
+    ENDIF.
+
+
+
+
+    IF 1 = 1.
+      EXIT.
+    ENDIF.
+    get_brf_logattributes_data(
+      iv_namespace = <lv_ns>
+      iv_version   = <lv_ifver>
+      iv_ifname    = <lv_ifname> ).
+    get_brf_hardcoded_data(
+      iv_namespace = <lv_ns>
+      iv_version   = <lv_ifver>
+      iv_ifname    = <lv_ifname> ).
+    get_brf_s3_config(
+     iv_namespace = <lv_ns>
+      iv_version   = <lv_ifver>
+      iv_ifname    = <lv_ifname> ).
+
+    IF ( mt_hardcoded IS INITIAL AND mt_logattributes IS INITIAL ) OR ms_s3_config IS INITIAL.
+      RETURN.
+    ENDIF.
+    GET TIME STAMP FIELD DATA(lv_timestamp).
+    lv_replace1 = ls_ifkeys-ns.
+    lv_replace2 = ls_ifkeys-ifname.
+    lv_replace3 = ls_ifkeys-ifver.
+    lv_replace4 = lv_timestamp.
+    process_filename(
+        iv_replace1 = lv_replace1
+        iv_replace2 = lv_replace2
+        iv_replace3 = lv_replace3
+        iv_replace4 = lv_replace4 ).
+
+
+    LOOP AT mt_logattributes ASSIGNING FIELD-SYMBOL(<ls_logattributes2>).
+      SPLIT <ls_logattributes2>-source_xpath AT lc_split INTO TABLE lt_path_with_field_source.
+      APPEND lt_path_with_field_source[ 1 ] TO lt_component.
+      CLEAR lt_path_with_field_source.
+    ENDLOOP.
+
+    FIELD-SYMBOLS <ls_data> TYPE any.
+    LOOP AT mt_logattributes ASSIGNING FIELD-SYMBOL(<ls_logattributes>).
+      SPLIT <ls_logattributes>-source_xpath AT lc_split INTO TABLE lt_path_with_field_source.
+      SPLIT <ls_logattributes>-target_xpath AT lc_split INTO TABLE lt_path_with_field_target.
+
+
+      lv_component = lt_path_with_field_source[ 1 ].
+      DELETE lt_path_with_field_source INDEX 1.
+      IF lv_component EQ 'IS_POST_PROC'.
+        ASSIGN lr_source_data->* TO <ls_data>.
+      ELSE.
+        ASSIGN (lv_component) TO <ls_data>.
+      ENDIF.
+      CLEAR lv_component.
+      lv_component = lt_path_with_field_source[ 1 ].
+      lv_lines_source = lines( lt_path_with_field_source ).
+      lv_lines_target = lines( lt_path_with_field_target ).
+
+
+      IF lt_path_with_field_target[ lv_lines_target ] EQ lc_logattributes.
+        lv_log_attributes_bool = abap_true.
+      ELSE.
+        lv_log_attributes_bool = abap_false.
+      ENDIF.
+
+
+      logattribute_map(
+         EXPORTING
+           iv_index_structure = 1
+           is_any_data = <ls_data>
+           iv_component_to_assing = lv_component
+           iv_to_stop = lv_lines_source
+           iv_log_attributes = lv_log_attributes_bool
+           it_path_with_field_source = lt_path_with_field_source
+           it_path_with_field_target = lt_path_with_field_target
+           iv_name_value       = <ls_logattributes>-name
+         CHANGING
+           cs_main_json   = ls_main_json  ).
+
+
+      CLEAR lt_path_with_field_source.
+    ENDLOOP.
+
+
+    LOOP AT mt_hardcoded ASSIGNING FIELD-SYMBOL(<ls_hardcoded>). "#EC CI_NESTED
+      SPLIT <ls_hardcoded>-target_xpath AT lc_split INTO TABLE lt_path_with_field_source.
+
+      hardcoded_map(
+        EXPORTING
+          is_struct          = <ls_main_json>
+          it_path_with_field = lt_path_with_field_source
+          iv_value           = <ls_hardcoded>-hardcode
+        CHANGING
+          cs_main_json       = ls_main_json ).
+
+    ENDLOOP.
+
+
+    variables_map(
+      EXPORTING
+*        is_struct       =
+*        it_path         =
+*        iv_variable     =
+        is_message_data =  is_message_data                 " Standard index table
+      CHANGING
+        cs_main_json    = ls_main_json
+  ).
+
+
+
+    TRY.
+        DATA(lo_session) = /aws1/cl_rt_session_aws=>create( iv_profile_id =  ms_s3_config-profile ).
+      CATCH /aws1/cx_rt_technical_generic INTO DATA(lo_message).
+        MESSAGE lo_message TYPE 'E'.
+      CATCH /aws1/cx_rt_no_auth_generic.
+        MESSAGE lo_message TYPE 'E'.
+      CATCH /aws1/cx_rt_service_generic.
+        MESSAGE lo_message TYPE 'E'.
+    ENDTRY.
+
+    TRY.
+        DATA(lif_s3_handler) = /aws1/cl_s3_factory=>create( lo_session ).
+      CATCH          /aws1/cx_rt_service_generic.
+        MESSAGE lo_message TYPE 'E'.
+      CATCH            /aws1/cx_rt_technical_generic.
+        MESSAGE lo_message TYPE 'E'.
+    ENDTRY.
+
+
+    lv_data_final_string = /ui2/cl_json=>serialize( data             = ls_main_json
+                                                    pretty_name      = /ui2/cl_json=>pretty_mode-user_low_case
+                                                    compress         = abap_false ).
+
+    CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+      EXPORTING
+        text   = lv_data_final_string
+      IMPORTING
+        buffer = lv_data_xstring
+      EXCEPTIONS
+        failed = 1
+        OTHERS = 2.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+        WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+
+    TRY.
+        DATA(lv_key) = |{ ms_s3_config-path }{ ms_s3_config-filename }|.
+        lif_s3_handler->putobject( iv_bucket = ms_s3_config-bucket
+                                  iv_key    = condense( val = lv_key )
+                                  iv_body   =  lv_data_xstring  ) .
+
+      CATCH /aws1/cx_rt_technical_generic.
+        MESSAGE lo_message TYPE 'E'.
+      CATCH /aws1/cx_rt_service_generic.
+        MESSAGE lo_message TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD dynamic_map.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MARTIRIA     | 18.12.2023 | 27501     : Generate AIF logs after inte *
+*              |            | DS4K973287                               *
+*----------------------------------------------------------------------*
+    DATA: lv_index TYPE i.
+    FIELD-SYMBOLS: <lv_datatocopy> TYPE data,
+                   <lv_inception>  TYPE any,
+                   <lv_somnacin>   TYPE any.
+
+    DATA(lv_lines) = lines( it_path_with_field_source ).
+    ASSIGN is_struct TO <lv_inception>.
+    LOOP AT it_path_with_field_source ASSIGNING FIELD-SYMBOL(<ls_path_with_field_source>).
+      lv_index = sy-tabix.
+
+      ASSIGN COMPONENT <ls_path_with_field_source> OF STRUCTURE <lv_inception> TO <lv_somnacin>.
+      IF sy-subrc = 0.
+        IF lv_lines EQ lv_index.
+          <lv_datatocopy> = <lv_inception>.
+        ELSE.
+          ASSIGN <lv_somnacin> TO  <lv_inception>.
+          CONTINUE.
+
+        ENDIF.
+      ENDIF.
+
+    ENDLOOP.
+
+
+    CLEAR lv_index.
+    UNASSIGN <lv_inception>.
+    ASSIGN cs_main_json TO <lv_inception>.
+    LOOP AT it_path_with_field_target ASSIGNING FIELD-SYMBOL(<ls_path_with_field_target>).
+      lv_index = sy-tabix.
+      ASSIGN COMPONENT <ls_path_with_field_target> OF STRUCTURE <lv_inception> TO <lv_somnacin>.
+      IF sy-subrc = 0.
+        IF lv_lines EQ lv_index.
+          <lv_somnacin> = <lv_datatocopy>.
+        ELSE.
+          ASSIGN <lv_somnacin> TO <lv_inception>.
+          CONTINUE.
+
+        ENDIF.
+      ENDIF.
+
+
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD get_brf_logattributes_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MARTIRIA     | 18.12.2023 | 27501     : Generate AIF logs after inte *
+*              |            | DS4K973287                               *
+*----------------------------------------------------------------------*
+    TYPES: BEGIN OF ltyp_table_brf_input,
+             ifname    TYPE /aif/ifname,
+             ifversion TYPE /aif/ifversion,
+             ns        TYPE /aif/ns,
+           END OF ltyp_table_brf_input.
+
+
+    DATA: lt_brf_result TYPE TABLE OF mtyp_logattributes.
+    TRY.
+        zcl_pe_hm_complex=>get_table(
+          EXPORTING
+            iv_id           = 'EB209CAFFE131EDEA7E372BD3E535F5E'
+            is_filter       = VALUE ltyp_table_brf_input( ifname = iv_ifname ns = iv_namespace ifversion = iv_version ) "mv_brf_id
+            iv_mapping_type = 'N'
+
+          IMPORTING
+            et_table        = lt_brf_result ).
+
+        mt_logattributes = lt_brf_result.
+      CATCH zcx_pe_hm. " Harcode Manager
+        RETURN.
+    ENDTRY.
+
+
+  ENDMETHOD.
+
+
+  METHOD logattribute_map.
+    DATA: ls_logattributes TYPE zpe_s_aif_log_logattributes.
+    DATA: lo_typedesc TYPE REF TO cl_abap_typedescr.
+    DATA: lv_component_to_assign TYPE string.
+    DATA: lv_lines TYPE i.
+    FIELD-SYMBOLS: <lv_inception>        TYPE any,
+                   <lv_somnacin>         TYPE any,
+                   <ls_inception>        TYPE any,
+                   <lv_somnacin_target>  TYPE any,
+                   <lv_inception_target> TYPE any.
+
+
+    ASSIGN is_any_data TO <lv_inception>.
+    lo_typedesc ?= cl_abap_typedescr=>describe_by_data( p_data = <lv_inception> ).
+
+
+    IF iv_to_stop = iv_index_structure.
+      IF iv_log_attributes EQ abap_true.
+        IF lo_typedesc->kind NE lo_typedesc->kind_table.
+          ls_logattributes-name = iv_name_value.
+          ASSIGN COMPONENT iv_component_to_assing OF STRUCTURE <lv_inception> TO <lv_somnacin>.
+          ls_logattributes-value = <lv_somnacin>.
+          APPEND ls_logattributes TO cs_main_json-log-logevent-logattributes.
+
+        ELSE.
+          LOOP AT <lv_inception> ASSIGNING <ls_inception>.
+            ASSIGN COMPONENT iv_component_to_assing OF STRUCTURE <ls_inception> TO <lv_somnacin>.
+            ls_logattributes-name = iv_name_value.
+            ls_logattributes-value = <lv_somnacin>.
+            APPEND ls_logattributes TO cs_main_json-log-logevent-logattributes.
+          ENDLOOP.
+
+        ENDIF.
+        RETURN.
+      ELSE.
+
+
+        IF lo_typedesc->kind EQ lo_typedesc->kind_table.
+          UNASSIGN <ls_inception>.
+*          <ls_inception> = <lv_inception>->*.
+          LOOP AT <lv_inception> ASSIGNING <ls_inception>.
+            EXIT.
+          ENDLOOP.
+        ELSE.
+          ASSIGN <lv_inception> TO <ls_inception>.
+        ENDIF.
+
+        ASSIGN cs_main_json TO <lv_inception_target>.
+        lv_lines = lines( it_path_with_field_target ).
+        ASSIGN COMPONENT iv_component_to_assing OF STRUCTURE <ls_inception> TO <lv_somnacin>.
+        IF sy-subrc = 0.
+          LOOP AT it_path_with_field_target ASSIGNING FIELD-SYMBOL(<ls_path_with_field_target>).
+            DATA(lv_index) = sy-tabix.
+            ASSIGN COMPONENT <ls_path_with_field_target> OF STRUCTURE <lv_inception_target> TO <lv_somnacin_target>.
+            IF sy-subrc = 0.
+              IF lv_lines EQ lv_index.
+                <lv_somnacin_target> = <lv_somnacin>.
+              ELSE.
+                ASSIGN <lv_somnacin_target> TO <lv_inception_target>.
+                CONTINUE.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    IF lo_typedesc->kind EQ lo_typedesc->kind_table.
+      LOOP AT <lv_inception> ASSIGNING <ls_inception>.
+        ASSIGN COMPONENT iv_component_to_assing OF STRUCTURE <ls_inception> TO <lv_somnacin>.
+        IF sy-subrc = 0.
+          lv_component_to_assign = it_path_with_field_source[ iv_index_structure + 1 ].
+          logattribute_map(
+            EXPORTING
+              iv_index_structure            = iv_index_structure + 1
+              is_any_data                   = <lv_somnacin>
+              iv_component_to_assing        = lv_component_to_assign
+              iv_to_stop                    = iv_to_stop
+              iv_log_attributes             = iv_log_attributes
+              it_path_with_field_source     = it_path_with_field_source
+              it_path_with_field_target     = it_path_with_field_target
+              iv_name_value                 = iv_name_value
+             CHANGING
+               cs_main_json                 = cs_main_json
+          ).
+        ENDIF.
+
+      ENDLOOP.
+    ELSE.
+      ASSIGN COMPONENT iv_component_to_assing OF STRUCTURE <lv_inception> TO <lv_somnacin>.
+      IF sy-subrc = 0.
+        TRY.
+            lv_component_to_assign = it_path_with_field_source[ iv_index_structure + 1 ].
+          CATCH cx_sy_itab_line_not_found.
+        ENDTRY.
+
+        logattribute_map(
+          EXPORTING
+            iv_index_structure            = iv_index_structure + 1
+            is_any_data                   = <lv_somnacin>
+            iv_component_to_assing        = lv_component_to_assign
+            iv_to_stop                    = iv_to_stop
+            iv_log_attributes             = iv_log_attributes
+            it_path_with_field_source     = it_path_with_field_source
+            it_path_with_field_target     = it_path_with_field_target
+            iv_name_value                 = iv_name_value
+          CHANGING
+            cs_main_json                  = cs_main_json
+        ).
+      ENDIF.
+
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD hardcoded_map.
+************************************************************************
+*      R E V I S I O N   H I S T O R Y                                     *
+*    ***********************************************************************
+*     AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*                  |            | TRANSPORT REQUESTS                       *
+*    ***********************************************************************
+*     MARTIRIA     | 18.12.2023 | 27501     : Generate AIF logs after inte *
+*                  |            | DS4K973287                               *
+*    ----------------------------------------------------------------------*
+    FIELD-SYMBOLS: <lv_inception> TYPE any,
+                   <lv_somnacin>  TYPE any.
+
+    ASSIGN cs_main_json TO <lv_inception>.
+    DATA(lv_lines) = lines( it_path_with_field ).
+
+
+    LOOP AT it_path_with_field ASSIGNING FIELD-SYMBOL(<lv_path_with_field>).
+      DATA(lv_index) = sy-tabix.
+      ASSIGN COMPONENT <lv_path_with_field> OF STRUCTURE <lv_inception> TO <lv_somnacin>.
+      IF sy-subrc = 0.
+        IF lv_index NE lv_lines.
+          ASSIGN <lv_somnacin> TO <lv_inception>.
+          CONTINUE.
+        ELSE.
+          <lv_somnacin> = iv_value.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD variables_map.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MARTIRIA     | 18.12.2023 | 27501     : Generate AIF logs after inte *
+*              |            | DS4K973287                               *
+*----------------------------------------------------------------------*
+*    DATA: lo_struct TYPE REF TO cl_abap_structdescr.
+
+    FIELD-SYMBOLS: <lv_namespace>   TYPE /aif/ns,
+                   <lv_ifname>      TYPE /aif/ifname,
+                   <lv_ifver>       TYPE /aif/ifversion,
+                   <lv_internal_id> TYPE string,
+                   <lv_log_number>  TYPE balognr,
+                   <lv_datatocopy>  TYPE data.
+*
+*
+    ASSIGN COMPONENT 'NS' OF STRUCTURE is_message_data TO   <lv_namespace>.
+    ASSIGN COMPONENT 'IFNAME' OF STRUCTURE is_message_data TO   <lv_ifname>.
+    ASSIGN COMPONENT 'IFVER' OF STRUCTURE is_message_data TO   <lv_ifver>.
+    ASSIGN COMPONENT 'LOGNUMBER' OF STRUCTURE is_message_data TO   <lv_log_number>.
+
+    GET TIME STAMP FIELD DATA(lv_timestamp).
+    ASSIGN lv_timestamp TO <lv_datatocopy>.
+    cs_main_json-@timestamp = <lv_datatocopy>.
+
+
+
+    cs_main_json-log-logevent-correlationid = |AIF_{ <lv_namespace> }_{ <lv_ifname> }_{ <lv_ifver> }_{ <lv_log_number> }|.
+    cs_main_json-log-logevent-correlationiddesc = |Source_Namespace_Interface_Version_LogNumber|.
+    cs_main_json-log-logevent-currentprocessname = |AIF_{ sy-sysid }_{ <lv_ifname> }|.
+
+
+  ENDMETHOD.
+
+
+  METHOD get_brf_hardcoded_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MARTIRIA     | 18.12.2023 | 27501     : Generate AIF logs after inte *
+*              |            | DS4K973287                               *
+*----------------------------------------------------------------------*
+    TYPES: BEGIN OF ltyp_table_brf_input,
+             ifname    TYPE /aif/ifname,
+             ifversion TYPE /aif/ifversion,
+             ns        TYPE /aif/ns,
+           END OF ltyp_table_brf_input.
+
+    DATA: lt_brf_result TYPE TABLE OF mtyp_hardcoded.
+    TRY.
+        zcl_pe_hm_complex=>get_table(
+          EXPORTING
+            iv_id           = 'EB209CAFFE131EDEA8811137587E1F5E'
+            is_filter       = VALUE ltyp_table_brf_input( ifname = iv_ifname ns = iv_namespace ifversion = iv_version )
+            iv_mapping_type = 'N'
+          IMPORTING
+            et_table        = lt_brf_result ).
+        mt_hardcoded = lt_brf_result.
+      CATCH zcx_pe_hm. " Harcode Manager
+        RETURN.
+    ENDTRY.
+
+    mt_hardcoded = lt_brf_result.
+
+  ENDMETHOD.
+
+
+  METHOD get_brf_s3_config.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MARTIRIA     | 18.12.2023 | 27501     : Generate AIF logs after inte *
+*              |            | DS4K973287                               *
+*----------------------------------------------------------------------*
+    TYPES: BEGIN OF ltyp_table_brf_input,
+             ifname    TYPE /aif/ifname,
+             ifversion TYPE /aif/ifversion,
+             ns        TYPE /aif/ns,
+           END OF ltyp_table_brf_input.
+
+    DATA: lt_range_hm  TYPE zpe_tt_hm_table,
+          ls_range_hm  TYPE zpe_s_hm_table,
+          lt_s3_config TYPE TABLE OF mtyp_s3_config.
+
+    TRY.
+
+        lt_range_hm =  zcl_pe_hm_basic=>get_table(  iv_id    = '2722' ).
+        ls_range_hm = lt_range_hm[ field1 = sy-sysid field2 = sy-mandt field4 = abap_true ].
+        ms_s3_config-profile = ls_range_hm-field3.
+
+        zcl_pe_hm_complex=>get_table(
+          EXPORTING
+            iv_id           = 'EB209CAFFE131EDEA7B67E57DC211F5E'
+            is_filter       = VALUE ltyp_table_brf_input( ifname = iv_ifname ns = iv_namespace ifversion = iv_version )
+            iv_mapping_type = 'N'
+          IMPORTING
+            et_table        = lt_s3_config
+        ).
+
+        ms_s3_config-filename = condense( val = lt_s3_config[ 1 ]-filename ).
+        ms_s3_config-path = condense( val =  lt_s3_config[ 1 ]-path ).
+
+        ms_s3_config-bucket = condense( val  =  lt_s3_config[ 1 ]-bucket ).
+      CATCH zcx_pe_hm.
+        RETURN.
+      CATCH cx_sy_itab_line_not_found.
+        RETURN.
+
+    ENDTRY.
+
+    REPLACE '{HH}' IN ms_s3_config-path WITH sy-timlo(2).
+    REPLACE '{DD}' IN ms_s3_config-path WITH sy-datum+6(2).
+    REPLACE '{MM}' IN ms_s3_config-path WITH sy-datum+4(2).
+    REPLACE '{YYYY}' IN ms_s3_config-path WITH sy-datum(4).
+
+
+    ms_s3_config-profile = condense( val = ls_range_hm-field3 ).
+
+  ENDMETHOD.
+
+
+  METHOD process_filename.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* MARTIRIA     | 18.12.2023 | 27501     : Generate AIF logs after inte *
+*              |            | DS4K973287                               *
+*----------------------------------------------------------------------*
+
+    REPLACE '&1' IN ms_s3_config-filename WITH iv_replace1.
+    REPLACE '&2' IN ms_s3_config-filename WITH iv_replace2.
+    REPLACE '&3' IN ms_s3_config-filename WITH iv_replace3.
+    REPLACE '&4' IN ms_s3_config-filename WITH iv_replace4.
+    REPLACE ALL OCCURRENCES OF '/' IN ms_s3_config-filename WITH ''.
+    DO 4 TIMES.
+      DATA(lv_placeholder) = |&{ sy-tabix }|.
+      REPLACE ALL OCCURRENCES OF lv_placeholder IN ms_s3_config-filename WITH ''.
+    ENDDO.
+  ENDMETHOD.
+
+
+  METHOD remove_empty_fields.
+
+
+
+  ENDMETHOD.
+
+
+  METHOD check_run.
+    TYPES: BEGIN OF ltyp_table_brf_input,
+             /aif/ifname    TYPE /aif/ifname,
+             /aif/ifversion TYPE /aif/ifversion,
+             /aif/ns        TYPE /aif/ns,
+           END OF ltyp_table_brf_input.
+
+    DATA: lt_brf_result TYPE TABLE OF mtyp_logattributes.
+    TRY.
+
+        DATA(lv_active) =  zcl_pe_hm_complex=>is_active(
+            EXPORTING
+                  iv_id           = 'E7A829B9010C1EDEB6FB0EB851F35F64'
+                  is_filter       = VALUE ltyp_table_brf_input( /aif/ifname = iv_ifname /aif/ns = iv_namespace /aif/ifversion = iv_version )
+                  iv_mapping_type = 'D' ).
+
+
+        rv_to_run = lv_active.
+      CATCH zcx_pe_hm. " Harcode Manager
+        rv_to_run = abap_false.
+    ENDTRY.
+  ENDMETHOD.
+ENDCLASS.

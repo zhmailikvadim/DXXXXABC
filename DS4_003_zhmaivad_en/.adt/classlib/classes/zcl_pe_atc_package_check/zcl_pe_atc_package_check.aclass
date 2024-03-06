@@ -1,0 +1,459 @@
+CLASS zcl_pe_atc_package_check DEFINITION
+  PUBLIC
+  INHERITING FROM cl_ci_test_root
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    DATA: gv_changes TYPE sci_errty.
+
+    METHODS constructor.
+    METHODS get_attributes REDEFINITION.
+    METHODS put_attributes REDEFINITION.
+    METHODS query_attributes REDEFINITION.
+    METHODS run REDEFINITION.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+
+    TYPES: BEGIN OF mtyp_s_valid_dc,
+             system            TYPE syst_sysid,
+             team              TYPE zpe_hm_team,
+             development_class TYPE devclass,
+           END OF mtyp_s_valid_dc.
+
+    TYPES: BEGIN OF mtyp_s_team,
+             transport TYPE trkorr,
+             team      TYPE zpe_hm_team,
+           END OF mtyp_s_team.
+
+
+    CLASS-DATA: gts_development_classes TYPE SORTED TABLE OF mtyp_s_valid_dc WITH NON-UNIQUE KEY system team development_class.
+    CLASS-DATA: gts_teams TYPE SORTED TABLE OF mtyp_s_team WITH NON-UNIQUE KEY transport team.
+
+
+    DATA mv_rfc_destination TYPE rfcdest.
+
+    METHODS add_object_types.
+
+    METHODS get_development_classes IMPORTING iv_team          TYPE zpe_hm_team OPTIONAL
+                                              iv_transport     TYPE trkorr
+                                    RETURNING VALUE(rt_result) TYPE tr_devclasses
+                                    RAISING   zcx_pe_atc.
+
+    METHODS get_team IMPORTING iv_transport     TYPE trkorr
+                     RETURNING VALUE(rv_result) TYPE zpe_hm_team
+                     RAISING   zcx_pe_atc_not_relevant.
+
+    METHODS get_creation_transport_request IMPORTING iv_object_type   TYPE trobjtype
+                                                     iv_object_name   TYPE sobj_name
+                                                     iv_program_name  TYPE programm
+                                           RETURNING VALUE(rv_result) TYPE trkorr.
+
+ENDCLASS.
+
+
+
+CLASS zcl_pe_atc_package_check IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+
+    super->constructor( ).
+
+    description         = 'Incorrect package assignment'(001).
+    category            = zcl_pe_atc_category_002=>gc_my_name.
+    position            = '200'.
+    version             = '001'.
+    has_documentation   = abap_true.
+    has_attributes      = abap_true.
+    remote_rfc_enabled  = abap_true.
+
+    mv_rfc_destination  = zcl_pe_atc_aoc_super=>get_rfc_destination( ).
+
+    add_object_types( ).
+
+    INSERT VALUE #( test = myname code = '0001' kind = 'E' text = 'Development class &1'(002) pcom = c_exceptn_imposibl ) INTO TABLE scimessages.
+    INSERT VALUE #( test = myname code = '0003' kind = 'E' text = 'Package hierarchy cannot be determined. &1'(005) pcom = c_exceptn_imposibl ) INTO TABLE scimessages.
+
+  ENDMETHOD.
+
+
+  METHOD get_attributes.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+
+    EXPORT changes = gv_changes TO DATA BUFFER p_attributes.
+
+  ENDMETHOD.
+
+
+  METHOD run.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 20071: Team cut in message               *
+*              |            | DS4K949730                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 06.06.2023 | 21958: Navigation error for CLAS         *
+*              |            | DS4K954570                               *
+*----------------------------------------------------------------------*
+
+
+*-- Is it relevant?
+    IF program_name IS NOT INITIAL.
+      IF zcl_pe_atc_aoc_super=>is_relevant( iv_program = program_name iv_destination = mv_rfc_destination ) = abap_false.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+
+*-- Get current/ATC transport request
+    DATA(lv_transport_atc) = zcl_pe_atc_aoc_super=>get_atc_transport_request( mv_rfc_destination ).
+    IF lv_transport_atc IS INITIAL.
+      RETURN.  "Will be checked when ATC being executed on TR
+    ENDIF.
+
+
+*-- Get creation transport request
+    DATA(lv_transport) = get_creation_transport_request( iv_object_type  = object_type
+                                                         iv_object_name  = object_name
+                                                         iv_program_name = program_name ).
+    IF lv_transport IS INITIAL.
+      lv_transport = lv_transport_atc.
+    ENDIF.
+
+
+*-- Mode: Check creation or also object changes
+    DATA(lv_mode) = COND #( WHEN lv_transport <> lv_transport_atc THEN c_warning ELSE c_error ).
+    IF lv_mode = c_warning AND gv_changes IS INITIAL.
+      RETURN.
+    ENDIF.
+
+
+*-- Get current development class
+    TRY.
+        DATA(ls_tadir) = zcl_pe_atc_aoc_super=>get_tadir( iv_object_type = object_type
+                                                          iv_object_name = object_name
+                                                          iv_destination = mv_rfc_destination ).
+      CATCH zcx_pe_atc_not_relevant.
+        RETURN.
+    ENDTRY.
+
+
+*-- Get Responsible Team (optional)
+    TRY.
+        DATA(lv_team) = get_team( lv_transport ).
+      CATCH zcx_pe_atc_not_relevant.
+        RETURN.
+    ENDTRY.
+
+
+*-- Get valid development classes for team & transport
+    TRY.
+        DATA(lt_development_classes) = get_development_classes( iv_team      = lv_team
+                                                                iv_transport = lv_transport ).
+      CATCH zcx_pe_atc.
+
+        DATA(lv_analysis) = |{ TEXT-008 } { lv_transport } | &&
+                            |{ TEXT-009 } { COND string( WHEN lv_team IS INITIAL THEN '?' ELSE lv_team ) }|.
+
+        inform( p_sub_obj_name = COND #( WHEN program_name IS INITIAL THEN object_name ELSE program_name )
+                p_sub_obj_type = COND #( WHEN program_name IS INITIAL THEN object_type ELSE 'PROG' )
+                p_line         = 0
+                p_kind         = lv_mode
+                p_test         = myname
+                p_code         = '0003'
+                p_param_1      = lv_analysis ).
+        RETURN.
+    ENDTRY.
+
+
+*-- ...and finally compare
+    READ TABLE lt_development_classes WITH KEY table_line = ls_tadir-devclass TRANSPORTING NO FIELDS BINARY SEARCH.
+    IF sy-subrc NE 0.
+
+      DATA(lv_reason) = |{ ls_tadir-devclass } { TEXT-003 } { lv_team }|.
+      inform( p_sub_obj_name = COND #( WHEN program_name IS INITIAL THEN object_name ELSE program_name )
+              p_sub_obj_type = COND #( WHEN program_name IS INITIAL THEN object_type ELSE 'PROG' )
+              p_line         = 0
+              p_kind         = lv_mode
+              p_test         = myname
+              p_code         = '0001'
+              p_param_1      = lv_reason ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD add_object_types.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+
+*  Relevant for all development object types
+    SELECT DISTINCT object
+      FROM tadir
+       INTO TABLE @DATA(lt_objects)
+      WHERE devclass LIKE 'Z%'.          "#EC CI_GENBUFF "#EC CI_BYPASS
+    IF sy-subrc = 0.
+      typelist = VALUE #( FOR ls_object IN lt_objects ( sign = 'I' option = 'EQ' low = ls_object-object ) ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_creation_transport_request.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+* CANOCAR      | 12.07.2023 | 23283: Object type transf. RFC Enabled   *
+*              |            | DS4K958171                               *
+************************************************************************
+
+    DATA: lt_version_list TYPE STANDARD TABLE OF vrsd.
+
+
+*-- Get versions (without transport of copies)
+    CALL FUNCTION 'ZPE_FM_GET_OBJECT_VERSIONS' DESTINATION mv_rfc_destination
+      EXPORTING
+        iv_object_type         = COND versobjtyp( WHEN iv_program_name IS INITIAL THEN iv_object_type ELSE 'REPT' )
+        iv_object_name         = COND versobjnam( WHEN iv_program_name IS INITIAL THEN iv_object_name ELSE iv_program_name )
+      IMPORTING
+        et_versions            = lt_version_list
+      EXCEPTIONS
+        not_found              = 1
+        not_authorized         = 2
+        communication_failure_ = 3
+        system_failure         = 4
+        OTHERS                 = 5.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    DELETE lt_version_list WHERE korrnum IS INITIAL.
+    IF lt_version_list IS INITIAL.
+      RETURN.
+    ENDIF.
+
+
+*-- Return first transport request
+    SORT lt_version_list BY versno.
+    LOOP AT lt_version_list ASSIGNING FIELD-SYMBOL(<ls_version>).
+      rv_result = <ls_version>-korrnum.
+      IF <ls_version>-versno NE '00000'.    "Active version
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    zcl_pe_atc_aoc_super=>get_parent_transport( EXPORTING iv_destination = mv_rfc_destination
+                                                 CHANGING cv_transport   = rv_result ).
+
+
+
+  ENDMETHOD.
+
+
+  METHOD put_attributes.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+
+    IMPORT changes = gv_changes FROM DATA BUFFER p_attributes. "#EC CI_SUBRC
+
+  ENDMETHOD.
+
+
+  METHOD get_development_classes.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+
+    DATA: lt_root_packages TYPE STANDARD TABLE OF mtyp_s_valid_dc.
+
+
+*-- Read buffer
+    rt_result = VALUE tr_devclasses( FOR ls_development_class IN gts_development_classes WHERE ( system = iv_transport(3) AND team = iv_team ) ( ls_development_class-development_class )  ).
+    IF rt_result IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+
+    TRY.
+*--     Load valid root packages from BRF+
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '024F85009E261EEDADD2BB64D7B320D2'
+                                                is_filter       = VALUE mtyp_s_valid_dc( system = iv_transport(3) team = iv_team  )
+                                                iv_mapping_type = zcl_pe_hm_complex=>gc_s_mapping_type-data_elements
+                                      IMPORTING et_table        = lt_root_packages ).
+
+*--     Explode package hierarchy
+        LOOP AT lt_root_packages ASSIGNING FIELD-SYMBOL(<ls_root>).
+          DATA(lt_nodes) = zcl_pe_atc_aoc_super=>get_package_hierarchy( iv_destination = mv_rfc_destination
+                                                                        iv_root        = <ls_root>-development_class ).
+          LOOP AT lt_nodes ASSIGNING FIELD-SYMBOL(<ls_node>). "#EC CI_NESTED
+            INSERT VALUE #( system = iv_transport(3) team = iv_team development_class = <ls_node>-devclass ) INTO TABLE gts_development_classes.
+          ENDLOOP.
+          CONTINUE.
+        ENDLOOP.
+
+      CATCH zcx_pe_hm zcx_pe_atc_not_relevant.
+        RAISE EXCEPTION TYPE zcx_pe_atc.
+    ENDTRY.
+
+
+*-- Read buffer
+    DELETE ADJACENT DUPLICATES FROM gts_development_classes.
+    rt_result = VALUE tr_devclasses( FOR ls_development_class IN gts_development_classes WHERE ( system = iv_transport(3) AND team = iv_team ) ( ls_development_class-development_class )  ).
+
+  ENDMETHOD.
+
+
+  METHOD get_team.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+* CANOCAR      | 12.07.2023 | 23283: Consider not relevant in buffer   *
+*              |            | DS4K958171                               *
+************************************************************************
+
+    TYPES: BEGIN OF ltyp_s_project,
+             project TYPE zpe_project,
+           END OF ltyp_s_project.
+    DATA: lt_projects TYPE STANDARD TABLE OF ltyp_s_project.
+
+
+
+
+*-- Check buffer
+    READ TABLE gts_teams WITH KEY transport = iv_transport ASSIGNING FIELD-SYMBOL(<ls_buffer>).
+    IF sy-subrc = 0 AND <ls_buffer>-team = '-'.
+      RAISE EXCEPTION TYPE zcx_pe_atc_not_relevant.
+    ELSEIF
+      sy-subrc = 0.
+      rv_result = <ls_buffer>-team.
+      RETURN.
+    ENDIF.
+
+
+*-- Get work item from transport request description
+    TRY.
+        DATA(lv_wi) = zcl_pe_atc_change_log=>get_tr_change_management_ref( iv_trkorr      = iv_transport
+                                                                           iv_destination = mv_rfc_destination ).
+      CATCH zcx_pe_trv_xx.
+        INSERT VALUE #( transport = iv_transport team = '-' ) INTO TABLE gts_teams.
+        RAISE EXCEPTION TYPE zcx_pe_atc_not_relevant.    "Shouldn't happen or another ATC will force correcting this
+    ENDTRY.
+
+
+*--  Get JIRA Projects for team search
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDD97E95051E5BC3F59'
+                                                iv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements
+                                      IMPORTING et_table        = lt_projects ).
+      CATCH zcx_pe_hm INTO DATA(lo_hm_msg).
+        INSERT VALUE #( transport = iv_transport team = '-' ) INTO TABLE gts_teams.
+        zcl_pe_atc_logger=>log_message( io_exception = lo_hm_msg ).
+        RAISE EXCEPTION TYPE zcx_pe_atc_not_relevant.
+    ENDTRY.
+
+
+*--  Search user stories in JIRA and get Team field
+    TRY.
+        DATA(lt_us) = NEW zcl_pe_jira_connector( )->search_issues( it_work_items     = VALUE #( ( |{ lv_wi ALPHA = IN }| ) )
+                                                                   it_projects       =  CONV #( lt_projects )
+                                                                   iv_issue_fields   = 'summary,status,customfield_15200,customfield_13506' ).
+        rv_result      = lt_us[ 1 ]-team.
+        INSERT VALUE #( transport = iv_transport team = rv_result ) INTO TABLE gts_teams.
+
+      CATCH zcx_pe_jira_connector cx_sy_itab_line_not_found.
+        INSERT VALUE #( transport = iv_transport ) INTO TABLE gts_teams.
+        RETURN. "No Team
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD query_attributes.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 09.03.2023 | 18481: Check package assignment          *
+*              |            | DS4K945173                               *
+************************************************************************
+
+    DATA: lt_attributes  TYPE sci_atttab,
+          lv_message(72) TYPE c.
+
+
+    CLASS cl_ci_query_attributes DEFINITION LOAD.
+    INSERT VALUE #( ref = REF #( gv_changes )  text = 'Check also object changes'(006) kind = 'C' ) INTO TABLE lt_attributes.
+
+    IF cl_ci_query_attributes=>generic( p_name       = myname
+                                        p_title      = 'Settings'(007)
+                                        p_attributes = lt_attributes
+                                        p_message    = lv_message
+                                        p_display    = p_display ) = 'X'.
+      RETURN.
+    ENDIF.
+
+    attributes_ok = 'X'.
+
+  ENDMETHOD.
+ENDCLASS.

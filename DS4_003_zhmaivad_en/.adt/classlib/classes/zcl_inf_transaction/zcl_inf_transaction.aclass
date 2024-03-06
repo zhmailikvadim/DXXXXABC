@@ -1,0 +1,422 @@
+class ZCL_INF_TRANSACTION definition
+  public
+  final
+  create public .
+
+public section.
+
+  data GO_SPRINT type ref to ZCL_INF_SPRINT .
+  data GO_CONFIG type ref to ZCL_INF_CONFIGURATION .
+
+  methods CONSTRUCTOR .
+  methods GET_TRANSACTION
+    importing
+      !I_SPRINT type ZINF_DE_SPRINT optional
+      !I_GROUPID type ZINF_DE_GROUPID optional
+    exporting
+      !ET_TRANS_TAB type ZTINF_TRANS_TAB_TT .
+  methods SET_TRANSACTION
+    importing
+      !I_OBJID type ZINF_DE_OBJ_ID
+      !I_SUBOBJID type ZINF_DE_SUBOBJ_ID
+      !I_PROG_NAME type ZINF_DE_TRIGGER_PROG
+      !I_TRANS_TYPE type ZINF_DE_TRANS_TYPE
+      !I_TRANS_METHODS type ZINF_DE_TRANS_METHOD
+      !I_CREATE type FLAG
+      !I_JOBNAME type BTCJOB
+      !I_MANUAL_CORRECTION type ZINF_DE_CORRECTION
+      !I_COUNT type ZINF_DE_ACT_COUNT
+      !I_RUNID type ZINF_DE_RUNID optional
+    exporting
+      !E_MESSAGE type BAPI_MSG .
+protected section.
+private section.
+
+  methods VALIDATE_TRANSACTION
+    importing
+      !I_OBJID type ZINF_DE_OBJ_ID optional
+      !I_SUBOBJID type ZINF_DE_SUBOBJ_ID optional
+      !I_TRANS_METHODS type ZINF_DE_TRANS_METHOD optional
+      !I_PROG_NAME type ZINF_DE_TRIGGER_PROG optional
+      !I_TRANS_TYPE type ZINF_DE_TRANS_TYPE optional
+    exporting
+      !E_MESSAGE type BAPI_MSG .
+  methods SAVE_TRANSCATION
+    importing
+      !I_TRANSACTION type ZTINF_TRANS_TAB
+    exporting
+      !E_TRANSACTION type ZTINF_TRANS_TAB
+      !E_MESSAGE type BAPI_MSG .
+  methods LOG_TRANSACTION
+    importing
+      !I_TRANSACTION type ZTINF_TRANS_TAB
+      !I_JOBNAME type BTCJOB
+      !I_MANUAL_CORRECTION type ZINF_DE_CORRECTION
+      !I_CREATE type FLAG
+    exporting
+      !E_MESSAGE type BAPI_MSG .
+ENDCLASS.
+
+
+
+CLASS ZCL_INF_TRANSACTION IMPLEMENTATION.
+
+
+method CONSTRUCTOR.
+    CREATE OBJECT go_sprint.
+    CREATE OBJECT go_config.
+  endmethod.
+
+
+METHOD get_transaction.
+    DATA: lt_obj_subobj TYPE ztinf_mastr_data_tt,
+          ls_obj_subobj TYPE ztinf_mastr_data.
+    CALL METHOD go_config->get_object_subobject
+      IMPORTING
+        et_obj_subobj = lt_obj_subobj.
+    IF i_groupid IS NOT INITIAL.
+      READ TABLE lt_obj_subobj INTO ls_obj_subobj WITH KEY groupid = i_groupid.
+      IF sy-subrc = 0.
+        IF i_sprint IS NOT INITIAL.
+          SELECT * FROM ztinf_trans_tab INTO TABLE et_trans_tab "#EC CI_NOFIELD
+            WHERE sprint = i_sprint AND groupid = i_groupid.
+        ELSE.
+          SELECT * FROM ztinf_trans_tab INTO TABLE et_trans_tab "#EC CI_NOFIELD
+           WHERE groupid = i_groupid.
+        ENDIF.
+      ENDIF.
+    ELSEIF i_sprint IS NOT INITIAL.
+      SELECT * FROM ztinf_trans_tab INTO TABLE et_trans_tab WHERE sprint = i_sprint. "#EC CI_NOFIELD
+    ELSE.
+      SELECT * FROM ztinf_trans_tab INTO TABLE et_trans_tab. "#EC CI_NOWHERE
+    ENDIF.
+
+  ENDMETHOD.
+
+
+METHOD log_transaction.
+
+    DATA: lv_eventid   TYPE btceventid,       "EVENT ID
+          lv_jobcount  TYPE btcjobcnt,        "BACKGROUND JOB ID
+          lv_jobname   TYPE btcjob,           "BACKGROUND JOB NAME
+          lv_timestamp TYPE zinf_de_event_tstamp, "TIME STAMP
+          ls_ztinf_log_table TYPE ztinf_log_table,
+          lv_RAN_INT   type QF00-RAN_INT.
+
+* Get Background Job info
+    CALL FUNCTION 'GET_JOB_RUNTIME_INFO'
+      IMPORTING
+        eventid         = lv_eventid
+        jobcount        = lv_jobcount
+        jobname         = lv_jobname
+      EXCEPTIONS
+        no_runtime_info = 1
+        OTHERS          = 2.
+    IF sy-subrc <> 0.
+* Implement suitable error handling here
+    ENDIF.
+
+* Get Timestamp for the session
+    CALL FUNCTION 'ABI_TIMESTAMP_CONVERT_INTO'
+      EXPORTING
+        iv_date          = sy-datum
+        iv_time          = sy-uzeit
+      IMPORTING
+        ev_timestamp     = lv_timestamp
+      EXCEPTIONS
+        conversion_error = 1
+        OTHERS           = 2.
+    IF sy-subrc <> 0.
+* Implement suitable error handling here
+    ENDIF.
+
+* Prepare the record to be inserted in log table
+    ls_ztinf_log_table-mandt              = sy-mandt.
+    ls_ztinf_log_table-guid               = i_transaction-guid.
+    ls_ztinf_log_table-zcount             = i_transaction-zcount.
+    IF i_jobname IS INITIAL.
+      ls_ztinf_log_table-jobname          = i_transaction-prog_name.
+    ELSE.
+      ls_ztinf_log_table-jobname          = i_jobname.
+    ENDIF.
+    ls_ztinf_log_table-changeid          = i_create.
+    ls_ztinf_log_table-jobid              = lv_jobcount.
+    ls_ztinf_log_table-eventid            = lv_eventid.
+    ls_ztinf_log_table-event_tstamp       = lv_timestamp.
+    ls_ztinf_log_table-created_by         = sy-uname.
+    ls_ztinf_log_table-created_at         = sy-uzeit.
+    ls_ztinf_log_table-created_on         = sy-datum.
+    ls_ztinf_log_table-manual_correction  = i_manual_correction.
+
+    IF i_manual_correction EQ abap_true.
+      ls_ztinf_log_table-changed_by = sy-uname.
+    ENDIF.
+
+* Change number
+    clear lv_RAN_INT .
+    CALL FUNCTION 'QF05_RANDOM_INTEGER'
+      EXPORTING
+        ran_int_max   = 1000
+        ran_int_min   = 1
+      IMPORTING
+        ran_int       = lv_RAN_INT
+      EXCEPTIONS
+        invalid_input = 1
+        OTHERS        = 2.
+    IF sy-subrc <> 0.
+* Implement suitable error handling here
+    else.
+      ls_ztinf_log_table-changenr =  lv_RAN_INT .
+    ENDIF.
+
+
+* Insert this record in Log table ZTINF_LOG_TABLE
+    INSERT ztinf_log_table FROM ls_ztinf_log_table.
+    IF sy-subrc <> 0.
+      e_message = 'Database insert/update failed'.
+    ELSE.
+      e_message = 'Database insert/update done successfully'.
+    ENDIF.
+  ENDMETHOD.
+
+
+METHOD save_transcation.
+    DATA: ls_transaction TYPE ztinf_trans_tab.
+    ls_transaction = i_transaction.
+    IF ls_transaction-guid IS INITIAL.
+      CALL METHOD cl_reca_guid=>guid_create
+        IMPORTING
+          ed_guid_16 = ls_transaction-guid.
+
+      INSERT ztinf_trans_tab FROM ls_transaction.
+    ELSE.
+      MODIFY ztinf_trans_tab FROM ls_transaction.
+    ENDIF.
+    IF sy-subrc <> 0.
+      e_message = 'Database insert/update failed'.
+    ELSE.
+*      e_message = 'Database insert/update done successfully'.
+      e_transaction = ls_transaction.
+    ENDIF.
+  ENDMETHOD.
+
+
+METHOD set_transaction.
+  DATA: l_sprint      TYPE zinf_de_sprint,
+        lt_obj_subobj TYPE ztinf_mastr_data_tt,
+        ls_obj_subobj TYPE ztinf_mastr_data,
+        lt_trans_temp TYPE ztinf_trans_tab_tt,
+        lt_trans_tmp1 TYPE ztinf_trans_tab_tt,   "Added to avoid duplicates in Transaction table for business approved row
+        ls_trans_tab  TYPE ztinf_trans_tab,
+        l_guid        TYPE guid,
+        l_runid       TYPE zinf_de_runid.
+
+  CALL METHOD me->validate_transaction
+    EXPORTING
+      i_objid         = i_objid
+      i_subobjid      = i_subobjid
+      i_trans_methods = i_trans_methods
+      i_prog_name     = i_prog_name
+      i_trans_type    = i_trans_type
+    IMPORTING
+      e_message       = e_message.
+  IF e_message IS INITIAL.
+
+    CALL METHOD go_config->get_object_subobject
+      IMPORTING
+        et_obj_subobj = lt_obj_subobj.
+
+    READ TABLE lt_obj_subobj INTO ls_obj_subobj WITH KEY objectid = i_objid
+                                                         subobjid = i_subobjid
+                                                         trans_type = i_trans_type
+                                                         trans_methods = i_trans_methods.
+    IF sy-subrc EQ 0.
+      CALL METHOD go_sprint->get_current_sprint
+        IMPORTING
+          e_sprint = l_sprint.
+
+      CALL METHOD me->get_transaction
+        EXPORTING
+          i_sprint     = l_sprint
+          i_groupid    = ls_obj_subobj-groupid
+        IMPORTING
+          et_trans_tab = lt_trans_temp.
+
+      l_runid = i_runid.
+      CALL METHOD go_config->get_runid
+        EXPORTING
+          i_objectid      = i_objid
+          i_trans_type    = i_trans_type
+          i_trans_methods = i_trans_methods
+          i_create        = i_create
+        CHANGING
+          c_runid         = l_runid.
+      CLEAR ls_trans_tab.
+      READ TABLE lt_trans_temp INTO ls_trans_tab WITH KEY trans_type = i_trans_type
+                                                          trans_methods = i_trans_methods
+                                                          runid = l_runid.
+
+      IF sy-subrc NE 0.
+        ls_trans_tab-sprint = l_sprint.
+        ls_trans_tab-runid = l_runid.
+        ls_trans_tab-groupid = ls_obj_subobj-groupid.
+        ls_trans_tab-objectid = ls_obj_subobj-objectid.
+        ls_trans_tab-subobjid = ls_obj_subobj-subobjid.
+        ls_trans_tab-object_type = ls_obj_subobj-object_type.
+        ls_trans_tab-owned_by = sy-uname.
+        ls_trans_tab-trans_type = i_trans_type.
+        ls_trans_tab-trans_methods = i_trans_methods.
+        ls_trans_tab-prog_name = i_prog_name.
+        ls_trans_tab-erdat = sy-datum.
+        ls_trans_tab-erzet = sy-uzeit.
+        ls_trans_tab-ernam = sy-uname.
+        ls_trans_tab-aedat = sy-datum.
+        ls_trans_tab-aezet = sy-uzeit.
+        ls_trans_tab-aenam = sy-uname.
+      ELSE.
+        ls_trans_tab-aedat = sy-datum.
+        ls_trans_tab-aezet = sy-uzeit.
+        ls_trans_tab-aenam = sy-uname.
+      ENDIF.
+
+      CASE i_create.
+        WHEN 'O'.
+          ls_trans_tab-zcount = i_count.
+        WHEN 'A'. ls_trans_tab-zcount = ls_trans_tab-zcount + i_count.
+        WHEN ' '.
+          ls_trans_tab-zcount = i_count.
+*          WHEN 'M'. " For future use
+        WHEN OTHERS.
+          e_message = 'Create flag should be either ''O'' or ''A'' or space'.
+          RETURN.
+      ENDCASE.
+      CALL METHOD me->save_transcation
+        EXPORTING
+          i_transaction = ls_trans_tab
+        IMPORTING
+          e_message     = e_message
+          e_transaction = ls_trans_tab.
+      IF e_message IS  INITIAL.
+        CALL METHOD me->log_transaction
+          EXPORTING
+            i_transaction       = ls_trans_tab
+            i_jobname           = i_jobname
+            i_manual_correction = i_manual_correction
+            i_create            = i_create
+          IMPORTING
+            e_message           = e_message.
+
+* Begin of addition - Add a dummy record for Business approved - Randhir - 6th June 2016
+        IF i_create = ' ' AND ls_trans_tab-trans_type = '04'.
+
+          CLEAR: ls_trans_tab-zcount,
+                 ls_trans_tab-guid,
+                 ls_trans_tab-groupid,
+                 ls_trans_tab-trans_type.
+
+          ls_trans_tab-trans_type = '05'.
+
+          CONCATENATE ls_trans_tab-objectid
+                      ls_trans_tab-subobjid
+                      ls_trans_tab-trans_type
+                      ls_trans_tab-trans_methods
+          INTO ls_trans_tab-groupid.
+
+          CLEAR: lt_trans_tmp1.
+
+          CALL METHOD me->get_transaction
+            EXPORTING
+              i_sprint     = l_sprint
+              i_groupid    = ls_trans_tab-groupid
+            IMPORTING
+              et_trans_tab = lt_trans_tmp1.
+
+          IF lt_trans_tmp1[] IS INITIAL.
+
+            CALL METHOD me->save_transcation
+              EXPORTING
+                i_transaction = ls_trans_tab
+              IMPORTING
+                e_message     = e_message
+                e_transaction = ls_trans_tab.
+
+          ENDIF.
+
+        ENDIF.
+* End of addition - Add a dummy record for Business approved - Randhir - 6th June 2016
+
+      ENDIF.
+    ENDIF.
+  ENDIF.
+ENDMETHOD.
+
+
+METHOD validate_transaction.
+    DATA: lt_obj_subobj TYPE ztinf_mastr_data_tt,
+          lt_objid_metadata TYPE ztinf_meta_data_tt,
+          ls_trans_methods TYPE ztinf_trans_meth,
+          lv_trans_type TYPE val_single.
+
+    CALL METHOD go_config->get_object_subobject
+      IMPORTING
+        et_obj_subobj = lt_obj_subobj.
+
+    CALL METHOD go_config->get_objid_metadata
+      IMPORTING
+        et_objid_metadata = lt_objid_metadata.
+
+*    IF i_prog_name IS SUPPLIED AND i_prog_name IS NOT INITIAL.
+*      READ TABLE lt_obj_subobj TRANSPORTING NO FIELDS WITH KEY prog_name = i_prog_name.
+*      IF sy-subrc NE 0.
+*        e_message = 'Invalid Program name'.
+*        RETURN.
+*      ENDIF.
+*    ENDIF.
+    IF i_subobjid IS SUPPLIED AND i_subobjid IS NOT INITIAL.
+      READ TABLE lt_obj_subobj TRANSPORTING NO FIELDS WITH KEY subobjid = i_subobjid.
+      IF sy-subrc NE 0.
+        e_message = 'Invalid subobjid'.
+        RETURN.
+      ENDIF.
+    ENDIF.
+    IF i_objid IS SUPPLIED AND i_objid IS NOT INITIAL.
+      READ TABLE lt_objid_metadata TRANSPORTING NO FIELDS WITH KEY objectid = i_objid.
+      IF sy-subrc NE 0.
+        e_message = 'Invalid objetid'.
+        RETURN.
+      ENDIF.
+    ENDIF.
+    IF i_trans_methods IS SUPPLIED AND i_trans_methods IS NOT INITIAL.
+*      READ TABLE lt_obj_subobj TRANSPORTING NO FIELDS WITH KEY trans_methods = i_trans_methods.
+      SELECT * UP TO 1 ROWS FROM ztinf_trans_meth INTO ls_trans_methods WHERE trans_method = i_trans_methods.
+        ENDSELECT.
+      IF sy-subrc NE 0.
+        e_message = 'Invalid Transaction method'.
+        RETURN.
+      ENDIF.
+    ENDIF.
+    IF i_trans_type IS SUPPLIED AND i_trans_type IS NOT INITIAL.
+      lv_trans_type = i_trans_type.
+*      READ TABLE lt_obj_subobj TRANSPORTING NO FIELDS WITH KEY trans_methods = i_trans_methods.
+      CALL FUNCTION 'FM_DOMAINVALUE_CHECK'
+        EXPORTING
+          i_domname         = 'ZDO_TRANS_TYPE'
+          i_domvalue        = lv_trans_type
+        EXCEPTIONS
+          input_error       = 1
+          value_not_allowed = 2
+          OTHERS            = 3.
+      IF sy-subrc NE 0.
+        e_message = 'Invalid Transaction type'.
+        RETURN.
+      ENDIF.
+    ENDIF.
+    IF i_trans_methods IS SUPPLIED AND i_objid IS SUPPLIED AND i_subobjid IS SUPPLIED AND i_trans_type IS SUPPLIED.
+      READ TABLE lt_obj_subobj TRANSPORTING NO FIELDS WITH KEY objectid = i_objid subobjid = i_subobjid trans_methods = i_trans_methods
+      trans_type = i_trans_type.
+      IF sy-subrc NE 0.
+        e_message = 'Invalid combination of Object, subobject, transaction method and transaction type'.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

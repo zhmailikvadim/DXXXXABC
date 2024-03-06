@@ -1,0 +1,1872 @@
+CLASS cl_rfac_selection_analyzer DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PRIVATE .
+
+  PUBLIC SECTION.
+
+    INTERFACES if_rfac_selection_analyzer .
+
+    TYPES:
+      ty_t_stokesx                TYPE STANDARD TABLE OF stokesx WITH NON-UNIQUE DEFAULT KEY .
+    TYPES:
+      ty_t_sstmnt                 TYPE STANDARD TABLE OF sstmnt WITH NON-UNIQUE DEFAULT KEY .
+    TYPES:
+      ty_t_sstruc                 TYPE STANDARD TABLE OF sstruc WITH NON-UNIQUE DEFAULT KEY .
+
+    CLASS-METHODS get_instance
+      IMPORTING
+        i_blackboard      TYPE REF TO cl_art_blackboard
+      RETURNING
+        VALUE(r_instance) TYPE REF TO cl_rfac_selection_analyzer
+      RAISING
+        cx_rfac_error .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    TYPES:
+      ty_keyword TYPE c LENGTH 30 .
+    TYPES:
+      BEGIN OF ty_s_token_in_selection,
+        token_index     TYPE i,
+        token           TYPE stokesx,
+        statement_index TYPE i,
+      END OF ty_s_token_in_selection,
+      BEGIN OF ty_s_statement_in_selection,
+        statement_index TYPE i,
+        statement       TYPE sstmnt,
+      END OF ty_s_statement_in_selection,
+      BEGIN OF ty_s_structure_in_selection,
+        structure_index TYPE i,
+        structure       TYPE sstruc,
+      END OF ty_s_structure_in_selection.
+    TYPES:
+      BEGIN OF ty_s_token_for_analysis,
+        token_index TYPE i,
+        token       TYPE stokesx,
+      END OF ty_s_token_for_analysis .
+    TYPES:
+      BEGIN OF ty_s_parameter_definition,
+        full_name          TYPE string,
+        compiler_reference TYPE scr_ref,
+        transfer_direction TYPE if_rfac_impl_types=>ty_param_transfer_direction,
+      END OF ty_s_parameter_definition .
+    TYPES:
+      ty_t_token_in_selection     TYPE SORTED TABLE OF ty_s_token_in_selection WITH UNIQUE KEY token_index,
+      ty_t_statement_in_selection TYPE SORTED TABLE OF ty_s_statement_in_selection WITH UNIQUE KEY statement_index,
+      ty_t_structure_in_selection TYPE SORTED TABLE OF ty_s_structure_in_selection WITH UNIQUE KEY structure_index.
+    TYPES:
+      ty_t_token_for_analysis     TYPE SORTED TABLE OF ty_s_token_for_analysis WITH UNIQUE KEY token_index .
+    TYPES:
+      ty_t_compiler_references    TYPE ty_t_compiler_references.
+
+    TYPES:
+      ty_t_keyword                TYPE STANDARD TABLE OF ty_keyword WITH NON-UNIQUE DEFAULT KEY .
+    TYPES:
+      ty_t_parameter_definitions  TYPE SORTED TABLE OF ty_s_parameter_definition WITH UNIQUE KEY full_name.
+    TYPES:
+      BEGIN OF ty_s_source_method_information,
+        full_name             TYPE REF TO cl_ris_abap_fullname,
+        compiler_reference    TYPE scr_ref,
+        parameter_definitions TYPE ty_t_parameter_definitions,
+        is_in_local_interface TYPE abap_bool,
+      END OF ty_s_source_method_information .
+    TYPES:
+      BEGIN OF ty_s_source_method_content,
+        tokens              TYPE ty_t_stokesx,
+        statements          TYPE ty_t_sstmnt,
+        compiler_references TYPE ty_t_compiler_references,
+        BEGIN OF first_direct_references,
+          in_selection    TYPE ty_t_compiler_references,
+          after_selection TYPE ty_t_compiler_references,
+        END OF first_direct_references,
+      END OF ty_s_source_method_content .
+    TYPES:
+      BEGIN OF ty_s_data_declaration_info,
+        value         TYPE string,
+        is_initial    TYPE abap_bool,
+        is_constant   TYPE abap_bool,
+        is_generic    TYPE abap_bool,
+        original_type TYPE if_rfac_impl_types=>ts_type,
+      END OF ty_s_data_declaration_info .
+    TYPES:
+      BEGIN OF ty_s_declaration,
+        full_name            TYPE string,
+        reference            TYPE scr_ref,
+        is_in_selection      TYPE abap_bool,
+        is_in_method         TYPE abap_bool,
+        is_in_signature      TYPE abap_bool,
+        is_somewhere_else    TYPE abap_bool,
+        is_type_definition   TYPE abap_bool,
+        predefined_direction TYPE if_rfac_impl_types=>ty_param_transfer_direction,
+      END OF ty_s_declaration .
+    TYPES:
+      ty_t_declarations TYPE SORTED TABLE OF ty_s_declaration WITH UNIQUE KEY full_name .
+    TYPES:
+      BEGIN OF ty_s_candidate_parameter,
+        declaration_reference TYPE scr_ref,
+        occurrence_references TYPE ty_t_compiler_references,
+        no_additional_element TYPE abap_bool,
+        is_local              TYPE abap_bool,
+        is_source_local       TYPE abap_bool,
+        is_inline_declaration TYPE abap_bool,
+        contains_write_access TYPE abap_bool,
+        parameter_direction   TYPE if_rfac_impl_types=>ty_param_transfer_direction,
+      END OF ty_s_candidate_parameter .
+    TYPES:
+      ty_t_candidate_parameters TYPE SORTED TABLE OF ty_s_candidate_parameter WITH UNIQUE KEY declaration_reference .
+
+    DATA source_repository TYPE REF TO lif_source_repository.
+    DATA blackboard TYPE REF TO cl_art_blackboard.
+    DATA source_selection TYPE if_ris_source_position=>ty_selection .
+    DATA references_in_selection TYPE ty_t_compiler_references .
+    DATA affected_variables TYPE ty_t_affected_variables.
+    DATA source_method_info TYPE ty_s_source_method_information .
+    DATA source_method_content TYPE ty_s_source_method_content .
+    DATA abap_compiler TYPE REF TO cl_abap_compiler .
+    DATA: selected_statements       TYPE cl_pst_statement=>tab,
+          pst_method_implementation TYPE REF TO cl_pst_method_implementation,
+          snippet                   TYPE REF TO cl_art_snippet.
+
+
+    METHODS check_extract_method_supported
+      RAISING
+        cx_rfac_error .
+    METHODS is_field_symbol
+      IMPORTING
+        i_candidate_parameter TYPE cl_rfac_selection_analyzer=>ty_s_candidate_parameter
+      RETURNING
+        VALUE(r_result)       TYPE abap_bool.
+    METHODS initialize
+      RAISING
+        cx_rfac_error.
+    METHODS get_source_method_information
+      RAISING
+        cx_rfac_error .
+    METHODS determine_visibility_and_kind
+      CHANGING
+        !c_method TYPE if_rfac_impl_types=>ts_method .
+    METHODS add_source_body
+      CHANGING
+        !c_method TYPE if_rfac_impl_types=>ts_method .
+    METHODS scan_and_qualify_source_method
+      RAISING
+        cx_pst_dynamic
+        cx_rfac_error .
+
+
+    METHODS get_compiler_refs_for_method
+      RAISING
+        cx_rfac_error .
+    METHODS get_info_for_extract_method
+      CHANGING
+        !c_method TYPE if_rfac_impl_types=>ts_method
+      RAISING
+        cx_rfac_error .
+    METHODS is_write_access
+      IMPORTING
+                i_compiler_reference TYPE scr_ref
+      RETURNING VALUE(r_result)      TYPE abap_bool
+      RAISING   cx_rfac_error.
+
+    METHODS analyze_data_declaration
+      IMPORTING i_declaration_reference        TYPE scr_ref
+                i_current_types                TYPE if_rfac_impl_types=>tt_types OPTIONAL
+      RETURNING VALUE(r_data_declaration_info) TYPE ty_s_data_declaration_info
+      RAISING   cx_rfac_error.
+    METHODS get_exception_information
+      CHANGING
+        !c_method TYPE if_rfac_impl_types=>ts_method .
+
+    METHODS resolve_like_definition
+      IMPORTING
+        i_like_token      TYPE stokesx
+      CHANGING
+        c_type_definition TYPE if_rfac_impl_types=>ts_type .
+
+    METHODS qualify_refs_in_selection
+      EXPORTING
+        e_parameter_candidates TYPE ty_t_candidate_parameters
+        e_source_types         TYPE if_rfac_impl_types=>tt_types
+        e_types_to_copy        TYPE if_rfac_impl_types=>tt_types
+      RAISING
+        cx_rfac_error .
+
+    METHODS handle_inline_declaration
+      IMPORTING
+        !i_possible_declaration TYPE scr_ref
+      CHANGING
+        !c_compiler_references  TYPE cl_rfac_selection_analyzer=>ty_t_compiler_references .
+    METHODS determine_intf_data_fullname
+      IMPORTING
+        !i_declaration              TYPE cl_rfac_selection_analyzer=>ty_s_declaration
+      RETURNING
+        VALUE(r_intf_data_fullname) TYPE string .
+    METHODS adjust_types_on_name_conflicts
+      CHANGING c_method TYPE if_rfac_impl_types=>ts_method
+      RAISING  cx_rfac_error.
+
+    METHODS remove_inline_declaration
+      IMPORTING
+        i_candidate_parameter TYPE cl_rfac_selection_analyzer=>ty_s_candidate_parameter
+      CHANGING
+        c_method_body         TYPE rswsourcet.
+    METHODS handle_first_ref_in_selection
+      IMPORTING
+        i_compiler_reference TYPE scr_ref.
+    METHODS handle_first_ref_after_select
+      IMPORTING
+        i_compiler_reference TYPE scr_ref.
+    METHODS is_first_one_write_or_assign
+      IMPORTING
+        i_reference_for_compare    TYPE scr_ref
+        i_references_of_next_block TYPE cl_rfac_selection_analyzer=>ty_t_compiler_references
+      RETURNING
+        VALUE(r_result)            TYPE abap_bool.
+
+    METHODS fill_parameter_definitions
+      RAISING
+        cx_rfac_error.
+    METHODS is_before_selection
+      IMPORTING
+        reference_in_method    TYPE scr_ref
+        reference_in_selection TYPE scr_ref
+      RETURNING
+        VALUE(r_result)        TYPE abap_bool.
+    METHODS is_after_selection
+      IMPORTING
+        reference_in_method    TYPE scr_ref
+        reference_in_selection TYPE scr_ref
+      RETURNING
+        VALUE(r_result)        TYPE abap_bool.
+    METHODS is_fs_assigned_in_same_statmnt
+      IMPORTING
+        i_reference     TYPE scr_ref
+      RETURNING
+        VALUE(r_result) TYPE abap_bool.
+    METHODS is_ref_write_in_same_stamnt
+      IMPORTING
+        i_reference     TYPE scr_ref
+      RETURNING
+        VALUE(r_result) TYPE abap_bool.
+    METHODS get_pst_statement_for
+      IMPORTING
+        i_reference_statement TYPE REF TO cl_abap_statement_info
+      RETURNING
+        VALUE(r_result)       TYPE REF TO cl_pst_statement.
+    METHODS add_type_to_method_desc
+      IMPORTING
+        i_type   TYPE if_rfac_impl_types=>ts_type
+      CHANGING
+        c_method TYPE if_rfac_impl_types=>ts_method.
+    METHODS is_functional_call
+      IMPORTING
+        i_method        TYPE if_rfac_impl_types=>ts_method
+      RETURNING
+        VALUE(r_result) TYPE abap_bool.
+
+ENDCLASS.
+
+
+
+CLASS CL_RFAC_SELECTION_ANALYZER IMPLEMENTATION.
+
+
+  METHOD scan_and_qualify_source_method.
+
+    DATA: statement           TYPE sstmnt,
+          include_source_code TYPE string_table.
+
+    DATA(start_row) = pst_method_implementation->method_imp_node->source_position->get_backend_position(  )->range-start-row.
+    DATA(end_row) = pst_method_implementation->method_imp_node->source_position->get_backend_position(  )->range-end-row.
+
+    me->source_repository->get_include_source_code( EXPORTING i_include_name = me->source_selection-start_position-include
+                                                    IMPORTING e_source_code  = include_source_code ).
+
+    SCAN ABAP-SOURCE include_source_code WITH ANALYSIS WITH LIST TOKENIZATION
+                                         FROM start_row
+                                         TO   end_row
+                                         TOKENS INTO me->source_method_content-tokens
+                                         STATEMENTS INTO me->source_method_content-statements.
+
+    LOOP AT me->source_method_content-statements INTO statement.
+      CALL FUNCTION 'RS_QUALIFY_ABAP_TOKENS_STR'
+        EXPORTING
+          statement_type = statement-type
+          index_from     = statement-from
+          index_to       = statement-to
+        CHANGING
+          stokesx_tab    = me->source_method_content-tokens
+        EXCEPTIONS
+          OTHERS         = 0.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD resolve_like_definition.
+    DATA: like_index      TYPE i,
+          token_statement TYPE sstmnt,
+          token           TYPE stokesx,
+          like_found      TYPE abap_bool,
+          type_started    TYPE abap_bool.
+
+    READ TABLE me->source_method_content-tokens WITH KEY str = i_like_token-str type = sana_tok_field_def TRANSPORTING NO FIELDS.
+    like_index = sy-tabix.
+    IF like_index > 0.
+      LOOP AT me->source_method_content-statements INTO token_statement WHERE from <= like_index AND to >= like_index.
+        EXIT.
+      ENDLOOP.
+      LOOP AT me->source_method_content-tokens INTO token FROM like_index TO token_statement-to.
+        IF token-str = 'LIKE' AND token-type = sana_tok_word.
+          like_found = abap_true.
+          CONTINUE.
+        ENDIF.
+        IF like_found = abap_true.
+          me->resolve_like_definition( EXPORTING i_like_token      = token
+                                       CHANGING  c_type_definition = c_type_definition ).
+        ENDIF.
+        IF token-str = 'TYPE' AND token-type = sana_tok_word.
+          type_started = abap_true.
+          c_type_definition-typetype = if_rfac_impl_types=>co_parameter_type_type-type.
+          CONTINUE.
+        ENDIF.
+        IF type_started = abap_true AND token-str = 'REF' AND token-type = sana_tok_word.
+          c_type_definition-typetype = if_rfac_impl_types=>co_parameter_type_type-type_ref_to.
+          CONTINUE.
+        ENDIF.
+        IF c_type_definition-typetype = if_rfac_impl_types=>co_parameter_type_type-type_ref_to AND token-str = 'TO' AND token-type = sana_tok_word.
+          CONTINUE.
+        ENDIF.
+        IF type_started = abap_true.
+          IF token-type = sana_tok_type.
+            token-str = to_lower( token-str ).
+          ENDIF.
+          c_type_definition-value = |{ c_type_definition-value } { token-str }|.
+        ENDIF.
+      ENDLOOP.
+    ELSE.
+      c_type_definition-typetype = if_rfac_impl_types=>co_parameter_type_type-like.
+      c_type_definition-value = to_lower( i_like_token-str ).
+    ENDIF.
+    c_type_definition-value = shift_left( val = c_type_definition-value ).
+  ENDMETHOD.
+
+
+  METHOD remove_inline_declaration.
+
+    DATA: offset          TYPE i,
+          variable_offset TYPE i,
+          length          TYPE i,
+          after_offset    TYPE i.
+
+    FIELD-SYMBOLS: <source_line> TYPE string.
+
+    LOOP AT c_method_body ASSIGNING <source_line>.
+      offset = find( val = <source_line> sub = |@data({ to_lower( i_candidate_parameter-declaration_reference-name ) })| case = abap_false ).
+      IF offset > -1.
+        variable_offset = offset + 6.
+        length = strlen( i_candidate_parameter-declaration_reference-name ).
+        after_offset = variable_offset + length + 1.
+        <source_line> = |{ <source_line>(offset) }     @{ <source_line>+variable_offset(length) } { <source_line>+after_offset }|.
+        RETURN.
+      ENDIF.
+      offset = find( val = <source_line> sub = |data({ to_lower( i_candidate_parameter-declaration_reference-name ) })| case = abap_false ).
+      IF offset > -1.
+        variable_offset = offset + 5.
+        length = strlen( i_candidate_parameter-declaration_reference-name ).
+        after_offset = variable_offset + length + 1.
+        <source_line> = |{ <source_line>(offset) }     { <source_line>+variable_offset(length) } { <source_line>+after_offset }|.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD qualify_refs_in_selection.
+    DATA: reference_in_method   TYPE scr_ref,
+          declaration           TYPE ty_s_declaration,
+          declarations          TYPE ty_t_declarations,
+          candidate_parameter   TYPE ty_s_candidate_parameter,
+          parameter_definition  TYPE ty_s_parameter_definition,
+          intf_data_fullname    TYPE string,
+          data_declaration_info TYPE ty_s_data_declaration_info,
+          locally_defined_type  TYPE REF TO cl_abap_comp_alias_type,
+          locally_defined_data  TYPE REF TO cl_abap_comp_data,
+          is_write_access       TYPE abap_bool,
+          is_read_access        TYPE abap_bool,
+          type_to_copy          TYPE if_rfac_impl_types=>ts_type,
+          type_operator         TYPE string,
+          type_reference        TYPE scr_ref,
+          BEGIN OF reference_occurrence,
+            before TYPE abap_bool,
+            after  TYPE abap_bool,
+          END OF reference_occurrence.
+
+    FIELD-SYMBOLS: <candidate_parameter> TYPE ty_s_candidate_parameter.
+
+    CLEAR: e_parameter_candidates, e_source_types, e_types_to_copy.
+
+    LOOP AT me->references_in_selection INTO DATA(reference_in_selection).
+      CLEAR: declaration, reference_occurrence.
+
+      READ TABLE declarations WITH TABLE KEY full_name = reference_in_selection-full_name INTO declaration.
+
+      IF sy-subrc <> 0.
+        " Seek out its declaration!
+        declaration-full_name = reference_in_selection-full_name.
+
+
+        IF reference_in_selection-grade = cl_abap_compiler=>grade_definition.
+          " Is it in the selection?
+          declaration-reference       = reference_in_selection.
+          declaration-is_in_selection = abap_true.
+          " Check if it's a type definition
+          CLEAR: locally_defined_type.
+          IF declaration-reference-symbol IS INSTANCE OF cl_abap_comp_alias_type.
+            locally_defined_type ?= declaration-reference-symbol.
+            declaration-is_type_definition = abap_true.
+          ENDIF.
+          INSERT declaration INTO TABLE declarations.
+
+        ELSE.
+          " Is it in the source method?
+          READ TABLE me->source_method_content-compiler_references INTO declaration-reference
+            WITH TABLE KEY fullname_key COMPONENTS full_name = reference_in_selection-full_name
+                                                   grade     = cl_abap_compiler=>grade_definition.
+          IF sy-subrc = 0.
+            declaration-is_in_method = abap_true.
+
+            CLEAR: locally_defined_type, type_to_copy, type_reference, type_operator.
+            IF declaration-reference-symbol IS INSTANCE OF cl_abap_comp_alias_type.
+              " Check if it's a type definition
+              locally_defined_type ?= declaration-reference-symbol.
+              declaration-is_type_definition = abap_true.
+              type_reference = declaration-reference.
+            ELSEIF declaration-reference-symbol IS INSTANCE OF cl_abap_comp_data.
+              " Is type reference method-local? If yes, get it!
+              CLEAR: locally_defined_data.
+              locally_defined_data ?= declaration-reference-symbol.
+              READ TABLE me->source_method_content-compiler_references INTO type_reference
+                WITH TABLE KEY fullname_key COMPONENTS full_name = locally_defined_data->type->full_name
+                                                       grade     = cl_abap_compiler=>grade_definition.
+              IF sy-subrc = 0.
+                READ TABLE me->references_in_selection TRANSPORTING NO FIELDS WITH TABLE KEY fullname_key COMPONENTS full_name = locally_defined_data->type->full_name
+                                                                                                                     grade     = cl_abap_compiler=>grade_definition.
+                IF sy-subrc <> 0.
+                  IF locally_defined_data->type IS INSTANCE OF cl_abap_comp_alias_type.
+                    locally_defined_type ?= locally_defined_data->type.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+
+            IF locally_defined_type IS BOUND.
+              me->abap_compiler->get_type_code(
+                EXPORTING
+                  p_type          = locally_defined_type->alias_type
+                IMPORTING
+                  p_name          = type_to_copy-value
+                  p_type_operator = type_operator
+                EXCEPTIONS
+                  OTHERS          = 4 ).
+              IF sy-subrc = 0.
+                type_to_copy-name     = to_lower( type_reference-name ).
+                type_to_copy-typetype = to_upper( type_operator ).
+                type_to_copy-value    = to_lower( type_to_copy-value ).
+                INSERT type_to_copy INTO TABLE e_types_to_copy.
+              ENDIF.
+            ENDIF.
+
+            INSERT declaration INTO TABLE declarations.
+          ELSE.
+
+            " Is it in the signature?
+            CLEAR: parameter_definition.
+            IF me->pst_method_implementation->is_interface_method(  ).
+              intf_data_fullname = determine_intf_data_fullname( declaration ).
+              READ TABLE me->source_method_info-parameter_definitions INTO parameter_definition WITH TABLE KEY full_name = intf_data_fullname.
+            ELSE.
+              READ TABLE me->source_method_info-parameter_definitions INTO parameter_definition WITH TABLE KEY full_name = declaration-full_name.
+            ENDIF.
+            IF parameter_definition IS NOT INITIAL.
+              declaration-is_in_signature      = abap_true.
+              declaration-reference            = parameter_definition-compiler_reference.
+              declaration-predefined_direction = parameter_definition-transfer_direction.
+              INSERT declaration INTO TABLE declarations.
+            ELSE.
+              " It must be somewhere else (e.g. class attribute)
+              " For now we don't need to know the details.
+              declaration-is_somewhere_else = abap_true.
+              INSERT declaration INTO TABLE declarations.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      " If the declaration is somewhere else, we don't need to change anything
+      IF declaration-is_somewhere_else = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      " Is this just another reference of an already analyzed one?
+      UNASSIGN: <candidate_parameter>.
+      READ TABLE e_parameter_candidates ASSIGNING <candidate_parameter> WITH TABLE KEY declaration_reference = declaration-reference.
+      IF <candidate_parameter> IS ASSIGNED.
+        " Analysis already done, just add this reference and continue with the next reference...
+        INSERT reference_in_selection INTO TABLE <candidate_parameter>-occurrence_references.
+      ELSE.
+        " New reference, add declaration and analyze!
+        CLEAR: candidate_parameter.
+        candidate_parameter-declaration_reference = declaration-reference.
+        INSERT reference_in_selection INTO TABLE candidate_parameter-occurrence_references.
+        " If we have a type which is defined in the source method and also referenced in the extracted method,
+        " we know that we have to define this type also in the extracted method!
+        IF declaration-is_type_definition = abap_true AND declaration-is_in_selection = abap_true.
+          data_declaration_info = me->analyze_data_declaration( i_declaration_reference = declaration-reference ).
+
+          "don't create empty types for implicite data declarations e.g: inline, or aggregate functions in selects
+          IF data_declaration_info-original_type IS NOT INITIAL.
+            INSERT data_declaration_info-original_type INTO TABLE e_source_types.
+          ENDIF.
+
+          CONTINUE.
+        ENDIF.
+        IF declaration-is_type_definition = abap_true AND declaration-is_in_method = abap_true.
+          CONTINUE.
+        ENDIF.
+        INSERT candidate_parameter INTO TABLE e_parameter_candidates ASSIGNING <candidate_parameter>.
+      ENDIF.
+
+      IF is_write_access( EXPORTING i_compiler_reference = reference_in_selection ) = abap_true.
+        <candidate_parameter>-contains_write_access = abap_true.
+      ENDIF.
+
+      IF <candidate_parameter>-declaration_reference-mode2 = cl_abap_compiler=>mode2_def_write.
+        <candidate_parameter>-is_inline_declaration = abap_true.
+      ENDIF.
+
+      " Check if it's a method parameter...
+*      CLEAR: reference_occurrence.
+      IF declaration-is_in_signature = abap_true.
+        CASE declaration-predefined_direction.
+          WHEN if_rfac_impl_types=>co_param_transfer_direction-importing.
+            <candidate_parameter>-parameter_direction = declaration-predefined_direction.
+            CONTINUE.
+*          reference_occurrence-before = abap_true.
+          WHEN if_rfac_impl_types=>co_param_transfer_direction-changing.
+            reference_occurrence-before = abap_true.
+            reference_occurrence-after = abap_true.
+          WHEN if_rfac_impl_types=>co_param_transfer_direction-returning OR
+               if_rfac_impl_types=>co_param_transfer_direction-exporting.
+            reference_occurrence-after = abap_true.
+        ENDCASE.
+      ENDIF.
+
+      " Seek out the occurrences of this reference in the source method!
+      LOOP AT me->source_method_content-compiler_references INTO reference_in_method
+        USING KEY fullname_key WHERE full_name = reference_in_selection-full_name AND grade = cl_abap_compiler=>grade_direct.
+
+        " Check at which position this reference is used outside the selection...
+        IF is_before_selection( reference_in_method = reference_in_method reference_in_selection = reference_in_selection ) = abap_true.
+          " We only consider references before the selection if the first reference in the selection
+          " is NOT a write access. If it is a write access, the usages are independent from each other.
+          IF me->is_first_one_write_or_assign( i_reference_for_compare    = reference_in_method
+                                            i_references_of_next_block = me->source_method_content-first_direct_references-in_selection ) = abap_false.
+            reference_occurrence-before = abap_true.
+          ENDIF.
+        ELSEIF is_after_selection( reference_in_method = reference_in_method reference_in_selection = reference_in_selection ) = abap_true.
+          " We only consider references after the selection if the first reference after the selection
+          " is NOT a write access. If it is a write access, the usages are independent from each other.
+          " This only applies if the variable declaration is NOT in the selection.
+          IF declaration-is_in_selection = abap_true OR
+             me->is_first_one_write_or_assign( i_reference_for_compare    = reference_in_method
+                                            i_references_of_next_block = me->source_method_content-first_direct_references-after_selection ) = abap_false.
+            reference_occurrence-after = abap_true.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      IF declaration-is_in_selection = abap_true.
+        ASSERT reference_occurrence-before = abap_false.
+        IF reference_occurrence-after  = abap_false.
+          " Declaration is in selection, no external references
+          " => No additional parameter or local declaration needed!
+          <candidate_parameter>-no_additional_element = abap_true.
+        ELSE.
+          <candidate_parameter>-is_source_local = abap_true.
+        ENDIF.
+      ENDIF.
+
+      " Locals
+      IF declaration-is_in_method    = abap_true AND
+         reference_occurrence-before = abap_false AND
+         reference_occurrence-after  = abap_false.
+        <candidate_parameter>-is_local = abap_true.
+      ENDIF.
+
+      " Importing/Changing
+      IF reference_occurrence-before = abap_true AND
+         reference_occurrence-after  = abap_false.
+        IF <candidate_parameter>-contains_write_access = abap_false.
+          <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-importing.
+        ELSE.
+          <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-changing.
+        ENDIF.
+      ENDIF.
+
+      " Exporting
+      IF reference_occurrence-before = abap_false AND
+         reference_occurrence-after  = abap_true.
+        IF <candidate_parameter>-contains_write_access = abap_false.
+          <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-importing.
+        ELSE.
+          <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-exporting.
+        ENDIF.
+      ENDIF.
+
+      " Changing
+      IF reference_occurrence-before = abap_true AND
+         reference_occurrence-after  = abap_true.
+        IF <candidate_parameter>-contains_write_access = abap_false.
+          <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-importing.
+        ELSE.
+          <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-changing.
+        ENDIF.
+      ENDIF.
+
+      " Check for assignments to field symbols
+      IF ( reference_in_selection-mode2 = cl_abap_compiler=>mode2_def_assign OR reference_in_selection-mode2 = cl_abap_compiler=>mode2_assign ) AND
+         ( <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-changing OR
+           <candidate_parameter>-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-exporting ).
+        RAISE EXCEPTION TYPE cx_rfac_error
+          EXPORTING
+            textid = cx_rfac_error=>changes_to_field_symbols.
+      ENDIF.
+
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD is_write_access.
+
+    IF i_compiler_reference-mode2 = cl_abap_compiler=>mode2_name. "formal parameter
+      r_result = abap_false.
+    ELSEIF i_compiler_reference-mode2 = cl_abap_compiler=>mode2_read OR
+           i_compiler_reference-mode2 = cl_abap_compiler=>mode2_ref_read.
+
+      IF is_fs_assigned_in_same_statmnt( i_compiler_reference ).
+        " if the variable in the given reference is assigned to a field symbol we have to consider a write access
+        r_result = abap_true.
+      ELSEIF is_ref_write_in_same_stamnt( i_compiler_reference ).
+        " if the variable in the given reference is assigned to a reference variable we have to consider a write access too
+        r_result = abap_true.
+      ELSE.
+        r_result = abap_false.
+      ENDIF.
+
+    ELSE.
+      r_result = abap_true.
+    ENDIF.
+
+    " One and only exception: If we find a constant, we can guarantee read-only access!
+    " This coding can be removed as soon as CL_ABAP_COMPILER provides all information
+    READ TABLE me->source_method_content-compiler_references INTO DATA(declaration_reference)
+      WITH TABLE KEY fullname_key COMPONENTS full_name = i_compiler_reference-full_name grade = cl_abap_compiler=>grade_definition.
+    IF declaration_reference IS NOT INITIAL.
+      DATA(data_declaration_info) = me->analyze_data_declaration( i_declaration_reference = declaration_reference ).
+      IF data_declaration_info-is_constant = abap_true.
+        r_result = abap_false.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD is_ref_write_in_same_stamnt.
+
+    DATA(pst_statement) = get_pst_statement_for( i_reference-statement ).
+
+    IF pst_statement IS BOUND AND pst_statement->contains_keyword( `REFERENCE` ).
+      DATA(index_keyword_reference) = pst_statement->find_index_for_keyword( `REFERENCE` ).
+      IF pst_statement->has_keyword_at_index( i_keyword = `INTO` i_index = index_keyword_reference + 1  ) OR
+         ( pst_statement->has_keyword_at_index( i_keyword = `GET` i_index = index_keyword_reference - 1  ) AND
+           pst_statement->has_keyword_at_index( i_keyword = `OF` i_index = index_keyword_reference + 1  ) ).
+        r_result = abap_true.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD is_functional_call.
+
+    r_result = xsdbool( i_method-returning IS NOT INITIAL AND i_method-exporting IS INITIAL AND i_method-changing IS INITIAL AND ( i_method-class_based_exceptions = abap_true OR i_method-exceptions IS INITIAL ) ).
+
+  ENDMETHOD.
+
+
+  METHOD is_fs_assigned_in_same_statmnt.
+
+    LOOP AT me->references_in_selection INTO DATA(ref_same_statement) WHERE statement = i_reference-statement.
+
+      IF ref_same_statement-full_name = i_reference-full_name.
+        "exactly same reference
+        CONTINUE.
+      ENDIF.
+
+      IF ref_same_statement-mode2 = cl_abap_compiler=>mode2_assign OR
+         ref_same_statement-mode2 = cl_abap_compiler=>mode2_def_assign.
+        r_result = abap_true.
+        RETURN.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD is_first_one_write_or_assign.
+    DATA: data_reference         TYPE REF TO cl_abap_comp_data,
+          component_found        TYPE abap_bool,
+          range_for_wanted_modes TYPE RANGE OF char01.
+
+    READ TABLE i_references_of_next_block INTO DATA(first_reference) WITH TABLE KEY fullname_key COMPONENTS full_name = i_reference_for_compare-full_name grade = cl_abap_compiler=>grade_direct.
+    CHECK first_reference IS NOT INITIAL.
+
+    IF matches( val = i_reference_for_compare-name regex = '<\w+>' ).
+      "field symbol
+      range_for_wanted_modes = VALUE #( sign = 'I' option = 'EQ' ( low = cl_abap_compiler=>mode2_assign )
+                                                                 ( low = cl_abap_compiler=>mode2_def_assign ) ).
+    ELSE.
+      range_for_wanted_modes = VALUE #( sign = 'I' option = 'EQ' ( low = cl_abap_compiler=>mode2_def_write )
+                                                                 ( low = cl_abap_compiler=>mode2_ref_write )
+                                                                 ( low = cl_abap_compiler=>mode2_write ) ).
+    ENDIF.
+
+
+    IF first_reference-symbol IS INSTANCE OF cl_abap_comp_data.
+      data_reference ?= first_reference-symbol.
+      IF data_reference->type IS NOT INSTANCE OF cl_abap_comp_table_type.
+        " We can't distinguish between table appends/inserts and table overwrites.
+        " Therefore ignore writes to tables here for now...
+
+        IF ( first_reference-mode2 IN range_for_wanted_modes ).
+          " Some fuzzy logic to avoid that we have just have a component access ...
+          DATA(full_name_root_comp_access) = first_reference-full_name && '\'.
+          LOOP AT i_references_of_next_block INTO DATA(component_access_reference) WHERE full_name CS full_name_root_comp_access AND grade = cl_abap_compiler=>grade_direct. "#EC CI_SORTSEQ
+            IF component_access_reference-line = first_reference-line AND component_access_reference-column > first_reference-column.
+              component_found = abap_true.
+              EXIT.
+            ENDIF.
+          ENDLOOP.
+          IF component_found = abap_false.
+            r_result = abap_true.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD is_field_symbol.
+    r_result = xsdbool( matches( val = i_candidate_parameter-declaration_reference-name regex = '<\w+>' ) ).
+  ENDMETHOD.
+
+
+  METHOD is_before_selection.
+    r_result = boolc( reference_in_method-statement->end_line < source_selection-start_position-row OR
+                      ( reference_in_method-statement->end_line = source_selection-start_position-row AND
+                        reference_in_method-statement->end_column < source_selection-start_position-col ) ).
+  ENDMETHOD.
+
+
+  METHOD is_after_selection.
+    r_result = boolc( reference_in_method-statement->start_line > source_selection-end_position-row OR
+         ( reference_in_method-statement->start_line = source_selection-end_position-row AND
+           reference_in_method-statement->start_column > source_selection-end_position-col ) ).
+  ENDMETHOD.
+
+
+  METHOD initialize.
+    me->selected_statements = blackboard->get_selected_statements(  ).
+    me->scan_and_qualify_source_method( ).
+    me->abap_compiler = me->source_repository->get_abap_compiler( ).
+  ENDMETHOD.
+
+
+  METHOD if_rfac_selection_analyzer~supports_method_extraction.
+
+    TRY.
+        me->check_extract_method_supported( ).
+        r_is_supported = abap_true.
+      CATCH cx_rfac_error.
+        CLEAR: r_is_supported.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD if_rfac_selection_analyzer~get_selection_as_method.
+
+    CLEAR: e_method.
+
+    me->check_extract_method_supported( ).
+
+    me->initialize( ).
+
+    me->get_source_method_information( ).
+
+    me->determine_visibility_and_kind( CHANGING c_method = e_method ).
+    me->add_source_body( CHANGING c_method = e_method ).
+
+    me->fill_parameter_definitions(  ).
+
+    "this method does 4 things
+    "collect the usage references which are inside of the selected code snippet
+    "collect the first usage reference of a thing inside of the selected code snippet
+    "collect the first usage reference of a thing after the selected code snippet
+    "maybe missing ? collect the last usage reference of a thing before the selected code snippet
+    me->get_compiler_refs_for_method( ).
+
+    "determine parameters of the surrounding method with their compiler reference -> get rid of that in the first step.
+
+
+
+    me->get_exception_information( CHANGING c_method = e_method ).
+
+    me->get_info_for_extract_method( CHANGING c_method = e_method ).
+
+    me->adjust_types_on_name_conflicts( CHANGING c_method = e_method ).
+
+  ENDMETHOD.
+
+
+  METHOD handle_inline_declaration.
+    IF i_possible_declaration-mode2 = cl_abap_compiler=>mode2_def_write.
+      DATA(new_write_reference) = i_possible_declaration.
+      new_write_reference-mode2 = cl_abap_compiler=>mode2_write.
+      new_write_reference-grade = cl_abap_compiler=>grade_direct.
+      INSERT new_write_reference INTO TABLE c_compiler_references.
+    ELSEIF   i_possible_declaration-mode2 = cl_abap_compiler=>mode2_def_assign.
+      DATA(new_assign_reference) = i_possible_declaration.
+      new_assign_reference-mode2 = cl_abap_compiler=>mode2_assign.
+      new_assign_reference-grade = cl_abap_compiler=>grade_direct.
+      INSERT new_assign_reference INTO TABLE c_compiler_references.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD handle_first_ref_in_selection.
+
+    CHECK i_compiler_reference-grade = cl_abap_compiler=>grade_direct.
+
+    IF NOT line_exists( me->source_method_content-first_direct_references-in_selection[ KEY fullname_key COMPONENTS full_name = i_compiler_reference-full_name grade = cl_abap_compiler=>grade_direct ] ).
+      INSERT i_compiler_reference INTO TABLE me->source_method_content-first_direct_references-in_selection.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD handle_first_ref_after_select.
+
+    CHECK i_compiler_reference-grade = cl_abap_compiler=>grade_direct.
+    CHECK i_compiler_reference-statement->start_line > me->source_selection-end_position-row OR
+         ( i_compiler_reference-statement->start_line = me->source_selection-end_position-row AND
+           i_compiler_reference-statement->start_column >= me->source_selection-end_position-col ).
+
+    IF NOT line_exists( me->source_method_content-first_direct_references-after_selection[ KEY fullname_key COMPONENTS full_name = i_compiler_reference-full_name grade = cl_abap_compiler=>grade_direct ] ).
+      INSERT i_compiler_reference INTO TABLE me->source_method_content-first_direct_references-after_selection.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_source_method_information.
+
+    DATA: raw_full_name  TYPE string,
+          error_occurred TYPE abap_bool,
+          references     TYPE scr_refs.
+
+    DATA(backend_pos_id_method_impl) = pst_method_implementation->method_imp_node->get_identifier_position( )->get_backend_position( ).
+
+    me->abap_compiler->get_full_name_for_position(
+      EXPORTING
+        p_include   = backend_pos_id_method_impl->include
+        p_line      = backend_pos_id_method_impl->range-start-row
+        p_column    = backend_pos_id_method_impl->range-end-col - 1 "at the end of method name to get the method and not a interface e.g: if~method
+      IMPORTING
+        p_full_name = raw_full_name
+        p_error     = error_occurred
+      EXCEPTIONS
+        OTHERS      = 4
+    ).
+    IF sy-subrc <> 0 OR error_occurred = abap_true OR raw_full_name IS INITIAL.
+      RAISE EXCEPTION TYPE cx_rfac_error MESSAGE e023(srfac_impl).
+    ENDIF.
+
+    me->source_method_info-full_name = cl_ris_abap_fullname=>create( iv_abap_fullname = raw_full_name ).
+
+    me->abap_compiler->get_single_ref(
+      EXPORTING
+        p_full_name  = raw_full_name
+        p_grade      = cl_abap_compiler=>grade_definition
+        p_only_first = abap_true
+        p_extended   = abap_true
+      IMPORTING
+        p_result     = references
+        p_error      = error_occurred
+      EXCEPTIONS
+        OTHERS       = 4
+    ).
+    IF sy-subrc <> 0 OR error_occurred = abap_true OR references IS INITIAL.
+      RAISE EXCEPTION TYPE cx_rfac_error MESSAGE e023(srfac_impl).
+    ENDIF.
+
+    me->source_method_info-compiler_reference = references[ 1 ].
+
+    DATA(method_def) = pst_method_implementation->get_method_definition(  ).
+    IF method_def IS BOUND AND method_def->is_interface_method(  ) AND method_def->get_interface(  )->is_global(  ) = abap_false.
+      me->source_method_info-is_in_local_interface = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_pst_statement_for.
+
+    DATA(statement_table) = pst_method_implementation->method_imp_node->first_statement->get_pst_statement_table(  ).
+
+    DATA(backend_source_pos_statement) = cl_pst_source_position=>create(
+      i_include   = i_reference_statement->source_info->name
+      i_start_row = i_reference_statement->start_line
+      i_start_col = i_reference_statement->start_column ).
+
+    TRY.
+
+        r_result = statement_table->get_statement_at_position( backend_source_pos_statement->get_frontend_position( ) ).
+
+      CATCH cx_quickfix_error.
+        CLEAR r_result.
+    ENDTRY.
+
+
+  ENDMETHOD.
+
+
+  METHOD get_instance.
+    CREATE OBJECT r_instance.
+    r_instance->source_repository = lcl_source_repository_factory=>get_repository( i_blackboard = i_blackboard ).
+    r_instance->blackboard = i_blackboard.
+    r_instance->source_selection = r_instance->source_repository->get_backend_source_selection( ).
+  ENDMETHOD.
+
+
+  METHOD get_info_for_extract_method.
+
+    DATA: reference_in_selection  TYPE scr_ref,
+          parameter               TYPE if_rfac_impl_types=>ts_param,
+          local_declaration       TYPE string,
+          parameter_occurrence    TYPE if_rfac_impl_types=>ts_param_occurrence,
+          data_declaration_info   TYPE ty_s_data_declaration_info,
+          used_parameters         TYPE SORTED TABLE OF string WITH UNIQUE KEY table_line,
+          type_operator           TYPE string,
+          parameter_type          TYPE string,
+          data_keyword            TYPE string,
+          local_type              TYPE if_rfac_impl_types=>ts_type,
+          type_declared_locally   TYPE abap_bool,
+          type_operator_supported TYPE abap_bool,
+          lower_type_name         TYPE string,
+          type_to_copy            TYPE if_rfac_impl_types=>ts_type,
+          types_to_copy           TYPE if_rfac_impl_types=>tt_types,
+          msgv                    TYPE symsgv,
+          token                   TYPE stokesx,
+          BEGIN OF compiler_type_definition,
+            data_reference TYPE REF TO cl_abap_comp_data,
+            type_name      TYPE string,
+            type_operator  TYPE string,
+          END OF compiler_type_definition.
+
+    me->qualify_refs_in_selection( IMPORTING e_parameter_candidates = DATA(parameter_candidates)
+                                             e_source_types         = c_method-source_types
+                                             e_types_to_copy        = types_to_copy ).
+
+    LOOP AT types_to_copy INTO type_to_copy.
+      APPEND |TYPES { type_to_copy-name } { type_to_copy-typetype } { type_to_copy-value }.| TO c_method-locals.
+    ENDLOOP.
+
+    LOOP AT parameter_candidates INTO DATA(parameter_candidate) WHERE no_additional_element = abap_false. "#EC CI_SORTSEQ
+      CLEAR: compiler_type_definition, type_operator, type_declared_locally, type_operator_supported, lower_type_name.
+
+      "this part needs to be restructured it should be distinguished between parameters and locals at the beginning
+      "if a type is usable for variables there is no problem for locals
+      "if a type is not usable for parameters a helper type needs to be generated...
+*      IF sy-uname = 'LANGMARK0'.
+*
+*        IF parameter_candidate-is_local = abap_true OR parameter_candidate-is_source_local = abap_true.
+*
+*          DATA(variable) = pst_method_implementation->find_variable(  parameter_candidate-declaration_reference-name ).
+*
+*          data(type_info) = variable->get_corresponding_type_info(  ).
+*          if type_info->needs_helpertype4variable(  ).
+*            "TODO to be improved generate helper type instead
+*            RAISE EXCEPTION TYPE cx_rfac_error MESSAGE e058(srfac_impl) WITH parameter_candidate-declaration_reference-name.
+*          else.
+*
+*              case variable->kind.
+*              when ce_pst_kind=>fieldsymbol or ce_pst_kind=>fieldsymbol_declared_inline.
+*                data(keyword) = `FIELD-SYMBOLS`.
+*              when ce_pst_kind=>constant or ce_pst_kind=>local_constant.
+*                keyword = `CONSTANTS`.
+*              when others.
+*                keyword = `DATA`.
+*              endcase.
+*
+*              if variable->node->first_statement->contains_keyword( 'VALUE' ).
+*                data(index_for_value) = variable->node->first_statement->find_index_for_keyword( 'VALUE' ).
+*                data(value_addition) = | { variable->node->first_statement->get_substring_for_tokens( i_local_start_index = index_for_value ) }|.
+*              else.
+*                clear value_addition.
+*              endif.
+*
+*              data(declaration) = |{ keyword } { to_lower( parameter_candidate-declaration_reference-name ) } { to_upper( type_info->get_operator(  ) ) } { to_lower( type_info->get_name(  ) ) }{ value_addition }.|.
+*
+*            IF parameter_candidate-is_local = abap_true.
+*              append declaration to c_method-locals.
+*            endif.
+*            IF parameter_candidate-is_source_local = abap_true.
+*              append declaration to c_method-source_locals.
+*            ENDIF.
+*          endif.
+*
+*        ENDIF.
+*
+*      ENDIF.
+
+
+
+      TRY.
+          compiler_type_definition-data_reference ?= parameter_candidate-declaration_reference-symbol.
+
+          me->abap_compiler->get_type_code(
+            EXPORTING
+              p_type          = compiler_type_definition-data_reference->type
+            IMPORTING
+              p_name          = compiler_type_definition-type_name
+              p_type_operator = type_operator
+            EXCEPTIONS
+              invalid_type    = 1
+              OTHERS          = 2
+          ).
+          DATA(l_subrc) = sy-subrc.
+          type_operator_supported = lcl_abap_types_helper=>is_type_operator_supported( i_type_operator = to_lower( type_operator ) ).
+          IF l_subrc <> 0 OR compiler_type_definition-type_name IS INITIAL OR type_operator_supported = abap_false.
+
+            DATA(variable) = pst_method_implementation->find_variable( parameter_candidate-declaration_reference-name ).
+            DATA(type_info) = variable->get_corresponding_type_info(  ).
+
+            compiler_type_definition-type_name = type_info->get_name(  ).
+            type_operator = type_info->get_operator(  ).
+
+            type_operator_supported = lcl_abap_types_helper=>is_type_operator_supported( i_type_operator = to_lower( type_operator ) ).
+            IF compiler_type_definition-type_name IS INITIAL OR ( parameter_candidate-is_local = abap_false AND type_operator_supported = abap_false ).
+              IF contains( val = type_operator sub = 'TABLE' case = abap_false ).
+                compiler_type_definition-type_name = 'any table' ##NO_TEXT.
+              ELSE.
+                compiler_type_definition-type_name = 'any'.
+              ENDIF.
+              type_operator                      = if_rfac_impl_types=>co_parameter_type_type-type.
+            ENDIF.
+
+          ENDIF.
+          CASE to_lower( type_operator ).
+            WHEN 'type ref to'.
+              compiler_type_definition-type_operator = if_rfac_impl_types=>co_parameter_type_type-type_ref_to.
+            WHEN 'type'.
+              compiler_type_definition-type_operator = if_rfac_impl_types=>co_parameter_type_type-type.
+            WHEN 'like'.
+              compiler_type_definition-type_operator = if_rfac_impl_types=>co_parameter_type_type-like.
+            WHEN OTHERS.
+              compiler_type_definition-type_operator = type_operator.
+          ENDCASE.
+        CATCH cx_sy_move_cast_error.
+          compiler_type_definition-type_name     = 'any'.
+          compiler_type_definition-type_operator = if_rfac_impl_types=>co_parameter_type_type-type.
+      ENDTRY.
+
+      lower_type_name = to_lower( compiler_type_definition-type_name ).
+      READ TABLE c_method-source_types WITH TABLE KEY name = lower_type_name TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+        type_declared_locally = abap_true.
+      ENDIF.
+
+      CLEAR: data_declaration_info, parameter_type.
+      data_declaration_info = me->analyze_data_declaration( i_declaration_reference = parameter_candidate-declaration_reference i_current_types = c_method-types ).
+      parameter_type = compiler_type_definition-type_name.
+
+*      if sy-uname <> 'LANGMARK0'.
+      " Candidate Parameter becomes a variable declaration
+      IF parameter_candidate-is_local = abap_true OR parameter_candidate-is_source_local = abap_true.
+        " Is the determined parameter either generic or already determined?
+        " If yes, we need to reuse it here...
+        IF ( lcl_abap_types_helper=>is_generic_type( i_parameter_type = parameter_type ) = abap_true AND is_field_symbol( parameter_candidate ) = abap_false ) OR type_declared_locally = abap_true.
+          CLEAR: local_type.
+          READ TABLE c_method-source_types WITH TABLE KEY name = data_declaration_info-original_type-value INTO local_type.
+          IF sy-subrc = 0.
+            data_declaration_info-original_type = local_type.
+          ELSE.
+            IF data_declaration_info-original_type IS INITIAL.
+              msgv = parameter_candidate-declaration_reference-name.
+              RAISE EXCEPTION TYPE cx_rfac_error MESSAGE e058(srfac_impl) WITH msgv.
+            ENDIF.
+            add_type_to_method_desc( EXPORTING i_type = data_declaration_info-original_type CHANGING c_method = c_method ).
+
+          ENDIF.
+        ENDIF.
+        IF is_field_symbol( parameter_candidate ).
+          IF type_declared_locally = abap_true.
+            local_declaration = |FIELD-SYMBOLS { to_lower( parameter_candidate-declaration_reference-name ) } { to_upper( if_rfac_impl_types=>co_parameter_type_type-type ) } { data_declaration_info-original_type-name }.|.
+          ELSEIF lcl_abap_types_helper=>is_generic_type( i_parameter_type = parameter_type ).
+            local_declaration = |FIELD-SYMBOLS { to_lower( parameter_candidate-declaration_reference-name ) } { to_upper( compiler_type_definition-type_operator ) } { to_upper( compiler_type_definition-type_name ) }.|.
+          ELSE.
+            local_declaration = |FIELD-SYMBOLS { to_lower( parameter_candidate-declaration_reference-name ) } { to_upper( compiler_type_definition-type_operator ) } { to_lower( compiler_type_definition-type_name ) }.|.
+          ENDIF.
+        ELSE.
+          CLEAR: data_keyword.
+          IF data_declaration_info-is_constant = abap_true.
+            data_keyword = 'CONSTANTS'.
+          ELSE.
+            data_keyword = 'DATA'.
+          ENDIF.
+          IF lcl_abap_types_helper=>is_generic_type( i_parameter_type = parameter_type ) = abap_true OR type_declared_locally = abap_true.
+            local_declaration = |{ data_keyword } { to_lower( parameter_candidate-declaration_reference-name ) } { to_upper( if_rfac_impl_types=>co_parameter_type_type-type ) } { data_declaration_info-original_type-name }|.
+          ELSE.
+            local_declaration = |{ data_keyword } { to_lower( parameter_candidate-declaration_reference-name ) } { to_upper( compiler_type_definition-type_operator ) } { to_lower( compiler_type_definition-type_name ) }|.
+            IF data_declaration_info-is_initial = abap_true.
+              local_declaration = local_declaration && ' VALUE IS INITIAL'.
+            ENDIF.
+            IF data_declaration_info-value IS NOT INITIAL.
+              local_declaration = |{ local_declaration } VALUE { data_declaration_info-value }|.
+            ENDIF.
+          ENDIF.
+
+          local_declaration = local_declaration && '.'.
+        ENDIF.
+        IF parameter_candidate-is_source_local = abap_true.
+          APPEND local_declaration TO c_method-source_locals.
+        ELSE.
+          APPEND local_declaration TO c_method-locals.
+        ENDIF.
+      ENDIF.
+
+*      endif.
+
+      IF parameter_candidate-parameter_direction IS NOT INITIAL.
+        " Check if we have a LIKE reference to a local field, this is not possible!
+        IF compiler_type_definition-type_operator = if_rfac_impl_types=>co_parameter_type_type-like AND
+           compiler_type_definition-data_reference->type->full_name CS |{ me->source_method_info-full_name->if_ris_abap_fullname~get_abap_fullname( ) }\\|.
+          msgv = parameter_candidate-declaration_reference-name.
+          RAISE EXCEPTION TYPE cx_rfac_error
+            EXPORTING
+              textid = cx_rfac_error=>type_in_source_method
+              msgv1  = msgv.
+        ENDIF.
+        CLEAR: parameter.
+        IF ( lcl_abap_types_helper=>is_generic_type( i_parameter_type = parameter_type ) = abap_true OR type_declared_locally = abap_true ) AND
+           data_declaration_info-original_type IS NOT INITIAL.
+          IF data_declaration_info-is_generic = abap_true.
+            compiler_type_definition-type_name = data_declaration_info-original_type-value.
+          ELSE.
+            add_type_to_method_desc( EXPORTING i_type = data_declaration_info-original_type CHANGING c_method = c_method ).
+            DELETE c_method-source_types WHERE name = data_declaration_info-original_type-name.
+            compiler_type_definition-type_name = data_declaration_info-original_type-name.
+          ENDIF.
+        ENDIF.
+        IF is_field_symbol( parameter_candidate ).
+          " Field-Symbol!
+          parameter-actual = to_lower( parameter_candidate-declaration_reference-name ).
+          parameter-name   = shift_left( val = parameter-actual places = 1 ).
+          parameter-name   = shift_right( val = parameter-name places = 1 ).
+
+        ELSE.
+          " Normal field...
+          parameter-name = parameter-actual = to_lower( parameter_candidate-declaration_reference-name ).
+        ENDIF.
+        READ TABLE used_parameters WITH TABLE KEY table_line = parameter-name TRANSPORTING NO FIELDS.
+        IF sy-subrc = 0.
+          " Name collision with former field-symbol, append '_fs'
+          parameter-name = parameter-name && '_fs'.
+          READ TABLE used_parameters WITH TABLE KEY table_line = parameter-name TRANSPORTING NO FIELDS.
+          IF sy-subrc = 0.
+            " OK, this is the hard way, there's another parameter with the '_fs' suffix!
+            " We append a generated UUID...
+            TRY.
+                IF strlen( parameter-name ) > 20. " truncation causes exception otherwise
+                  parameter-name = parameter-name(20).
+                ENDIF.
+                parameter-name = parameter-name && to_lower( cl_system_uuid=>if_system_uuid_static~create_uuid_c32( ) ).
+              CATCH cx_uuid_error.                      "#EC NO_HANDLER
+                " Really bad luck, but no way out!
+            ENDTRY.
+          ENDIF.
+        ENDIF.
+        INSERT parameter-name INTO TABLE used_parameters.
+        parameter-typetype = compiler_type_definition-type_operator.
+        parameter-type     = to_lower( compiler_type_definition-type_name ).
+        CLEAR: type_to_copy.
+        READ TABLE types_to_copy WITH TABLE KEY name = parameter-type INTO type_to_copy.
+        IF type_to_copy IS NOT INITIAL.
+          INSERT type_to_copy INTO TABLE c_method-types.
+        ENDIF.
+        LOOP AT parameter_candidate-occurrence_references INTO reference_in_selection.
+          IF parameter_candidate-is_source_local = abap_true AND
+             reference_in_selection-grade = cl_abap_compiler=>grade_definition.
+            CONTINUE.
+          ENDIF.
+          " Recursive method calls
+          READ TABLE me->source_method_info-parameter_definitions WITH TABLE KEY full_name = reference_in_selection-full_name TRANSPORTING NO FIELDS.
+          IF sy-subrc = 0.
+            CLEAR: token.
+            READ TABLE me->source_method_content-tokens INTO token WITH KEY row = reference_in_selection-line col = reference_in_selection-column.
+            IF token-type = sana_tok_form_param.
+              CONTINUE.
+            ENDIF.
+          ENDIF.
+          CLEAR: parameter_occurrence.
+          " Adjust column if needed
+          IF reference_in_selection-line = me->source_selection-start_position-row.
+            " Reference is in the line where selection starts...
+            parameter_occurrence-start_col = reference_in_selection-column - me->source_selection-start_position-col.
+          ELSE.
+            parameter_occurrence-start_col = reference_in_selection-column.
+          ENDIF.
+          parameter_occurrence-end_col = parameter_occurrence-start_col + strlen( reference_in_selection-name ).
+          parameter_occurrence-start_row = parameter_occurrence-end_row = ( reference_in_selection-line - me->source_selection-start_position-row + 1 ).
+          INSERT parameter_occurrence INTO TABLE parameter-occurrences.
+        ENDLOOP.
+        IF parameter_candidate-parameter_direction = if_rfac_impl_types=>co_param_transfer_direction-exporting AND
+           parameter_candidate-is_inline_declaration = abap_true.
+          me->remove_inline_declaration( EXPORTING i_candidate_parameter = parameter_candidate
+                                         CHANGING  c_method_body         = c_method-body ).
+        ENDIF.
+        CASE parameter_candidate-parameter_direction.
+          WHEN if_rfac_impl_types=>co_param_transfer_direction-importing.
+            INSERT parameter INTO TABLE c_method-importing.
+          WHEN if_rfac_impl_types=>co_param_transfer_direction-exporting.
+            INSERT parameter INTO TABLE c_method-exporting.
+          WHEN if_rfac_impl_types=>co_param_transfer_direction-changing.
+            INSERT parameter INTO TABLE c_method-changing.
+          WHEN if_rfac_impl_types=>co_param_transfer_direction-returning.
+            c_method-returning = parameter.
+            c_method-returning-byvalue = abap_true.
+        ENDCASE.
+      ENDIF.
+    ENDLOOP.
+
+    IF c_method-returning IS NOT INITIAL AND ( c_method-exporting IS NOT INITIAL OR c_method-changing IS NOT INITIAL ).
+      INSERT c_method-returning INTO TABLE c_method-exporting.
+      CLEAR: c_method-returning.
+    ENDIF.
+
+    IF lines( c_method-exporting ) = 1 AND c_method-changing IS INITIAL.
+      CLEAR: c_method-returning, parameter.
+      READ TABLE c_method-exporting INTO parameter INDEX 1.
+      IF lcl_abap_types_helper=>is_generic_type( i_parameter_type = parameter-type ) = abap_false.
+        c_method-returning = parameter.
+        c_method-returning-byvalue = abap_true.
+        CLEAR: c_method-exporting.
+      ENDIF.
+    ENDIF.
+
+    c_method-is_functional_call = is_functional_call( c_method ).
+
+  ENDMETHOD.
+
+
+  METHOD get_exception_information.
+
+    "class based exceptions
+    DATA(uncaught_exceptions) = snippet->get_uncaught_exceptions(  ).
+
+    cl_art_exception=>remove_unpropagatable_exc( CHANGING c_exceptions = uncaught_exceptions ).
+    cl_art_exception=>remove_subclass_exceptions( CHANGING c_exceptions = uncaught_exceptions ).
+
+    LOOP AT uncaught_exceptions INTO DATA(uncaught_exception).
+
+      IF NOT line_exists( c_method-exceptions[ name = to_lower( uncaught_exception->exception_class->name ) ] ).
+
+        INSERT VALUE #( name = to_lower( uncaught_exception->exception_class->name )
+                        resumable = uncaught_exception->is_resumable(  ) ) INTO TABLE c_method-exceptions.
+
+      ENDIF.
+
+    ENDLOOP.
+
+    IF c_method-exceptions IS NOT INITIAL.
+      c_method-class_based_exceptions = abap_true.
+      RETURN.
+    ENDIF.
+
+    "non class based exceptions
+    LOOP AT selected_statements INTO DATA(statement_in_selection).
+
+      IF statement_in_selection->starts_with_keyword( `MESSAGE` ) AND statement_in_selection->contains_keyword( `RAISING` ).
+        DATA(index_classic_exception_token) = statement_in_selection->find_index_for_keyword( `RAISING` ) + 1.
+        DATA(exception_token) = statement_in_selection->get_local_token( index_classic_exception_token ).
+
+        IF NOT line_exists( c_method-exceptions[ name = to_lower( exception_token-str ) ] ).
+          INSERT VALUE #( name = to_lower( exception_token-str ) ) INTO TABLE c_method-exceptions.
+        ENDIF.
+        CONTINUE.
+
+      ENDIF.
+
+      IF statement_in_selection->starts_with_keyword( `RAISE` ) AND statement_in_selection->get_token_count(  ) = 2.
+        exception_token = statement_in_selection->get_local_token( 2 ).
+        IF NOT line_exists( c_method-exceptions[ name = to_lower( exception_token-str ) ] ).
+          INSERT VALUE #( name = to_lower( exception_token-str ) ) INTO TABLE c_method-exceptions.
+        ENDIF.
+        CONTINUE.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get_compiler_refs_for_method.
+
+    DATA: global_references          TYPE scr_glrefs,
+          global_reference           TYPE scr_glref,
+          compiler_references        TYPE scr_refs,
+          compiler_reference         TYPE scr_ref,
+          selopt_grades              TYPE scr_grades,
+          error_occurred             TYPE abap_bool,
+          name_grade                 TYPE scr_name_grade,
+          names_grades               TYPE scr_names_grades,
+          method_name                TYPE seomtdname,
+          lif_method_full_name       TYPE string,
+          compare_fullname           TYPE string,
+          references_above_selection TYPE tt_positions_and_references.
+
+    compare_fullname = me->source_method_info-compiler_reference-full_name && '\'.
+
+    method_name = me->source_method_info-full_name->if_ris_abap_fullname~get_part_value( iv_key = cl_abap_compiler=>tag_method ).
+
+    selopt_grades = VALUE #( sign = 'I' option = 'EQ' ( low =  cl_abap_compiler=>grade_definition ) ( low = cl_abap_compiler=>grade_direct ) ).
+
+    me->abap_compiler->get_all_refs( EXPORTING p_local    = abap_true
+                                               p_testcode = abap_true
+                                               p_grades   = selopt_grades
+                                               p_extended = abap_true
+                                     IMPORTING p_result   = global_references
+                                               p_error    = error_occurred ).
+    IF error_occurred = abap_true.
+      RAISE EXCEPTION TYPE cx_rfac_error MESSAGE e023(srfac_impl).
+    ENDIF.
+
+    " Handling for local interface definitions, these need to be included
+    " the compiler references as well...
+    IF me->source_method_info-is_in_local_interface EQ abap_true.
+      lif_method_full_name = '\' && cl_abap_compiler=>tag_program && ':' && me->source_selection-main_program &&
+                             '\' && cl_abap_compiler=>tag_type && ':' && me->source_method_info-full_name->if_ris_abap_fullname~get_part_value( iv_key = cl_abap_compiler=>tag_interface ) &&
+                             '\' && cl_abap_compiler=>tag_method && ':' && me->source_method_info-full_name->if_ris_abap_fullname~get_part_value( iv_key = cl_abap_compiler=>tag_method ) && '\'.
+    ENDIF.
+
+    LOOP AT global_references INTO global_reference.
+      IF global_reference-include = me->source_selection-start_position-include AND
+         global_reference-tag     <> cl_abap_compiler=>tag_shared_data AND
+         global_reference-tag     <> cl_abap_compiler=>tag_shared_type AND
+         global_reference-tag     <> cl_abap_compiler=>tag_enhancement_impl AND
+         global_reference-full_name(4) <> `\PT:`.
+        CLEAR: name_grade.
+        name_grade-full_name = global_reference-full_name.
+        name_grade-grade     = cl_abap_compiler=>grade_direct.
+        INSERT name_grade INTO TABLE names_grades.
+      ENDIF.
+      IF lif_method_full_name IS NOT INITIAL  AND global_reference-full_name CS lif_method_full_name AND
+         global_reference-tag     <> cl_abap_compiler=>tag_shared_data AND
+         global_reference-tag     <> cl_abap_compiler=>tag_shared_type AND
+         global_reference-tag     <> cl_abap_compiler=>tag_enhancement_impl AND
+         global_reference-full_name(4) <> `\PT:`.
+
+        CLEAR: name_grade.
+        name_grade-full_name = global_reference-full_name.
+        name_grade-grade     = cl_abap_compiler=>grade_definition.
+        INSERT name_grade INTO TABLE names_grades.
+      ENDIF.
+    ENDLOOP.
+
+    me->abap_compiler->get_single_ref( EXPORTING  p_full_names = names_grades
+                                                  p_extended   = abap_true
+                                       IMPORTING  p_result     = compiler_references
+                                                  p_error      = error_occurred
+                                       EXCEPTIONS OTHERS       = 4 ).
+
+    IF sy-subrc <> 0 OR error_occurred = abap_true.
+      RAISE EXCEPTION TYPE cx_rfac_error MESSAGE e023(srfac_impl).
+    ENDIF.
+
+    DATA(backend_pos_selection) = blackboard->get_pst_position4selection( )->get_backend_position( ).
+    DATA(backend_pos_method_body) = pst_method_implementation->get_body_position( )->get_backend_position( ).
+    DATA(backend_pos_above_selection) = backend_pos_method_body->get_start_position( )->span( backend_pos_selection->get_start_position(  ) ).
+    DATA(backend_pos_below_selection) = backend_pos_selection->get_end_position(  )->span( backend_pos_method_body->get_end_position( ) ).
+
+    DATA(context) = lcl_method_extraction_context=>create( i_source_method               = pst_method_implementation
+                                                           i_backend_pos_above_selection = backend_pos_above_selection
+                                                           i_backend_pos_selection       = backend_pos_selection
+                                                           i_backend_pos_below_selection = backend_pos_below_selection ).
+
+    LOOP AT compiler_references INTO compiler_reference.
+
+      DATA(position_compiler_reference) = cl_pst_source_position=>create(
+        i_main_prog = blackboard->get_main_programm( )
+        i_include   = compiler_reference-statement->source_info->name
+        i_start_row = compiler_reference-statement->start_line
+        i_start_col = compiler_reference-statement->start_column
+        i_end_row   = compiler_reference-statement->end_line
+        i_end_col   = compiler_reference-statement->end_column ).
+
+*      CASE abap_true.
+*        WHEN backend_pos_above_selection->includes( position_compiler_reference ).
+*          append value #( backend_position = position_compiler_reference reference = compiler_reference ) to references_above_selection.
+*        WHEN backend_pos_selection->includes( position_compiler_reference ).
+*          IF line_exists( affected_variables[ fullname = compiler_reference-full_name ] ).
+*            affected_variables[ fullname = compiler_reference-full_name ]-affected_variable->add_reference( i_backend_position = position_compiler_reference i_compiler_reference = compiler_reference ).
+*          ELSE.
+*            DATA(affected_variable) = lcl_affected_variable=>create( i_fullname = compiler_reference-full_name i_context = context ).
+*            affected_variable->add_reference( i_backend_position = position_compiler_reference i_compiler_reference = compiler_reference ).
+*            INSERT VALUE #( fullname = compiler_reference-full_name affected_variable = affected_variable ) INTO TABLE affected_variables.
+*          ENDIF.
+*        WHEN backend_pos_below_selection->includes( position_compiler_reference ).
+*          IF line_exists( affected_variables[ fullname = compiler_reference-full_name ] ).
+*            affected_variables[ fullname = compiler_reference-full_name ]-affected_variable->add_reference( i_backend_position = position_compiler_reference i_compiler_reference = compiler_reference ).
+*          ENDIF.
+*      ENDCASE.
+
+      IF backend_pos_selection->includes( position_compiler_reference ).
+*        IF line_exists( affected_variables[ fullname = compiler_reference-full_name ] ).
+*          affected_variables[ fullname = compiler_reference-full_name ]-affected_variable->add_reference( i_backend_position = position_compiler_reference i_compiler_reference = compiler_reference ).
+*        ELSE.
+*          INSERT VALUE #( fullname = compiler_reference-full_name affected_variable = lcl_affected_variable=>create( compiler_reference-full_name ) ) INTO TABLE affected_variables REFERENCE INTO DATA(line_ref).
+*          line_ref->*-affected_variable->add_reference( i_backend_position = position_compiler_reference i_compiler_reference = compiler_reference ).
+*        ENDIF.
+
+
+        INSERT compiler_reference INTO TABLE me->references_in_selection.
+
+        "TODO can we get rid of this method and handle inline declarations more explicit at other positions
+        me->handle_inline_declaration( EXPORTING i_possible_declaration = compiler_reference "add additional write references for inlinde declarations
+                                       CHANGING  c_compiler_references  = me->references_in_selection ).
+        me->handle_first_ref_in_selection( EXPORTING i_compiler_reference = compiler_reference ).
+        " References in the selection must not be in the method references table!
+        CONTINUE.
+      ENDIF.
+
+      IF backend_pos_method_body->includes( position_compiler_reference ).
+*        IF line_exists( affected_variables[ fullname = compiler_reference-full_name ] ).
+*          affected_variables[ fullname = compiler_reference-full_name ]-affected_variable->add_reference( i_backend_position = position_compiler_reference i_compiler_reference = compiler_reference ).
+*        ENDIF.
+
+
+        INSERT compiler_reference INTO TABLE me->source_method_content-compiler_references.
+
+        "TODO can we get rid of this method and handle inline declarations more explicit at other positions
+        me->handle_inline_declaration( EXPORTING i_possible_declaration = compiler_reference
+                                       CHANGING  c_compiler_references  = me->source_method_content-compiler_references ).
+        me->handle_first_ref_after_select( EXPORTING i_compiler_reference = compiler_reference ).
+        CONTINUE.
+      ENDIF.
+
+    ENDLOOP.
+
+*    loop at references_above_selection ASSIGNING FIELD-SYMBOL(<line>).
+*      IF line_exists( affected_variables[ fullname = <line>-reference-full_name ] ).
+*          affected_variables[ fullname = <line>-reference-full_name ]-affected_variable->add_reference( i_backend_position = <line>-backend_position i_compiler_reference = <line>-reference ).
+*      ENDIF.
+*    endloop.
+
+  ENDMETHOD.
+
+
+  METHOD fill_parameter_definitions.
+
+    DATA parameter_definition TYPE ty_s_parameter_definition.
+
+    DATA(source_method_definition) = pst_method_implementation->get_method_definition(  ).
+
+    DATA(parameters) = source_method_definition->get_parameters( ).
+
+    DATA(main_prog_method_def) = source_method_definition->def_node->source_position->main_prog.
+
+    DATA(compiler4source_method) = cl_art_source_repository=>get_instance( )->get_compiler_for_main_program( main_prog_method_def ).
+
+    LOOP AT parameters INTO DATA(parameter).
+
+      IF parameter->source_position IS INITIAL.
+        DATA(fullname_node_mapper) = cl_pst_fullname_node_mapper=>create( blackboard ).
+        DATA(parameter_fullname) = fullname_node_mapper->get_corresponding_fullname( parameter ).
+      ELSE.
+        DATA(parameter_start_pos) = parameter->source_position->get_start_position( )->get_backend_position( ).
+
+        DATA(column) = parameter_start_pos->range-start-col.
+
+        IF parameter->get_property( cl_pst_node=>co_properties-parameter_passed_as ) = 'VALUE'.
+          column = column + 6. "strlen( 'value(' ).
+        ENDIF.
+
+        compiler4source_method->get_full_name_for_position( EXPORTING  p_include                  = parameter_start_pos->include
+                                                                       p_line                     = parameter_start_pos->range-start-row
+                                                                       p_column                   = column
+                                                            IMPORTING  p_full_name                = parameter_fullname
+                                                            EXCEPTIONS include_not_found          = 1
+                                                                       object_not_found           = 2
+                                                                       program_fatal_syntax_error = 3
+                                                                       OTHERS                     = 4 ).
+        IF sy-subrc <> 0.
+          CONTINUE.
+        ENDIF.
+
+      ENDIF.
+
+      compiler4source_method->get_single_ref( EXPORTING  p_full_name      = parameter_fullname
+                                                         p_grade          = cl_abap_compiler=>grade_definition
+                                                         p_only_first     = abap_true
+                                                         p_extended       = abap_true
+                                              IMPORTING  p_result         = DATA(references)
+                                              EXCEPTIONS syntax_error     = 1
+                                                         object_not_found = 2
+                                                         ref_not_found    = 3
+                                                         parameter_error  = 4
+                                                         OTHERS           = 5 ).
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+      CHECK references IS NOT INITIAL.
+
+      parameter_definition-full_name          = parameter_fullname.
+      parameter_definition-compiler_reference = references[ 1 ].
+      parameter_definition-transfer_direction = to_lower( parameter->kind->keyword ).
+      INSERT parameter_definition INTO TABLE me->source_method_info-parameter_definitions.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD determine_visibility_and_kind.
+
+    " However, we use private for extracted methods per default.
+    c_method-visibility = if_rfac_impl_types=>co_method_visibility-private.
+
+    "definition include is where the surrounding class is defined
+    c_method-definition_include = blackboard->get_surrounding_class(  )->get_pos_of_definition(  )->include.
+    c_method-is_static = pst_method_implementation->is_static_method(  ).
+
+  ENDMETHOD.
+
+
+  METHOD determine_intf_data_fullname.
+
+    DATA places_to_shift TYPE i.
+
+    " Local interface method implementation?
+    IF me->source_method_info-is_in_local_interface = abap_true.
+      places_to_shift = 4 + strlen( me->source_selection-main_program ).
+      IF strlen( i_declaration-full_name ) > places_to_shift.
+        r_intf_data_fullname = i_declaration-full_name(places_to_shift).
+        places_to_shift = places_to_shift +
+                          4 + " Inner \TY:
+                          strlen( me->source_method_info-full_name->if_ris_abap_fullname~get_part_value( iv_key = cl_abap_compiler=>tag_type ) ) + " Length of class name
+                          3.
+        IF strlen( i_declaration-full_name ) > places_to_shift.
+          r_intf_data_fullname = r_intf_data_fullname && '\' && cl_abap_compiler=>tag_type && shift_left( val = i_declaration-full_name places = places_to_shift ).
+        ENDIF.
+      ENDIF.
+    ELSE.
+      " Class implementation of an external interface?
+      CLEAR: places_to_shift.
+      IF me->source_method_info-full_name->if_ris_abap_fullname~get_part_value( iv_key = cl_abap_compiler=>tag_program ) = me->source_selection-main_program.
+        places_to_shift = 4 + " Trailing \PR:
+                          strlen( me->source_selection-main_program ).
+      ENDIF.
+      " Get the name without the class name...
+      places_to_shift = places_to_shift +
+                        4 + " Trailing \TY:
+                        strlen( me->source_method_info-full_name->if_ris_abap_fullname~get_part_value( iv_key = cl_abap_compiler=>tag_type ) ) + " Length of class name
+                        3.
+      IF strlen( i_declaration-full_name ) > places_to_shift.
+        r_intf_data_fullname = shift_left( val = i_declaration-full_name places = places_to_shift ).
+        r_intf_data_fullname = '\' && cl_abap_compiler=>tag_type && r_intf_data_fullname.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD check_extract_method_supported.
+
+    pst_method_implementation = blackboard->get_surrounding_method(  ).
+
+    IF pst_method_implementation IS NOT BOUND.
+      RAISE EXCEPTION TYPE cx_rfac_error
+        EXPORTING
+          textid = cx_rfac_error=>no_valid_method_implementation.
+    ENDIF.
+
+    snippet = cl_art_snippet=>create( blackboard ).
+
+    IF snippet->can_be_extracted( ) = abap_false.
+      RAISE EXCEPTION TYPE cx_rfac_error USING MESSAGE.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD analyze_data_declaration.
+
+    DATA: include_name     TYPE programm,
+          statement        TYPE sstmnt,
+          statements       TYPE ty_t_sstmnt,
+          tokens           TYPE ty_t_stokesx,
+          token            TYPE stokesx,
+          new_type         TYPE if_rfac_impl_types=>ts_type-name,
+          like_found       TYPE abap_bool,
+          type_started     TYPE abap_bool,
+          type_found       TYPE abap_bool,
+          definition_found TYPE abap_bool,
+          value_found      TYPE abap_bool,
+          source           TYPE string_table,
+          msgv             TYPE symsgv.
+
+    " Data declaration is always within the already known include --> get it...
+    include_name = i_declaration_reference-statement->source_info->name.
+    me->source_repository->get_include_source_code( EXPORTING i_include_name = include_name
+                                                    IMPORTING e_source_code  = source ).
+
+    SCAN ABAP-SOURCE source WITH ANALYSIS WITH LIST TOKENIZATION
+                                                    FROM i_declaration_reference-statement->start_line
+                                                    TO   i_declaration_reference-statement->end_line
+                                                    TOKENS INTO tokens
+                                                    STATEMENTS INTO statements.
+
+    LOOP AT statements INTO statement.
+      CALL FUNCTION 'RS_QUALIFY_ABAP_TOKENS_STR'
+        EXPORTING
+          statement_type = statement-type
+          index_from     = statement-from
+          index_to       = statement-to
+        CHANGING
+          stokesx_tab    = tokens
+        EXCEPTIONS
+          OTHERS         = 0.
+    ENDLOOP.
+
+    LOOP AT tokens INTO token.
+      IF token-type = sana_tok_keyword AND token-str = 'CONSTANTS'.
+        r_data_declaration_info-is_constant = abap_true.
+      ENDIF.
+      IF ( token-type = sana_tok_field_def OR token-type = sana_tok_type_def ) AND token-str = i_declaration_reference-name.
+        definition_found = abap_true.
+        CONTINUE.
+      ENDIF.
+      IF definition_found = abap_true.
+        r_data_declaration_info-original_type-name = to_lower( i_declaration_reference-name ).
+        IF r_data_declaration_info-original_type-name CS '<' AND r_data_declaration_info-original_type-name CS '>'.
+          r_data_declaration_info-original_type-name = shift_left( val = r_data_declaration_info-original_type-name places = 1 ).
+          r_data_declaration_info-original_type-name = shift_right( val = r_data_declaration_info-original_type-name places = 1 ).
+        ENDIF.
+        new_type = r_data_declaration_info-original_type-name.
+        IF find( val = r_data_declaration_info-original_type-name regex = '^[tT]{1}[yY]{1}.*' ) = -1.
+          new_type = 'ty_' && new_type.
+        ENDIF.
+        IF i_current_types IS NOT INITIAL.
+          READ TABLE i_current_types WITH TABLE KEY name = new_type TRANSPORTING NO FIELDS.
+          IF sy-subrc = 0.
+            " Bad: Type name collision, try to create a new one...
+            TRY.
+                new_type = 'ty_' && shift_left( val = to_lower( cl_system_uuid=>if_system_uuid_static~create_uuid_c32( ) ) places = 22 ) && r_data_declaration_info-original_type-name.
+              CATCH cx_uuid_error.                      "#EC NO_HANDLER
+                " Really bad luck, but no way out!
+            ENDTRY.
+          ENDIF.
+        ENDIF.
+        r_data_declaration_info-original_type-name = new_type.
+        IF token-str = 'LIKE' AND token-type = sana_tok_word.
+          like_found = abap_true.
+          CONTINUE.
+        ENDIF.
+        IF like_found = abap_true.
+          IF token-type = sana_tok_word.
+            msgv = i_declaration_reference-name.
+            RAISE EXCEPTION TYPE cx_rfac_error
+              EXPORTING
+                textid = cx_rfac_error=>complex_like_reference
+                msgv1  = msgv.
+          ENDIF.
+          me->resolve_like_definition( EXPORTING i_like_token      = token
+                                       CHANGING  c_type_definition = r_data_declaration_info-original_type ).
+        ENDIF.
+        IF token-str = 'TYPE' AND token-type = sana_tok_word.
+          type_started = abap_true.
+          r_data_declaration_info-original_type-typetype = if_rfac_impl_types=>co_parameter_type_type-type.
+          CONTINUE.
+        ENDIF.
+        IF type_started = abap_true AND token-str = 'REF' AND token-type = sana_tok_word.
+          r_data_declaration_info-original_type-typetype = if_rfac_impl_types=>co_parameter_type_type-type_ref_to.
+          CONTINUE.
+        ENDIF.
+        IF r_data_declaration_info-original_type-typetype = if_rfac_impl_types=>co_parameter_type_type-type_ref_to AND token-str = 'TO' AND token-type = sana_tok_word.
+          CONTINUE.
+        ENDIF.
+        IF token-str = 'VALUE' AND token-type = sana_tok_word.
+          value_found = abap_true.
+          CONTINUE.
+        ENDIF.
+        IF type_started = abap_true.
+          IF token-type = sana_tok_type.
+            token-str = to_lower( token-str ).
+          ENDIF.
+          IF ( token-type = sana_tok_word AND ( token-str = 'IMPORTING' OR token-str = 'EXPORTING' OR token-str = 'RETURNING' OR token-str = 'CHANGING' OR token-str = 'OPTIONAL' ) )
+             OR token-type = sana_tok_field_def.
+            IF type_found = abap_false.
+              r_data_declaration_info-is_generic = abap_true.
+            ENDIF.
+            EXIT.
+          ENDIF.
+          r_data_declaration_info-original_type-value = |{ r_data_declaration_info-original_type-value } { token-str }|.
+        ENDIF.
+        IF value_found = abap_true.
+          IF token-str = 'IS' AND token-type = sana_tok_word.
+            r_data_declaration_info-is_initial = abap_true.
+            EXIT.
+          ELSE.
+            r_data_declaration_info-value = token-str.
+            EXIT.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    r_data_declaration_info-original_type-value = shift_left( val = r_data_declaration_info-original_type-value ).
+
+  ENDMETHOD.
+
+
+  METHOD adjust_types_on_name_conflicts.
+
+    DATA: scan_result          TYPE REF TO if_rfac_scan_result,
+          pst_position         TYPE REF TO cl_pst_source_position,
+          pst_class            TYPE REF TO cl_pst_class,
+          approved_type_name   TYPE string,
+          pst_node_at_position TYPE REF TO cl_pst_node,
+          matcher              TYPE REF TO cl_abap_matcher,
+          range_of_string      TYPE string,
+          range_type           TYPE if_rfac_impl_types=>ts_type,
+          types_in_class       TYPE cl_pst_node=>tab.
+
+    FIELD-SYMBOLS: <type>  TYPE if_rfac_impl_types=>ts_type,
+                   <param> TYPE if_rfac_impl_types=>ts_param.
+
+    IF c_method-types IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    pst_position = me->source_repository->get_frontend_selection_start( ).
+
+    scan_result = cl_rfac_scan_result=>create_for_main_program( pst_position->main_prog ).
+
+    IF scan_result->root_pst_node IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    pst_node_at_position = scan_result->root_pst_node->find_node_by_position( pst_position ).
+
+    IF pst_node_at_position IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    pst_class = cl_pst_class=>create( pst_node_at_position ).
+
+    IF pst_class IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    LOOP AT c_method-types ASSIGNING <type>.
+
+      approved_type_name = cl_art_name_service=>create_for_class( pst_class )->approve_name_for_new_member( <type>-name ).
+
+      IF approved_type_name <> <type>-name.
+        LOOP AT c_method-importing ASSIGNING <param> WHERE type = <type>-name.
+          <param>-type = approved_type_name.
+        ENDLOOP.
+        LOOP AT c_method-exporting ASSIGNING <param> WHERE type = <type>-name.
+          <param>-type = approved_type_name.
+        ENDLOOP.
+        LOOP AT c_method-changing ASSIGNING <param> WHERE type = <type>-name.
+          <param>-type = approved_type_name.
+        ENDLOOP.
+        IF c_method-returning-type = <type>-name.
+          c_method-returning-type = approved_type_name.
+        ENDIF.
+        "react in stolen declarations on naming conflicts for helper types
+        LOOP AT c_method-locals ASSIGNING FIELD-SYMBOL(<local_declaration>).
+          <local_declaration> = replace( val = <local_declaration> regex = |\\s{ <type>-name }\\.| with = | { approved_type_name }.| ).
+        ENDLOOP.
+        <type>-name = approved_type_name.
+      ENDIF.
+
+    ENDLOOP.
+
+    "do other adjustments on types after resolving the name conflicts
+    LOOP AT c_method-types ASSIGNING <type>.
+
+      "change "table of" into "standard table of" because of extended check in OO context
+      IF matches( val = <type>-value regex = `^table of .*` case = abap_false ).
+        <type>-value = |STANDARD { <type>-value }|.
+      ENDIF.
+
+      "check if standard table types have a key if not add addition "WITH DEFAULT KEY"
+      IF matches( val = <type>-value regex = `^standard table of .*` case = abap_false ) AND NOT
+         matches( val = <type>-value regex = `^standard table of .* with.*key.*` case = abap_false ) .
+        <type>-value = |{ <type>-value } WITH DEFAULT KEY|.
+      ENDIF.
+
+      "check if a type is a line of a range table
+      matcher = cl_abap_matcher=>create( pattern = `^of (range of.*)` ignore_case = abap_true text = <type>-value ) ##NO_TEXT.
+      IF matcher->match( ) = abap_true.
+        range_of_string = matcher->get_submatch( 1 ).
+        READ TABLE c_method-types INTO range_type WITH KEY value = range_of_string.
+        IF sy-subrc = 0.
+          <type>-value = |LINE OF { range_type-name }|.
+        ENDIF.
+      ENDIF.
+
+      "adjust types defined by addition  "line of "
+      IF matches( val = <type>-value regex = `^of.*` case = abap_false ).
+        <type>-value = |LINE OF{ <type>-value+2 }|.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD add_type_to_method_desc.
+
+    IF NOT line_exists( c_method-types[ name = i_type-name ] ).
+      INSERT i_type INTO TABLE c_method-types.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+  METHOD add_source_body.
+
+    me->source_repository->get_selected_source_code( IMPORTING e_source_code = c_method-body ).
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,467 @@
+*&---------------------------------------------------------------------*
+*& Include          ZSD_R_AUTOMATE_C01
+*&---------------------------------------------------------------------*
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* KALSHZHA     | 22.09.2022 | 13512     : PAL enhancement to automat   *
+*              |            | DS4K931060                               *
+*----------------------------------------------------------------------*
+
+CLASS lcl_bopf_driver DEFINITION.
+  PUBLIC SECTION.
+    DATA mif_txn_mngr TYPE REF TO /bobf/if_tra_transaction_mgr.
+    DATA mif_svc_mngr TYPE REF TO /bobf/if_tra_service_manager.
+    DATA mif_bo_conf  TYPE REF TO /bobf/if_frw_configuration.
+
+    DATA mo_s_root     TYPE REF TO isprodallocationsequencetp.
+    DATA mv_has_data_to_save TYPE abap_bool.
+    METHODS  constructor.
+    METHODS get_pd_allc_seq.
+    METHODS
+      get_node_table IMPORTING iv_key         TYPE /bobf/conf_key
+                               iv_node_key    TYPE /bobf/obm_node_key
+                     RETURNING VALUE(ro_data) TYPE REF TO data
+                     RAISING   /bobf/cx_frw.
+
+
+
+    METHODS get_node_row IMPORTING iv_key         TYPE /bobf/conf_key
+                                   iv_node_key    TYPE /bobf/obm_node_key
+                                   iv_index       TYPE i DEFAULT 1
+                         RETURNING VALUE(ro_data) TYPE REF TO data
+                         RAISING   /bobf/cx_frw.
+    METHODS add_assignment CHANGING cs_data TYPE gtyp_s_data.
+    METHODS save.
+ENDCLASS.
+
+CLASS lcl_bopf_driver IMPLEMENTATION.
+  METHOD save.
+    DATA lv_rejected TYPE boole_d.
+    "Apply the transactional changes:
+    mif_txn_mngr->save(
+      IMPORTING
+        ev_rejected = lv_rejected ).
+
+
+
+    IF lv_rejected EQ abap_true.
+      MESSAGE 'SAVE operation was rejected' TYPE 'S'.
+    ELSE.
+      MESSAGE 'SAVE operation was successful' TYPE 'S'.
+    ENDIF.
+  ENDMETHOD.
+  METHOD add_assignment.
+    DATA lt_mod      TYPE /bobf/t_frw_modification.
+    DATA lo_assg TYPE REF TO isprodallocsqncassgmttp.
+    DATA lif_message  TYPE REF TO /bobf/if_frw_message.
+
+    FIELD-SYMBOLS:
+     <ls_mod> LIKE LINE OF lt_mod.
+
+    lo_assg = NEW isprodallocsqncassgmttp( ).
+    lo_assg->key = /bobf/cl_frw_factory=>get_new_key( ).
+    lo_assg->isactiveentity = abap_true.
+    lo_assg->productallocationsequence = mo_s_root->productallocationsequence.
+    lo_assg->material = cs_data-matnr.
+    lo_assg->plant = cs_data-plant.
+    lo_assg->validitystarttimezone = sy-zonlo.
+    lo_assg->validityendtimezone = sy-zonlo.
+    CONVERT DATE cs_data-validty_sd TIME cs_data-validty_st
+    INTO TIME STAMP lo_assg->validitystartutcdatetime
+    TIME ZONE sy-zonlo.
+
+    CONVERT DATE cs_data-validty_ed TIME cs_data-validty_et
+          INTO TIME STAMP lo_assg->validityendutcdatetime
+          TIME ZONE sy-zonlo.
+
+    APPEND INITIAL LINE TO lt_mod ASSIGNING <ls_mod>.
+    <ls_mod>-node            = if_i_prodallocationsequencet_c=>sc_node-i_prodallocsqncassgmttp.
+    <ls_mod>-change_mode     = /bobf/if_frw_c=>sc_modify_create.
+    <ls_mod>-source_node     = if_i_prodallocationsequencet_c=>sc_node-i_prodallocationsequencetp.
+    <ls_mod>-association     =
+
+     if_i_prodallocationsequencet_c=>sc_association-i_prodallocationsequencetp-_prodallocsqncassgmttp.
+    <ls_mod>-source_key      = mo_s_root->key.
+    <ls_mod>-key             = lo_assg->key.
+    <ls_mod>-data            = lo_assg.
+
+    mif_svc_mngr->modify(
+       EXPORTING
+         it_modification = lt_mod
+       IMPORTING
+         eo_message      = lif_message
+   ).
+
+
+
+    "Check for errors:
+    IF lif_message IS BOUND.
+      lif_message->get( IMPORTING et_message = DATA(lt_messg) ).
+      LOOP AT lt_messg ASSIGNING FIELD-SYMBOL(<lo_messg>).
+        cs_data-message = <lo_messg>->get_longtext( ).
+        cs_data-rejected = abap_true.
+      ENDLOOP.
+      IF sy-subrc EQ 0.
+        mif_txn_mngr->cleanup( ).
+      ELSE.
+        cs_data-message = 'No issues were found during validation'.
+        IF mv_has_data_to_save NE abap_true.
+          mv_has_data_to_save = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+  METHOD get_node_table.
+    "Method-Local Data Declarations:
+    DATA lt_key       TYPE /bobf/t_frw_key.
+    DATA ls_node_conf TYPE /bobf/s_confro_node.
+
+    DATA lif_message   TYPE REF TO /bobf/if_frw_message.
+
+
+
+    FIELD-SYMBOLS <ls_key> LIKE LINE OF lt_key.
+    FIELD-SYMBOLS <lt_data> TYPE INDEX TABLE.
+
+
+
+    "Lookup the node's configuration:
+    mif_bo_conf->get_node(
+      EXPORTING
+        iv_node_key = iv_node_key
+      IMPORTING
+        es_node     = ls_node_conf ).
+
+
+
+    "Use the node configuration metadata to create the result table:
+    CREATE DATA ro_data TYPE (ls_node_conf-data_table_type).
+    ASSIGN ro_data->* TO <lt_data>.
+
+
+
+    "Retrieve the target node:
+    APPEND INITIAL LINE TO lt_key ASSIGNING <ls_key>.
+    <ls_key>-key = iv_key.
+
+
+
+    mif_svc_mngr->retrieve(
+      EXPORTING
+        iv_node_key = iv_node_key
+        it_key      = lt_key
+      IMPORTING
+        eo_message  = lif_message
+        et_data     = <lt_data> ).
+
+
+
+    "Check the results:
+    IF lif_message IS BOUND AND lif_message->check( ) EQ abap_true.
+      RAISE EXCEPTION TYPE /bobf/cx_dac.
+    ENDIF.
+  ENDMETHOD.                 " METHOD get_node_table
+
+
+
+  METHOD get_node_row.
+    "Method-Local Data Declarations:
+    DATA lo_t_data TYPE REF TO data.
+
+
+
+    FIELD-SYMBOLS <lt_data> TYPE INDEX TABLE.
+    FIELD-SYMBOLS <ls_row> TYPE any.
+
+
+
+    "Lookup the node data:
+    lo_t_data =
+      get_node_table( iv_key       = iv_key
+                      iv_node_key  = iv_node_key ).
+
+
+
+    IF lo_t_data IS NOT BOUND.
+      RAISE EXCEPTION TYPE /bobf/cx_dac.
+    ENDIF.
+
+
+
+    "Try to pull the record at the specified index:
+    ASSIGN lo_t_data->* TO <lt_data>.
+    READ TABLE <lt_data> INDEX iv_index ASSIGNING <ls_row>.
+    IF sy-subrc EQ 0.
+      ro_data = REF #( <ls_row> ).
+    ELSE.
+      RAISE EXCEPTION TYPE /bobf/cx_dac.
+    ENDIF.
+  ENDMETHOD.                 " METHOD get_node_row
+  METHOD get_pd_allc_seq.
+    TRY.
+        mo_s_root ?= get_node_row(   iv_key = p_pallsq
+                                    iv_node_key = if_i_prodallocationsequencet_c=>sc_node-i_prodallocationsequencetp
+                                    iv_index = 1 ).
+      CATCH /bobf/cx_frw.
+        MESSAGE 'Critical error encountered' TYPE 'E'.
+    ENDTRY.
+  ENDMETHOD.
+  METHOD constructor.
+    TRY.
+        "Obtain a reference to the BOPF transaction manager:
+        mif_txn_mngr =
+          /bobf/cl_tra_trans_mgr_factory=>get_transaction_manager( ).
+
+
+
+        "Obtain a reference to the BOPF service manager:
+        mif_svc_mngr =
+           /bobf/cl_tra_serv_mgr_factory=>get_service_manager(
+             if_i_prodallocationsequencet_c=>sc_bo_key ).
+
+
+        "Access the metadata for the /BOBF/DEMO_CUSTOMER BO:
+        mif_bo_conf =
+          /bobf/cl_frw_factory=>get_configuration(
+            if_i_prodallocationsequencet_c=>sc_bo_key ).
+      CATCH /bobf/cx_frw INTO DATA(lo_frw).
+        MESSAGE lo_frw TYPE 'I'.
+    ENDTRY.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lcl_data_model DEFINITION.
+  PUBLIC SECTION.
+    DATA mt_data TYPE STANDARD TABLE OF gtyp_s_data.
+    DATA mt_seqtxt TYPE STANDARD TABLE OF i_productallocationsequencet.
+    METHODS read_data.
+    METHODS load_prdall_texts.
+ENDCLASS.
+
+CLASS lcl_data_model IMPLEMENTATION.
+  METHOD load_prdall_texts.
+    SELECT *
+      INTO TABLE @mt_seqtxt
+      FROM i_productallocationsequencet
+      WHERE language EQ @sy-langu.
+    IF sy-subrc EQ 0.
+      DATA ls_lvalue LIKE LINE OF gt_list.
+      LOOP AT mt_seqtxt ASSIGNING FIELD-SYMBOL(<ls_seqtxt>).
+        CLEAR ls_lvalue.
+        ls_lvalue-key = <ls_seqtxt>-productallocationsequenceuuid.
+        ls_lvalue-text = <ls_seqtxt>-productallocationsequencedesc.
+        INSERT  ls_lvalue INTO TABLE gt_list.
+      ENDLOOP.
+      IF gt_list IS NOT INITIAL.
+        CALL FUNCTION 'VRM_SET_VALUES'
+          EXPORTING
+            id              = 'p_pallsq'
+            values          = gt_list
+          EXCEPTIONS
+            id_illegal_name = 1
+            OTHERS          = 2. "#EC CI_SUBRC
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+  METHOD read_data.
+    TYPES: BEGIN OF ltyp_s_wlk1,
+             filia TYPE wlk1-filia,
+             artnr TYPE wlk1-artnr,
+             datae TYPE wlk1-datae,
+             plant TYPE t001w-werks,
+             matnr TYPE marc-matnr,
+           END OF ltyp_s_wlk1.
+
+    DATA lt_wlk1 TYPE STANDARD TABLE OF ltyp_s_wlk1.
+    SELECT
+       wk~assortment AS filia,
+       wk~product AS artnr,
+       wk~lastchangedate AS datae,
+       tw~plant AS plant,
+       mc~material AS matnr
+     FROM i_listingcondition WITH PRIVILEGED ACCESS AS wk
+      INNER JOIN i_assortmentuser WITH PRIVILEGED ACCESS AS wz
+      ON wz~assortment EQ wk~assortment
+      INNER JOIN i_plant WITH PRIVILEGED ACCESS AS tw
+      ON tw~plant EQ wz~sitecustomer
+      LEFT OUTER JOIN i_materialplant WITH PRIVILEGED ACCESS AS mc
+      ON mc~plant EQ tw~plant
+      AND mc~material EQ wk~product
+      WHERE wk~assortment IN @s_filia
+        AND wk~product IN @s_artnr
+        AND wk~lastchangedate IN @s_date
+        AND tw~plant IN @s_werks
+        AND tw~plantcategory EQ 'B'
+        INTO TABLE @lt_wlk1.
+    IF sy-subrc EQ 0.
+      DATA ls_data LIKE LINE OF  mt_data.
+      DATA lt_bopf_data LIKE mt_data.
+      READ TABLE gt_list ASSIGNING FIELD-SYMBOL(<ls_list>)
+      WITH KEY key = p_pallsq.
+      IF sy-subrc EQ 0.
+        DATA(lo_bopf) = NEW lcl_bopf_driver( ).
+        lo_bopf->get_pd_allc_seq( ).
+        LOOP AT lt_wlk1 ASSIGNING FIELD-SYMBOL(<ls_wlk1>).
+          CHECK <ls_wlk1>-matnr IS NOT INITIAL.
+          CLEAR ls_data.
+          ls_data = CORRESPONDING #( <ls_wlk1> ).
+          ls_data-seqid = <ls_list>-key.
+          ls_data-seqtxt = <ls_list>-text.
+          ls_data-validty_sd = sy-datlo.
+          ls_data-validty_st = sy-timlo.
+          ls_data-validty_ed = '99991231'.
+          ls_data-validty_et = '000000'.
+          lo_bopf->add_assignment( CHANGING cs_data = ls_data ).
+          INSERT ls_data INTO TABLE mt_data.
+          IF ls_data-rejected NE abap_true.
+            INSERT ls_data INTO TABLE lt_bopf_data.
+          ENDIF.
+        ENDLOOP.
+        IF mt_data IS NOT INITIAL AND lo_bopf->mv_has_data_to_save EQ abap_true.
+          lo_bopf->mif_txn_mngr->cleanup( ).
+          LOOP AT lt_bopf_data ASSIGNING FIELD-SYMBOL(<ls_bopf_data>).
+            lo_bopf->add_assignment( CHANGING cs_data = <ls_bopf_data> ).
+          ENDLOOP.
+          lo_bopf->save( ).
+        ENDIF.
+      ENDIF.
+    ELSE.
+      MESSAGE 'No entries found' TYPE 'E'.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+
+
+
+CLASS lcl_alv_formatter DEFINITION.
+  PUBLIC SECTION.
+    DATA mo_alv TYPE REF TO cl_salv_table.
+    DATA mo_columns TYPE  REF TO cl_salv_columns_table.
+    METHODS constructor IMPORTING io_alv TYPE REF TO cl_salv_table.
+    METHODS set_disp_sett.
+    METHODS set_column_prop
+      IMPORTING iv_name        TYPE columnname
+                iv_header      TYPE scrtext_l OPTIONAL
+                iv_long_text   TYPE scrtext_l OPTIONAL
+                iv_medium_text TYPE scrtext_m OPTIONAL
+                iv_short_text  TYPE scrtext_s OPTIONAL
+                iv_technical   TYPE abap_bool OPTIONAL.
+
+ENDCLASS.
+
+CLASS lcl_alv_formatter IMPLEMENTATION.
+  METHOD constructor.
+    mo_alv = io_alv.
+    mo_columns = mo_alv->get_columns( ).
+  ENDMETHOD.
+  METHOD set_disp_sett.
+    DATA(lo_dsett) = mo_alv->get_display_settings( ).
+    lo_dsett->set_striped_pattern( abap_true ).
+    mo_columns->set_optimize( ).
+  ENDMETHOD.
+  METHOD set_column_prop .
+    DATA lo_column TYPE REF TO cl_salv_column.
+    DATA lv_name TYPE lvc_fname.
+    lv_name = to_upper( iv_name ).
+
+    DATA lv_long_text   TYPE scrtext_l.
+    DATA lv_medium_text TYPE scrtext_m.
+    DATA lv_short_text  TYPE scrtext_s.
+    TRY.
+        lo_column = mo_columns->get_column( lv_name ).
+        IF iv_header IS NOT INITIAL.
+          lv_long_text  =  iv_header.
+          lv_medium_text =  iv_header.
+          lv_short_text  =  iv_header.
+        ENDIF.
+
+        IF iv_long_text IS NOT INITIAL.
+          lv_long_text = iv_long_text.
+        ENDIF.
+
+        IF iv_medium_text IS NOT INITIAL.
+          lv_medium_text = iv_medium_text.
+        ENDIF.
+
+        IF iv_short_text IS NOT INITIAL.
+          lv_short_text = iv_short_text.
+        ENDIF.
+
+        IF lv_long_text IS NOT INITIAL.
+          lo_column->set_long_text( lv_long_text ).
+        ENDIF.
+
+        IF lv_medium_text IS NOT INITIAL.
+          lo_column->set_medium_text( lv_medium_text ).
+        ENDIF.
+
+        IF lv_short_text IS NOT INITIAL.
+          lo_column->set_short_text( lv_short_text ).
+        ENDIF.
+
+        IF iv_technical EQ abap_true.
+          lo_column->set_technical( abap_true ).
+        ENDIF.
+      CATCH cx_salv_not_found.
+        MESSAGE 'Alv formatting error' TYPE 'E'.
+    ENDTRY.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lcl_view DEFINITION.
+  PUBLIC SECTION.
+    METHODS display.
+ENDCLASS.
+
+CLASS lcl_view IMPLEMENTATION.
+  METHOD display.
+    TRY.
+        cl_salv_table=>factory(
+         IMPORTING r_salv_table = DATA(lo_alv)
+         CHANGING t_table = go_model->mt_data
+        ).
+
+      CATCH cx_salv_msg.
+        MESSAGE 'ALV control was not created' TYPE 'E'.
+    ENDTRY.
+
+    DATA(lo_fmtr) = NEW lcl_alv_formatter( lo_alv ).
+
+    lo_fmtr->set_column_prop(
+      iv_name = 'seqid'
+      iv_technical = abap_true
+    ).
+
+    lo_fmtr->set_column_prop(
+      iv_name = 'rejected'
+      iv_technical = abap_true
+      ).
+
+    lo_fmtr->set_column_prop(
+          iv_name = 'validty_st'
+          iv_header = 'Validity start time'
+          iv_short_text = 'Start time'
+          ).
+
+    lo_fmtr->set_column_prop(
+             iv_name = 'validty_et'
+             iv_header = 'Validity end time'
+             iv_short_text = 'End time'
+             ).
+
+    lo_fmtr->set_column_prop(
+                 iv_name = 'seqtxt'
+                 iv_header = 'Product Allocation Sequence'
+                 ).
+
+    lo_fmtr->set_column_prop(
+                iv_name = 'message'
+                iv_header = 'Status'
+                ).
+    lo_alv->get_functions( )->set_all( ).
+    lo_fmtr->set_disp_sett( ).
+    lo_alv->display( ).
+  ENDMETHOD.
+ENDCLASS.

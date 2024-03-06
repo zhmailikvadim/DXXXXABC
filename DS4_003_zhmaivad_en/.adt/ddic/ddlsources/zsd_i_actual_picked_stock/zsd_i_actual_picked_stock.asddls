@@ -23,14 +23,18 @@ define view entity zsd_i_actual_picked_stock
                                                               and _DoncumentFlow.posnv   = _Deliveries.DeliveryItem
                                                               and _DoncumentFlow.vbtyp_n = 'Q'
 {
-  key _Deliveries.OrderNumber,
-  key _Deliveries.OrderItemNumber,
-      @Semantics.quantity.unitOfMeasure: 'Meins'
-      sum( case when _DoncumentFlow.vbtyp_v = 'T' then  - _DoncumentFlow.rfmng
-                else _DoncumentFlow.rfmng end ) as StockQuantity,
-      _DoncumentFlow.meins                      as Meins
+  key  _Deliveries.OrderNumber,
+  key  _Deliveries.OrderItemNumber,
+  key  _Deliveries.DeliveryDoc,
+  key  _Deliveries.DeliveryItem,
+       @Semantics.quantity.unitOfMeasure: 'Meins'
+       sum( case when _DoncumentFlow.vbtyp_v = 'T' then  - _DoncumentFlow.rfmng
+                 else _DoncumentFlow.rfmng end ) as StockQuantity,
+       _DoncumentFlow.meins                      as Meins
 }
 group by
   _Deliveries.OrderNumber,
   _Deliveries.OrderItemNumber,
+  _Deliveries.DeliveryDoc,
+  _Deliveries.DeliveryItem,
   _DoncumentFlow.meins

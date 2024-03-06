@@ -1,0 +1,238 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* RIOSNAT      | 16.02.2024 | 29157: Critical Objects v1               *
+*              |            | DS4K980071                               *
+************************************************************************
+CLASS lcl_main DEFINITION CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    TYPES: BEGIN OF gtyp_s_data_out,
+             object   TYPE e071-object,
+             obj_name TYPE e071-obj_name,
+             trkorr   TYPE e071-trkorr,
+             wi       TYPE zpe_work_item,
+             us       TYPE string,
+             team     TYPE zpe_hm_team,
+           END OF gtyp_s_data_out.
+    TYPES: gtyp_tt_data_out TYPE STANDARD TABLE OF gtyp_s_data_out WITH DEFAULT KEY.
+    DATA gt_data_out TYPE gtyp_tt_data_out.
+
+    METHODS start_of_selection.
+    METHODS end_of_selection.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF mtyp_s_data,
+             trkorr      TYPE e071-trkorr,
+             object      TYPE e071-object,
+             obj_name    TYPE e071-obj_name,
+             description TYPE e07t-as4text,
+           END OF mtyp_s_data.
+    TYPES: mtyp_tt_data TYPE STANDARD TABLE OF mtyp_s_data WITH DEFAULT KEY.
+    TYPES: BEGIN OF mtyp_s_project,
+             project TYPE zpe_project,
+           END OF mtyp_s_project.
+    TYPES: mtyp_tt_project TYPE STANDARD TABLE OF mtyp_s_project WITH DEFAULT KEY.
+
+
+    METHODS get_relevant_data RETURNING VALUE(rt_data) TYPE mtyp_tt_data.
+    METHODS get_critical_objects
+      IMPORTING
+        it_data TYPE lcl_main=>gtyp_tt_data_out
+      EXPORTING
+        et_data TYPE lcl_main=>gtyp_tt_data_out.
+    METHODS get_data_with_team
+      IMPORTING
+        it_us   TYPE zcl_pe_jira_connector=>gtyp_t_user_stories
+      CHANGING
+        ct_data TYPE lcl_main=>gtyp_tt_data_out.
+    METHODS get_data_with_wi
+      IMPORTING
+        it_data TYPE lcl_main=>mtyp_tt_data
+      EXPORTING
+        et_data TYPE lcl_main=>gtyp_tt_data_out
+        et_wi   TYPE zpe_tt_work_items.
+    METHODS get_team_per_wi
+      IMPORTING
+                it_wi TYPE zpe_tt_work_items
+      EXPORTING
+                et_us TYPE zcl_pe_jira_connector=>gtyp_t_user_stories
+      RAISING   zcx_pe_jira_connector.
+    METHODS get_jira_projects
+      RETURNING
+        VALUE(rt_projects) TYPE mtyp_tt_project.
+
+
+
+
+ENDCLASS.
+CLASS lcl_main IMPLEMENTATION.
+  METHOD end_of_selection.
+    TRY.
+        cl_salv_table=>factory( IMPORTING r_salv_table = DATA(lo_alv)
+                               CHANGING t_table      = gt_data_out ).
+        lo_alv->get_functions( )->set_all( if_salv_c_bool_sap=>true ).
+        lo_alv->display( ).
+      CATCH cx_salv_msg INTO DATA(lo_error).
+        DATA(ls_message) = lo_error->get_message(  ).
+        MESSAGE ID ls_message-msgid TYPE ls_message-msgty NUMBER ls_message-msgno .
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD start_of_selection.
+    DATA(lt_data) = get_relevant_data( ).
+
+    get_data_with_wi( EXPORTING it_data = lt_data
+                      IMPORTING et_data = DATA(lt_data_filtered)
+                                et_wi = DATA(lt_wi) ).
+    TRY.
+        get_team_per_wi( EXPORTING it_wi = lt_wi
+                         IMPORTING et_us = DATA(lt_us) ).
+      CATCH zcx_pe_jira_connector .
+        MESSAGE e006(zpe_jira_connector).
+    ENDTRY.
+
+
+    get_data_with_team( EXPORTING it_us = lt_us
+                        CHANGING ct_data = lt_data_filtered ).
+
+    get_critical_objects( EXPORTING it_data = lt_data_filtered
+                          IMPORTING et_data = gt_data_out ).
+
+  ENDMETHOD.
+
+
+  METHOD get_relevant_data.
+    SELECT  i~trkorr, object, obj_name, as4text AS description
+        FROM e071 AS i
+        INNER JOIN e07t AS d ON d~trkorr = i~trkorr
+                             AND d~langu = @sy-langu
+        INNER JOIN e070 AS h ON h~trkorr = i~trkorr
+      WHERE obj_name LIKE 'Z%'
+        AND i~trkorr LIKE 'DS4K%'
+        AND  h~trfunction = 'K'
+      INTO CORRESPONDING FIELDS OF TABLE @rt_data.
+    IF sy-subrc <> 0.
+      CLEAR rt_data.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_data_with_wi.
+*-- Get work item from transport request description
+    DATA: lt_blocks  TYPE TABLE OF string.
+    SELECT * FROM zpe_t_trv_block                       "#EC CI_NOWHERE
+      INTO TABLE @DATA(lt_block_def).
+    IF sy-subrc <> 0.
+      MESSAGE e008(zpe_trv).
+      RETURN.
+    ENDIF.
+
+    LOOP AT it_data ASSIGNING FIELD-SYMBOL(<ls_data>).
+      TRY.
+          SPLIT <ls_data>-description AT '_' INTO TABLE lt_blocks.
+          DATA(lv_index) = lt_block_def[ blid = zcl_pe_trv=>gc_blid_work_item ]-blnum.
+          DATA(lv_wi) =  lt_blocks[ lv_index ].
+
+          et_data = VALUE #( BASE et_data
+                                      ( object = <ls_data>-object
+                                        obj_name = <ls_data>-obj_name
+                                        trkorr = <ls_data>-trkorr
+                                        wi =  |{ lv_wi ALPHA = IN }| ) ).
+
+          et_wi = VALUE #( BASE et_wi ( |{ lv_wi ALPHA = IN }| ) ).
+
+        CATCH cx_sy_itab_line_not_found.
+          CONTINUE.
+      ENDTRY.
+
+    ENDLOOP.
+
+    SORT et_wi.
+    DELETE ADJACENT DUPLICATES FROM et_wi.
+  ENDMETHOD.
+
+
+  METHOD get_team_per_wi.
+    DATA lt_wi_tmp TYPE zpe_tt_work_items.
+
+    DATA(lt_projects) = get_jira_projects(  ).
+
+    LOOP AT it_wi ASSIGNING FIELD-SYMBOL(<lv_wi>).
+      DATA(lv_mod) = sy-tabix MOD 50.
+      lt_wi_tmp = VALUE #( BASE lt_wi_tmp ( <lv_wi> ) ).
+      IF lv_mod = 0.
+        DATA(lt_us_tmp) = NEW zcl_pe_jira_connector( )->search_issues( it_work_items     = lt_wi_tmp
+                                                                   it_projects       =  CONV #( lt_projects )
+                                                                   iv_issue_fields   = 'summary,status,customfield_15200,customfield_13506' ).
+        et_us = VALUE #( BASE et_us ( LINES OF lt_us_tmp ) ).
+        CLEAR lt_wi_tmp.
+      ENDIF.
+    ENDLOOP.
+    lt_us_tmp = NEW zcl_pe_jira_connector( )->search_issues( it_work_items     = lt_wi_tmp
+                                                                      it_projects       =  CONV #( lt_projects )
+                                                                      iv_issue_fields   = 'summary,status,customfield_15200,customfield_13506' ).
+    et_us = VALUE #( BASE et_us ( LINES OF lt_us_tmp ) ).
+
+
+    SORT et_us.
+    DELETE ADJACENT DUPLICATES FROM et_us.
+  ENDMETHOD.
+
+
+  METHOD get_jira_projects.
+    TRY.
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id           = '0239FC3B8D041EDD97E95051E5BC3F59'
+                                                iv_mapping_type = zcl_pe_hm=>gc_s_mapping_type-data_elements
+                                      IMPORTING et_table        = rt_projects ).
+      CATCH zcx_pe_hm.
+        MESSAGE e011(zpe_hm) WITH '0239FC3B8D041EDD97E95051E5BC3F59'.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD get_data_with_team.
+    LOOP AT ct_data ASSIGNING FIELD-SYMBOL(<ls_data_out>).
+      TRY.
+          DATA(lv_team) = it_us[ wi = <ls_data_out>-wi ]-team.
+          <ls_data_out>-team      = SWITCH #( lv_team
+                                            WHEN '' THEN 'NO TEAM'
+                                            ELSE lv_team ).
+          <ls_data_out>-us      = it_us[ wi = <ls_data_out>-wi ]-key.
+        CATCH cx_sy_itab_line_not_found.
+          <ls_data_out>-team = 'NO TEAM'.
+      ENDTRY.
+    ENDLOOP.
+
+    SORT ct_data BY obj_name team.
+    DELETE ADJACENT DUPLICATES FROM ct_data COMPARING obj_name team.
+  ENDMETHOD.
+
+
+  METHOD get_critical_objects.
+    DATA lt_data_out_tmp  TYPE lcl_main=>gtyp_tt_data_out.
+    LOOP AT it_data ASSIGNING FIELD-SYMBOL(<ls_data_out>).
+      AT NEW obj_name.
+        CLEAR lt_data_out_tmp.
+      ENDAT.
+      IF <ls_data_out>-team = 'NO TEAM' OR <ls_data_out>-team = 'T4M Platform & Frontend Engineering' .
+        CONTINUE.
+      ENDIF.
+      lt_data_out_tmp = VALUE #( BASE lt_data_out_tmp ( <ls_data_out> ) ).
+      AT END OF obj_name.
+        IF lines( lt_data_out_tmp ) >= p_num.
+          et_data =  VALUE #( BASE et_data
+                                  ( LINES OF lt_data_out_tmp ) ).
+        ENDIF.
+      ENDAT.
+    ENDLOOP.
+  ENDMETHOD.
+
+ENDCLASS.

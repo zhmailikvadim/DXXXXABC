@@ -1,0 +1,223 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.01.2023 | 16955 : PO re-routing tool               *
+*              |            | DS4K940574                               *
+*----------------------------------------------------------------------*
+CLASS lhc_proc DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PRIVATE SECTION.
+
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys REQUEST requested_features FOR proc RESULT result.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys REQUEST requested_authorizations FOR proc RESULT result.
+
+    METHODS read FOR READ
+      IMPORTING keys FOR READ proc RESULT result.
+
+    METHODS lock FOR LOCK
+      IMPORTING keys FOR LOCK proc.
+
+    METHODS rba_messg FOR READ
+      IMPORTING keys_rba FOR READ proc\_messg FULL result_requested RESULT result LINK association_links.
+
+    METHODS check FOR MODIFY
+      IMPORTING keys FOR ACTION proc~check.
+
+    METHODS reroute FOR MODIFY
+      IMPORTING keys FOR ACTION proc~reroute.
+
+ENDCLASS.
+
+CLASS lhc_proc IMPLEMENTATION.
+
+  METHOD get_instance_features.
+    CLEAR result.
+    IF requested_features IS INITIAL OR keys IS INITIAL.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_instance_authorizations.
+
+    READ ENTITIES OF zsp_i_porr_procc IN LOCAL MODE
+       ENTITY proc
+         ALL FIELDS WITH CORRESPONDING #( keys )
+         RESULT DATA(lt_result).
+
+    IF requested_authorizations-%action-reroute EQ if_abap_behv=>mk-on.
+      LOOP AT lt_result ASSIGNING FIELD-SYMBOL(<ls_res>).
+        AUTHORITY-CHECK OBJECT 'M_BEST_WRK'
+          ID 'ACTVT' FIELD '02'
+          ID 'WERKS' FIELD <ls_res>-plant.
+        IF sy-subrc = 0.
+          APPEND VALUE #( id = <ls_res>-id %action-reroute = if_abap_behv=>auth-allowed ) TO result.
+        ELSE.
+          APPEND VALUE #( id = <ls_res>-id %action-reroute = if_abap_behv=>auth-unauthorized ) TO result.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD read.
+
+    LOOP AT keys ASSIGNING FIELD-SYMBOL(<ls_key>).
+      APPEND INITIAL LINE TO result ASSIGNING FIELD-SYMBOL(<ls_res>).
+      <ls_res> = CORRESPONDING #( zcl_sp_i_porr_proc=>read( <ls_key>-id ) ).
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD lock.
+    IF keys IS INITIAL.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD rba_messg.
+    CLEAR result.
+    IF result_requested IS INITIAL OR association_links IS INITIAL OR keys_rba IS INITIAL.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD check.
+    DATA ls_proc TYPE zcl_sp_po_rerouting=>gtyp_s_procc.
+
+    READ ENTITIES OF zsp_i_porr_procc IN LOCAL MODE
+       ENTITY proc
+         ALL FIELDS WITH CORRESPONDING #( keys )
+         RESULT DATA(lt_result).
+
+    LOOP AT lt_result ASSIGNING FIELD-SYMBOL(<ls_res>).
+      ls_proc = CORRESPONDING #( <ls_res> ).
+      READ TABLE keys ASSIGNING FIELD-SYMBOL(<ls_key>) WITH TABLE KEY entity COMPONENTS id = <ls_res>-id.
+      IF sy-subrc EQ 0.
+        ls_proc-toplant = <ls_key>-%param-plant.
+      ENDIF.
+      TRY.
+          zcl_sp_i_porr_proc=>check( CHANGING cs_proc = ls_proc ).
+        CATCH zcx_sp_po_rerouting INTO DATA(lo_error).
+          zcl_sp_i_porr_proc=>handle_message(
+                    EXPORTING iv_id       = <ls_res>-id
+                              iv_text     = lo_error->get_text(  )
+                     CHANGING ct_failed   = failed-proc
+                              ct_reported = reported-proc ).
+      ENDTRY.
+    ENDLOOP.
+
+    MESSAGE s009(zsp_po_rerouting) INTO DATA(lv_dummy) ##NEEDED.
+    zcl_sp_i_porr_proc=>add_independent_message( EXPORTING iv_msgno = '009'
+                                                  CHANGING ct_repother = reported-%other ).
+  ENDMETHOD.
+
+  METHOD reroute.
+    DATA ls_proc   TYPE zcl_sp_po_rerouting=>gtyp_s_procc.
+    DATA lt_return TYPE bapiret2_t.
+
+    READ ENTITIES OF zsp_i_porr_procc IN LOCAL MODE
+       ENTITY proc
+         ALL FIELDS WITH CORRESPONDING #( keys )
+         RESULT DATA(lt_result).
+
+    LOOP AT lt_result ASSIGNING FIELD-SYMBOL(<ls_res>).
+      ls_proc = CORRESPONDING #( <ls_res> ).
+      CLEAR lt_return.
+      TRY.
+          zcl_sp_i_porr_proc=>reroute( IMPORTING et_return = lt_return
+                                        CHANGING cs_proc   = ls_proc ).
+        CATCH cx_root INTO DATA(lo_error).
+          zcl_sp_i_porr_proc=>handle_message(
+                    EXPORTING iv_id       = <ls_res>-id
+                              iv_text     = lo_error->get_text(  )
+                     CHANGING ct_failed   = failed-proc
+                              ct_reported = reported-proc ).
+          RETURN.
+      ENDTRY.
+      IF lt_return[] IS NOT INITIAL.
+        zcl_sp_i_porr_proc=>handle_messages( EXPORTING iv_id       = <ls_res>-id
+                                                       it_messages = lt_return
+                                              CHANGING ct_failed   = failed-proc
+                                                       ct_reported = reported-proc ).
+      ENDIF.
+    ENDLOOP.
+
+    MESSAGE s008(zsp_po_rerouting) INTO DATA(lv_dummy) ##NEEDED.
+    zcl_sp_i_porr_proc=>add_independent_message( EXPORTING iv_msgno = '008'
+                                                  CHANGING ct_repother = reported-%other ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS lhc_messg DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PRIVATE SECTION.
+
+    METHODS read FOR READ
+      IMPORTING keys FOR READ messg RESULT result.
+
+    METHODS rba_process FOR READ
+      IMPORTING keys_rba FOR READ messg\_process FULL result_requested RESULT result LINK association_links.
+
+ENDCLASS.
+
+CLASS lhc_messg IMPLEMENTATION.
+
+  METHOD read.
+    CLEAR result.
+    IF keys IS INITIAL.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD rba_process.
+    CLEAR result.
+    IF keys_rba IS INITIAL OR association_links IS INITIAL OR result_requested IS INITIAL.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS lsc_zsp_i_porr_procc DEFINITION INHERITING FROM cl_abap_behavior_saver.
+  PROTECTED SECTION.
+
+    METHODS finalize REDEFINITION.
+
+    METHODS check_before_save REDEFINITION.
+
+    METHODS save REDEFINITION.
+
+    METHODS cleanup REDEFINITION.
+
+    METHODS cleanup_finalize REDEFINITION.
+
+ENDCLASS.
+
+CLASS lsc_zsp_i_porr_procc IMPLEMENTATION.
+
+  METHOD finalize.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD check_before_save.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD save.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD cleanup.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD cleanup_finalize.
+    RETURN.
+  ENDMETHOD.
+
+ENDCLASS.

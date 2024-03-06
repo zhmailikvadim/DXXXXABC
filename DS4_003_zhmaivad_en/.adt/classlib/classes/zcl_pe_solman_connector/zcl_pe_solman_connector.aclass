@@ -1,0 +1,301 @@
+CLASS zcl_pe_solman_connector DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    METHODS constructor RAISING zcx_pe_solman_connector.
+
+    METHODS convert_id_to_guid IMPORTING iv_id          TYPE zpe_work_item
+                               RETURNING VALUE(rv_guid) TYPE guid_32
+                               RAISING   zcx_pe_solman_connector.
+
+    METHODS get_workitem_url IMPORTING iv_work_item    TYPE zpe_work_item
+                                       iv_process_type TYPE crmt_process_type OPTIONAL
+                             RETURNING VALUE(rv_url)   TYPE string
+                             RAISING   zcx_pe_solman_connector.
+
+    METHODS read_orders IMPORTING it_ids     TYPE zpe_tt_work_items
+                        EXPORTING ets_header  TYPE zpe_tt_s_crm_order_header
+                                  ets_status TYPE crmt_status_wrkt
+                        RAISING   zcx_pe_solman_connector.
+
+    CLASS-METHODS log_message IMPORTING io_exception TYPE REF TO zcx_pe_solman_connector OPTIONAL.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA: mv_rfc_destination TYPE rfcdest.
+
+    CONSTANTS: BEGIN OF mc_s_log,
+                 object    TYPE balobj_d VALUE 'ZPE',
+                 subobject TYPE balsubobj VALUE 'SOLMAN',
+               END OF mc_s_log.
+
+
+
+    METHODS get_rfc_destination RETURNING VALUE(rv_rfc_destination) TYPE rfcdest
+                                RAISING   zcx_pe_solman_connector.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_SOLMAN_CONNECTOR IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 17.10.2022 | 14170     : Solman connector             *
+*              |            | DS4K932682                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 02.11.2022 | 14981: Bugfixing, exception handling     *
+*              |            | DS4K934555                               *
+************************************************************************
+
+    TRY.
+        mv_rfc_destination = get_rfc_destination( ).
+      CATCH zcx_pe_solman_connector INTO DATA(lo_exception).
+        log_message( lo_exception ).
+        RAISE EXCEPTION lo_exception.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD get_rfc_destination.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 17.10.2022 | 14170     : Solman connector             *
+*              |            | DS4K932682                               *
+*----------------------------------------------------------------------*
+    TEST-SEAM get_rfc_destination.
+
+      TRY.
+          zcl_pe_hm_complex=>get_value( EXPORTING iv_id           = '0239FC3B8D041EDD93D75A2B32369F59'
+                                                  is_filter       = sy-sysid
+                                        IMPORTING ev_value        = rv_rfc_destination ).
+        CATCH zcx_pe_hm.
+          RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e001(zpe_solman_connector).
+      ENDTRY.
+
+    END-TEST-SEAM.
+
+  ENDMETHOD.
+
+
+  METHOD log_message.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 17.10.2022 | 14170     : Solman connector             *
+*              |            | DS4K932682                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 02.11.2022 | 14981: Bugfixing, exception handling     *
+*              |            | DS4K934555                               *
+************************************************************************
+
+    GET TIME STAMP FIELD DATA(lv_timestamp).
+    DATA(lv_external_id) = CONV balnrext( |{ lv_timestamp ALIGN = LEFT }| ).
+
+    TRY.
+        DATA(lif_log)        = cl_bali_log=>create( ).
+        DATA(lif_log_header) = cl_bali_header_setter=>create( object      = mc_s_log-object
+                                                              subobject   = mc_s_log-subobject
+                                                              external_id = lv_external_id ).
+        lif_log->set_header( lif_log_header ).
+        IF io_exception IS INITIAL.
+          lif_log->add_item( cl_bali_message_setter=>create_from_sy( ) ).
+        ELSE.
+          lif_log->add_item( cl_bali_message_setter=>create( severity    =  if_bali_constants=>c_severity_error
+                                                             id          = io_exception->if_t100_message~t100key-msgid
+                                                             number      = io_exception->if_t100_message~t100key-msgno
+                                                             variable_1  = io_exception->if_t100_dyn_msg~msgv1
+                                                             variable_2  = io_exception->if_t100_dyn_msg~msgv2
+                                                             variable_3  = io_exception->if_t100_dyn_msg~msgv3
+                                                             variable_4  = io_exception->if_t100_dyn_msg~msgv4 ) ).
+        ENDIF.
+
+        cl_bali_log_db=>get_instance( )->save_log( log = lif_log ).
+        COMMIT WORK.
+
+      CATCH cx_bali_runtime.
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD get_workitem_url.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 17.10.2022 | 14170     : Solman connector             *
+*              |            | DS4K932682                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 24.05.2023 | 21642: Adapt logic for CHARM             *
+*              |            | DS4K953477                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 06.11.2023 | 26417: CHARM Integration                 *
+*              |            | DS4K968701                               *
+************************************************************************
+
+
+    DATA lv_guid TYPE crmt_object_guid.
+
+*   Move to local
+    DATA(lv_object_id)    = CONV crmt_object_id( |{ iv_work_item ALPHA = IN }| ).
+    DATA(lv_process_type) = iv_process_type.
+
+
+*   Get GUID & Process Type from Focused Build (ASM)
+    IF lv_process_type IS INITIAL.
+      CALL FUNCTION 'DSWP_CI_CRM_OBJECTID_2_GUID' DESTINATION mv_rfc_destination
+        EXPORTING
+          pf_crm_object_id       = lv_object_id
+        IMPORTING
+          pf_crm_guid            = lv_guid
+        CHANGING
+          pf_process_type        = lv_process_type
+        EXCEPTIONS
+          no_authority           = 1
+          communication_failure_ = 2
+          system_failure         = 3
+          OTHERS                 = 2.
+      CASE sy-subrc.
+        WHEN '1'.
+          RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e002(zpe_solman_connector) WITH mv_rfc_destination.
+        WHEN '2' OR '3'.
+          RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e003(zpe_solman_connector) WITH mv_rfc_destination.
+        WHEN OTHERS.
+          IF lv_guid IS INITIAL.
+            RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e004(zpe_solman_connector) WITH lv_object_id.
+          ENDIF.
+      ENDCASE.
+    ENDIF.
+
+
+*   Build URL
+    TRY.
+        zcl_pe_hm_complex=>get_value( EXPORTING iv_id     = '0239FC3B8D041EDD93D7B63F37231F59'
+                                                is_filter = sy-sysid
+                                      IMPORTING ev_value  = rv_url ).
+        rv_url = replace( val = rv_url sub = '#1#' with = lv_object_id ).
+        rv_url = replace( val = rv_url sub = '#2#' with = lv_process_type ).
+
+      CATCH zcx_pe_hm.
+        RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e005(zpe_solman_connector).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD read_orders.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 06.11.2023 | 26417: CHARM Integration                 *
+*              |            | DS4K968701                               *
+************************************************************************
+
+    DATA(lt_guids) = VALUE tguid_32( FOR lv_id IN it_ids ( convert_id_to_guid( iv_id = lv_id ) ) ).
+
+*   Read orders from Solman
+    CALL FUNCTION 'DSWP_CI_READ_ORDERS_RFC' DESTINATION mv_rfc_destination
+      EXPORTING
+        pt_header_guid         = lt_guids
+      IMPORTING
+        et_orderadm_h          = ets_header
+        et_status              = ets_status
+      EXCEPTIONS
+        no_authority           = 1
+        document_not_found     = 2
+        error_occurred         = 3
+        document_locked        = 4
+        no_change_authority    = 5
+        no_display_authority   = 6
+        no_change_allowed      = 7
+        failed                 = 8
+        communication_failure_ = 9
+        system_failure         = 10
+        OTHERS                 = 11.
+
+    CASE sy-subrc.
+      WHEN '0'.
+        DELETE ADJACENT DUPLICATES FROM ets_status COMPARING guid.   "Keep latest status
+      WHEN '1'.
+        RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e002(zpe_solman_connector) WITH mv_rfc_destination.
+      WHEN '9' OR '10'.
+        RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e003(zpe_solman_connector) WITH mv_rfc_destination.
+      WHEN OTHERS.
+        RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e006(zpe_solman_connector).
+    ENDCASE.
+
+  ENDMETHOD.
+
+
+  METHOD convert_id_to_guid.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 06.11.2023 | 26417: CHARM Integration                 *
+*              |            | DS4K968701                               *
+************************************************************************
+
+    DATA: lv_object_id    TYPE crmt_object_id,
+          lv_process_type TYPE crmt_process_type,
+          lv_guid         TYPE crmt_object_guid.
+
+
+*   Get GUID & Process Type from Focused Build (ASM)
+    lv_object_id = |{ iv_id ALPHA = IN }|.
+    CALL FUNCTION 'DSWP_CI_CRM_OBJECTID_2_GUID' DESTINATION mv_rfc_destination
+      EXPORTING
+        pf_crm_object_id       = lv_object_id
+      IMPORTING
+        pf_crm_guid            = lv_guid
+      CHANGING
+        pf_process_type        = lv_process_type
+      EXCEPTIONS
+        no_authority           = 1
+        communication_failure_ = 2
+        system_failure         = 3
+        OTHERS                 = 2.
+
+    CASE sy-subrc.
+      WHEN '1'.
+        RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e002(zpe_solman_connector) WITH mv_rfc_destination.
+      WHEN '2' OR '3'.
+        RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e003(zpe_solman_connector) WITH mv_rfc_destination.
+      WHEN OTHERS.
+        IF lv_guid IS INITIAL.
+          RAISE EXCEPTION TYPE zcx_pe_solman_connector MESSAGE e004(zpe_solman_connector) WITH lv_object_id.
+        ENDIF.
+    ENDCASE.
+
+    rv_guid = CONV guid_32( lv_guid ).
+
+  ENDMETHOD.
+ENDCLASS.

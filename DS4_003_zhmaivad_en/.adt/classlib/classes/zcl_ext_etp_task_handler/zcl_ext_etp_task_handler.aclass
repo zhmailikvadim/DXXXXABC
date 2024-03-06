@@ -1,0 +1,2177 @@
+class ZCL_EXT_ETP_TASK_HANDLER definition
+  public
+  final
+  create public .
+
+public section.
+
+  methods PROCESS_GET_EVENT
+    exporting
+      !ET_TASKS type ZSVATT_TASK_RESPONSE .
+  methods PROCESS_EXECUTE
+    importing
+      !IS_TEST_MODE type BOOLEAN
+    raising
+      ZCX_EXT_EXCEPTION
+      CX_ENCRYPT_ERROR
+      CX_ADDRESS_BCS
+      CX_SEND_REQ_BCS
+      CX_DOCUMENT_BCS
+      CX_UUID_ERROR .
+protected section.
+private section.
+
+  data MV_TOKEN type STRING .
+  class-data MV_TIMESTAMP type TIMESTAMPL .
+  data MV_TOKEN_STATUS type STRING .
+  data MV_ENDPOINT type STRING .
+  data MT_ALL_TASKS type ZSVATT_TASK_RESPONSE .
+  data MT_FILTER_TASKS type ZSVATT_TASK_RESPONSE .
+  data MV_STATUS_APPROVED type STRING value 'Approved' ##NO_TEXT.
+  data MV_STATUS_PENDING type STRING value 'Pending' ##NO_TEXT.
+  data MV_STATUS_SUCCESSFUL type STRING value 'Successful' ##NO_TEXT.
+  data MV_STATUS_FAILED type STRING value 'Failed' ##NO_TEXT.
+  data MV_STATUS_RUNNING type STRING value 'Running' ##NO_TEXT.
+  data MS_CURRENT_TASK type ZSVAT_TASK_RESPONSE .
+  data MT_ALL_TASKS_JSON type ZVAT_EXT_STRING_T .
+
+  methods GET_TASKS
+    exporting
+      !ET_TASKS type ZSVATT_TASK_RESPONSE
+    raising
+      ZCX_EXT_EXCEPTION
+      CX_ENCRYPT_ERROR .
+  methods HANDLER_MASTER_EVENT
+    for event EXECUTE_METHOD of ZCL_EXT_MASTER
+    importing
+      !IV_TYPE
+      !IV_MESSAGE .
+  methods GET_OAUTH_TOKEN
+    raising
+      ZCX_EXT_EXCEPTION
+      CX_ENCRYPT_ERROR .
+  methods EXECUTE_TASK
+    importing
+      !IS_TASK type ZSVAT_TASK_RESPONSE
+      !IS_TEST_MODE type BOOLEAN
+    raising
+      CX_ADDRESS_BCS
+      CX_DOCUMENT_BCS
+      CX_SEND_REQ_BCS
+      CX_UUID_ERROR
+      CX_ENCRYPT_ERROR
+      ZCX_EXT_EXCEPTION .
+  methods FILTER_TASKS
+    importing
+      !IS_TEST_MODE type BOOLEAN .
+  methods UPDATE_STATUS_TASK
+    importing
+      !IS_TASK type ZSVAT_TASK_RESPONSE
+      !IV_STATUS type STRING
+    raising
+      ZCX_EXT_EXCEPTION
+      CX_ENCRYPT_ERROR .
+  methods CREATE_LOG
+    importing
+      !IS_TASK type ZSVAT_TASK_RESPONSE
+      !IV_TYPE type STRING
+      !IV_MESSAGE type STRING
+    raising
+      ZCX_EXT_EXCEPTION
+      CX_ENCRYPT_ERROR .
+  methods WRITE_LOG_SLG1
+    importing
+      !IS_TASK type ZSVAT_TASK_RESPONSE
+      !IV_STATUS type STRING .
+  methods CREATE_TASK
+    changing
+      !CS_TASK type ZSVAT_TASK_RESPONSE
+    raising
+      CX_ENCRYPT_ERROR .
+  methods CHECK_PARAMETER
+    importing
+      !IS_TASK type ZSVAT_TASK_RESPONSE
+    exporting
+      !EV_MESSAGE type STRING .
+  methods CREATE_SELOPT_T
+    importing
+      !IV_VALUE type STRING
+    exporting
+      !ET_SELOPT type ZVAT_EXT_SELOPT_T .
+  methods CHECK_AND_RENAME_COPY_TASK
+    importing
+      !IS_TASK type ZSVAT_TASK_RESPONSE
+    exporting
+      !EV_RESULT type BOOLEAN
+      !ES_COPY_TASK type ZSVAT_TASK_RESPONSE .
+  methods GET_NUMBER_OF_ERROR
+    exporting
+      !EV_NUMBER_OF_RECORDS type INTEGER .
+  methods CREATE_TASK_ERROR_RECORD
+    importing
+      !IV_ID_ERROR type CHAR10 .
+ENDCLASS.
+
+
+
+CLASS ZCL_EXT_ETP_TASK_HANDLER IMPLEMENTATION.
+
+
+  METHOD check_and_rename_copy_task.
+
+    DATA: lv_task_name    TYPE string,
+          lv_task_no_c    TYPE string,
+          lv_task_no      TYPE string,
+          lv_task_copy    TYPE string,
+          lv_task_limit_p TYPE zvat_ext_param_val,
+          lv_task_limit   TYPE i.
+
+    es_copy_task = is_task.
+    ev_result = abap_true.
+
+* ~ Get parameters from param table via class
+
+    zcl_ext_paramater=>get_paramater(
+          EXPORTING
+            iv_param = 'API_TASK_LIM_CR'                 " Parameter ID for SAP Extractor parameter table
+          IMPORTING
+            ev_value = lv_task_limit_p                 " Value for parameters in the SAP Extractor parameter table
+        ).
+
+    lv_task_limit = lv_task_limit_p.
+    IF lv_task_limit is INITIAL.
+      lv_task_limit = 100.
+    ENDIF.
+
+    SPLIT is_task-type AT '|' INTO lv_task_name lv_task_no_c lv_task_copy.
+
+    lv_task_no = lv_task_no_c.
+    IF lv_task_no < lv_task_limit. "Limit
+      CONCATENATE sy-datum(4) '-' sy-datum+4(2) '-' sy-datum+6(2) 'T' sy-uzeit(2) ':' sy-uzeit+2(2) ':' sy-uzeit+4(2) '.0000000Z' INTO es_copy_task-plannedexecutiondate.
+      ADD 1 to lv_task_no.
+      lv_task_no_c = lv_task_no.
+      lv_task_copy = '#This task has been copied'.
+      CONCATENATE lv_task_name '|' lv_task_no_c '|' lv_task_copy INTO es_copy_task-type.
+    ELSE.
+      ev_result = abap_false.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD check_parameter.
+
+    DATA: ls_param TYPE zsvat_task_param_response.
+
+    DATA: lv_message TYPE string.
+
+    ls_param = is_task-params.
+
+    "Common Check
+    IF ls_param-report IS INITIAL.
+      lv_message = '| ''report'' is missing |'.
+    ENDIF.
+
+    "Report Check
+    CASE is_task-params-report.
+      WHEN 'VAT' OR 'JEK' OR 'SUM'.
+        IF ls_param-company IS INITIAL.
+          CONCATENATE lv_message '| ''company'' is missing |' INTO lv_message.
+        ENDIF.
+        IF ls_param-periodstart IS INITIAL.
+          CONCATENATE lv_message '| ''periodStart'' is missing |' INTO lv_message.
+        ENDIF.
+        IF ls_param-periodend IS INITIAL.
+          CONCATENATE lv_message '| ''periodEnd'' is missing |' INTO lv_message.
+        ENDIF.
+      WHEN 'SII'.
+        IF ls_param-company IS INITIAL.
+          CONCATENATE lv_message '| ''company'' is missing |' INTO lv_message.
+        ENDIF.
+        IF ls_param-periodstart IS INITIAL AND ls_param-periodend IS INITIAL AND ls_param-taxreportingstart IS INITIAL AND ls_param-taxreportingend IS INITIAL.
+          CONCATENATE lv_message '| ''periodStart'' & ''periodEnd'' are missing or ''taxReportingStart'' & ''taxReportingEnd'' are missing |' INTO lv_message.
+        ELSE.
+          IF ls_param-periodstart IS NOT INITIAL AND ls_param-periodend IS INITIAL.
+            CONCATENATE lv_message '| ''periodend'' is missing |' INTO lv_message.
+          ENDIF.
+
+          IF ls_param-periodstart IS INITIAL AND ls_param-periodend IS NOT INITIAL.
+            CONCATENATE lv_message '| ''periodstart'' is missing |' INTO lv_message.
+          ENDIF.
+
+          IF ls_param-taxreportingstart IS NOT INITIAL AND ls_param-taxreportingend IS INITIAL.
+            CONCATENATE lv_message '| ''taxreportingend'' is missing |' INTO lv_message.
+          ENDIF.
+
+          IF ls_param-taxreportingstart IS INITIAL AND ls_param-taxreportingend IS NOT INITIAL.
+            CONCATENATE lv_message '| ''taxreportingstart'' is missing |' INTO lv_message.
+          ENDIF.
+        ENDIF.
+        IF ls_param-sii_region IS INITIAL.
+          CONCATENATE lv_message '| ''sii_region'' is missing |' INTO lv_message.
+        ENDIF.
+      WHEN 'GLI'.
+      WHEN 'TBR'.
+        IF ls_param-ledger IS INITIAL.
+          CONCATENATE lv_message '| ''ledger'' is missing |' INTO lv_message.
+        ENDIF.
+        IF ls_param-company IS INITIAL.
+          CONCATENATE lv_message '| ''company'' is missing |' INTO lv_message.
+        ENDIF.
+        IF ls_param-fiscalyear IS INITIAL.
+          CONCATENATE lv_message '| ''fiscalyear'' is missing |' INTO lv_message.
+        ENDIF.
+        IF ls_param-period IS INITIAL.
+          CONCATENATE lv_message '| ''period'' is missing |' INTO lv_message.
+        ENDIF.
+      WHEN 'DYN'.
+        IF ls_param-modelid IS INITIAL.
+          CONCATENATE lv_message '| ''modelid'' is missing |' INTO lv_message.
+        ENDIF.
+      WHEN OTHERS.
+    ENDCASE.
+
+    ev_message = lv_message.
+  ENDMETHOD.
+
+
+  METHOD create_log.
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client TYPE REF TO if_http_client,
+          lo_decrypter   TYPE REF TO cl_hard_wired_encryptor.
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+* Variables
+
+    DATA: lv_api_url      TYPE string,
+          lv_token        TYPE string,
+          lv_response     TYPE string,
+          lv_status       TYPE string,
+          lv_status_i     TYPE i,
+          lv_json         TYPE string,
+          lv_task_url_p   TYPE zvat_ext_param_val,
+          lv_task_url     TYPE string,
+          lv_task_id_p    TYPE zvat_ext_param_val,
+          lv_task_id_encr TYPE string,
+          lv_task_id      TYPE string.
+
+* Constants
+
+    CONSTANTS: lc_api_loglines   TYPE string VALUE 'loglines'.
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    CREATE OBJECT lo_decrypter.
+
+* ~ Get parameters from param table via class
+
+    zcl_ext_paramater=>get_paramater(
+          EXPORTING
+            iv_param = 'API_TASK_EP_URL'                 " Parameter ID for SAP Extractor parameter table
+          IMPORTING
+            ev_value = lv_task_url_p                 " Value for parameters in the SAP Extractor parameter table
+        ).
+
+    lv_api_url = lv_task_url_p.
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TASK_CL_ID'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_task_id_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_task_id_encr = lv_task_id_p.
+    lv_task_id = lo_decrypter->decrypt_string2string( the_string = lv_task_id_encr ).
+
+    " Create JSON
+
+    CONCATENATE '{"logLevel":"' iv_type '", "message":"' iv_message '"}' into lv_json.
+
+    REPLACE '*' INTO lv_api_url WITH is_task-tenantid.
+
+    CONCATENATE lv_api_url '/' is_task-id '/' lc_api_loglines into mv_endpoint.
+
+    CONDENSE mv_endpoint NO-GAPS.
+
+    " Create endpoint url
+
+    me->get_oauth_token( ).
+
+    CONCATENATE 'Bearer' mv_token INTO lv_token SEPARATED BY space.
+
+    CLEAR lo_http_client.
+
+    CALL METHOD cl_http_client=>create_by_url
+      EXPORTING
+        url                = mv_endpoint
+      IMPORTING
+        client             = lo_http_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4.
+    IF sy-subrc <> 0.
+*      Implement suitable error handling here
+    ENDIF.
+
+    " Set request header and http method
+
+    IF lo_http_client IS BOUND.
+
+      " add method and token
+
+      lo_http_client->request->set_method( 'POST' ).
+      lo_http_client->request->set_header_field( EXPORTING  name  = 'Authorization' value = lv_token ).
+      lo_http_client->request->set_cdata(
+        EXPORTING
+          data   = lv_json
+      ).
+
+      CALL METHOD lo_http_client->send
+        EXCEPTIONS
+          http_communication_failure = 1
+          http_invalid_state         = 2
+          http_processing_failed     = 3
+          http_invalid_timeout       = 4
+          OTHERS                     = 5.
+
+      IF sy-subrc = 0.
+
+        CALL METHOD lo_http_client->receive
+          EXCEPTIONS
+            http_communication_failure = 1
+            http_invalid_state         = 2
+            http_processing_failed     = 3
+            OTHERS                     = 4.
+
+        lv_response = lo_http_client->response->get_cdata( ).
+        lo_http_client->response->get_status(
+          IMPORTING
+            code   = lv_status_i                 " HTTP Status Code
+        ).
+        lv_status = lv_status_i.
+
+*        WRITE :/ '*****'.
+*        WRITE :/ 'CREATE LOG :'.
+*        WRITE :/ 'DATA SEND :', lv_json.
+*        WRITE :/ 'RESPONSE : ', lv_response, lv_status_i.
+*        WRITE :/ '*****'.
+
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD create_selopt_t.
+
+    DATA : lt_string TYPE STANDARD TABLE OF string,
+           lt_table  TYPE zvat_ext_selopt_t,
+           lv_string TYPE string,
+           lv_low    TYPE string,
+           lv_high   TYPE string,
+           ls_selopt TYPE selopt.
+
+    ls_selopt-sign = 'I'.
+
+    SPLIT iv_value AT ';' INTO TABLE lt_string.
+    LOOP AT lt_string INTO lv_string.
+      CLEAR: lv_low, lv_high.
+      SPLIT lv_string AT '*' INTO lv_low lv_high.
+      IF lv_high IS INITIAL. "EQ
+        ls_selopt-option = 'EQ'.
+        ls_selopt-low = lv_low.
+      ELSE. "BETWEEN
+        ls_selopt-option = 'BT'.
+        ls_selopt-low = lv_low.
+        ls_selopt-high = lv_high.
+      ENDIF.
+      APPEND ls_selopt TO et_selopt.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD create_task.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client TYPE REF TO if_http_client,
+          lo_decrypter   TYPE REF TO cl_hard_wired_encryptor.
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+    DATA: ls_msg_key TYPE scx_t100key,
+          ls_task TYPE ZSVAT_TASK_RESPONSE.
+
+* Variables
+
+    DATA: lv_service_url         TYPE string,
+          lv_service_url_p       TYPE zvat_ext_param_val,
+          lv_content_type        TYPE string,
+          lv_content_type_p      TYPE zvat_ext_param_val,
+          lv_service_url_id_p    TYPE zvat_ext_param_val,
+          lv_service_url_id      TYPE string,
+          lv_service_url_id_encr TYPE string,
+          lv_token               TYPE string,
+          lv_response            TYPE string,
+          lv_status              TYPE string,
+          lv_status_i            TYPE i,
+          lv_json                TYPE string.
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    IF mv_token IS NOT INITIAL.
+
+      CREATE OBJECT lo_decrypter.
+
+* ~ Get parameters
+
+      " Endpoint
+
+      zcl_ext_paramater=>get_paramater(
+        EXPORTING
+          iv_param = 'API_TASK_EP_URL'                 " Parameter ID for SAP Extractor parameter table
+        IMPORTING
+          ev_value = lv_service_url_p                 " Value for parameters in the SAP Extractor parameter table
+      ).
+
+      lv_service_url = lv_service_url_p.
+
+      zcl_ext_paramater=>get_paramater(
+        EXPORTING
+          iv_param = 'API_TASK_EP_ID'                 " Parameter ID for SAP Extractor parameter table
+        IMPORTING
+          ev_value = lv_service_url_id_p                 " Value for parameters in the SAP Extractor parameter table
+      ).
+
+      lv_service_url_id_encr = lv_service_url_id_p.
+      lv_service_url_id = lo_decrypter->decrypt_string2string( the_string = lv_service_url_id_encr ).
+
+      REPLACE '*' IN lv_service_url WITH lv_service_url_id.
+      mv_endpoint = lv_service_url.
+
+      " Content Type
+
+      zcl_ext_paramater=>get_paramater(
+       EXPORTING
+         iv_param = 'API_TASK_CON_TY'                 " Parameter ID for SAP Extractor parameter table
+       IMPORTING
+         ev_value = lv_content_type_p                " Value for parameters in the SAP Extractor parameter table
+     ).
+
+      lv_content_type = lv_content_type_p.
+
+* ~ Perform call
+
+      " Create endpoint url
+
+      CONCATENATE 'Bearer' mv_token INTO lv_token SEPARATED BY space.
+
+      CLEAR lo_http_client.
+
+      CALL METHOD cl_http_client=>create_by_url
+        EXPORTING
+          url                = mv_endpoint
+        IMPORTING
+          client             = lo_http_client
+        EXCEPTIONS
+          argument_not_found = 1
+          plugin_not_active  = 2
+          internal_error     = 3
+          OTHERS             = 4.
+      IF sy-subrc <> 0.
+*      Implement suitable error handling here
+      ENDIF.
+
+      " Set request header and http method
+
+      IF lo_http_client IS BOUND.
+
+        " add method and token and body
+
+
+        lo_http_client->request->set_method( 'POST' ).
+        lo_http_client->request->set_header_field( EXPORTING  name  = 'Authorization' value = lv_token ).
+        lo_http_client->request->set_header_field( EXPORTING  name  = 'content-type' value = lv_content_type ).
+
+*        lv_json = /ui2/cl_json=>serialize( EXPORTING data = cs_task compress = abap_true pretty_name = /ui2/cl_json=>pretty_mode-camel_case ).
+
+        zvat_ext_ui2_cl_json=>serialize(
+          EXPORTING
+            data             = cs_task                 " Data to serialize
+          RECEIVING
+            r_json           = lv_json                 " JSON string
+        ).
+        lo_http_client->request->set_cdata(
+          EXPORTING
+          data   = lv_json
+                ).
+
+        CALL METHOD lo_http_client->send
+          EXCEPTIONS
+            http_communication_failure = 1
+            http_invalid_state         = 2
+            http_processing_failed     = 3
+            http_invalid_timeout       = 4
+            OTHERS                     = 5.
+
+        IF sy-subrc = 0.
+
+          CALL METHOD lo_http_client->receive
+            EXCEPTIONS
+              http_communication_failure = 1
+              http_invalid_state         = 2
+              http_processing_failed     = 3
+              OTHERS                     = 4.
+
+          lv_response = lo_http_client->response->get_cdata( ).
+          lo_http_client->response->get_status(
+            IMPORTING
+              code   = lv_status_i                 " HTTP Status Code
+          ).
+          lv_status = lv_status_i.
+
+          zvat_ext_ui2_cl_json=>deserialize(
+            EXPORTING
+              json             = lv_response " JSON string
+            CHANGING
+              data             = cs_task " Data to serialize
+          ).
+
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD create_task_error_record.
+
+    DATA: ls_task_error TYPE zvat_task_error.
+
+    ls_task_error-mandt = sy-mandt.
+    ls_task_error-id_error = iv_id_error.
+    ls_task_error-date_run = sy-datum.
+    ls_task_error-time_run = sy-uzeit.
+
+    INSERT zvat_task_error FROM ls_task_error.
+
+  ENDMETHOD.
+
+
+  METHOD execute_task.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+    DATA: lo_ZCL_EXT_MASTER TYPE REF TO zcl_ext_master.
+
+* Tables
+
+    DATA: lt_string         TYPE STANDARD TABLE OF string,
+          lt_company_selopt TYPE zvat_ext_selopt_t,
+          lt_date_selopt    TYPE zvat_ext_selopt_t,
+          lt_lstml          TYPE zvat_ext_selopt_t,
+          lt_ktosl          TYPE zvat_ext_selopt_t,
+          lt_mwskz          TYPE zvat_ext_selopt_t,
+          lt_vdate          TYPE zvat_ext_selopt_t,
+          lt_xblnr          TYPE zvat_ext_selopt_t,
+          lt_cpudt          TYPE zvat_ext_selopt_t,
+          lt_budat          TYPE zvat_ext_selopt_t,
+          lt_bldat          TYPE zvat_ext_selopt_t,
+          lt_branch         TYPE zvat_ext_selopt_t,
+          lt_blart          TYPE zvat_ext_selopt_t,
+          lt_belnr          TYPE zvat_ext_selopt_t,
+          lt_bukrs          TYPE zvat_ext_selopt_t,
+          lt_icntry         TYPE zvat_ext_selopt_t,
+          lt_intra_date     TYPE zvat_ext_selopt_t,
+          lt_saknr          TYPE zvat_ext_selopt_t,
+          lt_waers          TYPE zvat_ext_selopt_t.
+
+* Field Symbols
+
+    FIELD-SYMBOLS: <fs_filter_task> TYPE zsvat_task_response.
+
+* Structures
+
+    TYPES: BEGIN OF ty_validationResult,
+             code    TYPE string,
+             message TYPE string,
+           END OF ty_validationResult.
+
+    DATA: lt_validation_result TYPE STANDARD TABLE OF ty_validationResult.
+
+    TYPES: BEGIN OF ty_response,
+             success          TYPE boolean,
+             trackingId       TYPE string,
+             validationResult LIKE lt_validation_result,
+           END OF ty_response.
+
+    DATA: ls_response  TYPE ty_response,
+          ls_selopt    TYPE selopt,
+          ls_dyn       TYPE zsvat_dyn_ext_filters,
+          ls_copy_task TYPE zsvat_task_response.
+
+
+* Variables
+
+    DATA: lv_run_type         TYPE char03,
+          lv_output_type      TYPE char3,
+          lv_status_code      TYPE string,
+          lv_response         TYPE string,
+          lv_exception        TYPE boolean,
+          lv_nat_curr         TYPE boolean,
+          lv_in_tax           TYPE boolean,
+          lv_out_tax          TYPE boolean,
+          lv_reverse_charge   TYPE boolean,
+          lv_deffered_tax     TYPE boolean,
+          lv_string           TYPE string,
+          lv_ledger           TYPE char2,
+          lv_country_of_plant TYPE werksland,
+          lv_direction        TYPE verei,
+          lv_flip_sign        TYPE boolean,
+          lv_year             TYPE gjahr,
+          lv_period           TYPE perio,
+          lv_delta_run        TYPE boolean,
+          lv_bukrs            TYPE bukrs,
+          lv_update_audit_log TYPE boolean,
+          lv_max_lines        TYPE i,
+          lv_model_id         TYPE numc10,
+          lv_filename_suffix  TYPE zvat_ext_file_name_suffix,
+          lv_sii_region       TYPE zvat_ext_sii_region,
+          lv_message          TYPE string,
+          lv_low              TYPE string,
+          lv_high             TYPE string,
+          lv_result           TYPE boolean.
+
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+* ~ Initialisation of current task
+    ms_current_task = is_task.
+
+    me->check_parameter(
+      EXPORTING
+        is_task    = is_task                 " Deloitte Extractor - Response tasks from ETP Core
+      IMPORTING
+        ev_message = lv_message
+    ).
+
+    IF lv_message IS INITIAL.
+
+      lv_run_type = is_task-params-report.
+      lv_output_type = is_task-params-outputtype.
+      lv_delta_run = is_task-params-deltarun.
+      lv_update_audit_log = is_task-params-updateauditlog.
+      lv_filename_suffix = is_task-params-filenamesuffix.
+
+      IF lv_output_type IS INITIAL.
+        lv_output_type = 'API'.
+      ENDIF.
+
+* ~ Initialisation of select option
+
+      ls_selopt-sign = 'I'.
+      ls_selopt-option = 'EQ'.
+
+      CASE is_task-params-report.
+        WHEN 'VAT' OR 'JEK' OR 'SUM' OR 'SII'.
+          LOOP AT mt_all_tasks_json INTO lv_string.
+            TRANSLATE lv_string TO LOWER CASE.
+            IF lv_string CS is_task-id.
+              IF lv_string CS 'natcrcy'.
+                lv_nat_curr = is_task-params-natcrcy.
+              ELSE.
+                "Default
+                lv_nat_curr = 'X'.
+              ENDIF.
+              IF lv_string CS 'selinputtax'.
+                lv_in_tax = is_task-params-selinputtax.
+              ELSE.
+                "Default
+                lv_in_tax = 'X'.
+              ENDIF.
+              IF lv_string CS 'seloutputtax'.
+                lv_out_tax = is_task-params-seloutputtax.
+              ELSE.
+                "Default
+                lv_out_tax = 'X'.
+              ENDIF.
+              IF lv_string CS 'reversecharge'.
+                lv_reverse_charge = is_task-params-reversecharge.
+              ELSE.
+                "Default
+                lv_reverse_charge = ''.
+              ENDIF.
+              IF lv_string CS 'deferredtax'.
+                lv_deffered_tax = is_task-params-deferredtax.
+              ELSE.
+                "Default
+                lv_deffered_tax = ''.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+          lv_max_lines = is_task-params-maxnumberoflines.
+          lv_sii_region = is_task-params-sii_region.
+
+          IF lv_max_lines IS INITIAL.
+            lv_max_lines = 500000.
+          ENDIF.
+
+* ~ BUKRS - Company code
+          CLEAR : lt_string, ls_selopt-high.
+          SPLIT is_task-params-company AT ';' INTO TABLE lt_string.
+          LOOP AT lt_string INTO lv_string.
+
+            ls_selopt-low = lv_string.
+
+            AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+            ID 'BUKRS' FIELD ls_selopt-low
+            ID 'ACTVT' FIELD '03'.
+
+            IF sy-subrc EQ 0.
+              APPEND ls_selopt TO lt_bukrs.
+            ELSE.
+              MESSAGE 'User unauthorized for given company code.'(070) TYPE 'E'.
+            ENDIF.
+          ENDLOOP.
+
+* ~ LSTML - Country for tax return
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_lstml
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-countryfortax AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_lstml.
+*          ENDLOOP.
+
+* ~ BELNR - Document Number
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_belnr
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-documentnumber AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_belnr.
+*          ENDLOOP.
+
+* ~ XBLNR - Reference
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_xblnr
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-reference AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_xblnr.
+*          ENDLOOP.
+
+* ~ MWSKZ - Tax code
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_mwskz
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-Taxcode AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_mwskz.
+*          ENDLOOP.
+
+* ~ Ktosl- Transaction
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_ktosl
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-transaction AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_ktosl.
+*          ENDLOOP.
+
+* ~ BLART - Document Type
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_blart
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-documenttype AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_blart.
+*          ENDLOOP.
+
+* ~ BRANCH - Business Place
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_branch
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-businessplace AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_branch.
+*          ENDLOOP.
+
+          ls_selopt-sign = 'I'.
+          ls_selopt-option = 'BT'.
+
+* ~ BUDAT - Posting Date
+          CLEAR : lt_string, ls_selopt-high.
+          IF is_task-params-periodstart IS NOT INITIAL AND is_task-params-periodend IS NOT INITIAL.
+            CONCATENATE is_task-params-periodstart(4) is_task-params-periodstart+5(2) is_task-params-periodstart+8(2) INTO ls_selopt-low.
+            CONCATENATE is_task-params-periodend(4) is_task-params-periodend+5(2) is_task-params-periodend+8(2) INTO ls_selopt-high.
+            APPEND ls_selopt TO lt_budat.
+          ENDIF.
+
+* ~ BLDAT - Document Date
+          IF is_task-params-documentdatestart IS NOT INITIAL AND is_task-params-documentdateend IS NOT INITIAL.
+            CLEAR : lt_string, ls_selopt-high.
+            ls_selopt-low = is_task-params-documentdatestart.
+            ls_selopt-high = is_task-params-documentdateend.
+            APPEND ls_selopt TO lt_bldat.
+          ENDIF.
+
+* ~ VDATE - Tax reporting Date
+          IF is_task-params-taxreportingstart IS NOT INITIAL AND is_task-params-taxreportingend IS NOT INITIAL.
+            CLEAR : lt_string, ls_selopt-high.
+            ls_selopt-low = is_task-params-taxreportingstart.
+            ls_selopt-high = is_task-params-taxreportingend.
+            APPEND ls_selopt TO lt_vdate.
+          ENDIF.
+
+* ~ CPUDT - Entry date
+          CLEAR : lt_string, ls_selopt-high.
+          IF is_task-params-entrydatestart IS NOT INITIAL AND is_task-params-entryDateend IS NOT INITIAL.
+            CONCATENATE is_task-params-entrydatestart(4) is_task-params-entrydatestart+5(2) is_task-params-entrydatestart+8(2) INTO ls_selopt-low.
+            CONCATENATE is_task-params-entryDateend(4) is_task-params-entryDateend+5(2) is_task-params-entryDateend+8(2) INTO ls_selopt-high.
+            APPEND ls_selopt TO lt_cpudt.
+          ENDIF.
+
+        WHEN 'INT'.
+
+          lv_country_of_plant = is_task-params-countryofplant.
+          lv_direction = is_task-params-direction.
+          lv_max_lines = is_task-params-maxnumberoflines.
+          lv_bukrs = is_task-params-company.
+
+          IF lv_max_lines IS INITIAL.
+            lv_max_lines = 500000.
+          ENDIF.
+
+* ~ ICNTRY - Comp.Code/Cntry of plant
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_icntry
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-cmpnycodecntryofplant AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_icntry.
+*          ENDLOOP.
+
+          ls_selopt-sign = 'I'.
+          ls_selopt-option = 'BT'.
+
+* ~ INTRA_DATE - Intra Date
+          CLEAR : lt_string, ls_selopt-high.
+          IF is_task-params-periodstart IS NOT INITIAL AND is_task-params-periodend IS NOT INITIAL.
+            CONCATENATE is_task-params-periodstart(4) is_task-params-periodstart+5(2) is_task-params-periodstart+8(2) INTO ls_selopt-low.
+            CONCATENATE is_task-params-periodend(4) is_task-params-periodend+5(2) is_task-params-periodend+8(2) INTO ls_selopt-high.
+            APPEND ls_selopt TO lt_intra_date.
+
+          ENDIF.
+
+        WHEN 'GLI'.
+
+          lv_ledger = is_task-params-ledger.
+          lv_flip_sign = is_task-params-flipsign.
+
+* ~ SAKNR - G/L Account
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_saknr
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-glaccount AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_saknr.
+*          ENDLOOP.
+
+* ~ BUKRS - Company code
+          CLEAR : lt_string, ls_selopt-high.
+          SPLIT is_task-params-company AT ';' INTO TABLE lt_string.
+          LOOP AT lt_string INTO lv_string.
+
+            ls_selopt-low = lv_string.
+
+            AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+            ID 'BUKRS' FIELD ls_selopt-low
+            ID 'ACTVT' FIELD '03'.
+
+            IF sy-subrc EQ 0.
+              APPEND ls_selopt TO lt_bukrs.
+            ELSE.
+              MESSAGE 'User unauthorized for given company code.'(070) TYPE 'E'.
+            ENDIF.
+          ENDLOOP.
+
+          ls_selopt-sign = 'I'.
+          ls_selopt-option = 'BT'.
+
+* ~ BUDAT - Posting Date
+          CLEAR : lt_string, ls_selopt-high.
+          IF is_task-params-periodstart IS NOT INITIAL AND is_task-params-periodend IS NOT INITIAL.
+            CONCATENATE is_task-params-periodstart(4) is_task-params-periodstart+5(2) is_task-params-periodstart+8(2) INTO ls_selopt-low.
+            CONCATENATE is_task-params-periodend(4) is_task-params-periodend+5(2) is_task-params-periodend+8(2) INTO ls_selopt-high.
+            APPEND ls_selopt TO lt_budat.
+
+          ENDIF.
+        WHEN 'TBR'.
+
+* ~ Ledger & Period & Year
+          lv_ledger = is_task-params-ledger.
+          lv_period = is_task-params-period.
+          lv_year = is_task-params-fiscalyear.
+
+* ~ BUKRS - Company code
+          CLEAR : lt_string, ls_selopt-high.
+          SPLIT is_task-params-company AT ';' INTO TABLE lt_string.
+          LOOP AT lt_string INTO lv_string.
+
+            ls_selopt-low = lv_string.
+
+            AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+            ID 'BUKRS' FIELD ls_selopt-low
+            ID 'ACTVT' FIELD '03'.
+
+            IF sy-subrc EQ 0.
+              APPEND ls_selopt TO lt_bukrs.
+            ELSE.
+              MESSAGE 'User unauthorized for given company code.'(070) TYPE 'E'.
+            ENDIF.
+          ENDLOOP.
+
+* ~ SAKNR - G/L Account
+          me->create_selopt_t(
+            EXPORTING
+              iv_value  = is_task-params-glaccount
+            IMPORTING
+              et_selopt = lt_saknr
+          ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-glaccount AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            clear: lv_low, lv_high.
+*            SPLIT lv_string at '*' INTO lv_low lv_high.
+*            IF lv_high is INITIAL. "EQ
+*              ls_selopt-option = 'EQ'.
+*              ls_selopt-low = lv_low.
+*            ELSE. "BETWEEN
+*              ls_selopt-option = 'BT'.
+*              ls_selopt-low = lv_low.
+*              ls_selopt-high = lv_high.
+*            ENDIF.
+*            APPEND ls_selopt TO lt_saknr.
+*          ENDLOOP.
+
+* ~ WAERS - Currency
+          me->create_selopt_t(
+                      EXPORTING
+                        iv_value  = is_task-params-glaccount
+                      IMPORTING
+                        et_selopt = lt_waers
+                    ).
+*          CLEAR : lt_string, ls_selopt-high.
+*          SPLIT is_task-params-currency AT ';' INTO TABLE lt_string.
+*          LOOP AT lt_string INTO lv_string.
+*            ls_selopt-low = lv_string.
+*            APPEND ls_selopt TO lt_waers.
+*          ENDLOOP.
+        WHEN 'DYN'.
+          lv_model_id     = is_task-params-modelid.
+          ls_dyn-filter_1 = is_task-params-filter1.
+          ls_dyn-filter_2 = is_task-params-filter2.
+          ls_dyn-filter_3 = is_task-params-filter3.
+          ls_dyn-filter_4 = is_task-params-filter4.
+          ls_dyn-filter_5 = is_task-params-filter5.
+          ls_dyn-filter_6 = is_task-params-filter6.
+          ls_dyn-filter_7 = is_task-params-filter7.
+          ls_dyn-filter_8 = is_task-params-filter8.
+          ls_dyn-filter_9 = is_task-params-filter9.
+          ls_dyn-filter_delta_period = is_task-params-deltaperiod.
+          ls_dyn-filter_delta_period_start = is_task-params-deltaperiodstart.
+          ls_dyn-filter_delta_period_end = is_task-params-deltaperiodend.
+        WHEN OTHERS.
+          RETURN.
+      ENDCASE.
+
+
+
+* ~ Initialisation master class object
+
+      CREATE OBJECT lo_zcl_ext_master
+        EXPORTING
+          iv_output          = lv_output_type
+          iv_type            = lv_run_type
+          it_budat           = lt_budat
+          it_lstml           = lt_lstml
+          it_ktosl           = lt_ktosl
+          it_mwskz           = lt_mwskz
+          it_vdate           = lt_vdate
+          it_xblnr           = lt_xblnr
+          it_cpudt           = lt_cpudt
+          it_bldat           = lt_bldat
+          it_belnr           = lt_belnr
+          it_blart           = lt_blart
+          it_bukrs           = lt_bukrs
+          it_intra_date      = lt_intra_date
+          it_waers           = lt_waers
+          it_saknr           = lt_saknr
+          iv_ledger          = lv_ledger
+          iv_nat_curr        = lv_nat_curr
+          iv_input_tax       = lv_in_tax
+          iv_output_tax      = lv_out_tax
+          iv_deferred_tax    = lv_deffered_tax
+          iv_rev_charge      = lv_reverse_charge
+          iv_gjahr           = lv_year
+          iv_delta_run       = lv_delta_run
+          iv_update_audit    = lv_update_audit_log
+          iv_filename_suffix = lv_filename_suffix
+          iv_gli_flip        = lv_flip_sign
+          iv_direc           = lv_direction
+          iv_country         = lv_country_of_plant
+          iv_max_lines       = lv_max_lines
+          iv_period          = lv_period
+          iv_sii_region      = lv_sii_region
+          iv_bukrs           = lv_bukrs
+          iv_model_id        = lv_model_id
+          is_dyn_filters     = ls_dyn.
+
+      SET HANDLER: me->handler_master_event FOR lo_zcl_ext_master.
+
+      IF sy-subrc EQ 0.
+
+*        IF is_test_mode EQ abap_false.
+** ~ Update status - Pending -> Running
+*          me->update_status_task(
+*            EXPORTING
+*              is_task   = is_task
+*              iv_status = mv_status_running
+*          ).
+*
+** ~ Write log - Running
+*          me->write_log_slg1(
+*            EXPORTING
+*              is_task   = is_task
+*              iv_status = mv_status_running
+*          ).
+*        ENDIF.
+
+
+* ~ Execute Master run method
+        lo_zcl_ext_master->run(
+          IMPORTING
+            ev_response           = lv_response
+            ev_status_code        = lv_status_code
+            ev_exception          = lv_exception
+        ).
+
+* ~ Update task status
+        IF lv_exception EQ abap_true.
+          IF is_test_mode EQ abap_false.
+* ~ Update status - Running -> Failed
+            me->update_status_task(
+              EXPORTING
+                is_task   = is_task
+                iv_status = mv_status_failed
+            ).
+
+* ~ Write log - Failed
+            me->write_log_slg1(
+              EXPORTING
+                is_task   = is_task
+                iv_status = mv_status_failed
+            ).
+
+            me->check_and_rename_copy_task(
+              EXPORTING
+                is_task      =  is_task                " Deloitte Extractor - Response tasks from ETP Core
+              IMPORTING
+                ev_result    = lv_result                 " The task can be copy or not
+                es_copy_task = ls_copy_task                 " Deloitte Extractor - Response tasks from ETP Core
+            ).
+
+            IF lv_result EQ abap_true.
+* ~ Create a copy task
+              me->create_task(
+                CHANGING
+                  cs_task = ls_copy_task                 " Deloitte Extractor - Response tasks from ETP Core
+              ).
+*              CATCH cx_encrypt_error. " Error During Encryption or Decryption.
+
+* ~ Update status - Created -> Pending
+              me->update_status_task(
+                EXPORTING
+                  is_task   = ls_copy_task
+                  iv_status = mv_status_pending
+              ).
+            ENDIF.
+            CLEAR ls_copy_task.
+
+          ENDIF.
+
+        ELSE.
+          zvat_ext_ui2_cl_json=>deserialize(
+              EXPORTING
+                json             = lv_response " JSON string
+              CHANGING
+                data             = ls_response " Data to serialize
+            ).
+
+          IF ls_response-success EQ abap_true.
+            IF is_test_mode EQ abap_false.
+* ~ Update status - Running -> Successful
+              me->update_status_task(
+                EXPORTING
+                  is_task   = is_task
+                  iv_status = mv_status_successful
+              ).
+
+* ~ Write log - Running
+              me->write_log_slg1(
+                EXPORTING
+                  is_task   = is_task
+                  iv_status = mv_status_successful
+              ).
+            ENDIF.
+
+          ELSE.
+            IF is_test_mode EQ abap_false.
+* ~ Update status - Running -> Failed
+              me->update_status_task(
+                EXPORTING
+                  is_task   = is_task
+                  iv_status = mv_status_failed
+              ).
+
+* ~ Write log - failed
+              me->write_log_slg1(
+                EXPORTING
+                  is_task   = is_task
+                  iv_status = mv_status_failed
+              ).
+
+              me->check_and_rename_copy_task(
+                EXPORTING
+                  is_task      =  is_task                " Deloitte Extractor - Response tasks from ETP Core
+                IMPORTING
+                  ev_result    = lv_result                 " The task can be copy or not
+                  es_copy_task = ls_copy_task                 " Deloitte Extractor - Response tasks from ETP Core
+              ).
+
+              IF lv_result EQ abap_true.
+* ~ Create a copy task
+                me->create_task(
+                  CHANGING
+                    cs_task = ls_copy_task                 " Deloitte Extractor - Response tasks from ETP Core
+                ).
+*                CATCH cx_encrypt_error. " Error During Encryption or Decryption
+
+* ~ Update status - Created -> Pending
+                me->update_status_task(
+                  EXPORTING
+                    is_task   = ls_copy_task
+                    iv_status = mv_status_pending
+                ).
+              ENDIF.
+              CLEAR ls_copy_task.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ELSE.
+      me->create_log(
+        EXPORTING
+          is_task    = is_task                 " Deloitte Extractor - Response tasks from ETP Core
+          iv_type    = 'Fatal'
+          iv_message = lv_message
+      ).
+      "Log Error Check Parameter
+      IF is_test_mode EQ abap_false.
+* ~ Update status - Running -> Failed
+        me->update_status_task(
+          EXPORTING
+            is_task   = is_task
+            iv_status = mv_status_failed
+        ).
+
+* ~ Write log - Failed
+        me->write_log_slg1(
+          EXPORTING
+            is_task   = is_task
+            iv_status = mv_status_failed
+        ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD filter_tasks.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+* Tables
+
+* Field Symbols
+
+    FIELD-SYMBOLS: <fs_all_task> LIKE LINE OF mt_filter_tasks.
+    FIELD-SYMBOLS: <fs_filter_task> LIKE LINE OF mt_filter_tasks.
+
+* Structures
+
+* Variables
+
+    DATA: lv_datetime   TYPE timestamp,
+          lv_datetime_c TYPE string.
+
+* Constants
+
+    DATA: lc_status_running type string value 'Running'.
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+* ~ Filter
+
+    LOOP AT mt_all_tasks ASSIGNING <fs_all_task> WHERE state EQ 'Pending'.
+      APPEND <fs_all_task> TO mt_filter_tasks.
+      IF is_test_mode EQ abap_false.
+* ~ Update status - Pending -> Running
+          me->update_status_task(
+            EXPORTING
+              is_task   = <fs_all_task>
+              iv_status = lc_status_running
+          ).
+
+* ~ Write log - Running
+          me->write_log_slg1(
+            EXPORTING
+              is_task   = <fs_all_task>
+              iv_status = mv_status_running
+          ).
+       ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  method GET_NUMBER_OF_ERROR.
+
+    SELECT COUNT( * )
+    INTO ev_number_of_records
+    FROM zvat_task_error where date_run EQ sy-datum.
+
+  endmethod.
+
+
+  METHOD get_oauth_token.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client TYPE REF TO if_http_client,
+          lo_badi_auth   TYPE REF TO zbadi_extractor_auth_def,
+          lo_decrypter   TYPE REF TO cl_hard_wired_encryptor.
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+    DATA: ls_msg_key TYPE scx_t100key.
+
+* Variables
+
+    DATA: lv_oauth                   TYPE string,
+          lv_etpc                    TYPE string,
+          lv_rest                    TYPE string,
+          lv_success                 TYPE abap_bool,
+          lv_status_code             TYPE i,
+          lv_auth_url_p              TYPE zvat_ext_param_val,
+          lv_auth_client_id_p        TYPE zvat_ext_param_val,
+          lv_auth_client_secret_p    TYPE zvat_ext_param_val,
+          lv_grant_type_p            TYPE zvat_ext_param_val,
+          lv_scope_type_p            TYPE zvat_ext_param_val,
+          lv_auth_url_id_p           TYPE zvat_ext_param_val,
+          lv_auth_url                TYPE string,
+          lv_auth_client_id_encr     TYPE string,
+          lv_auth_client_secret_encr TYPE string,
+          lv_auth_url_id_p_encr      TYPE string,
+          lv_auth_url_id             TYPE string,
+          lv_auth_client_id          TYPE string,
+          lv_auth_client_secret      TYPE string,
+          lv_grant_type              TYPE string,
+          lv_scope                   TYPE string.
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    ls_msg_key-msgid = 'ZVAT_EXT'.
+
+    CREATE OBJECT lo_decrypter.
+
+* ~ Get parameters from param table via class
+
+    zcl_ext_paramater=>get_paramater(
+          EXPORTING
+            iv_param = 'API_TASK_TOKEN'                 " Parameter ID for SAP Extractor parameter table
+          IMPORTING
+            ev_value = lv_auth_url_p                 " Value for parameters in the SAP Extractor parameter table
+        ).
+
+    lv_auth_url = lv_auth_url_p.
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TASK_TKN_ID'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_auth_url_id_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_auth_url_id_p_encr = lv_auth_url_id_p.
+    lv_auth_url_id = lo_decrypter->decrypt_string2string( the_string = lv_auth_url_id_p_encr ).
+
+    REPLACE '*' IN lv_auth_url WITH lv_auth_url_id.
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TASK_CL_ID'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_auth_client_id_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+*    lv_auth_client_id = lv_auth_client_id_p.
+
+    lv_auth_client_id_encr = lv_auth_client_id_p.
+    lv_auth_client_id = lo_decrypter->decrypt_string2string( the_string = lv_auth_client_id_encr ).
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TASK_CL_SEC'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_auth_client_secret_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+*    lv_auth_client_secret = lv_auth_client_secret_p.
+
+    lv_auth_client_secret_encr = lv_auth_client_secret_p.
+    lv_auth_client_secret = lo_decrypter->decrypt_string2string( the_string = lv_auth_client_secret_encr ).
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TASK_GRANT'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_grant_type_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_grant_type = lv_grant_type_p.
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TASK_SCOPE'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_scope_type_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+    lv_scope = lv_scope_type_p.
+
+* ~ Create HTTP client from url
+
+    CALL METHOD cl_http_client=>create_by_url
+      EXPORTING
+        url                = lv_auth_url
+      IMPORTING
+        client             = lo_http_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4.
+    IF sy-subrc <> 0.
+*      Implement suitable error handling here
+    ENDIF.
+
+    IF lo_http_client IS BOUND.
+
+* ~ Set request headers
+
+      lo_http_client->request->set_method( if_http_request=>co_request_method_post ).
+      lo_http_client->request->set_form_field( EXPORTING name  = 'client_id'  value = lv_auth_client_id ).
+      lo_http_client->request->set_form_field( EXPORTING name  = 'client_secret'  value = lv_auth_client_secret ).
+      lo_http_client->request->set_form_field( EXPORTING name  = 'grant_type'  value = lv_grant_type ).
+      lo_http_client->request->set_form_field( EXPORTING name  = 'scope'  value = lv_scope ).
+
+* ~ Send request
+
+      CALL METHOD lo_http_client->send
+        EXCEPTIONS
+          http_communication_failure = 1
+          http_invalid_state         = 2
+          http_processing_failed     = 3
+          http_invalid_timeout       = 4
+          OTHERS                     = 5.
+      IF sy-subrc = 0.
+
+* ~ Receive response
+
+        CALL METHOD lo_http_client->receive
+          EXCEPTIONS
+            http_communication_failure = 1
+            http_invalid_state         = 2
+            http_processing_failed     = 3
+            OTHERS                     = 4.
+
+        IF sy-subrc = 0.
+          GET TIME STAMP FIELD mv_timestamp.
+
+          lv_oauth = lo_http_client->response->get_cdata( ).
+          lo_http_client->response->get_status( IMPORTING code = lv_status_code ).
+          mv_token_status = lv_status_code.
+
+          IF lv_oauth CS 'error' OR lv_oauth IS INITIAL.
+            ls_msg_key-msgno = '005'.
+            RAISE EXCEPTION TYPE zcx_ext_exception
+              EXPORTING
+                textid = ls_msg_key.
+          ENDIF.
+
+          SPLIT lv_oauth AT '"access_token":"' INTO lv_etpc lv_oauth.
+          SPLIT lv_oauth AT '"' INTO lv_oauth lv_etpc.
+
+* ~ Save token to class
+
+          mv_token = lv_oauth.
+
+        ELSE.
+
+          ls_msg_key-msgno = '005'.
+          RAISE EXCEPTION TYPE zcx_ext_exception
+            EXPORTING
+              textid = ls_msg_key.
+
+        ENDIF.
+
+      ELSE.
+
+        ls_msg_key-msgno = '005'.
+        RAISE EXCEPTION TYPE zcx_ext_exception
+          EXPORTING
+            textid = ls_msg_key.
+
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_tasks.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client TYPE REF TO if_http_client,
+          lo_decrypter   TYPE REF TO cl_hard_wired_encryptor.
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+    DATA: ls_msg_key TYPE scx_t100key.
+
+* Variables
+
+    DATA: lv_service_url         TYPE string,
+          lv_service_url_p       TYPE zvat_ext_param_val,
+          lv_content_type        TYPE string,
+          lv_content_type_p      TYPE zvat_ext_param_val,
+          lv_service_url_id_p    TYPE zvat_ext_param_val,
+          lv_service_url_id      TYPE string,
+          lv_service_url_id_encr TYPE string,
+          lv_token               TYPE string,
+          lv_response            TYPE string,
+          lv_status              TYPE string,
+          lv_status_i            TYPE i.
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    IF mv_token IS NOT INITIAL.
+
+      CREATE OBJECT lo_decrypter.
+
+* ~ Get parameters
+
+      " Endpoint
+
+      zcl_ext_paramater=>get_paramater(
+        EXPORTING
+          iv_param = 'API_TASK_EP_URL'                 " Parameter ID for SAP Extractor parameter table
+        IMPORTING
+          ev_value = lv_service_url_p                 " Value for parameters in the SAP Extractor parameter table
+      ).
+
+      lv_service_url = lv_service_url_p.
+
+      zcl_ext_paramater=>get_paramater(
+        EXPORTING
+          iv_param = 'API_TASK_EP_ID'                 " Parameter ID for SAP Extractor parameter table
+        IMPORTING
+          ev_value = lv_service_url_id_p                 " Value for parameters in the SAP Extractor parameter table
+      ).
+
+      lv_service_url_id_encr = lv_service_url_id_p.
+      lv_service_url_id = lo_decrypter->decrypt_string2string( the_string = lv_service_url_id_encr ).
+
+      REPLACE '*' IN lv_service_url WITH lv_service_url_id.
+      mv_endpoint = lv_service_url.
+
+      " Content Type
+
+      zcl_ext_paramater=>get_paramater(
+       EXPORTING
+         iv_param = 'API_TASK_CON_TY'                 " Parameter ID for SAP Extractor parameter table
+       IMPORTING
+         ev_value = lv_content_type_p                " Value for parameters in the SAP Extractor parameter table
+     ).
+
+      lv_content_type = lv_content_type_p.
+
+* ~ Perform call
+
+      " Create endpoint url
+
+      CONCATENATE 'Bearer' mv_token INTO lv_token SEPARATED BY space.
+
+      CLEAR lo_http_client.
+
+      CALL METHOD cl_http_client=>create_by_url
+        EXPORTING
+          url                = mv_endpoint
+        IMPORTING
+          client             = lo_http_client
+        EXCEPTIONS
+          argument_not_found = 1
+          plugin_not_active  = 2
+          internal_error     = 3
+          OTHERS             = 4.
+      IF sy-subrc <> 0.
+*      Implement suitable error handling here
+      ENDIF.
+
+      " Set request header and http method
+
+      IF lo_http_client IS BOUND.
+
+        " add method and token
+
+        lo_http_client->request->set_method( 'GET' ).
+        lo_http_client->request->set_header_field( EXPORTING  name  = 'Authorization' value = lv_token ).
+        lo_http_client->request->set_header_field( EXPORTING  name  = 'content-type' value = lv_content_type ).
+
+        CALL METHOD lo_http_client->send
+          EXCEPTIONS
+            http_communication_failure = 1
+            http_invalid_state         = 2
+            http_processing_failed     = 3
+            http_invalid_timeout       = 4
+            OTHERS                     = 5.
+
+        IF sy-subrc = 0.
+
+          CALL METHOD lo_http_client->receive
+            EXCEPTIONS
+              http_communication_failure = 1
+              http_invalid_state         = 2
+              http_processing_failed     = 3
+              OTHERS                     = 4.
+
+          lv_response = lo_http_client->response->get_cdata( ).
+          lo_http_client->response->get_status(
+            IMPORTING
+              code   = lv_status_i                 " HTTP Status Code
+          ).
+          lv_status = lv_status_i.
+
+          zvat_ext_ui2_cl_json=>deserialize(
+            EXPORTING
+              json             = lv_response " JSON string
+            CHANGING
+              data             = mt_all_tasks " Data to serialize
+          ).
+
+          SPLIT lv_response AT '},{' INTO TABLE mt_all_tasks_json.
+          et_tasks = mt_all_tasks.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD handler_master_event.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+* Variables
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+    TRY.
+        me->create_log(
+              EXPORTING
+                is_task        = ms_current_task                 " Deloitte Extractor - Response tasks from ETP Core
+                iv_type = iv_type
+                iv_message = iv_message
+            ).
+      CATCH zcx_ext_exception.
+      CATCH cx_encrypt_error.
+    ENDTRY.
+*    WRITE :/ iv_message.
+  ENDMETHOD.
+
+
+  METHOD PROCESS_EXECUTE.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+* Tables
+
+* Field Symbols
+
+    FIELD-SYMBOLS: <fs_filter_task> TYPE zsvat_task_response.
+
+* Structures
+
+    DATA: ls_limit_error_p TYPE zvat_ext_param_val.
+
+* Variables
+
+    DATA: lv_number_of_error TYPE i,
+          lv_limit_error     TYPE i.
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    zcl_ext_paramater=>get_paramater(
+          EXPORTING
+            iv_param = 'API_TASK_LIM_ER'                 " Parameter ID for SAP Extractor parameter table
+          IMPORTING
+            ev_value = ls_limit_error_p                 " Value for parameters in the SAP Extractor parameter table
+        ).
+
+    lv_limit_error = ls_limit_error_p.
+
+* ~ Generate oAuth token
+    me->get_number_of_error(
+      IMPORTING
+        ev_number_of_records = lv_number_of_error                 " Whole Number with +/- Sign (-2.147.483.648 .. 2.147.483.647)
+    ).
+
+    IF lv_limit_error is INITIAL OR lv_number_of_error LT lv_limit_error.
+
+
+* ~ Generate oAuth token
+
+      IF mv_token IS INITIAL OR zcl_ext_utility=>is_token_valid( iv_timestamp = mv_timestamp ) EQ abap_false.
+        me->get_oauth_token( ).
+      ENDIF.
+
+* ~ Generate all tasks
+
+      IF mv_token IS NOT INITIAL.
+        me->get_tasks( ).
+
+* ~ Filter - Keep only status 'APPROVED' and plannedExecutionDate now + in the past
+
+        me->filter_tasks( is_test_mode = is_test_mode ).
+
+        LOOP AT mt_filter_tasks ASSIGNING <fs_filter_task>.
+          me->execute_task( is_task = <fs_filter_task> is_test_mode = is_test_mode ).
+        ENDLOOP.
+      ELSE.
+        "INSERT ERROR TO THE TABLE
+        me->create_task_error_record( iv_id_error = 'OAUTH' ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD process_get_event.
+
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+* Variables
+
+* Constants
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+* ~ Generate oAuth token
+
+    me->get_oauth_token( ).
+
+* ~ Generate all tasks
+
+    me->get_tasks( IMPORTING et_tasks = et_tasks ).
+  ENDMETHOD.
+
+
+  METHOD update_status_task.
+***************************************************************************"
+* DATA DECLARATION
+***************************************************************************"
+* Objects
+
+    DATA: lo_http_client TYPE REF TO if_http_client,
+          lo_decrypter   TYPE REF TO cl_hard_wired_encryptor.
+
+* Tables
+
+* Field Symbols
+
+* Structures
+
+* Variables
+
+    DATA: lv_api_url      TYPE string,
+          lv_token        TYPE string,
+          lv_response     TYPE string,
+          lv_status       TYPE string,
+          lv_status_i     TYPE i,
+          lv_task_url_p   TYPE zvat_ext_param_val,
+          lv_task_url     TYPE string,
+          lv_task_id_p    TYPE zvat_ext_param_val,
+          lv_task_id_encr TYPE string,
+          lv_task_id      TYPE string,
+          lv_json         TYPE string.
+
+* Constants
+
+    CONSTANTS: lc_api_pending    TYPE string VALUE 'approve',
+               lc_api_running    TYPE string VALUE 'start',
+               lc_api_successful TYPE string VALUE 'complete',
+               lc_api_failed     TYPE string VALUE 'complete'.
+
+***************************************************************************"
+* IMPLEMENTATION
+***************************************************************************"
+
+    CREATE OBJECT lo_decrypter.
+
+* ~ Get parameters from param table via class
+
+    zcl_ext_paramater=>get_paramater(
+          EXPORTING
+            iv_param = 'API_TASK_EP_URL'                 " Parameter ID for SAP Extractor parameter table
+          IMPORTING
+            ev_value = lv_task_url_p                 " Value for parameters in the SAP Extractor parameter table
+        ).
+
+    lv_api_url = lv_task_url_p.
+
+    zcl_ext_paramater=>get_paramater(
+      EXPORTING
+        iv_param = 'API_TASK_CL_ID'                 " Parameter ID for SAP Extractor parameter table
+      IMPORTING
+        ev_value = lv_task_id_p                 " Value for parameters in the SAP Extractor parameter table
+    ).
+
+    lv_task_id_encr = lv_task_id_p.
+    lv_task_id = lo_decrypter->decrypt_string2string( the_string = lv_task_id_encr ).
+
+
+    REPLACE '*' INTO lv_api_url WITH is_task-tenantid.
+
+    CONCATENATE lv_api_url '/' is_task-id '/' INTO lv_api_url.
+
+    CASE iv_status.
+      WHEN mv_status_pending.
+        CONCATENATE lv_api_url lc_api_pending into mv_endpoint.
+      WHEN mv_status_running.
+        CONCATENATE lv_api_url lc_api_running into mv_endpoint.
+      WHEN mv_status_successful.
+        CONCATENATE lv_api_url lc_api_successful into mv_endpoint.
+        lv_json = '{"success": true, "message": "deserunt"}'.
+      WHEN mv_status_failed.
+        CONCATENATE lv_api_url lc_api_successful into mv_endpoint.
+      WHEN OTHERS.
+    ENDCASE.
+
+    CONDENSE mv_endpoint NO-GAPS.
+
+    " Create endpoint url
+
+    me->get_oauth_token( ).
+
+    CONCATENATE 'Bearer' mv_token INTO lv_token SEPARATED BY space.
+
+    CLEAR lo_http_client.
+
+    CALL METHOD cl_http_client=>create_by_url
+      EXPORTING
+        url                = mv_endpoint
+      IMPORTING
+        client             = lo_http_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4.
+    IF sy-subrc <> 0.
+*      Implement suitable error handling here
+    ENDIF.
+
+    " Set request header and http method
+
+    IF lo_http_client IS BOUND.
+
+      " add method and token
+
+      lo_http_client->request->set_method( 'PUT' ).
+      lo_http_client->request->set_header_field( EXPORTING  name  = 'Authorization' value = lv_token ).
+      lo_http_client->request->set_cdata(
+        EXPORTING
+          data   = lv_json
+      ).
+
+      CALL METHOD lo_http_client->send
+        EXCEPTIONS
+          http_communication_failure = 1
+          http_invalid_state         = 2
+          http_processing_failed     = 3
+          http_invalid_timeout       = 4
+          OTHERS                     = 5.
+
+      IF sy-subrc = 0.
+
+        CALL METHOD lo_http_client->receive
+          EXCEPTIONS
+            http_communication_failure = 1
+            http_invalid_state         = 2
+            http_processing_failed     = 3
+            OTHERS                     = 4.
+
+        lv_response = lo_http_client->response->get_cdata( ).
+        lo_http_client->response->get_status(
+          IMPORTING
+            code   = lv_status_i                 " HTTP Status Code
+        ).
+        lv_status = lv_status_i.
+
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD write_log_slg1.
+
+* Structures
+    DATA: ls_message       TYPE bal_s_msg,
+          ls_message_lines TYPE bapiret2,
+          ls_bal_log       TYPE bal_s_log.
+
+* Variables
+
+    DATA: lv_lines        TYPE char50,
+          lv_message_type TYPE bapireturn-type VALUE 'I',
+          lv_log_handle   TYPE balloghndl.
+
+* Constants
+
+    CONSTANTS: lc_message_class TYPE sy-msgid VALUE 'ZVAT_EXT',
+               lc_msg_no        TYPE sy-msgno VALUE '013',
+               lc_bal_obj       TYPE balobj_d VALUE 'ZVAT_EXT',
+               lc_bal_subobj    TYPE balsubobj VALUE 'ZTASK'.
+
+* ~ Create lines message
+
+    IF iv_status EQ mv_status_failed.
+      lv_message_type = 'E'.
+    ENDIF.
+
+    CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+      EXPORTING
+        type   = lv_message_type
+        cl     = lc_message_class
+        number = lc_msg_no
+*       par1   = iv_status
+      IMPORTING
+        return = ls_message_lines.
+
+* ~ Create instance of BAL LOG
+
+    ls_bal_log-extnumber = is_task-id.
+    CONDENSE ls_bal_log-extnumber.
+
+    ls_bal_log-object = lc_bal_obj.
+    ls_bal_log-subobject = lc_bal_subobj.
+    ls_bal_log-aldate = sy-datum.
+    ls_bal_log-altime = sy-uzeit.
+
+    CALL FUNCTION 'BAL_LOG_CREATE'
+      EXPORTING
+        i_s_log                 = ls_bal_log
+      IMPORTING
+        e_log_handle            = lv_log_handle
+      EXCEPTIONS
+        log_header_inconsistent = 1
+        OTHERS                  = 2.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+* ~ Add messages
+
+    " Lines - status
+
+    ls_message-msgid = ls_message_lines-id.
+    ls_message-msgno = '013'. "SE91
+    ls_message-msgty = ls_message_lines-type.
+    ls_message-msgv1 = iv_status.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = lv_log_handle
+        i_s_msg          = ls_message
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    " Lines - Type
+
+    CLEAR ls_message.
+    ls_message-msgid = ls_message_lines-id.
+    ls_message-msgno = '015'. "SE91
+    ls_message-msgty = ls_message_lines-type.
+    ls_message-msgv1 = is_task-type.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = lv_log_handle
+        i_s_msg          = ls_message
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    " Lines - PlannedDate
+
+    CLEAR ls_message.
+    ls_message-msgid = ls_message_lines-id.
+    ls_message-msgno = '016'. "SE91
+    ls_message-msgty = ls_message_lines-type.
+    ls_message-msgv1 = is_task-plannedexecutiondate.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = lv_log_handle
+        i_s_msg          = ls_message
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    " Lines - Params
+
+    CLEAR ls_message.
+      ls_message-msgid = ls_message_lines-id.
+      ls_message-msgno = '014'.
+      ls_message-msgty = ls_message_lines-type.
+
+      CALL FUNCTION 'BAL_LOG_MSG_ADD'
+        EXPORTING
+          i_log_handle     = lv_log_handle
+          i_s_msg          = ls_message
+        EXCEPTIONS
+          log_not_found    = 1
+          msg_inconsistent = 2
+          log_is_full      = 3
+          OTHERS           = 4.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+
+    DATA : lv_length TYPE i,
+           lv_param  TYPE string.
+
+    CALL METHOD /ui2/cl_json=>serialize
+      EXPORTING
+        data   = is_task-params
+      RECEIVING
+        r_json = lv_param.
+
+    lv_length = strlen( lv_param ).
+    CONDENSE lv_param.
+
+    WHILE lv_length > 0.
+
+      CLEAR ls_message.
+      ls_message-msgid = ls_message_lines-id.
+      ls_message-msgno = '017'.
+      ls_message-msgty = ls_message_lines-type.
+      ls_message-msgv1 = lv_param.
+
+      CALL FUNCTION 'BAL_LOG_MSG_ADD'
+        EXPORTING
+          i_log_handle     = lv_log_handle
+          i_s_msg          = ls_message
+        EXCEPTIONS
+          log_not_found    = 1
+          msg_inconsistent = 2
+          log_is_full      = 3
+          OTHERS           = 4.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+
+      IF lv_length < 50.
+        CLEAR lv_param.
+      ELSE.
+        lv_param = lv_param+50.
+      ENDIF.
+
+      lv_length = strlen( lv_param ).
+
+    ENDWHILE.
+
+* ~ Save messages
+
+    CALL FUNCTION 'BAL_DB_SAVE'
+      EXPORTING
+        i_save_all       = abap_true
+      EXCEPTIONS
+        log_not_found    = 1
+        save_not_allowed = 2
+        numbering_error  = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

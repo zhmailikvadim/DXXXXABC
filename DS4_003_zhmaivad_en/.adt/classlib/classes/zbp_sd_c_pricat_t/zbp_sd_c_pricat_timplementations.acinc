@@ -1,0 +1,544 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* IAPRYALE     | 27.12.2022 | 16440: SD_Build Fiori App for            *
+*              |            | Price Catalogue EDI                      *
+*              |            | DS4K938943                               *
+*----------------------------------------------------------------------*
+* IAPRYALE     | 19.05.2023 | 19741: SD_Build Fiori App for            *
+*              |            | Price Catalogue EDI                      *
+*              |            | DS4K949200                               *
+*----------------------------------------------------------------------*
+
+CLASS lhc_pricecatalogue DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+
+  PRIVATE SECTION.
+
+    TYPES:
+      BEGIN OF mtyp_s_partner_data,
+        partner_exists TYPE abap_bool,
+        e_email        TYPE e_email,
+      END OF mtyp_s_partner_data.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys REQUEST requested_authorizations FOR pricecatalogue RESULT result.
+
+    METHODS sendidoc FOR MODIFY
+      IMPORTING keys FOR ACTION pricecatalogue~sendidoc RESULT result.
+
+    METHODS emailsfunction FOR MODIFY
+      IMPORTING keys FOR ACTION pricecatalogue~emailsfunction RESULT result.
+
+    METHODS itab_to_excel
+      IMPORTING io_data_ref       TYPE REF TO data
+      RETURNING VALUE(rv_xstring) TYPE xstring.
+
+    METHODS get_sender_email
+      RETURNING VALUE(rv_email) TYPE ad_smtpadr.
+
+    METHODS get_recipient_email
+      IMPORTING iv_vkorg               TYPE vkorg
+                iv_vtweg               TYPE vtweg
+                iv_kunnr               TYPE kunnr
+      RETURNING VALUE(rs_partner_data) TYPE mtyp_s_partner_data.
+
+    METHODS get_idoc_data
+      IMPORTING is_pricat_text          TYPE zsd_s_pricat_text_input
+                it_pricat               TYPE zsd_tt_pricat_keys
+      RETURNING VALUE(rs_idoc_segments) TYPE zsd_s_pricat_segments.
+
+    METHODS generate_idoc
+      IMPORTING iv_vkorg         TYPE vkorg
+                iv_vtweg         TYPE vtweg
+                iv_kunnr         TYPE kunnr
+                is_pricat_text   TYPE zsd_s_pricat_text_input
+                it_pricat        TYPE zsd_tt_pricat_keys
+      RETURNING VALUE(rs_return) TYPE bapiret1.
+
+    METHODS get_sender_numb
+      IMPORTING iv_vkorg      TYPE vkorg
+      RETURNING VALUE(rv_gln) TYPE eane_iln.
+
+    METHODS get_extension
+      IMPORTING iv_rcvprn        TYPE edi_rcvprn
+                iv_rcvprt        TYPE edi_rcvprt
+                iv_mestyp        TYPE edi_mestyp
+      RETURNING VALUE(rv_cimtyp) TYPE edi_cimtyp.
+
+    METHODS check_partner
+      IMPORTING iv_kunnr                 TYPE kunnr
+      RETURNING VALUE(rv_partner_exists) TYPE abap_boolean.
+ENDCLASS.
+
+CLASS lhc_pricecatalogue IMPLEMENTATION.
+
+  METHOD get_instance_authorizations.
+    READ ENTITIES OF  zsd_i_pricat IN LOCAL MODE
+      ENTITY pricecatalogue
+          ALL FIELDS
+          WITH CORRESPONDING #( keys )
+          RESULT DATA(lt_pricat).
+
+    IF lt_pricat IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_pricat ASSIGNING FIELD-SYMBOL(<ls_pricat>).
+      AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+            ID 'BUKRS' FIELD <ls_pricat>-%data-salesorganization
+            ID 'ACTVT'      FIELD '10'. "post
+      DATA(lv_result) = COND abap_bool( WHEN sy-subrc = 0 THEN abap_true ELSE abap_false ).
+      IF lv_result = abap_false.
+        APPEND VALUE #( %msg = new_message( id       = 'ZSD_PRICAT'
+                                            number   = 001
+                                            severity = if_abap_behv_message=>severity-error
+                       ) ) TO reported-pricecatalogue.
+        IF 1 = 2.  MESSAGE e001(zsd_pricat) INTO DATA(lv_message). ENDIF.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD sendidoc.
+    READ ENTITIES OF zsd_i_pricat IN LOCAL MODE
+         ENTITY pricecatalogue
+             ALL FIELDS
+             WITH CORRESPONDING #( keys )
+             RESULT DATA(lt_pricat_keys).
+
+    "Check if the customer is EDI relevant
+    DATA(ls_pricat_keys) = lt_pricat_keys[ 1 ].
+    DATA(ls_recipient) = get_recipient_email( iv_kunnr = CONV kunnr( ls_pricat_keys-%key-customernumber )
+                                              iv_vkorg = ls_pricat_keys-%key-salesorganization
+                                              iv_vtweg = ls_pricat_keys-%key-distributionchannel ).
+
+    IF ls_recipient-partner_exists IS INITIAL.
+      APPEND VALUE #( %msg = new_message( id       = 'ZSD_PRICAT'
+                                          number   = 003
+                                          severity = if_abap_behv_message=>severity-error
+                                          v1       = ls_pricat_keys-%key-customernumber
+                     ) ) TO reported-pricecatalogue.
+      IF 1 = 2. MESSAGE e003(zsd_pricat) INTO DATA(lv_message). ENDIF.
+      RETURN.
+    ELSE.
+      IF check_partner( CONV kunnr( ls_pricat_keys-%key-customernumber ) ) IS INITIAL.
+        APPEND VALUE #( %msg = new_message( id       = 'ZSD_PRICAT'
+                                            number   = 008
+                                            severity = if_abap_behv_message=>severity-error
+                                            v1       = ls_pricat_keys-%key-customernumber
+                       ) ) TO reported-pricecatalogue.
+        IF 1 = 2. MESSAGE e008(zsd_pricat) INTO lv_message. ENDIF.
+        RETURN.
+      ENDIF.
+
+      "Collect input text from pop-up
+      DATA(lt_keys) = keys.
+      DATA(ls_keys) = lt_keys[ 1 ].
+      DATA(ls_pricat_text) = VALUE zsd_s_pricat_text_input( doctxt = ls_keys-%param-document_name
+                                                            catid  = ls_keys-%param-catalog_id
+                                                            cattxt = ls_keys-%param-catalog_desc ).
+
+      DATA(lt_pricat) =  CORRESPONDING zsd_tt_pricat_keys( lt_pricat_keys MAPPING vkorg          = %key-salesorganization
+                                                                                  vtweg          = %key-distributionchannel
+                                                                                  kunnr          = %key-customernumber
+                                                                                  matnr          = %key-article
+                                                                                  fsh_season     = %key-fashionseason
+                                                                                  fsh_collection = %key-fashionseason
+                                                                                  fsh_theme      = %key-fashiontheme ) .
+
+      DATA(ls_return) = generate_idoc( iv_vkorg       = ls_pricat_keys-%key-salesorganization
+                                       iv_vtweg       = ls_pricat_keys-%key-distributionchannel
+                                       iv_kunnr       = CONV kunnr( ls_pricat_keys-%key-customernumber )
+                                       is_pricat_text = ls_pricat_text
+                                       it_pricat      = lt_pricat ).
+
+      APPEND VALUE #( %msg = new_message( id       = ls_return-id
+                                          number   = ls_return-number
+                                          severity = COND #( WHEN ls_return-type = 'E' THEN if_abap_behv_message=>severity-error
+                                                             WHEN ls_return-type = 'S' THEN if_abap_behv_message=>severity-success )
+                                          v1       = ls_return-message_v1
+                     ) ) TO reported-pricecatalogue.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD itab_to_excel.
+    FIELD-SYMBOLS: <lt_data> TYPE ANY TABLE.
+
+    ASSIGN io_data_ref->* TO <lt_data>.
+
+    TRY.
+        cl_salv_table=>factory( IMPORTING r_salv_table = DATA(lo_table)
+                                CHANGING  t_table      = <lt_data> ).
+
+        DATA(lt_fcat) =
+          cl_salv_controller_metadata=>get_lvc_fieldcatalog(
+            r_columns      = lo_table->get_columns( )
+            r_aggregations = lo_table->get_aggregations( ) ).
+
+        DATA(lo_result) =
+          cl_salv_ex_util=>factory_result_data_table(
+            r_data         = io_data_ref
+            t_fieldcatalog = lt_fcat ).
+
+        cl_salv_bs_tt_util=>if_salv_bs_tt_util~transform(
+          EXPORTING
+            xml_type      = if_salv_bs_xml=>c_type_xlsx
+            xml_version   = cl_salv_bs_a_xml_base=>get_version( )
+            r_result_data = lo_result
+            xml_flavour   = if_salv_bs_c_tt=>c_tt_xml_flavour_export
+            gui_type      = if_salv_bs_xml=>c_gui_type_gui
+          IMPORTING
+            xml           = rv_xstring ).
+      CATCH cx_root.
+        CLEAR rv_xstring.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD get_sender_email.
+    DATA:
+      ls_address TYPE bapiaddr3,
+      lt_return  TYPE TABLE OF bapiret2.
+
+    CALL FUNCTION 'BAPI_USER_GET_DETAIL'
+      EXPORTING
+        username      = sy-uname
+        cache_results = 'X'
+      IMPORTING
+        address       = ls_address
+      TABLES
+        return        = lt_return.
+    IF line_exists( lt_return[ type = 'E' ] ).
+      CLEAR rv_email.
+    ELSE.
+      rv_email = ls_address-e_mail.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD get_recipient_email.
+    TYPES:
+      BEGIN OF ltyp_s_filter_part_data,
+        kunnr TYPE kunnr,
+        vkorg TYPE vkorg,
+        vtweg TYPE vtweg,
+      END OF ltyp_s_filter_part_data,
+      BEGIN OF ltyp_s_part_data,
+        zsd_pricat_email_1 TYPE e_email,
+        zsd_pricat_email_2 TYPE e_email,
+        zsd_pricat_email_3 TYPE e_email,
+      END OF ltyp_s_part_data.
+
+    DATA:
+        lt_part_data TYPE TABLE OF ltyp_s_part_data.
+
+    TRY.
+        zcl_pe_hm_complex=>get_table(
+          EXPORTING iv_id           = '0239FC3B8D041EDDBE92955A9D519F59'
+                    is_filter       = VALUE ltyp_s_filter_part_data( kunnr = iv_kunnr
+                                                                     vkorg = iv_vkorg
+                                                                     vtweg = iv_vtweg )
+          IMPORTING et_table        = lt_part_data ).
+        rs_partner_data = VALUE #( partner_exists = abap_true e_email = lt_part_data[ 1 ]-zsd_pricat_email_1 ).
+      CATCH zcx_pe_hm.
+        CLEAR: lt_part_data, rs_partner_data.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD generate_idoc.
+    DATA:
+      lt_idoc_data TYPE edidd_tt.
+
+    CONSTANTS:
+      lc_mes_type    TYPE edi_mestyp VALUE 'ZPRICA',
+      lc_doc_type    TYPE edi_doctyp VALUE 'ZPRICA03',
+      lc_direction   TYPE edi_direct VALUE '1',
+      lc_idoc_type   TYPE edi_idoctp VALUE 'ZPRICA03',
+      lc_partn_type  TYPE edi_rcvprt VALUE 'KU',
+      lc_sender_type TYPE edi_sndprt VALUE 'LI'.
+
+    IF iv_vkorg  IS INITIAL
+    OR iv_vtweg  IS INITIAL
+    OR iv_kunnr  IS INITIAL
+    OR it_pricat IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(ls_idoc_data_segments) = get_idoc_data( is_pricat_text = is_pricat_text
+                                                 it_pricat      = it_pricat ).
+
+    lt_idoc_data = VALUE #( ( segnam = 'Z1IDTY'  sdata  = ls_idoc_data_segments-z1idty  )
+                            ( segnam = 'E1EDK03' sdata  = ls_idoc_data_segments-e1edk03 )
+                            ( segnam = 'Z1CUST'  sdata  = ls_idoc_data_segments-z1cust ) ).
+
+    LOOP AT ls_idoc_data_segments-item ASSIGNING FIELD-SYMBOL(<ls_pricat_item>).
+      lt_idoc_data = VALUE #( BASE lt_idoc_data ( segnam = 'Z1MODEL' sdata  = <ls_pricat_item>-z1model )
+                                                ( segnam = 'Z1MODL2' sdata  = <ls_pricat_item>-z1modl2 )
+                                                ( segnam = 'Z1MODL3' sdata  = <ls_pricat_item>-z1modl3 )
+                                                ( segnam = 'Z1COLOR' sdata  = <ls_pricat_item>-z1color ) ).
+      LOOP AT <ls_pricat_item>-z1siz ASSIGNING FIELD-SYMBOL(<ls_z1siz>).
+        lt_idoc_data = VALUE #( BASE lt_idoc_data ( segnam = 'Z1SIZ' sdata  = <ls_z1siz> ) ).
+      ENDLOOP.
+    ENDLOOP.
+
+    DATA(lv_sender_numb) = get_sender_numb( iv_vkorg ).
+
+    DATA(lv_extension) = get_extension( iv_rcvprn = iv_kunnr
+                                        iv_rcvprt = lc_partn_type
+                                        iv_mestyp = lc_mes_type ).
+
+    DATA(ls_idoc_control) = VALUE edidc( doctyp = lc_doc_type
+                                         mestyp = lc_mes_type
+                                         idoctp = lc_idoc_type
+                                         direct = lc_direction
+                                         cimtyp = lv_extension
+                                         sndprn = lv_sender_numb
+                                         sndprt = lc_sender_type
+                                         rcvprt = lc_partn_type
+                                         rcvprn = iv_kunnr
+                                         serial = |{ sy-datum }{ sy-uzeit }| ).
+
+    CALL FUNCTION 'ZSD_FM_SEND_IDOC' DESTINATION 'NONE'
+      EXPORTING
+        is_idoc_control       = ls_idoc_control
+        it_idoc_data          = lt_idoc_data
+      IMPORTING
+        es_return             = rs_return
+      EXCEPTIONS
+        system_failure        = 1
+        communication_failure = 2
+        OTHERS                = 3.
+    IF sy-subrc <> 0.
+      CALL FUNCTION 'BALW_BAPIRETURN_GET1'
+        EXPORTING
+          type       = sy-msgty
+          cl         = sy-msgid
+          number     = sy-msgno
+          par1       = sy-msgv1
+          par2       = sy-msgv2
+          par3       = sy-msgv3
+          par4       = sy-msgv4
+        IMPORTING
+          bapireturn = rs_return.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD get_idoc_data.
+
+    IF is_pricat_text IS INITIAL
+    OR it_pricat IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lo_pricat_idoc_builder) = zcl_sd_pricat_idoc_builder=>get_instance( ).
+
+    IF lo_pricat_idoc_builder IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    rs_idoc_segments = lo_pricat_idoc_builder->collect_idoc_segments( is_pricat_text = is_pricat_text
+                                                                      it_pricat      = it_pricat ).
+
+  ENDMETHOD.
+
+  METHOD get_sender_numb.
+    CONSTANTS:
+        lc_object_vkorg TYPE eane_object VALUE 'VKORG'.
+
+    IF iv_vkorg IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SELECT
+        gln
+        UP TO 1 ROWS
+  FROM eanc_gln_mapp
+    INTO  @rv_gln
+    WHERE object     = @lc_object_vkorg
+      AND object_key = @iv_vkorg.
+    ENDSELECT.
+    IF sy-subrc <> 0.
+      CLEAR rv_gln.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD get_extension.
+    IF iv_rcvprn IS INITIAL
+    OR iv_rcvprt IS INITIAL
+    OR iv_mestyp IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SELECT
+        cimtyp
+        UP TO 1 ROWS
+  FROM edp13
+    INTO  @rv_cimtyp
+    WHERE rcvprn = @iv_rcvprn
+      AND rcvprt = @iv_rcvprt
+      AND mestyp = @iv_mestyp.
+    ENDSELECT.
+    IF sy-subrc <> 0.
+      CLEAR rv_cimtyp.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD check_partner.
+    CONSTANTS:
+        lc_coordinator TYPE parvw VALUE 'KO'.
+
+    IF iv_kunnr IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SELECT COUNT(*)
+        UP TO 1 ROWS
+  FROM edpar
+    WHERE kunnr = @iv_kunnr
+      AND parvw = @lc_coordinator.
+    IF sy-subrc <> 0.
+      CLEAR rv_partner_exists.
+    ELSE.
+      rv_partner_exists = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD emailsfunction.
+
+    TYPES:
+      BEGIN OF ltyp_emails,
+        email TYPE ad_smtpadr,
+      END OF ltyp_emails.
+
+    CONSTANTS:
+        lc_sep TYPE char1 VALUE ';'.
+
+    DATA:
+      lt_emails           TYPE TABLE OF ltyp_emails,
+      ls_pricat_data_line TYPE zsd_s_pricat_data,
+      lt_pricat_data_line TYPE zsd_tt_pricat_data.
+
+    READ ENTITIES OF  zsd_i_pricat IN LOCAL MODE
+         ENTITY pricecatalogue
+             ALL FIELDS
+             WITH CORRESPONDING #( keys )
+             RESULT DATA(lt_pricat_keys).
+
+    "Collect input text from pop-up
+    DATA(lt_keys) = keys.
+    DATA(ls_keys) = lt_keys[ 1 ].
+    DATA(ls_pricat_text) = VALUE zsd_s_pricat_text_input( doctxt = ls_keys-%param-document_name
+                                                          catid  = ls_keys-%param-catalog_id
+                                                          cattxt = ls_keys-%param-catalog_desc ).
+
+    "Collect key fields from the result table
+    DATA(ls_pricat_keys) = lt_pricat_keys[ 1 ].
+
+    DATA(lt_pricat) = CORRESPONDING zsd_tt_pricat_keys( lt_pricat_keys MAPPING vkorg          = %key-salesorganization
+                                                                               vtweg          = %key-distributionchannel
+                                                                               kunnr          = %key-customernumber
+                                                                               matnr          = %key-article
+                                                                               fsh_season     = %key-fashionseason
+                                                                               fsh_collection = %key-fashioncollection
+                                                                               fsh_theme      = %key-fashiontheme ) .
+
+    DATA(ls_idoc_data_segments) = get_idoc_data( is_pricat_text = ls_pricat_text
+                                                 it_pricat      = lt_pricat ).
+
+    ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) ls_idoc_data_segments-z1idty ).
+    ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) ls_idoc_data_segments-e1edk03 ).
+    ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) ls_idoc_data_segments-z1cust ).
+    LOOP AT ls_idoc_data_segments-item ASSIGNING FIELD-SYMBOL(<ls_pricat_item>).
+      ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) <ls_pricat_item>-z1model ).
+      ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) <ls_pricat_item>-z1modl2 ).
+      ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) <ls_pricat_item>-z1modl3 ).
+      ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) <ls_pricat_item>-z1color ).
+      APPEND ls_pricat_data_line TO lt_pricat_data_line.
+      LOOP AT <ls_pricat_item>-z1siz ASSIGNING FIELD-SYMBOL(<ls_z1siz>).
+        ls_pricat_data_line = CORRESPONDING #( BASE ( ls_pricat_data_line ) <ls_z1siz> ).
+        APPEND ls_pricat_data_line TO lt_pricat_data_line.
+      ENDLOOP.
+    ENDLOOP.
+
+    DATA(lo_data_ref) = REF #( lt_pricat_data_line ).
+    DATA(lv_xstring) = itab_to_excel( lo_data_ref ).
+
+    TRY.
+        DATA(lo_send_request) = cl_bcs=>create_persistent( ).
+
+        IF ls_keys-%param-email IS INITIAL.
+          APPEND VALUE #( %msg = new_message( id       = 'ZSD_PRICAT'
+                                              number   = 005
+                                              severity = if_abap_behv_message=>severity-error
+                                              v1       = ls_pricat_keys-%key-customernumber
+                         ) ) TO reported-pricecatalogue.
+          IF 1 = 2. MESSAGE e005(zsd_pricat) INTO DATA(lv_message). ENDIF.
+          RETURN.
+        ENDIF.
+
+        SPLIT ls_keys-%param-email AT lc_sep INTO TABLE lt_emails.
+
+        LOOP AT lt_emails INTO DATA(ls_emails).
+          lo_send_request->add_recipient( i_recipient      = cl_cam_address_bcs=>create_internet_address( i_address_string = ls_emails-email )
+                                          i_express        = abap_true ).
+        ENDLOOP.
+
+        DATA(lt_body) = VALUE bcsy_text(
+                          ( line = 'Dear Recipient,'(001) ) ( )
+                          ( line = |{ TEXT-002 } { ls_keys-%param-catalog_id } { ls_keys-%param-catalog_desc } { TEXT-005 }| ) ( )
+                          ( line = 'Thank You'(003) ) ).
+
+        DATA(lo_document) = cl_document_bcs=>create_document(
+                              i_type    = 'RAW'
+                              i_text    = lt_body
+                              i_subject = |{ TEXT-004 } { ls_keys-%param-catalog_id }| ).
+
+        lo_document->add_attachment(
+            i_attachment_type    = 'xls'
+            i_attachment_size    = CONV #( xstrlen( lv_xstring ) )
+            i_attachment_subject = |{ TEXT-004 } {  ls_keys-%param-catalog_id }|
+            i_attachment_header  = VALUE #( ( line = 'Pricat.xlsx' ) )
+            i_att_content_hex    = cl_bcs_convert=>xstring_to_solix( lv_xstring ) ).
+
+        lo_send_request->set_document( lo_document ).
+
+        DATA(lv_sender_email) = get_sender_email( ).
+
+        IF lv_sender_email IS INITIAL.
+          APPEND VALUE #( %msg = new_message( id       = 'ZSD_PRICAT'
+                                              number   = 005
+                                              severity = if_abap_behv_message=>severity-error
+                         ) ) TO reported-pricecatalogue.
+          IF 1 = 2.  MESSAGE e005(zsd_pricat) INTO lv_message. ENDIF.
+          RETURN.
+        ENDIF.
+
+        lo_send_request->set_sender(
+          cl_cam_address_bcs=>create_internet_address( i_address_string = lv_sender_email ) ).
+        lo_send_request->send( ).
+      CATCH cx_bcs.
+        APPEND VALUE #( %msg = new_message( id       = 'ZSD_PRICAT'
+                                            number   = 005
+                                            severity = if_abap_behv_message=>severity-error
+                       ) ) TO reported-pricecatalogue.
+        IF 1 = 2. MESSAGE e005(zsd_pricat) INTO lv_message. ENDIF.
+        RETURN.
+    ENDTRY.
+    APPEND VALUE #( %msg = new_message( id       = 'ZSD_PRICAT'
+                                        number   = 006
+                                        severity = if_abap_behv_message=>severity-success
+                   ) ) TO reported-pricecatalogue.
+    IF 1 = 2.  MESSAGE e006(zsd_pricat) INTO lv_message. ENDIF.
+
+  ENDMETHOD.
+
+ENDCLASS.

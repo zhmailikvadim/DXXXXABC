@@ -9,9 +9,15 @@
 " ----------------------------------------------------------------------*
 * ZHMAIVAD     | 13.07.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 27.02.2024 | 29294     : [Feature] [Build] - Stock re *
+*              |            | DS4K980553                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
 *----------------------------------------------------------------------*/
 @AbapCatalog.viewEnhancementCategory: [#NONE]
-@AccessControl.authorizationCheck: #NOT_ALLOWED
+@AccessControl.authorizationCheck: #CHECK
 @EndUserText.label: 'BW or SAP Snapshot base'
 @Metadata.ignorePropagatedAnnotations: true
 @ObjectModel.usageType:{
@@ -28,40 +34,36 @@ define view entity zsd_i_bw_or_sap_snapshot
                                                     and $projection.SalesOrderNumber = _SapSnapshot.SalesOrderNumber
                                                     and $projection.SalesOrderItem   = _SapSnapshot.SalesOrderItem
 {
-              // non't forget change it back before release
-              //
+
   key         WmsSnapshotDate,
   key         Plant,
   key         StorageLocation,
   key         Article,
   key         SalesOrderNumber,
   key         SalesOrderItem,
-              SapTimeStamp                                                    as WmsTimeStamp,
+              WmsTimeStamp,
               case when SapTimeStamp > 0 then
               SapTimeStamp
-              else _SapSnapshot.SapTimestamp end                              as SapTimeStamp,
+              else _SapSnapshot.SapTimestamp end as SapTimeStamp,
               Meins,
               @Semantics.quantity.unitOfMeasure : 'Meins'
-              UnrectrictedSapStockQuantity - cast( 20 as abap.quan( 13, 3 ) ) as UnrectrictedWmsStockQuantity,
+              UnrectrictedWmsStockQuantity,
               @Semantics.quantity.unitOfMeasure : 'Meins'
-              InQualityInspSapStockQuantity + cast( 8 as abap.quan( 13, 3 ) ) as InQualityInspWmsStockQuantity,
+              InQualityInspWmsStockQuantity,
               @Semantics.quantity.unitOfMeasure : 'Meins'
-              BlockedSapStockQuantity + cast( 12 as abap.quan( 13, 3 ) )      as BlockedWmsStockQuantity,
-              //non't forget change it back before release
-              //
-              //
-              //
-
+              BlockedWmsStockQuantity,
               @Semantics.quantity.unitOfMeasure : 'Meins'
               case when SapTimeStamp > 0 then
               UnrectrictedSapStockQuantity
-              else  _SapSnapshot.UuQty end                                    as UnrectrictedSapStockQuantity,
+              else  _SapSnapshot.UuQty end       as UnrectrictedSapStockQuantity,
               @Semantics.quantity.unitOfMeasure : 'Meins'
               case when SapTimeStamp > 0 then
               InQualityInspSapStockQuantity
-              else  _SapSnapshot.QiQty end                                    as InQualityInspSapStockQuantity,
+              else  _SapSnapshot.QiQty end       as InQualityInspSapStockQuantity,
               @Semantics.quantity.unitOfMeasure : 'Meins'
               case when SapTimeStamp > 0 then
               BlockedSapStockQuantity
-              else _SapSnapshot.BlQty end                                     as BlockedSapStockQuantity
+              else _SapSnapshot.BlQty end        as BlockedSapStockQuantity
 }
+//where
+//  WmsSnapshotDate = '20240415'

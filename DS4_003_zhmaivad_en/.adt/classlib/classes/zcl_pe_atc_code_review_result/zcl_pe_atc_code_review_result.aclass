@@ -1,0 +1,299 @@
+CLASS zcl_pe_atc_code_review_result DEFINITION
+  PUBLIC
+  INHERITING FROM cl_ci_result_root
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+  PROTECTED SECTION.
+
+    METHODS get_docu_for_test_code REDEFINITION.
+
+  PRIVATE SECTION.
+
+    METHODS add_analysis_tools IMPORTING is_atc_result TYPE scir_rest
+                               CHANGING  ct_text       TYPE tlinetab
+                               RAISING   zcx_pe_jira_connector zcx_pe_hm zcx_pe_solman_connector.
+
+    METHODS add_code_review_tracking IMPORTING is_atc_result TYPE scir_rest
+                                     CHANGING  ct_text       TYPE tlinetab
+                                     RAISING   zcx_pe_jira_connector zcx_pe_hm.
+
+
+    METHODS get_work_item IMPORTING iv_transport        TYPE trkorr
+                          RETURNING VALUE(rv_work_item) TYPE string.
+
+    METHODS is_navigation_relevant RETURNING VALUE(rv_bool) TYPE abap_bool.
+
+
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_ATC_CODE_REVIEW_RESULT IMPLEMENTATION.
+
+
+  METHOD add_analysis_tools.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 29.11.2022 | 14981     : Code Review & Log improvemen *
+*              |            | DS4K934555                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 01.06.2023 | 21866: Housekeeping JIRA Connector       *
+*              |            | DS4K953824                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 06.11.2023 | 26417: CHARM Integration                 *
+*              |            | DS4K968701                               *
+************************************************************************
+
+    DATA: lv_doc_link_type TYPE zpe_doc_link_type.
+
+
+
+*   No ATC transport request: Analysis tools not available
+    IF is_atc_result-param1 IS INITIAL.
+      INSERT VALUE tline( tdformat = '*' tdline = TEXT-003 ) INTO TABLE ct_text.
+      RETURN.
+    ENDIF.
+
+*   Get document link configuration
+    zcl_pe_hm_complex=>get_value( EXPORTING iv_id    = '0239FC3B8D041EDD93D1EC091701FF59'
+                                  IMPORTING ev_value = lv_doc_link_type ).
+
+*   Adding transport request navigation
+    IF is_atc_result-param1 IS NOT INITIAL.
+      INSERT VALUE tline( tdformat = '*' tdline = |{ TEXT-001 } <DS:{ lv_doc_link_type }.{ zcl_pe_atc_code_review_lh=>gc_s_subtypes-transport }.{ is_atc_result-param1 }>{ is_atc_result-param1 }</>| ) INTO TABLE ct_text.
+    ENDIF.
+
+*   Adding work item navigation
+    DATA(lv_work_item) = get_work_item( CONV trkorr( result-param1 ) ).
+    IF lv_work_item IS NOT INITIAL.
+      INSERT VALUE tline( tdformat = '*' tdline = |{ TEXT-002 } <DS:{ lv_doc_link_type }.{ zcl_pe_atc_code_review_lh=>gc_s_subtypes-workitem }.{ lv_work_item }>{ lv_work_item }</>| ) INTO TABLE ct_text.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+
+*   Adding change numbers
+    DATA(lo_solman) = NEW zcl_pe_solman_connector( ).
+    lo_solman->read_orders( EXPORTING it_ids    = VALUE #( ( CONV #( lv_work_item ) ) )
+                            IMPORTING ets_header = DATA(lts_header)
+                                      ets_status = DATA(lts_status) ).
+
+    LOOP AT lts_header ASSIGNING FIELD-SYMBOL(<ls_header>).
+      DATA(lv_key)    = COND string( WHEN <ls_header>-/salm/ext_id IS INITIAL THEN <ls_header>-/core/f0001
+                                     ELSE <ls_header>-/salm/ext_id ).
+      DATA(lv_status) = lts_status[ guid = <ls_header>-guid ]-txt30.
+      INSERT VALUE tline( tdformat = '*'
+                          tdline   = |User story: <DS:{ lv_doc_link_type }.{ zcl_pe_atc_code_review_lh=>gc_s_subtypes-user_story }.{ lv_key }>{ lv_key } ({ lv_status })</>| )
+              INTO TABLE ct_text.
+    ENDLOOP.
+    IF sy-subrc NE 0.
+      INSERT VALUE tline( tdformat = '*' tdline = TEXT-006 ) INTO TABLE ct_text.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD add_code_review_tracking.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 29.11.2022 | 14981     : Code Review & Log improvemen *
+*              |            | DS4K934555                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 18.01.2023 | 17080: Show all defects for object & tr  *
+*              |            | DS4K940925                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 01.06.2023 | 21866: Sort defects                      *
+*              |            | DS4K953824                               *
+************************************************************************
+
+    DATA: lv_doc_link_type TYPE zpe_doc_link_type,
+          lv_resolved      TYPE i.
+
+
+*   Section title
+    INSERT VALUE tline( tdformat = 'U1' tdline = TEXT-004 ) INTO TABLE ct_text.
+
+*   Get document link configuration
+    zcl_pe_hm_complex=>get_value( EXPORTING iv_id    = '0239FC3B8D041EDD93D1EC091701FF59'
+                                  IMPORTING ev_value = lv_doc_link_type ).
+
+*   Get Jira Project
+    DATA(lt_jira_project) = zcl_pe_hm_basic=>get_table( '797' ).
+
+*   Search open code reviews
+    DATA(lt_user_stories) = NEW zcl_pe_jira_connector( )->search_us_by_object( iv_object       = is_atc_result-objname
+                                                                               iv_project      = CONV #( lt_jira_project[ 1 ]-field1 )
+                                                                               iv_transport    = CONV #( is_atc_result-param1 ) ).
+    SORT lt_user_stories BY key.
+
+*  Adding links to existing defects
+    LOOP AT lt_user_stories ASSIGNING FIELD-SYMBOL(<ls_user_story>).
+      INSERT VALUE tline( tdformat = '*'
+                          tdline   = |<DS:{ lv_doc_link_type }.{ zcl_pe_atc_code_review_lh=>gc_s_subtypes-user_story }.{ <ls_user_story>-key }>{ <ls_user_story>-key } ({ <ls_user_story>-status })</>| )
+              INTO TABLE ct_text.
+
+      IF <ls_user_story>-status = 'Closed' OR <ls_user_story>-status = 'Resolved'.
+        lv_resolved = lv_resolved + 1.
+      ENDIF.
+
+    ENDLOOP.
+
+*   and link to facilitate creating a new one if there are no defects or all are closed
+    IF lt_user_stories IS INITIAL OR lines( lt_user_stories ) = lv_resolved.
+      AUTHORITY-CHECK OBJECT 'S_Q_GOVERN'
+        ID 'ACTVT'      FIELD '31'
+        ID 'ATC_OTYPGO' FIELD '01'
+        ID 'DEVCLASS'   DUMMY
+        ID 'APPL_COMP'  DUMMY.
+      IF sy-subrc = 0.
+        INSERT VALUE tline( tdformat = '*' tdline = |<DS:{ lv_doc_link_type }.{ zcl_pe_atc_code_review_lh=>gc_s_subtypes-defect }.{ is_atc_result-objname }.{ is_atc_result-ciuser }.{ is_atc_result-param1 }>{ TEXT-005 }</>| )
+                INTO TABLE ct_text.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_docu_for_test_code.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 01.02.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 27.10.2022 | 14170     : Code review analysis tools   *
+*              |            | DS4K932069                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 02.11.2022 | 14981: Bugfixing, exception handling     *
+*              |            | DS4K934555                               *
+************************************************************************
+
+    IF 1 = 0.
+      MESSAGE e004(zpe_atc).
+    ENDIF.
+
+    CALL FUNCTION 'DOCU_GET_FOR_F1HELP'
+      EXPORTING
+        id       = 'NA'
+        langu    = sy-langu
+        object   = CONV doku_obj( `ZPE_ATC004` )
+      IMPORTING
+        head     = p_document_header
+      TABLES
+        line     = p_document_lines
+      EXCEPTIONS
+        ret_code = 1.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+*   ADT or user is not navigation to the error details
+    IF is_navigation_relevant( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+    TRY.
+*       Add info to facilitate code review by PE
+        add_analysis_tools( EXPORTING is_atc_result = result
+                             CHANGING ct_text       = p_document_lines ).
+
+
+*       Add links for code review tracking in Jira
+        add_code_review_tracking( EXPORTING is_atc_result = result
+                                   CHANGING ct_text       = p_document_lines ).
+
+      CATCH zcx_pe_hm zcx_pe_jira_connector  INTO DATA(lo_exc).
+        zcl_pe_atc_logger=>log_message( io_exception = lo_exc ).
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD get_work_item.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 27.10.2022 | 14170     : Code review analysis tools   *
+*              |            | DS4K932069                               *
+*----------------------------------------------------------------------*
+
+    DATA: lv_text TYPE as4text.
+
+*-- Get RFC destination based on TR naming convention
+    DATA(lv_rfc_destination) = zcl_pe_atc_code_review=>get_tm_rfc_destination( iv_transport ).
+
+*-- Get transport request description
+    IF zcl_pe_atc_aoc_super=>is_function_in_destination( iv_function = 'ZPE_FM_GET_TR' iv_destination = lv_rfc_destination ) = abap_false.
+      RETURN.
+    ENDIF.
+    CALL FUNCTION 'ZPE_FM_GET_TR' DESTINATION lv_rfc_destination
+      EXPORTING
+        iv_trkorr              = iv_transport
+      IMPORTING
+        ev_text                = lv_text
+      EXCEPTIONS
+        not_found              = 1
+        action_not_supported   = 2
+        not_authorized         = 3
+        communication_failure_ = 4
+        system_failure         = 5
+        OTHERS                 = 6.
+    IF sy-subrc NE 0.
+      MESSAGE e010(zpe_atc) WITH iv_transport INTO DATA(lv_msg)  ##NEEDED.
+      zcl_pe_atc_logger=>log_message( ).
+      RETURN.
+    ENDIF.
+
+*-- Extract work item
+    rv_work_item = substring_before( val = substring_after( val = lv_text sub = '_' ) sub = '_' ).
+
+  ENDMETHOD.
+
+
+  METHOD is_navigation_relevant.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 27.10.2022 | 14170     : Code review analysis tools   *
+*              |            | DS4K932069                               *
+*----------------------------------------------------------------------*
+
+    DATA(lt_call_stack) = cl_abap_get_call_stack=>get_call_stack( ).
+
+*   Discard navigation using ADT tools
+    rv_bool = abap_true.
+    LOOP AT lt_call_stack TRANSPORTING NO FIELDS WHERE program_info CS 'ADT_REST'.
+      rv_bool = abap_false.
+      RETURN.
+    ENDLOOP.
+
+*   Only consider when error message details are requested
+    rv_bool = abap_false.
+    LOOP AT lt_call_stack TRANSPORTING NO FIELDS WHERE program_info CS 'CHECK_API_FACTORY'.
+      rv_bool = abap_true.
+      RETURN.
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

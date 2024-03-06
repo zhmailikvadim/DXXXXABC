@@ -1,0 +1,126 @@
+*&---------------------------------------------------------------------------------------*
+*& Include          ZSD_R_CUST_OPEN_ITEM_LOAD_CLS
+*&---------------------------------------------------------------------------------------*
+******************************************************************************************
+*  R E V I S I O N   H I S T O R Y                                                       *
+******************************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION                                *
+*              |            | TRANSPORT REQUESTS                                         *
+******************************************************************************************
+* ZAICHART     | 01.02.2024 | 28498_SD_Feature - Build - Create a AR upload functionality*
+*              |            | DS4K977727                                                 *
+*----------------------------------------------------------------------------------------*
+CLASS lcl_excel_uploader DEFINITION FINAL.
+  PUBLIC SECTION.
+    METHODS:
+      upload
+        IMPORTING iv_file TYPE localfile,
+      process
+        IMPORTING it_data                 TYPE ANY TABLE
+        RETURNING VALUE(rt_sto_down_data) TYPE zsd_tt_cust_o_item_upl,
+      get_data_description
+        IMPORTING it_data         TYPE ANY TABLE
+        EXPORTING ev_column_count TYPE i.
+
+ENDCLASS.
+
+CLASS lcl_excel_uploader IMPLEMENTATION.
+  METHOD upload.
+
+    DATA: lt_binary_data TYPE solix_tab.
+
+    IF iv_file IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    cl_gui_frontend_services=>gui_upload(
+      EXPORTING
+        filename   = CONV #( iv_file )
+        filetype   = 'BIN'
+      CHANGING
+        data_tab   = lt_binary_data ).
+
+    DATA(lv_bin_data) = cl_bcs_convert=>solix_to_xstring( it_solix = lt_binary_data ).
+
+    TRY.
+        DATA(lo_excel) = NEW cl_fdt_xl_spreadsheet( document_name = CONV #( iv_file )
+                                                    xdocument     = lv_bin_data ).
+      CATCH cx_fdt_excel_core.
+        MESSAGE e008(zsd_cust_o_item_load).
+    ENDTRY.
+
+    lo_excel->if_fdt_doc_spreadsheet~get_worksheet_names( IMPORTING
+                                                            worksheet_names = DATA(lt_worksheets) ).
+
+    IF lines( lt_worksheets ) >= 1.
+      DATA(lo_data) = lo_excel->if_fdt_doc_spreadsheet~get_itab_from_worksheet( worksheet_name = lt_worksheets[ 1 ] ).
+      ASSIGN lo_data->* TO FIELD-SYMBOL(<lt_data>).
+      IF sy-subrc = 0.
+        process( <lt_data> ).
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+  METHOD process.
+
+    DATA: ls_cust_o_item_upl TYPE zsd_s_cust_o_item_upl.
+
+    FIELD-SYMBOLS: <lv_coi_field>   TYPE any,
+                   <lv_excel_field> TYPE any,
+                   <lt_excel_data>  TYPE STANDARD TABLE.
+
+    ASSIGN it_data TO <lt_excel_data>.
+
+    get_data_description( EXPORTING
+                            it_data         = it_data
+                          IMPORTING
+                            ev_column_count = DATA(lv_column_count) ).
+
+    LOOP AT <lt_excel_data> ASSIGNING FIELD-SYMBOL(<ls_excel_data>) FROM 5. "#EC CI_NESTED
+
+      IF <ls_excel_data> IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      CLEAR: ls_cust_o_item_upl.
+
+      DO lv_column_count TIMES.                          "#EC CI_NESTED
+        ASSIGN COMPONENT sy-index OF STRUCTURE <ls_excel_data> TO <lv_excel_field>.
+        IF sy-subrc = 0.
+          ASSIGN COMPONENT sy-index OF STRUCTURE ls_cust_o_item_upl TO <lv_coi_field>.
+          IF sy-subrc = 0.
+            CASE sy-index.
+              WHEN 2 OR 3 OR 13 ##NUMBER_OK.
+                IF strlen( <lv_excel_field> ) >= 10.
+                  <lv_coi_field> = |{ <lv_excel_field>+6(4) }{ <lv_excel_field>+3(2) }{ <lv_excel_field>(2) }|.
+                ENDIF.
+              WHEN OTHERS.
+                <lv_coi_field> = CONV #( <lv_excel_field> ).
+            ENDCASE.
+          ENDIF.
+        ENDIF.
+      ENDDO.
+
+      APPEND ls_cust_o_item_upl TO gt_cust_o_item_upl.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+  METHOD get_data_description.
+
+    DATA: lo_table_descr  TYPE REF TO cl_abap_tabledescr,
+          lo_struct_descr TYPE REF TO cl_abap_structdescr.
+
+    TRY.
+        lo_table_descr  ?= cl_abap_tabledescr=>describe_by_data( it_data ).
+        lo_struct_descr ?= lo_table_descr->get_table_line_type( ).
+
+        "Count number of columns in structure
+        ev_column_count = lines( lo_struct_descr->components ).
+
+      CATCH cx_sy_move_cast_error.
+        MESSAGE e008(zsd_cust_o_item_load).
+    ENDTRY.
+
+  ENDMETHOD.
+ENDCLASS.

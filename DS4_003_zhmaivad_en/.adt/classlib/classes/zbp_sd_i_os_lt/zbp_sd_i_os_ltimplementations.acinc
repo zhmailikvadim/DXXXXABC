@@ -1,0 +1,919 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* BALUNYAN     | 02.02.2023 | 16561     : [Feature] 1/3 [Development]  *
+*              |            | DS4K939556                               *
+************************************************************************
+* BALUNYAN     | 11.05.2023 | 20056     : [Defect] Outb. Sched. Maint  *
+*              |            | DS4K951105                               *
+************************************************************************
+* BALUNYAN     | 09.08.2023 | 20056     : [Defect] Outb. Sched. Maint  *
+*              |            | DS4K951105                               *
+*----------------------------------------------------------------------*
+* GERTSVIK     | 21.08.2023 | 20056     : [Feature] Activate delta OS  *
+*              |            | DS4K951105                               *
+*----------------------------------------------------------------------*
+* GERTSVIK     | 12.10.2023 | 24047     : [Feature] Activate delta OS  *
+*              |            | DS4K960050                               *
+*----------------------------------------------------------------------*
+* GERTSVIK     | 11.12.2023 | 27429     : Development - Outbound schedu*
+*              |            | DS4K972979                               *
+*----------------------------------------------------------------------*
+* GERTSVIK     | 29.02.2024 | 29527     : [Defect]- Issues in OS  Lead Times*
+*              |            | DS4K981479                               *
+*----------------------------------------------------------------------*
+CLASS lhc_zsd_i_os_lt DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PUBLIC SECTION.
+  PRIVATE SECTION.
+    METHODS deleterecord FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~deleterecord RESULT result.
+    METHODS createwithreference FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~createwithreference RESULT result.
+    METHODS copy FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~copy RESULT result.
+    METHODS copydnloadinglt FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~copydnloadinglt RESULT result.
+    METHODS convertleadtime FOR DETERMINE ON SAVE
+      IMPORTING keys FOR _os_lt~convertleadtime.
+    METHODS add FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~create RESULT result.
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys
+      REQUEST requested_authorizations ##NEEDED
+      FOR _os_lt RESULT result.
+    METHODS createdcprocessinglt FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~createdcprocessinglt RESULT result.
+    METHODS createdncreationlt FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~createdncreationlt RESULT result.
+    METHODS creatednloadinglt FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~creatednloadinglt RESULT result.
+    METHODS createwithrefdcprocessinglt FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~createwithrefdcprocessinglt RESULT result.
+    METHODS createwithrefdncreationlt FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~createwithrefdncreationlt RESULT result.
+    METHODS createwithrefdnloadinglt FOR MODIFY
+      IMPORTING keys FOR ACTION _os_lt~createwithrefdnloadinglt RESULT result.
+    METHODS validateshippingpoint FOR VALIDATE ON SAVE
+      IMPORTING keys FOR _os_lt~validateshippingpoint.
+    METHODS validatedistributionchannel FOR VALIDATE ON SAVE
+      IMPORTING keys FOR _os_lt~validatedistributionchannel.
+    METHODS validateorderreason FOR VALIDATE ON SAVE
+      IMPORTING keys FOR _os_lt~validateorderreason.
+    METHODS validatesalesordertype FOR VALIDATE ON SAVE
+      IMPORTING keys FOR _os_lt~validatesalesordertype.
+    METHODS validateshippingcondition FOR VALIDATE ON SAVE
+      IMPORTING keys FOR _os_lt~validateshippingcondition.
+    METHODS setcreateadmindata FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR _os_lt~setcreateadmindata.
+    METHODS setchangeadmindata FOR DETERMINE ON SAVE
+      IMPORTING keys FOR _os_lt~setchangeadmindata.
+
+    METHODS is_update_granted
+      IMPORTING iv_shipping_point        TYPE vstel
+      RETURNING VALUE(rv_update_granted) TYPE char2.
+    METHODS is_delete_granted
+      IMPORTING iv_shipping_point        TYPE vstel
+      RETURNING VALUE(rv_delete_granted) TYPE char2.
+    METHODS is_creation_granted
+      IMPORTING iv_shipping_point          TYPE vstel
+      RETURNING VALUE(rv_creation_granted) TYPE char2.
+
+ENDCLASS.
+
+CLASS lhc_zsd_i_os_lt IMPLEMENTATION.
+
+  METHOD get_instance_authorizations.
+    DATA ls_result LIKE LINE OF result.
+
+    LOOP AT keys INTO DATA(ls_key).
+      ls_result = VALUE #( leadtimetype        = ls_key-leadtimetype
+                           shippingpoint       = ls_key-shippingpoint
+                           distributionchannel = ls_key-distributionchannel
+                           shippingcondition   = ls_key-shippingcondition
+                           salesordertype      = ls_key-salesordertype
+                           orderreason         = ls_key-orderreason
+                           %update              = is_update_granted( iv_shipping_point = ls_key-shippingpoint )
+                         ).
+      APPEND ls_result TO result.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD createwithreference.
+    DATA(ls_shipping_point) = keys[ 1 ].
+
+    IF is_creation_granted( ls_shipping_point-%param-new_shipping_point ) = if_abap_behv=>auth-allowed.
+
+      SELECT leadtimetype,
+             distributionchannel,
+             salesordertype,
+             shippingcondition,
+             shippingpoint,
+             orderreason,
+             leadtimeint
+      FROM zsd_i_os_lt
+      WHERE ( shippingpoint = @ls_shipping_point-%param-shipping_point
+      OR shippingpoint = @ls_shipping_point-%param-new_shipping_point )
+      AND leadtimetype = @ls_shipping_point-%param-lead_time_type
+      INTO TABLE @DATA(lt_referenced_os_lt).
+
+      IF sy-subrc = 0.
+
+        DATA(lt_records_to_create) = lt_referenced_os_lt.
+        DELETE lt_records_to_create WHERE shippingpoint = ls_shipping_point-%param-new_shipping_point.
+
+        DATA(lt_existing_records) = lt_referenced_os_lt.
+        DELETE lt_existing_records WHERE shippingpoint = ls_shipping_point-%param-shipping_point.
+
+        DATA(lv_duplicate_counter) = 0.
+        LOOP AT lt_existing_records ASSIGNING FIELD-SYMBOL(<ls_existing_records>).
+
+          DELETE lt_records_to_create
+          WHERE distributionchannel = <ls_existing_records>-distributionchannel
+          AND shippingcondition     = <ls_existing_records>-shippingcondition
+          AND salesordertype        = <ls_existing_records>-salesordertype
+          AND orderreason           = <ls_existing_records>-orderreason.
+
+          IF sy-subrc = 0.
+            lv_duplicate_counter = lv_duplicate_counter + 1.
+          ENDIF.
+
+        ENDLOOP.
+
+        IF lt_records_to_create IS NOT INITIAL .
+
+          MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+              ENTITY _os_lt
+              CREATE FIELDS (
+                    leadtimetype
+                    shippingpoint
+                    distributionchannel
+                    shippingcondition
+                    salesordertype
+                    orderreason
+                    leadtimeint )
+                WITH VALUE #( FOR <ls_records_to_create> IN  lt_records_to_create ( leadtimetype        = <ls_records_to_create>-leadtimetype
+                                                                                    shippingpoint       = ls_shipping_point-%param-new_shipping_point
+                                                                                    distributionchannel = <ls_records_to_create>-distributionchannel
+                                                                                    shippingcondition   = <ls_records_to_create>-shippingcondition
+                                                                                    salesordertype      = <ls_records_to_create>-salesordertype
+                                                                                    orderreason         = <ls_records_to_create>-orderreason
+                                                                                    leadtimeint         = <ls_records_to_create>-leadtimeint ) )
+          MAPPED mapped
+          FAILED failed
+          REPORTED reported.
+
+          CHECK failed-_os_lt IS INITIAL.
+
+          READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+          ENTITY _os_lt
+           ALL FIELDS
+           WITH VALUE #( FOR <ls_records_to_create> IN  lt_records_to_create ( leadtimetype        = <ls_records_to_create>-leadtimetype
+                                                                               shippingpoint       = ls_shipping_point-%param-new_shipping_point
+                                                                               distributionchannel = <ls_records_to_create>-distributionchannel
+                                                                               shippingcondition   = <ls_records_to_create>-shippingcondition
+                                                                               salesordertype      = <ls_records_to_create>-salesordertype
+                                                                               orderreason         = <ls_records_to_create>-orderreason
+                                                                               ) )
+          RESULT DATA(lt_os_lt).
+
+          result = VALUE #( FOR <ls_os_lt> IN lt_os_lt ( %cid   = ls_shipping_point-%cid
+                                                         %param = <ls_os_lt> ) ).
+
+
+        ENDIF.
+      ENDIF.
+
+      DATA(lv_created_records) = lines( lt_records_to_create ) - lines( failed-_os_lt ).
+
+      IF lv_created_records IS INITIAL.
+        DATA(lv_severenity) = if_abap_behv_message=>severity-error.
+      ELSE.
+        lv_severenity = if_abap_behv_message=>severity-success.
+      ENDIF.
+
+      APPEND VALUE #(
+         %msg      = NEW zcx_sd_os_lt(
+                         iv_duplicate_record = lv_duplicate_counter
+                         iv_created_record = lv_created_records
+                         iv_textid      = zcx_sd_os_lt=>mc_created_record
+                         iv_severity    = lv_severenity )
+         %element-shippingcondition = if_abap_behv=>mk-on
+      ) TO reported-_os_lt.
+
+    ELSE.
+      APPEND VALUE #(
+           %msg      = NEW zcx_sd_os_lt(
+                           iv_shippingpoint = ls_shipping_point-%param-new_shipping_point
+                           iv_textid      = zcx_sd_os_lt=>mc_creation_not_allowed
+                           iv_severity    = if_abap_behv_message=>severity-error )
+           %element-shippingpoint = if_abap_behv=>mk-on
+        ) TO reported-_os_lt.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD deleterecord.
+    DATA ls_os_lt TYPE zsd_t_os_lt.
+    DATA(ls_data) = keys[ 1 ].
+
+    IF is_delete_granted( ls_data-shippingpoint ) = if_abap_behv=>auth-allowed.
+
+      READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+          ENTITY _os_lt
+          ALL FIELDS
+          WITH CORRESPONDING #( keys )
+          RESULT DATA(lt_os_result).
+      CHECK lt_os_result IS NOT INITIAL.
+
+      MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+          ENTITY _os_lt
+          DELETE FROM
+          VALUE #(
+              ( %tky = ls_data-%tky
+                leadtimetype        = ls_data-leadtimetype
+                shippingpoint       = ls_data-shippingpoint
+                distributionchannel = ls_data-distributionchannel
+                shippingcondition   = ls_data-shippingcondition
+                salesordertype      = ls_data-salesordertype
+                orderreason         = ls_data-orderreason
+                deletionind         = ls_data-deletionind ) )
+          MAPPED mapped
+          FAILED failed
+          REPORTED reported.
+      CHECK failed-_os_lt IS INITIAL.
+
+      LOOP AT lt_os_result ASSIGNING FIELD-SYMBOL(<ls_result>).
+        <ls_result>-deletionind   = abap_true.
+        <ls_result>-changedon     = sy-datum.
+        <ls_result>-changedat     = sy-uzeit.
+        <ls_result>-changedby     = sy-uname.
+        <ls_result>-changedonlong = sy-datum && sy-uzeit.
+      ENDLOOP.
+
+      SELECT zlt_type, zvstel, zvtweg, zvsbed, zauart, zorderreason, zdeletion_indi
+          FROM zsd_t_os_lt
+          WHERE zlt_type       = @<ls_result>-leadtimetype
+            AND zvstel         = @<ls_result>-shippingpoint
+            AND zvtweg         = @<ls_result>-distributionchannel
+            AND zvsbed         = @<ls_result>-shippingcondition
+            AND zauart         = @<ls_result>-salesordertype
+            AND zorderreason   = @<ls_result>-orderreason
+            AND zdeletion_indi = @<ls_result>-deletionind
+            INTO TABLE @DATA(lt_os_lt).
+      IF sy-subrc <> 0.
+        CLEAR lt_os_lt.
+      ENDIF.
+
+      IF lt_os_lt IS INITIAL.
+
+        MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+          ENTITY _os_lt
+          CREATE FIELDS ( leadtimetype
+                          shippingpoint
+                          distributionchannel
+                          shippingcondition
+                          salesordertype
+                          orderreason
+                          deletionind
+                          leadtime
+                          changedon
+                          changedat
+                          changedby
+                          changedonlong
+                          createdon
+                          createdat
+                          createdby )
+          WITH VALUE #( (
+                 leadtimetype        = <ls_result>-leadtimetype
+                 shippingpoint       = <ls_result>-shippingpoint
+                 distributionchannel = <ls_result>-distributionchannel
+                 shippingcondition   = <ls_result>-shippingcondition
+                 salesordertype      = <ls_result>-salesordertype
+                 orderreason         = <ls_result>-orderreason
+                 deletionind         = <ls_result>-deletionind
+                 leadtime            = <ls_result>-leadtime
+                 changedon           = <ls_result>-changedon
+                 changedat           = <ls_result>-changedat
+                 changedby           = <ls_result>-changedby
+                 changedonlong       = <ls_result>-changedonlong
+                 createdon           = <ls_result>-createdon
+                 createdat           = <ls_result>-createdat
+                 createdby           = <ls_result>-createdby ) ).
+
+      ELSE.
+        ls_os_lt = CORRESPONDING #( <ls_result> MAPPING zlt_type       = leadtimetype
+                                                        zvstel         = shippingpoint
+                                                        zvtweg         = distributionchannel
+                                                        zvsbed         = shippingcondition
+                                                        zauart         = salesordertype
+                                                        zorderreason   = orderreason
+                                                        zdeletion_indi = deletionind
+                                                        zlead_time     = leadtimeint
+                                                        created_on     = createdon
+                                                        created_at     = createdat
+                                                        created_by     = createdby
+                                                        changed_on     = changedon
+                                                        changed_at     = changedat
+                                                        changed_by     = changedby ).
+        MODIFY zsd_t_os_lt FROM ls_os_lt.
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+
+      ENDIF.
+
+      result = VALUE #( FOR <ls_os_lt_result> IN lt_os_result ( %tky   = ls_data-%tky
+                                                                %param = <ls_os_lt_result> ) ).
+      APPEND VALUE #(
+               %msg      = NEW zcx_sd_os_lt(
+                               iv_textid      = zcx_sd_os_lt=>mc_delete_record_res
+                               iv_severity    = if_abap_behv_message=>severity-success )
+            ) TO reported-_os_lt.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD copy.
+    DATA(ls_data) = keys[ 1 ].
+
+    IF is_creation_granted( ls_data-%param-shippingpoint ) = if_abap_behv=>auth-allowed.
+
+      MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+                ENTITY _os_lt
+                CREATE FIELDS (
+                      leadtimetype
+                      shippingpoint
+                      distributionchannel
+                      salesordertype
+                      orderreason
+                      leadtimeint )
+                  WITH VALUE #( (  leadtimetype        = ls_data-%param-leadtimetype
+                                   shippingpoint       = ls_data-%param-shippingpoint
+                                   distributionchannel = ls_data-%param-distributionchannel
+                                   salesordertype      = ls_data-%param-salesordertype
+                                   orderreason         = ls_data-%param-orderreason
+                                   leadtimeint         = ls_data-%param-leadtime ) )
+            MAPPED mapped
+            FAILED failed
+            REPORTED reported.
+
+      READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+      ENTITY _os_lt
+           ALL FIELDS
+           WITH VALUE #( ( leadtimetype        = ls_data-%param-leadtimetype
+                           shippingpoint       = ls_data-%param-shippingpoint
+                           distributionchannel = ls_data-%param-distributionchannel
+                           salesordertype      = ls_data-%param-salesordertype
+                           orderreason         = ls_data-%param-orderreason
+                           ) )
+          RESULT DATA(lt_os_lt_result).
+
+      CHECK failed-_os_lt IS INITIAL.
+
+      result = VALUE #( FOR <ls_os_lt_result> IN lt_os_lt_result ( %cid = ls_data-%cid
+                                                                   %param = <ls_os_lt_result> ) ).
+
+    ELSE.
+      APPEND VALUE #(
+           %msg      = NEW zcx_sd_os_lt(
+                           iv_shippingpoint = ls_data-%param-shippingpoint
+                           iv_textid      = zcx_sd_os_lt=>mc_creation_not_allowed
+                           iv_severity    = if_abap_behv_message=>severity-error )
+           %element-shippingpoint = if_abap_behv=>mk-on
+        ) TO reported-_os_lt.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD copydnloadinglt.
+    DATA(ls_data) = keys[ 1 ].
+
+    IF is_creation_granted( ls_data-%param-shippingpoint ) = if_abap_behv=>auth-allowed.
+
+      MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+                ENTITY _os_lt
+                CREATE FIELDS (
+                      leadtimetype
+                      shippingpoint
+                      distributionchannel
+                      shippingcondition
+                      salesordertype
+                      orderreason
+                      leadtimeint )
+                  WITH VALUE #( (  leadtimetype        = ls_data-%param-leadtimetype
+                                   shippingpoint       = ls_data-%param-shippingpoint
+                                   distributionchannel = ls_data-%param-distributionchannel
+                                   shippingcondition   = ls_data-%param-shippingcondition
+                                   salesordertype      = ls_data-%param-salesordertype
+                                   orderreason         = ls_data-%param-orderreason
+                                   leadtimeint         = ls_data-%param-leadtime ) )
+            MAPPED mapped
+            FAILED failed
+            REPORTED reported.
+
+      READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+      ENTITY _os_lt
+           ALL FIELDS
+           WITH VALUE #( ( leadtimetype        = ls_data-%param-leadtimetype
+                           shippingpoint       = ls_data-%param-shippingpoint
+                           distributionchannel = ls_data-%param-distributionchannel
+                           shippingcondition   = ls_data-%param-shippingcondition
+                           salesordertype      = ls_data-%param-salesordertype
+                           orderreason         = ls_data-%param-orderreason
+                           ) )
+          RESULT DATA(lt_os_lt_result).
+
+      CHECK failed-_os_lt IS INITIAL.
+
+      result = VALUE #( FOR <ls_os_lt_result> IN lt_os_lt_result ( %cid = ls_data-%cid
+                                                                   %param = <ls_os_lt_result> ) ).
+    ELSE.
+      APPEND VALUE #(
+           %msg      = NEW zcx_sd_os_lt(
+                           iv_shippingpoint = ls_data-%param-shippingpoint
+                           iv_textid      = zcx_sd_os_lt=>mc_creation_not_allowed
+                           iv_severity    = if_abap_behv_message=>severity-error )
+           %element-shippingpoint = if_abap_behv=>mk-on
+        ) TO reported-_os_lt.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD convertleadtime.
+    TRY.
+        DATA(lv_conversion_size) = zcl_pe_hm_basic=>get_value( iv_id = '0000002218' iv_sequence = '001' ).
+
+        READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+              ENTITY _os_lt
+              FIELDS (
+                  leadtimeint )
+             WITH CORRESPONDING #( keys )
+          RESULT DATA(lt_os_lt).
+
+        CHECK lt_os_lt IS NOT INITIAL.
+
+        MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+               ENTITY _os_lt
+               UPDATE FIELDS ( leadtimeint )
+               WITH VALUE #( FOR <ls_os_lt> IN lt_os_lt
+                    ( %tky = <ls_os_lt>-%tky
+                      leadtimeint  = <ls_os_lt>-leadtime * lv_conversion_size ) ).
+
+      CATCH zcx_pe_hm.
+        CLEAR: lv_conversion_size.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD add.
+    DATA(ls_data) = keys[ 1 ].
+
+    IF is_creation_granted( ls_data-%param-shipping_point ) = if_abap_behv=>auth-allowed.
+
+      MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+                ENTITY _os_lt
+                CREATE FIELDS (
+                      leadtimetype
+                      shippingpoint
+                      distributionchannel
+                      shippingcondition
+                      salesordertype
+                      orderreason
+                      leadtimeint )
+                  WITH VALUE #( (  leadtimetype        = ls_data-%param-lead_time_type
+                                   shippingpoint       = ls_data-%param-shipping_point
+                                   distributionchannel = ls_data-%param-distribution_channel
+                                   shippingcondition   = ls_data-%param-shipping_condition
+                                   salesordertype      = ls_data-%param-sales_order_type
+                                   orderreason         = ls_data-%param-order_reason
+                                   leadtimeint         = ls_data-%param-lead_time ) )
+            MAPPED mapped
+            FAILED failed
+            REPORTED reported.
+
+      READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+      ENTITY _os_lt
+           ALL FIELDS
+           WITH VALUE #( ( leadtimetype        = ls_data-%param-lead_time_type
+                           shippingpoint       = ls_data-%param-shipping_point
+                           distributionchannel = ls_data-%param-distribution_channel
+                           shippingcondition   = ls_data-%param-shipping_condition
+                           salesordertype      = ls_data-%param-sales_order_type
+                           orderreason         = ls_data-%param-order_reason
+                           ) )
+          RESULT DATA(lt_os_lt_result).
+
+      CHECK failed-_os_lt IS INITIAL.
+
+      result = VALUE #( FOR <ls_os_lt_result> IN lt_os_lt_result ( %cid = ls_data-%cid
+                                                                   %param = <ls_os_lt_result> ) ).
+    ELSE.
+      APPEND VALUE #(
+         %msg      = NEW zcx_sd_os_lt(
+                         iv_shippingpoint = ls_data-%param-shipping_point
+                         iv_textid      = zcx_sd_os_lt=>mc_creation_not_allowed
+                         iv_severity    = if_abap_behv_message=>severity-error )
+         %element-shippingpoint = if_abap_behv=>mk-on
+      ) TO reported-_os_lt.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD createdcprocessinglt.
+    TRY.
+        DATA(lt_dcprocessinglt) = zcl_pe_hm_basic=>get_table( iv_id = '0000002222' ).
+        READ TABLE lt_dcprocessinglt WITH KEY  sequence = '001' INTO DATA(ls_dcprocessinglt).
+
+        IF sy-subrc = 0.
+
+          MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+             ENTITY _os_lt
+               EXECUTE create
+                 FROM  VALUE  #(  FOR <ls_keys> IN keys ( %cid = <ls_keys>-%cid
+                                                          %param-distribution_channel = <ls_keys>-%param-distribution_channel
+                                                          %param-shipping_condition = <ls_keys>-%param-shipping_condition
+                                                          %param-lead_time = <ls_keys>-%param-lead_time
+                                                          %param-lead_time_type = ls_dcprocessinglt-field1
+                                                          %param-order_reason = <ls_keys>-%param-order_reason
+                                                          %param-sales_order_type = <ls_keys>-%param-sales_order_type
+                                                          %param-shipping_point = <ls_keys>-%param-shipping_point
+                                                           ) )
+          RESULT DATA(lt_resultcreate)
+          FAILED failed
+          REPORTED reported.
+
+          result = VALUE #( FOR <ls_os_lt_result> IN lt_resultcreate ( %cid = <ls_os_lt_result>-%cid
+                                                                       %param = <ls_os_lt_result>-%param ) ).
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR: lt_dcprocessinglt.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD createdncreationlt.
+    TRY.
+        DATA(lt_dncreationlt) = zcl_pe_hm_basic=>get_table( iv_id = '0000002222' ).
+        READ TABLE lt_dncreationlt WITH KEY  sequence = '002' INTO DATA(ls_dncreationlt).
+
+        IF sy-subrc = 0.
+
+          MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+                ENTITY _os_lt
+                  EXECUTE create
+                    FROM  VALUE  #(  FOR <ls_keys> IN keys ( %cid = <ls_keys>-%cid
+                                                             %param-distribution_channel = <ls_keys>-%param-distribution_channel
+                                                             %param-shipping_condition = <ls_keys>-%param-shipping_condition
+                                                             %param-lead_time = <ls_keys>-%param-lead_time
+                                                             %param-lead_time_type = ls_dncreationlt-field1
+                                                             %param-order_reason = <ls_keys>-%param-order_reason
+                                                             %param-sales_order_type = <ls_keys>-%param-sales_order_type
+                                                             %param-shipping_point = <ls_keys>-%param-shipping_point
+                                                              ) )
+          RESULT DATA(lt_resultcreate)
+          FAILED failed
+          REPORTED reported.
+
+          result = VALUE #( FOR <ls_os_lt_result> IN lt_resultcreate ( %cid = <ls_os_lt_result>-%cid
+                                                                       %param = <ls_os_lt_result>-%param ) ).
+
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR: lt_dncreationlt.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD creatednloadinglt.
+    TRY.
+        DATA(lt_dnloadinglt) = zcl_pe_hm_basic=>get_table( iv_id = '0000002222' ).
+        READ TABLE lt_dnloadinglt WITH KEY  sequence = '003' INTO DATA(ls_dnloadinglt).
+
+        IF sy-subrc = 0.
+
+          MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+             ENTITY _os_lt
+               EXECUTE create
+                 FROM  VALUE  #(  FOR <ls_keys> IN keys ( %cid = <ls_keys>-%cid
+                                                          %param-distribution_channel = <ls_keys>-%param-distribution_channel
+                                                          %param-shipping_condition = <ls_keys>-%param-shipping_condition
+                                                          %param-lead_time = <ls_keys>-%param-lead_time
+                                                          %param-lead_time_type = ls_dnloadinglt-field1
+                                                          %param-order_reason = <ls_keys>-%param-order_reason
+                                                          %param-sales_order_type = <ls_keys>-%param-sales_order_type
+                                                          %param-shipping_point = <ls_keys>-%param-shipping_point
+                                                          ) )
+          RESULT DATA(lt_resultcreate)
+          FAILED failed
+          REPORTED reported.
+
+          result = VALUE #( FOR <ls_os_lt_result> IN lt_resultcreate ( %cid = <ls_os_lt_result>-%cid
+                                                                       %param = <ls_os_lt_result>-%param ) ).
+
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR: lt_dnloadinglt.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD createwithrefdcprocessinglt.
+    TRY.
+        DATA(lt_dcprocessinglt) = zcl_pe_hm_basic=>get_table( iv_id = '0000002222' ).
+        READ TABLE lt_dcprocessinglt WITH KEY  sequence = '001' INTO DATA(ls_dcprocessinglt).
+
+        IF sy-subrc = 0.
+
+          MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+               ENTITY _os_lt
+                 EXECUTE createwithreference
+                   FROM  VALUE  #(  FOR <ls_keys> IN keys ( %cid = <ls_keys>-%cid
+                                                            %param-shipping_point = <ls_keys>-%param-shipping_point
+                                                            %param-new_shipping_point = <ls_keys>-%param-new_shipping_point
+                                                            %param-lead_time_type = ls_dcprocessinglt-field1
+                                                             ) )
+         RESULT DATA(lt_resultcreate)
+          FAILED failed
+          REPORTED reported.
+
+          result = VALUE #( FOR <ls_os_lt_result> IN lt_resultcreate ( %cid = <ls_os_lt_result>-%cid
+                                                                       %param = <ls_os_lt_result>-%param ) ).
+
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR: lt_dcprocessinglt.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD createwithrefdncreationlt.
+    TRY.
+        DATA(lt_dncreationlt) = zcl_pe_hm_basic=>get_table( iv_id = '0000002222' ).
+        READ TABLE lt_dncreationlt WITH KEY  sequence = '002' INTO DATA(ls_dncreationlt).
+
+        IF sy-subrc = 0.
+
+          MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+               ENTITY _os_lt
+                 EXECUTE createwithreference
+                   FROM  VALUE  #(  FOR <ls_keys> IN keys ( %cid = <ls_keys>-%cid
+                                                            %param-shipping_point = <ls_keys>-%param-shipping_point
+                                                            %param-new_shipping_point = <ls_keys>-%param-new_shipping_point
+                                                            %param-lead_time_type = ls_dncreationlt-field1
+                                                             ) )
+         RESULT DATA(lt_resultcreate)
+          FAILED failed
+          REPORTED reported.
+
+          result = VALUE #( FOR <ls_os_lt_result> IN lt_resultcreate ( %cid = <ls_os_lt_result>-%cid
+                                                                       %param = <ls_os_lt_result>-%param ) ).
+
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR: lt_dncreationlt.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD createwithrefdnloadinglt.
+    TRY.
+        DATA(lt_dnloadinglt) = zcl_pe_hm_basic=>get_table( iv_id = '0000002222' ).
+        READ TABLE lt_dnloadinglt WITH KEY  sequence = '003' INTO DATA(ls_dnloadinglt).
+
+        IF sy-subrc = 0.
+
+          MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+               ENTITY _os_lt
+                 EXECUTE createwithreference
+                   FROM  VALUE  #(  FOR <ls_keys> IN keys ( %cid = <ls_keys>-%cid
+                                                            %param-shipping_point = <ls_keys>-%param-shipping_point
+                                                            %param-new_shipping_point = <ls_keys>-%param-new_shipping_point
+                                                            %param-lead_time_type = ls_dnloadinglt-field1
+                                                             ) )
+          RESULT DATA(lt_resultcreate)
+          FAILED failed
+          REPORTED reported.
+
+          result = VALUE #( FOR <ls_os_lt_result> IN lt_resultcreate ( %cid = <ls_os_lt_result>-%cid
+                                                                       %param = <ls_os_lt_result>-%param ) ).
+
+        ENDIF.
+      CATCH zcx_pe_hm.
+        CLEAR: lt_dnloadinglt.
+    ENDTRY.
+  ENDMETHOD.
+
+  METHOD validateshippingpoint.
+    DATA(ls_key) = keys[ 1 ].
+
+    IF ls_key-shippingpoint IS NOT INITIAL.
+
+      SELECT @abap_true
+      FROM i_shippingpointvh
+      WHERE shippingpoint = @ls_key-shippingpoint
+      INTO TABLE @DATA(lt_checked_shipping_point)
+      UP TO 1 ROWS.
+
+      IF sy-subrc <> 0 AND lt_checked_shipping_point IS INITIAL.
+        APPEND VALUE #(  %tky = ls_key-%tky ) TO failed-_os_lt.
+        APPEND VALUE #(  %tky = ls_key-%tky
+                         %msg      = NEW zcx_sd_os_lt(
+                                         iv_shippingpoint = ls_key-shippingpoint
+                                         iv_textid      = zcx_sd_os_lt=>mc_shipping_point_unknown
+                                         iv_severity    = if_abap_behv_message=>severity-error )
+                         %element-shippingpoint = if_abap_behv=>mk-on
+                      ) TO reported-_os_lt.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD validatedistributionchannel.
+    DATA(ls_key) = keys[ 1 ].
+
+    IF ls_key-distributionchannel IS NOT INITIAL.
+
+      SELECT @abap_true
+      FROM i_distributionchannelvaluehelp
+      WHERE distributionchannel = @ls_key-distributionchannel
+      INTO TABLE @DATA(lt_checked_distrib_channel)
+      UP TO 1 ROWS.
+
+      IF sy-subrc <> 0 AND lt_checked_distrib_channel IS INITIAL.
+        APPEND VALUE #(  %tky = ls_key-%tky ) TO failed-_os_lt.
+        APPEND VALUE #(  %tky = ls_key-%tky
+                         %msg      = NEW zcx_sd_os_lt(
+                                         iv_distributionchannel = ls_key-distributionchannel
+                                         iv_textid      = zcx_sd_os_lt=>mc_distrib_channel_unknown
+                                         iv_severity    = if_abap_behv_message=>severity-error )
+                         %element-distributionchannel = if_abap_behv=>mk-on
+                      ) TO reported-_os_lt.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD validateorderreason.
+    DATA(ls_key) = keys[ 1 ].
+
+    IF ls_key-orderreason IS NOT INITIAL.
+
+      SELECT @abap_true
+      FROM zsd_i_order_reason_vh
+      WHERE orderreason = @ls_key-orderreason
+      INTO TABLE @DATA(lt_checked_order_reason)
+      UP TO 1 ROWS.
+
+      IF sy-subrc <> 0 AND lt_checked_order_reason IS INITIAL.
+        APPEND VALUE #(  %tky = ls_key-%tky ) TO failed-_os_lt.
+        APPEND VALUE #(  %tky = ls_key-%tky
+                         %msg      = NEW zcx_sd_os_lt(
+                                         iv_orderreason = ls_key-orderreason
+                                         iv_textid      = zcx_sd_os_lt=>mc_order_reason_unknown
+                                         iv_severity    = if_abap_behv_message=>severity-error )
+                         %element-orderreason = if_abap_behv=>mk-on
+                      ) TO reported-_os_lt.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD validatesalesordertype.
+    DATA(ls_key) = keys[ 1 ].
+
+    IF ls_key-salesordertype IS NOT INITIAL.
+
+      SELECT @abap_true
+      FROM zsd_c_zauart
+      WHERE auart = @ls_key-salesordertype
+      INTO TABLE @DATA(lt_checked_sales_order_type)
+      UP TO 1 ROWS.
+
+      IF sy-subrc <> 0 AND lt_checked_sales_order_type IS INITIAL.
+        APPEND VALUE #(  %tky = ls_key-%tky ) TO failed-_os_lt.
+        APPEND VALUE #(  %tky = ls_key-%tky
+                         %msg      = NEW zcx_sd_os_lt(
+                                         iv_salesordertype = ls_key-salesordertype
+                                         iv_textid      = zcx_sd_os_lt=>mc_sales_order_type_unknown
+                                         iv_severity    = if_abap_behv_message=>severity-error )
+                         %element-salesordertype = if_abap_behv=>mk-on
+                      ) TO reported-_os_lt.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD validateshippingcondition.
+    DATA(ls_key) = keys[ 1 ].
+
+    IF ls_key-shippingcondition IS NOT INITIAL.
+
+      SELECT @abap_true
+      FROM i_shippingcondition
+      WHERE shippingcondition = @ls_key-shippingcondition
+      INTO TABLE @DATA(lt_checked_shipping_condition)
+      UP TO 1 ROWS.
+
+      IF sy-subrc <> 0 AND lt_checked_shipping_condition IS INITIAL.
+        APPEND VALUE #(  %tky = ls_key-%tky ) TO failed-_os_lt.
+        APPEND VALUE #(  %tky = ls_key-%tky
+                         %msg      = NEW zcx_sd_os_lt(
+                                         iv_shippingcondition = ls_key-shippingcondition
+                                         iv_textid      = zcx_sd_os_lt=>mc_shipping_condition_unknown
+                                         iv_severity    = if_abap_behv_message=>severity-error )
+                         %element-shippingcondition = if_abap_behv=>mk-on
+                      ) TO reported-_os_lt.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD setcreateadmindata.
+    READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+         ENTITY _os_lt
+         FIELDS (
+           changedon
+           changedat
+           changedby
+           createdat
+           createdon
+           createdby )
+        WITH CORRESPONDING #( keys )
+     RESULT DATA(lt_os_lt).
+
+    CHECK lt_os_lt IS NOT INITIAL.
+
+    MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+        ENTITY _os_lt
+        UPDATE FIELDS (
+          changedon
+          changedat
+          changedby
+          createdat
+          createdon
+          createdby )
+        WITH VALUE #( FOR <ls_os_lt> IN lt_os_lt
+                        ( %key = <ls_os_lt>-%key
+                          createdat = sy-uzeit
+                          createdon = sy-datum
+                          createdby = sy-uname
+                          changedat = sy-uzeit
+                          changedon = sy-datum
+                          changedby = sy-uname  ) ).
+  ENDMETHOD.
+
+  METHOD setchangeadmindata.
+    READ ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+          ENTITY _os_lt
+          FIELDS (
+            changedon
+            changedat
+            changedby
+            createdat
+            createdon
+            createdby )
+         WITH CORRESPONDING #( keys )
+      RESULT DATA(lt_os_lt).
+
+    CHECK lt_os_lt IS NOT INITIAL.
+
+    MODIFY ENTITIES OF zsd_i_os_lt IN LOCAL MODE
+        ENTITY _os_lt
+        UPDATE FIELDS (
+          changedon
+          changedat
+          changedby )
+        WITH VALUE #( FOR <ls_os_lt> IN lt_os_lt
+                        ( %key = <ls_os_lt>-%key
+                          changedat = sy-uzeit
+                          changedon = sy-datum
+                          changedby = sy-uname ) ).
+  ENDMETHOD.
+
+  METHOD is_delete_granted.
+    AUTHORITY-CHECK OBJECT 'V_LIKP_VST'
+    ID 'VSTEL' FIELD iv_shipping_point
+    ID 'ACTVT'  FIELD '24'.
+
+    IF sy-subrc = 0.
+      rv_delete_granted = if_abap_behv=>auth-allowed.
+    ELSE.
+      rv_delete_granted = if_abap_behv=>auth-unauthorized.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD is_update_granted.
+    AUTHORITY-CHECK OBJECT 'V_LIKP_VST'
+    ID 'VSTEL' FIELD iv_shipping_point
+    ID 'ACTVT' FIELD '02'.
+
+    IF sy-subrc = 0.
+      rv_update_granted = if_abap_behv=>auth-allowed.
+    ELSE.
+      rv_update_granted = if_abap_behv=>auth-unauthorized.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD is_creation_granted.
+    AUTHORITY-CHECK OBJECT 'V_LIKP_VST'
+    ID 'VSTEL' FIELD iv_shipping_point
+    ID 'ACTVT' FIELD '01'.
+
+    IF sy-subrc = 0.
+      rv_creation_granted = if_abap_behv=>auth-allowed.
+    ELSE.
+      rv_creation_granted = if_abap_behv=>auth-unauthorized.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.

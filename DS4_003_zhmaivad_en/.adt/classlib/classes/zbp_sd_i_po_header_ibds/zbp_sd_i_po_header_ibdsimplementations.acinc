@@ -1,0 +1,495 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ISAICSVI     | 14.03.2024 | 29930     : [Build] - [CR] HU upload     *
+*              |            | DS4K983119                               *
+*----------------------------------------------------------------------*
+CLASS lcl_poitem DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+
+  PRIVATE SECTION.
+    CONSTANTS:
+      BEGIN OF mc_state_areas,
+        mc_check_quantity       TYPE char20 VALUE 'CHECK_QUANTITY',
+        mc_check_delivery_date  TYPE char20 VALUE 'CHECK_DELIVERY_DATE',
+        mc_check_mot_type       TYPE char20 VALUE 'CHECK_MOT_TYPE',
+        mc_check_shipping_type  TYPE char20 VALUE 'CHECK_SHIPPING_TYPE',
+        mc_check_shipment_type  TYPE char20 VALUE 'CHECK_SHIPMENT_TYPE',
+        mc_check_container_id   TYPE char20 VALUE 'CHECK_CONTAINER_ID',
+        mc_check_eta            TYPE char20 VALUE 'CHECK_ETA',
+        mc_check_etd            TYPE char20 VALUE 'CHECK_ETD',
+        mc_check_departure_port TYPE char20 VALUE 'CHECK_DEPARTURE_PORT',
+        mc_check_arrival_port   TYPE char20 VALUE 'CHECK_ARRIVAL_PORT',
+      END OF mc_state_areas.
+
+    DATA: mif_dao  TYPE REF TO zif_sd_manage_po_ibds_dao.
+
+    TYPES: mtyp_reported TYPE RESPONSE FOR REPORTED EARLY zsd_i_po_header_ibds,
+           mtyp_failed   TYPE RESPONSE FOR FAILED EARLY zsd_i_po_header_ibds.
+
+    METHODS get_instance_authorizations
+      FOR INSTANCE AUTHORIZATION
+      IMPORTING it_keys   REQUEST requested_authorizations FOR poitem
+      RESULT    ct_result ##NEEDED.
+
+    METHODS create_inbound_delivery FOR MODIFY
+      IMPORTING it_keys FOR ACTION poitem~create_inbound_delivery RESULT ct_result.
+
+    METHODS create_inbound_shipment FOR MODIFY
+      IMPORTING it_keys FOR ACTION poitem~create_inbound_shipment RESULT ct_result.
+
+    METHODS create_id_and_is FOR MODIFY
+      IMPORTING it_keys FOR ACTION poitem~create_id_and_is        RESULT ct_result ##NEEDED.
+
+    METHODS add_to_shipment FOR MODIFY
+      IMPORTING it_keys   FOR ACTION poitem~add_to_shipment
+      RESULT    ct_result ##NEEDED.
+
+    METHODS check_delivery_fields
+      IMPORTING it_keys     TYPE ANY TABLE
+      EXPORTING es_reported TYPE mtyp_reported
+                es_failed   TYPE mtyp_failed.
+
+    METHODS check_shipment_fields
+      IMPORTING it_keys     TYPE ANY TABLE
+      EXPORTING es_reported TYPE mtyp_reported
+                es_failed   TYPE mtyp_failed.
+
+    METHODS save_log
+      IMPORTING io_log TYPE REF TO zcl_sd_log_manager_idsp.
+
+    METHODS get_dao
+      RETURNING VALUE(rif_dao) TYPE REF TO zif_sd_manage_po_ibds_dao.
+
+    METHODS set_dao
+      IMPORTING iif_dao TYPE REF TO zif_sd_manage_po_ibds_dao ##RELAX.
+ENDCLASS.
+
+CLASS lcl_poitem IMPLEMENTATION.
+
+  METHOD create_inbound_delivery.
+    DATA  lt_input_del TYPE zsd_tt_aif_ibdis_out.
+
+    check_delivery_fields( EXPORTING it_keys     = it_keys
+                           IMPORTING es_failed   = failed
+                                     es_reported = reported ).
+
+    IF reported IS INITIAL.
+      READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poheader
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_headers) ##NEEDED.
+
+      READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poitem
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_items).
+
+      lt_input_del = VALUE #( BASE lt_input_del FOR ls_po_item IN lt_po_items (
+                                                                                ebeln   = ls_po_item-purchaseordernumber
+                                                                                ebelp   = ls_po_item-purchaseorderitem
+                                                                                menge   = ls_po_item-quantity
+                                                                                meins   = ls_po_item-quantityuom
+                                                                                dlvdt   = ls_po_item-deliverydate
+                                                                                transty = ls_po_item-transportmeanstype ) ).
+
+      TRY.
+          DATA(lo_massproc) = NEW zcl_sd_parallel_proc_ibds( iv_task_prefix = CONV #( zcl_pe_hm_basic=>get_value( iv_id = '312' ) )
+                                                             iv_threads     = 1
+                                                             iv_group       = '' ).
+          lo_massproc->set_run_type( iv_run_type = 2 ).
+        CATCH zcx_pe_hm.
+          RETURN.
+      ENDTRY.
+      lo_massproc->post_inb_delivery_in_parallel( it_input = lt_input_del ).
+
+      save_log( lo_massproc->mo_log ).
+
+      READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poitem
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_items_upd).
+
+      ct_result = VALUE #( FOR ls_po_item_upd IN lt_po_items_upd
+                                ( %tky   = ls_po_item_upd-%tky
+                                  %param = ls_po_item_upd ) ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD create_inbound_shipment.
+    DATA  lt_input_ship TYPE zsd_tt_aif_ibdis_out.
+
+    check_shipment_fields( EXPORTING it_keys     = it_keys
+                           IMPORTING es_failed   = failed
+                                     es_reported = reported ).
+
+    IF reported IS INITIAL.
+      READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poitem
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_items).
+
+      lt_input_ship = VALUE #( BASE lt_input_ship FOR ls_po_item IN lt_po_items ( contid     = ls_po_item-containerid
+                                                                                  ebeln      = ls_po_item-purchaseordernumber
+                                                                                  ebelp      = ls_po_item-purchaseorderitem
+                                                                                  shipty     = ls_po_item-shippingtype
+                                                                                  shtyp      = ls_po_item-shipmenttype
+                                                                                  eta        = ls_po_item-eta
+                                                                                  etd        = ls_po_item-etd
+                                                                                  loadport   = ls_po_item-departureport
+                                                                                  arrport    = ls_po_item-arrivalport
+                                                                                  vttk_add02 = ls_po_item-carriercode
+                                                                                  vttk_add03 = ls_po_item-pl3name
+                                                                                  vttk_text2 = ls_po_item-loadtype
+                                                                                  vttk_add04 = ls_po_item-containertype ) ).
+
+      TRY.
+          DATA(lo_massproc) = NEW zcl_sd_parallel_proc_ibds( iv_task_prefix = CONV #( zcl_pe_hm_basic=>get_value( iv_id = '312' ) )
+                                                             iv_threads     = 1
+                                                             iv_group       = ''  ).
+          lo_massproc->set_run_type( iv_run_type    = CONV #( zcl_pe_hm_basic=>get_value( iv_id = '320' iv_sequence = 2 ) ) ).
+        CATCH zcx_pe_hm.
+          RETURN.
+      ENDTRY.
+      lo_massproc->post_inb_shipment_in_parallel( it_input = lt_input_ship ).
+
+      save_log( lo_massproc->mo_log ).
+
+      READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poitem
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_items_upd).
+
+      ct_result = VALUE #( FOR ls_po_item_upd IN lt_po_items_upd
+                                ( %tky   = ls_po_item_upd-%tky
+                                  %param = ls_po_item_upd ) ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD create_id_and_is.
+    DATA lt_input_del  TYPE zsd_tt_aif_ibdis_out.
+    DATA lt_input_ship TYPE zsd_tt_aif_ibdis_out.
+    DATA ls_reported_del TYPE mtyp_reported.
+    DATA ls_reported_ship TYPE mtyp_reported.
+
+    check_delivery_fields( EXPORTING it_keys     = it_keys
+                           IMPORTING es_failed   = failed
+                                     es_reported = ls_reported_del ).
+
+    check_shipment_fields( EXPORTING it_keys     = it_keys
+                           IMPORTING es_failed   = failed
+                                     es_reported = ls_reported_ship ).
+
+    IF ls_reported_del IS INITIAL AND ls_reported_ship IS INITIAL.
+      READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poheader
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_headers) ##NEEDED.
+
+      READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poitem
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_items).
+
+      lt_input_del = VALUE #( BASE lt_input_del FOR ls_po_item IN lt_po_items (
+                                                                                ebeln   = ls_po_item-purchaseordernumber
+                                                                                ebelp   = ls_po_item-purchaseorderitem
+                                                                                menge   = ls_po_item-quantity
+                                                                                meins   = ls_po_item-quantityuom
+                                                                                dlvdt   = ls_po_item-deliverydate
+                                                                                transty = ls_po_item-transportmeanstype ) ).
+
+      TRY.
+          DATA(lo_massproc) = NEW zcl_sd_parallel_proc_ibds( iv_task_prefix = CONV #( zcl_pe_hm_basic=>get_value( iv_id = '312' ) )
+                                                             iv_threads     = 1
+                                                             iv_group       = '' ).
+          lo_massproc->set_run_type( iv_run_type    = CONV #( zcl_pe_hm_basic=>get_value( iv_id = '320' iv_sequence = 2 ) ) ).
+        CATCH zcx_pe_hm.
+          RETURN.
+      ENDTRY.
+      lo_massproc->post_inb_delivery_in_parallel( it_input = lt_input_del ).
+
+      lt_input_ship = VALUE #( BASE lt_input_ship FOR ls_po_item IN lt_po_items ( contid     = ls_po_item-containerid
+                                                                                  ebeln      = ls_po_item-purchaseordernumber
+                                                                                  ebelp      = ls_po_item-purchaseorderitem
+                                                                                  shipty     = ls_po_item-shippingtype
+                                                                                  shtyp      = ls_po_item-shipmenttype
+                                                                                  eta        = ls_po_item-eta
+                                                                                  etd        = ls_po_item-etd
+                                                                                  loadport   = ls_po_item-departureport
+                                                                                  arrport    = ls_po_item-arrivalport
+                                                                                  vttk_add02 = ls_po_item-carriercode
+                                                                                  vttk_add03 = ls_po_item-pl3name
+                                                                                  vttk_text2 = ls_po_item-loadtype
+                                                                                  vttk_add04 = ls_po_item-containertype ) ).
+
+
+
+
+      lo_massproc->post_inb_shipment_in_parallel( it_input = lt_input_ship ).
+
+      save_log( lo_massproc->mo_log ).
+    ELSE.
+      reported-poitem = CORRESPONDING #( ls_reported_del-poitem ).
+      reported-poitem = CORRESPONDING #( BASE ( reported-poitem ) ls_reported_ship-poitem ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD add_to_shipment.
+    DATA lt_input TYPE zsd_tt_item_to_ship.
+
+    READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+    ENTITY poitem
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_po_items).
+
+    lt_input = VALUE #( BASE lt_input FOR ls_po_item IN lt_po_items ( shipment_number = it_keys[ %tky = ls_po_item-%tky ]-%param-inboundshipmentnumber
+                                                                      po_number       = ls_po_item-purchaseordernumber
+                                                                      po_item_number  = ls_po_item-purchaseorderitem ) ) ##PRIMKEY[DRAFT]. "#EC CI_STDSEQ
+
+
+    TRY.
+        DATA(lo_massproc) = NEW zcl_sd_parallel_proc_ibds( iv_task_prefix = CONV #( zcl_pe_hm_basic=>get_value( iv_id = '312' ) )
+                                                           iv_threads     = 1
+                                                           iv_group       = '' ).
+        lo_massproc->set_run_type( iv_run_type    = CONV #( zcl_pe_hm_basic=>get_value( iv_id = '320' iv_sequence = 2 ) ) ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    lo_massproc->add_to_shipment( it_input = lt_input ).
+
+    save_log( lo_massproc->mo_log ).
+
+    READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+      ENTITY poitem
+      ALL FIELDS WITH CORRESPONDING #( it_keys )
+      RESULT DATA(lt_po_items_upd).
+
+    ct_result = VALUE #( FOR ls_po_item_upd IN lt_po_items_upd
+                              ( %tky   = ls_po_item_upd-%tky
+                                %param = ls_po_item_upd ) ).
+  ENDMETHOD.
+
+  METHOD check_delivery_fields.
+    CLEAR es_failed.
+    CLEAR es_reported.
+
+    READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+    ENTITY poitem
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_po_items).
+
+    DATA(lt_mot_types) = get_dao( )->get_mot_types(  ).
+
+    LOOP AT lt_po_items ASSIGNING FIELD-SYMBOL(<ls_po_item>).
+      IF <ls_po_item>-quantity < 0 OR <ls_po_item>-quantity > <ls_po_item>-totalpurchaseorderquantity.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky
+                        %state_area  = mc_state_areas-mc_check_quantity
+                        %msg         = NEW zcx_sd_idsp(
+                                           severity   = if_abap_behv_message=>severity-error
+                                           textid     = zcx_sd_idsp=>invalid_quantity
+                                           poquantity = <ls_po_item>-totalpurchaseorderquantity
+                                           itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-deliverydate IS INITIAL OR <ls_po_item>-deliverydate < sy-datum.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky
+                        %state_area  = mc_state_areas-mc_check_delivery_date
+                        %msg         = NEW zcx_sd_idsp(
+                                           severity   = if_abap_behv_message=>severity-error
+                                           textid     = zcx_sd_idsp=>invalid_delivery_date
+                                           itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-transportmeanstype IS NOT INITIAL
+         AND NOT line_exists( lt_mot_types[ transport_type = <ls_po_item>-transportmeanstype ] ). "#EC CI_STDSEQ
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky
+                        %state_area   = mc_state_areas-mc_check_mot_type
+                        %msg          = NEW zcx_sd_idsp(
+                                            severity   = if_abap_behv_message=>severity-error
+                                            textid     = zcx_sd_idsp=>invalid_mot_type
+                                            itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD check_shipment_fields.
+    CLEAR es_failed.
+    CLEAR es_reported.
+
+    READ ENTITIES OF zsd_i_po_header_ibds IN LOCAL MODE
+    ENTITY poitem
+    ALL FIELDS WITH CORRESPONDING #( it_keys )
+    RESULT DATA(lt_po_items).
+
+    DATA(lt_shipment_types)   = get_dao(  )->get_shipment_types(  ).
+    DATA(lt_shipping_types)   = get_dao(  )->get_shipping_types(  ).
+    DATA(lt_transport_points) = get_dao(  )->get_transportation_points(  ).
+
+    LOOP AT lt_po_items ASSIGNING FIELD-SYMBOL(<ls_po_item>).
+      IF <ls_po_item>-shippingtype IS NOT INITIAL
+         AND NOT line_exists( lt_shipping_types[ shipping_type = <ls_po_item>-shippingtype ] ). "#EC CI_STDSEQ
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky
+                        %state_area  = mc_state_areas-mc_check_shipping_type
+                        %msg         = NEW zcx_sd_idsp(
+                                           severity   = if_abap_behv_message=>severity-error
+                                           textid     = zcx_sd_idsp=>invalid_shipping_type
+                                           itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-shipmenttype IS NOT INITIAL
+         AND NOT line_exists( lt_shipment_types[ shipment_type = <ls_po_item>-shipmenttype ] ). "#EC CI_STDSEQ
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky
+                        %state_area  = mc_state_areas-mc_check_shipment_type
+                        %msg         = NEW zcx_sd_idsp(
+                                           severity   = if_abap_behv_message=>severity-error
+                                           textid     = zcx_sd_idsp=>invalid_shipment_type
+                                           itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-containerid IS INITIAL.
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky
+                        %state_area   = mc_state_areas-mc_check_container_id
+                        %msg          = NEW zcx_sd_idsp(
+                                            severity   = if_abap_behv_message=>severity-error
+                                            textid     = zcx_sd_idsp=>invalid_container_id
+                                            itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-eta IS INITIAL OR <ls_po_item>-eta < sy-datum.
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky
+                        %state_area   = mc_state_areas-mc_check_eta
+                        %msg          = NEW zcx_sd_idsp(
+                                            severity   = if_abap_behv_message=>severity-error
+                                            textid     = zcx_sd_idsp=>invalid_eta
+                                            itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-etd IS INITIAL OR <ls_po_item>-etd < sy-datum.
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky          = <ls_po_item>-%tky
+                        %state_area   = mc_state_areas-mc_check_etd
+                        %msg          = NEW zcx_sd_idsp(
+                                            severity   = if_abap_behv_message=>severity-error
+                                            textid     = zcx_sd_idsp=>invalid_etd
+                                            itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-departureport IS INITIAL
+         OR NOT line_exists( lt_transport_points[ transport_point = <ls_po_item>-departureport ] ). "#EC CI_STDSEQ
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky
+                        %state_area  = mc_state_areas-mc_check_departure_port
+                        %msg         = NEW zcx_sd_idsp(
+                                           severity   = if_abap_behv_message=>severity-error
+                                           textid     = zcx_sd_idsp=>invalid_deparure_port
+                                           itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+
+      IF <ls_po_item>-arrivalport IS INITIAL
+        OR NOT line_exists( lt_transport_points[ transport_point = <ls_po_item>-arrivalport ] ). "#EC CI_STDSEQ
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky ) TO es_failed-poitem.
+        APPEND VALUE #( %tky         = <ls_po_item>-%tky
+                        %state_area  = mc_state_areas-mc_check_arrival_port
+                        %msg         = NEW zcx_sd_idsp(
+                                           severity   = if_abap_behv_message=>severity-error
+                                           textid     = zcx_sd_idsp=>invalid_arrival_port
+                                           itemnumber = <ls_po_item>-purchaseorderitem ) )
+        TO es_reported-poitem.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD get_dao.
+    IF mif_dao IS NOT BOUND.
+      mif_dao = NEW zcl_sd_manage_po_ibds_dao(  ).
+    ENDIF.
+    rif_dao = mif_dao.
+  ENDMETHOD.
+
+  METHOD set_dao.
+    mif_dao = iif_dao.
+  ENDMETHOD.
+
+  METHOD get_instance_authorizations ##NEEDED.
+  ENDMETHOD.
+
+  METHOD save_log.
+    DATA lt_ibds_create TYPE TABLE FOR CREATE zsd_i_result_idsp\\resultidsp\_resultibds.
+
+    TRY.
+        DATA(lv_runtypeid) = zcl_pe_hm_basic=>get_value( iv_id = '320' iv_sequence = 2 ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    DATA(lt_ibds) = io_log->zif_sd_log_manager~get_ibds_data(  ).
+
+    IF lt_ibds IS INITIAL.
+      DATA(lv_status_id) = zif_sd_log_manager=>gc_run_status-completed_with_errors.
+    ELSE.
+      lv_status_id = zif_sd_log_manager=>gc_run_status-successfully_completed.
+    ENDIF.
+
+    MODIFY ENTITIES OF zsd_i_result_idsp
+    ENTITY resultidsp
+    CREATE
+    SET FIELDS WITH VALUE #( (  runstatusid = lv_status_id
+                                runtypeid   = lv_runtypeid
+                           ) )
+    MAPPED   DATA(ls_mapped_idsp)
+    FAILED   DATA(ls_failed_idsp)
+    REPORTED DATA(ls_reported_idsp).
+
+    lt_ibds_create = VALUE #( ( runuuid = ls_mapped_idsp-resultidsp[ 1 ]-runuuid ) ).
+    lt_ibds_create[ 1 ]-%target = VALUE #( FOR ls_ibds IN lt_ibds ( CORRESPONDING #( ls_ibds ) ) ).
+
+    MODIFY ENTITIES OF zsd_i_result_idsp
+    ENTITY resultidsp
+    CREATE BY \_resultibds
+    FIELDS ( containerid deliverydate eta etd inbounddeliverynum inboundshipmentnum logid material poitem ponumber shippingtype status
+             statusid mergedtotalquantities qtyuom statusmessage totalgrquantity totalidquantity totalpurchaseorderquantity totalusedqty )
+    WITH CORRESPONDING #( lt_ibds_create )
+    MAPPED   ls_mapped_idsp
+    FAILED   ls_failed_idsp
+    REPORTED ls_reported_idsp.
+
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lcl_poheader DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+
+  PRIVATE SECTION.
+
+    METHODS get_instance_authorizations
+      FOR INSTANCE AUTHORIZATION
+      IMPORTING it_keys   REQUEST requested_authorizations FOR poheader
+      RESULT    ct_result ##NEEDED.
+
+ENDCLASS.
+
+CLASS lcl_poheader IMPLEMENTATION.
+
+  METHOD get_instance_authorizations ##NEEDED.
+  ENDMETHOD.
+
+ENDCLASS.

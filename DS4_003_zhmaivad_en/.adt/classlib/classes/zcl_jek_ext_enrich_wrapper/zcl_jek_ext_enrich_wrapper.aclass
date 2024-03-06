@@ -1,0 +1,1151 @@
+class ZCL_JEK_EXT_ENRICH_WRAPPER definition
+  public
+  inheriting from ZCL_JEK_EXT_ENRICHER_SUPER
+  final
+  create public .
+
+public section.
+
+  methods CONSTRUCTOR .
+
+  methods ENRICH
+    redefinition .
+protected section.
+private section.
+
+  data MT_P_FUNCT type ZVAT_EXT_P_FUNCT_T .
+  data MV_IS_S4 type BOOLEAN .
+
+  methods SPLIT_INVOICES
+    importing
+      !IT_INVOICES type ZSVAT_JEK_INVOICE_T .
+  methods ENRICH_S_SALES .
+  methods ENRICH_P_NONPO .
+  methods ENRICH_P_PURCH .
+ENDCLASS.
+
+
+
+CLASS ZCL_JEK_EXT_ENRICH_WRAPPER IMPLEMENTATION.
+
+
+  METHOD constructor.
+
+    super->constructor( ).
+
+    zcl_ext_utility=>get_is_s4(
+      IMPORTING
+        ev_is_s4 = mv_is_s4                 " Is this an S/4 HANA system?
+    ).
+
+    SELECT partner_function itc_category
+      FROM zvat_ext_p_funct
+      INTO TABLE mt_p_funct.
+
+  ENDMETHOD.
+
+
+  METHOD enrich.
+
+    FIELD-SYMBOLS: <ls_invoice> TYPE zsvat_jek_invoice.
+
+    DATA: ls_enriched TYPE zsvat_jek_invoice,
+          lo_badi     TYPE REF TO zbadi_ext_jek_cust_field_def.
+    split_invoices( it_invoices = ct_base_data ).
+
+    IF mt_s_sales IS NOT INITIAL.
+      enrich_s_sales( ).
+    ENDIF.
+
+    IF mt_p_nonpo IS NOT INITIAL.
+      enrich_p_nonpo( ).
+    ENDIF.
+
+    IF mt_p_purch IS NOT INITIAL.
+      enrich_p_purch( ).
+    ENDIF.
+
+    CLEAR: ct_base_data.
+
+    LOOP AT mt_s_sales INTO ls_enriched.
+      APPEND INITIAL LINE TO ct_base_data ASSIGNING <ls_invoice>.
+      <ls_invoice> = ls_enriched.
+    ENDLOOP.
+
+    LOOP AT mt_p_nonpo INTO ls_enriched.
+      APPEND INITIAL LINE TO ct_base_data ASSIGNING <ls_invoice>.
+      <ls_invoice> = ls_enriched.
+    ENDLOOP.
+
+    LOOP AT mt_p_purch INTO ls_enriched.
+      APPEND INITIAL LINE TO ct_base_data ASSIGNING <ls_invoice>.
+      <ls_invoice> = ls_enriched.
+    ENDLOOP.
+
+    FREE: mt_s_sales, mt_p_nonpo, mt_p_purch.
+
+    TRY.
+        GET BADI lo_badi.
+        IF lo_badi IS BOUND.
+          CALL BADI lo_badi->fill_customer_fields
+            CHANGING
+              ct_jek_invoice_data = ct_base_data.
+        ENDIF.
+      CATCH cx_badi_not_implemented.
+        " Sweep under the rug. If not implemented, no action has to be taken.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD enrich_p_nonpo.
+*-----------------------------------------------------------------------"
+* DATA DECLARATION
+*-----------------------------------------------------------------------"
+* ~ Types
+
+    TYPES: BEGIN OF lty_partner,
+             belnr      TYPE belnr_d,
+             lifnr      TYPE lifnr,
+             name1      TYPE name1,
+             street     TYPE adrc-street,
+             post_code1 TYPE adrc-post_code1,
+             city1      TYPE adrc-city1,
+             region     TYPE adrc-region,
+             country    TYPE adrc-country,
+             taxjurcode TYPE adrc-taxjurcode,
+           END OF lty_partner.
+
+* ~ Field Symbols
+
+    FIELD-SYMBOLS: <ls_invoice>     LIKE LINE OF mt_p_nonpo,
+                   <ls_partner>     TYPE zsvat_jek_partner_info,
+                   <ls_partner_lty> TYPE lty_partner,
+                   <ls_selopt>      TYPE selopt.
+
+* ~ Objects
+
+* ~ Tables
+
+    DATA: lt_adrc      TYPE STANDARD TABLE OF adrc,
+          lt_address   TYPE STANDARD TABLE OF lty_partner,
+          lt_partners  TYPE STANDARD TABLE OF lty_partner,
+          lt_sel_lifnr TYPE STANDARD TABLE OF selopt.
+
+* ~ Structures
+
+    DATA: ls_adrc    LIKE LINE OF lt_adrc,
+          ls_partner TYPE lty_partner.
+
+* ~ Variables
+
+    DATA: lv_bukrs TYPE bukrs.
+
+* ~ Constants
+
+*-----------------------------------------------------------------------"
+* IMPLEMENTATION
+*-----------------------------------------------------------------------"
+
+    IF mt_p_nonpo IS INITIAL.
+      RETURN.
+    ENDIF.
+
+* ~ Select data
+
+    SELECT b~street b~post_code1 b~city1 b~region b~country b~taxjurcode
+      FROM t001 AS a INNER JOIN adrc AS b ON a~adrnr = b~addrnumber
+ INTO CORRESPONDING FIELDS OF TABLE lt_adrc
+      WHERE a~bukrs = lv_bukrs
+        AND b~date_from <= sy-datum.
+
+    SELECT belnr lifnr
+      FROM bseg
+      INTO CORRESPONDING FIELDS OF TABLE lt_partners
+       FOR ALL ENTRIES IN mt_p_nonpo
+     WHERE belnr = mt_p_nonpo-invoice_data-invoice_header-header_details-accounting_number
+       AND gjahr = mt_p_nonpo-invoice_data-invoice_header-header_details-fiscal_year
+       AND bukrs = mt_p_nonpo-invoice_data-invoice_header-tax_subject_identification-company_code.
+
+    LOOP AT lt_partners INTO ls_partner.
+      IF ls_partner-lifnr IS NOT INITIAL.
+        APPEND INITIAL LINE TO lt_sel_lifnr ASSIGNING <ls_selopt>.
+        <ls_selopt>-option = 'EQ'.
+        <ls_selopt>-sign   = 'I'.
+        <ls_selopt>-low    = ls_partner-lifnr.
+      ENDIF.
+    ENDLOOP.
+
+    SORT lt_sel_lifnr BY low.
+    DELETE ADJACENT DUPLICATES FROM lt_sel_lifnr COMPARING low.
+
+    SELECT a~lifnr a~name1 b~street b~post_code1 b~city1 b~region b~country b~taxjurcode
+      FROM lfa1 AS a
+     INNER JOIN adrc AS b ON a~adrnr = b~addrnumber
+      INTO CORRESPONDING FIELDS OF TABLE lt_address
+     WHERE a~lifnr IN lt_sel_lifnr.
+
+    SORT lt_address BY lifnr.
+
+    LOOP AT lt_partners ASSIGNING <ls_partner_lty>.
+
+      CLEAR: ls_partner.
+
+      READ TABLE lt_address INTO ls_partner WITH KEY lifnr = <ls_partner_lty>-lifnr BINARY SEARCH.
+
+      IF sy-subrc = 0.
+
+        <ls_partner_lty>-city1      = ls_partner-city1.
+        <ls_partner_lty>-country    = ls_partner-country.
+        <ls_partner_lty>-name1      = ls_partner-name1.
+        <ls_partner_lty>-post_code1 = ls_partner-post_code1.
+        <ls_partner_lty>-region     = ls_partner-region.
+        <ls_partner_lty>-street     = ls_partner-street.
+        <ls_partner_lty>-taxjurcode = ls_partner-taxjurcode.
+
+      ENDIF.
+
+    ENDLOOP.
+
+    IF mv_is_s4 EQ abap_true.
+
+    ENDIF.
+
+* ~ Assign data to structure
+
+    READ TABLE lt_adrc INDEX 1 INTO ls_adrc.
+
+    LOOP AT mt_p_nonpo ASSIGNING <ls_invoice>.
+
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-street            = ls_adrc-street.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-house_nr          = ls_adrc-house_num1. " asandu @ 18.10.20
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-postal_code       = ls_adrc-post_code1.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-city              = ls_adrc-city1.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-region            = ls_adrc-region.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-country_code      = ls_adrc-country.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-jurisdiction_code = ls_adrc-taxjurcode.
+
+      LOOP AT lt_partners INTO ls_partner WHERE belnr = <ls_invoice>-invoice_data-invoice_header-header_details-accounting_number.
+
+        APPEND INITIAL LINE TO <ls_invoice>-invoice_data-invoice_header-partner_identification-partner_info ASSIGNING <ls_partner>.
+
+        <ls_partner>-partner_category                  = 'VENDOR'.
+        <ls_partner>-partner_number                    = ls_partner-lifnr.
+        <ls_partner>-partner_name                      = ls_partner-name1.
+        <ls_partner>-partner_address-street            = ls_partner-street.
+        <ls_partner>-partner_address-postal_code       = ls_partner-post_code1.
+        <ls_partner>-partner_address-city              = ls_partner-city1.
+        <ls_partner>-partner_address-region            = ls_partner-region.
+        <ls_partner>-partner_address-country_code      = ls_partner-country.
+        <ls_partner>-partner_address-jurisdiction_code = ls_partner-taxjurcode.
+
+      ENDLOOP.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD enrich_p_purch.
+*-----------------------------------------------------------------------"
+* DATA DECLARATION
+*-----------------------------------------------------------------------"
+* ~ Types
+
+*    TYPES: BEGIN OF lty_ekko_ekpo,
+*             ebeln      TYPE ekko-ebeln,
+*             bsart      TYPE ekko-bsart,
+*             waers      TYPE ekko-waers,
+*             grwcu      TYPE ekko-grwcu,
+*             wkurs      TYPE ekko-wkurs,
+*             intra_rel  TYPE ekko-intra_rel,
+*             intra_excl TYPE ekko-intra_excl,
+*             lands      TYPE ekko-lands,
+*             "
+*             ebelp      TYPE ekpo-ebelp,
+*             menge      TYPE ekpo-menge,
+*             netwr      TYPE ekpo-netwr,
+*             meins      TYPE ekpo-meins,
+*             ntgew      TYPE ekpo-ntgew,
+*             gewei      TYPE ekpo-gewei,
+*             txjcd      TYPE ekpo-txjcd,
+*             inco1      TYPE ekpo-inco1,
+*             inco2      TYPE ekpo-inco2,
+*             werks      TYPE ekpo-werks,
+*             lgort      TYPE ekpo-lgort,
+*             pstyp      TYPE ekpo-pstyp,
+*             isvco      TYPE ekpo-isvco,
+*             matnr      TYPE ekpo-matnr,
+*             txz01      TYPE ekpo-txz01,
+*             matkl      TYPE ekpo-matkl,
+*             stawn      TYPE ekpo-stawn,
+*             "
+*             lifn2      TYPE ekpa-lifn2,
+*             parvw      TYPE ekpa-parvw,
+*             "
+*             name1      TYPE lfa1-name1,
+*             "
+*             street     TYPE adrc-street,
+*             post_code1 TYPE adrc-post_code1,
+*             city1      TYPE adrc-city1,
+*             region     TYPE adrc-region,
+*             country    TYPE adrc-country,
+*             taxjurcode TYPE adrc-taxjurcode,
+*           END OF lty_ekko_ekpo.
+*
+*    TYPES: BEGIN OF lty_partner,
+*             lifnr      TYPE lfa1-lifnr,
+*             name1      TYPE lfa1-name1,
+*             "
+*             street     TYPE adrc-street,
+*             post_code1 TYPE adrc-post_code1,
+*             city1      TYPE adrc-city1,
+*             region     TYPE adrc-region,
+*             country    TYPE adrc-country,
+*             taxjurcode TYPE adrc-taxjurcode,
+*           END OF lty_partner.
+
+* ~ Field Symbols
+
+*    FIELD-SYMBOLS:<ls_data>        TYPE lty_ekko_ekpo,
+*                  <ls_inv>         LIKE LINE OF mt_p_purch,
+*                  <ls_line>        TYPE zsvat_jek_line_item,
+*                  <ls_partner_inv> TYPE zsvat_jek_partner_info.
+
+* ~ Objects
+
+* ~ Tables
+
+*    DATA: lt_data      TYPE STANDARD TABLE OF lty_ekko_ekpo,
+*          lt_data_copy TYPE STANDARD TABLE OF lty_ekko_ekpo,
+*          lt_partners  TYPE STANDARD TABLE OF lty_partner.
+
+* ~ Structures
+
+*    DATA: ls_partner LIKE LINE OF lt_partners,
+*          ls_data    LIKE LINE OF lt_data,
+*          ls_p_funct LIKE LINE OF mt_p_funct.
+
+* ~ Variables
+
+*    DATA: lv_select TYPE string.
+
+* ~ Constants
+
+*-----------------------------------------------------------------------"
+* IMPLEMENTATION
+*-----------------------------------------------------------------------"
+*
+*    IF mv_is_s4 = abap_true.
+*
+*      CONCATENATE 'a~ebeln a~bsart a~waers a~grwcu a~wkurs a~intra_rel a~intra_excl a~lands' lv_select INTO lv_select.
+*      CONCATENATE 'b~ebelp b~menge b~netwr b~meins b~ntgew b~gewei b~txjcd b~inco1 b~inco2' lv_select  INTO lv_select SEPARATED BY space.
+*      CONCATENATE 'b~werks b~lgort b~pstyp b~isvco b~matnr b~txz01 b~matkl b~stawn' lv_select          INTO lv_select SEPARATED BY space.
+*      CONCATENATE 'c~lifn2 c~parvw' lv_select INTO lv_select SEPARATED BY space.
+*
+*      IF mt_p_purch IS NOT INITIAL.
+*
+*        SELECT (lv_select)
+*          FROM ekko AS a INNER JOIN ekpo AS b
+*                    ON a~ebeln = b~ebeln
+*                    INNER JOIN ekpa AS c
+*                    ON b~ebeln = c~ebeln
+*          INTO CORRESPONDING FIELDS OF TABLE lt_data
+*           FOR ALL ENTRIES IN mt_p_purch
+*         WHERE a~ebeln = mt_p_purch-invoice_data-invoice_header-header_details-invoice_number
+*           AND c~ekorg = mt_p_purch-invoice_data-invoice_header-tax_subject_identification-company_code.
+*
+*        lt_data_copy = lt_data.
+*        SORT lt_data_copy BY lifn2.
+*        DELETE ADJACENT DUPLICATES FROM lt_data_copy COMPARING lifn2.
+*
+*        IF lt_data_copy IS NOT INITIAL.
+*
+*          SELECT a~lifnr a~name1 b~street b~post_code1 b~city1 b~region b~country b~taxjurcode
+*            FROM lfa1 AS a INNER JOIN adrc AS b
+*              ON a~adrnr = b~addrnumber
+*            INTO CORRESPONDING FIELDS OF TABLE lt_partners
+*             FOR ALL ENTRIES IN lt_data_copy
+*           WHERE a~lifnr = lt_data_copy-lifn2.
+*
+*          FREE: lt_data_copy.
+*
+*          LOOP AT lt_data ASSIGNING <ls_data>.
+*
+*            READ TABLE lt_partners INTO ls_partner WITH KEY lifnr = <ls_data>-lifn2.
+*            IF sy-subrc = 0.
+*              MOVE-CORRESPONDING ls_partner TO <ls_data>.
+*            ENDIF.
+*
+*          ENDLOOP.
+*
+*        ENDIF.
+*
+*        lt_data_copy = lt_data.
+*        SORT lt_data_copy BY ebeln.
+*        DELETE ADJACENT DUPLICATES FROM lt_data_copy COMPARING ebeln.
+*        SORT lt_data BY ebeln ebelp.
+*
+*        LOOP AT mt_p_purch ASSIGNING <ls_inv>.
+*
+*          READ TABLE lt_data_copy INTO ls_data WITH KEY ebeln = <ls_inv>-invoice_data-invoice_header-header_details-invoice_number
+*                                               BINARY SEARCH.
+*          IF sy-subrc <> 0.
+*            CONTINUE.
+*          ENDIF.
+*
+*          <ls_inv>-invoice_data-invoice_header-header_details-invoice_type             = ls_data-bsart.
+*          <ls_inv>-invoice_data-invoice_header-header_details-document_currency        = ls_data-waers.
+*          <ls_inv>-invoice_data-invoice_header-header_details-statistical_currency     = ls_data-grwcu.
+*          <ls_inv>-invoice_data-invoice_header-header_details-accounting_exchange_rate = ls_data-wkurs.
+*          <ls_inv>-invoice_data-invoice_header-header_details-intrastat_relevance      = ls_data-intra_rel.
+*          <ls_inv>-invoice_data-invoice_header-header_details-intrastat_exclusion      = ls_data-intra_excl.
+*
+*          LOOP AT lt_data ASSIGNING <ls_data> WHERE ebeln = ls_data-ebeln.
+*
+*            APPEND INITIAL LINE TO <ls_inv>-invoice_data-invoice_lines-line_item ASSIGNING <ls_line>.
+*
+*            <ls_line>-line_index             = <ls_data>-ebelp.
+*            <ls_line>-quantity               = <ls_data>-menge.
+*            <ls_line>-unit_price             = <ls_data>-netwr.
+*            <ls_line>-unit_of_measure        = <ls_data>-meins.
+*            <ls_line>-net_weight             = <ls_data>-ntgew.
+*            <ls_line>-weight_unit            = <ls_data>-gewei.
+*            <ls_line>-tax_jurisdiction       = <ls_data>-txjcd.
+*            <ls_line>-incoterm               = <ls_data>-inco1.
+*            <ls_line>-inco_location          = <ls_data>-inco2.
+*            <ls_line>-destination_country    = <ls_data>-lands.
+*            <ls_line>-plant                  = <ls_data>-werks.
+*            <ls_line>-storage_location       = <ls_data>-lgort.
+*            <ls_line>-item_category          = <ls_data>-pstyp.
+*            <ls_line>-intrastat_service_code = <ls_data>-isvco.
+*
+*            <ls_line>-product_info-material_number  = <ls_data>-matnr.
+*            <ls_line>-product_info-line_description = <ls_data>-txz01.
+*            <ls_line>-product_info-material_group   = <ls_data>-matkl.
+*            <ls_line>-product_info-commodity_code   = <ls_data>-stawn.
+*
+*            READ TABLE mt_p_funct INTO ls_p_funct WITH KEY partner_function = <ls_data>-parvw BINARY SEARCH.
+*
+*            <ls_line>-partner_info-partner_category = ls_p_funct-itc_category.
+*            <ls_line>-partner_info-partner_number   = <ls_data>-lifn2.
+*            <ls_line>-partner_info-partner_name     = <ls_data>-name1.
+*
+*            <ls_line>-partner_info-partner_address-street            = <ls_data>-street.
+*            <ls_line>-partner_info-partner_address-postal_code       = <ls_data>-post_code1.
+*            <ls_line>-partner_info-partner_address-city              = <ls_data>-city1.
+*            <ls_line>-partner_info-partner_address-region            = <ls_data>-region.
+*            <ls_line>-partner_info-partner_address-country_code      = <ls_data>-country.
+*            <ls_line>-partner_info-partner_address-jurisdiction_code = <ls_data>-taxjurcode.
+*
+*
+*            APPEND <ls_line>-partner_info TO <ls_inv>-invoice_data-invoice_header-partner_identification-partner_info.
+*
+*            CLEAR: ls_p_funct.
+*
+*          ENDLOOP.
+*
+*          SORT <ls_inv>-invoice_data-invoice_header-partner_identification-partner_info BY partner_number.
+*          DELETE ADJACENT DUPLICATES FROM <ls_inv>-invoice_data-invoice_header-partner_identification-partner_info COMPARING partner_number.
+*
+*        ENDLOOP.
+*
+*      ENDIF.
+*
+*    ELSE.
+*
+*    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD enrich_s_sales.
+*-----------------------------------------------------------------------"
+* DATA DECLARATION
+*-----------------------------------------------------------------------"
+* ~ Types
+    TYPES: BEGIN OF lty_data,
+             vbeln      TYPE vbrk-vbeln,
+             vkorg      TYPE vbrk-vkorg,
+             knumv      TYPE knumv,
+             gjahr      TYPE vbrk-gjahr,
+             xblnr      TYPE vbrk-xblnr,
+             vbtyp      TYPE vbrk-vbtyp,
+             fkdat      TYPE vbrk-fkdat,
+             erdat      TYPE vbrk-erdat,
+             stceg      TYPE vbrk-stceg,
+             kurrf_dat  TYPE vbrk-kurrf_dat,
+             erzet      TYPE vbrk-erzet,
+             fkart      TYPE vbrk-fkart,
+             blart      TYPE char2,
+             waerk      TYPE vbrk-waerk,
+             stwae      TYPE vbrk-stwae,
+             kurrf      TYPE vbrk-kurrf,
+             intra_rel  TYPE char1,
+             intra_excl TYPE char1,
+             xegdr      TYPE vbrk-xegdr,
+             landtx     TYPE vbrk-landtx,
+             bupla      TYPE vbrk-bupla,
+             vbund      TYPE vbrk-vbund,
+             posnr      TYPE zsvat_jek_line_item-line_index,
+             fkimg      TYPE zsvat_jek_line_item-quantity,
+             meins      TYPE zsvat_jek_line_item-unit_of_measure,
+             netwr      TYPE vbap-netwr,
+             ntgew      TYPE zsvat_jek_line_item-net_weight,
+             gewei      TYPE zsvat_jek_line_item-weight_unit,
+             aubel      TYPE zsvat_jek_line_item-reference_document,
+             matnr      TYPE matnr,
+             arktx      TYPE arktx,
+             matkl      TYPE matkl,
+             mwskz      TYPE vbrp-mwskz, " asandu @ 20.10.20
+             prctr      TYPE zsvat_jek_line_item-profit_center,
+             kostl      TYPE zsvat_jek_line_item-cost_center,
+             kursk_dat  TYPE zsvat_jek_line_item-translation_date,
+             txjcd      TYPE zsvat_jek_line_item-tax_jurisdiction,
+             inco1      TYPE zsvat_jek_line_item-incoterm,
+             inco2      TYPE zsvat_jek_line_item-inco_location,
+             aland      TYPE zsvat_jek_line_item-goods_departure_country,
+             land1      TYPE zsvat_jek_line_item-destination_country,
+             werks      TYPE zsvat_jek_line_item-plant,
+             wkcou      TYPE zsvat_jek_line_item-plant_country,
+             lgort      TYPE zsvat_jek_line_item-storage_location,
+             stawn      TYPE stawn,
+             zlsch      TYPE char1,
+             pstyv      TYPE vbrp-pstyv,
+             wkreg      TYPE vbrp-wkreg,
+             regio_auft TYPE vbrp-regio_auft,
+             grwcu      TYPE waers,
+             exnum      TYPE vbrk-exnum,
+             isocode    TYPE char3,
+           END OF lty_data.
+
+    TYPES: BEGIN OF lty_com_code,
+             matnr TYPE char40,
+             ccngn TYPE char30,
+             datab TYPE dats,
+             datbi TYPE dats,
+             bemeh TYPE meins,
+             beme2 TYPE meins,
+             cuom1 TYPE char10,
+             cuom2 TYPE char10,
+           END OF lty_com_code.
+
+    TYPES: BEGIN OF lty_partners,
+             vbeln      TYPE vbeln,
+             posnr      TYPE posnr,
+             kunnr      TYPE kunnr,
+             name1      TYPE kna1-name1,
+             adrnr      TYPE adrnr,
+             street     TYPE adrc-street,
+             house_num1 TYPE adrc-house_num1,
+             post_code1 TYPE adrc-post_code1,
+             city1      TYPE adrc-city1,
+             region     TYPE adrc-region,
+             country    TYPE adrc-country,
+             taxjurcode TYPE adrc-taxjurcode,
+             parvw      TYPE parvw,
+           END OF lty_partners.
+
+    TYPES: BEGIN OF lty_t001,
+             werks TYPE werks_d,
+             bukrs TYPE bukrs,
+             butxt TYPE butxt,
+             waers TYPE waers,
+             land1 TYPE land1,
+             stceg TYPE stceg,
+           END OF lty_t001.
+
+    TYPES: BEGIN OF lty_tvko,
+             vkorg TYPE vkorg,
+             bukrs TYPE vkbuk,
+           END OF lty_tvko.
+
+* ~ asandu @ 26.10.20
+    TYPES: BEGIN OF lty_prcd,
+             knumv TYPE knumv,
+             kposn TYPE kposn,
+             kbetr TYPE p LENGTH 13 DECIMALS 9, "vfprc_element_amount,
+             mwsk1 TYPE mwskz,
+           END OF lty_prcd.
+
+    TYPES: BEGIN OF lty_konv,
+             knumv TYPE knumv,
+             kposn TYPE kposn,
+             kbetr TYPE kbetr,
+             mwsk1 TYPE mwskz,
+             krech TYPE krech,
+           END OF lty_konv.
+* ~ end of asandu
+
+    TYPES: BEGIN OF lty_eikp,
+             exnum TYPE eikp-exnum,
+             grwcu TYPE eikp-grwcu,
+           END OF lty_eikp.
+
+* ~ Field Symbols
+    FIELD-SYMBOLS: <ls_selopt>        TYPE selopt,
+                   <ls_invoice>       LIKE LINE OF mt_s_sales,
+                   <ls_line_item>     TYPE zsvat_jek_line_item,
+                   <lt_comm_code>     TYPE ANY TABLE,
+                   <ls_comm_code>     TYPE any,
+                   <lv_comm_value>    TYPE char30,
+                   <ls_partner_ident> TYPE zsvat_jek_partner_identific,
+                   <ls_partner>       TYPE zsvat_jek_partner_info.
+* ~ Objects
+    DATA: lo_cc_class  TYPE REF TO object,
+          lo_matnr     TYPE REF TO data,
+          lo_land1     TYPE REF TO data,
+          lo_valid_on  TYPE REF TO data,
+          lo_comm_code TYPE REF TO data.
+* ~ Tables
+    DATA: lt_selopt_vbeln TYPE STANDARD TABLE OF selopt,
+          lt_selopt_werks TYPE STANDARD TABLE OF selopt,
+          lt_data         TYPE STANDARD TABLE OF lty_data,
+          lt_adrc         TYPE STANDARD TABLE OF adrc,
+          lt_ptab         TYPE abap_parmbind_tab,
+          lt_etab         TYPE abap_excpbind_tab,
+          lt_matnr        TYPE STANDARD TABLE OF matnr_d,
+          lt_partners     TYPE STANDARD TABLE OF lty_partners,
+          lt_t001         TYPE STANDARD TABLE OF lty_t001,
+          lt_tvko         TYPE STANDARD TABLE OF lty_tvko,
+          lt_t001w        TYPE STANDARD TABLE OF lty_t001,
+          lt_t001n        TYPE STANDARD TABLE OF lty_t001,
+          lt_prcd         TYPE STANDARD TABLE OF lty_prcd, " asandu @ 26.10.20
+          lt_konv         TYPE STANDARD TABLE OF lty_konv, " asandu @ 26.10.20
+          lt_eikp         TYPE STANDARD TABLE OF lty_eikp.
+
+* ~ Structures
+    DATA: ls_invoice LIKE LINE OF mt_s_sales,
+          ls_data    TYPE lty_data,
+          ls_adrc    LIKE LINE OF lt_adrc,
+          ls_ptab    LIKE LINE OF lt_ptab,
+          ls_partner LIKE LINE OF lt_partners,
+          ls_p_funct LIKE LINE OF mt_p_funct,
+          ls_tvko    TYPE lty_tvko,
+          ls_t001    TYPE lty_t001,
+          ls_land1w  TYPE lty_t001,
+          ls_t001n   TYPE lty_t001,
+          ls_t001w   LIKE LINE OF lt_t001w,
+          ls_prcd    LIKE LINE OF lt_prcd, " asandu @ 26.10.20
+          ls_konv    LIKE LINE OF lt_konv, " asandu @ 26.10.20
+          ls_eikp    LIKE LINE OF lt_eikp.
+
+
+* ~ Variables
+    DATA: lv_select TYPE string,
+          lv_bukrs  TYPE bukrs,
+          lv_waers  TYPE t005-waers,
+          lv_vkbuk  TYPE tvko-bukrs.
+* ~ Constants
+    CONSTANTS: lc_cc_class  TYPE string VALUE '/SAPSLL/CL_MM_CLS_SERVICE',
+               lc_cc_method TYPE string VALUE 'GET_COMMODITY_CODE_CLS',
+               lc_cc_type   TYPE string VALUE '/SAPSLL/MM_CLS_RET_ST'.
+*-----------------------------------------------------------------------"
+* IMPLEMENTATION
+*-----------------------------------------------------------------------"
+
+* ~ Create select options
+
+    LOOP AT mt_s_sales INTO ls_invoice.
+      APPEND INITIAL LINE TO lt_selopt_vbeln ASSIGNING <ls_selopt>.
+      <ls_selopt>-option = 'EQ'.
+      <ls_selopt>-sign   = 'I'.
+      <ls_selopt>-low    = ls_invoice-invoice_data-invoice_header-header_details-invoice_number.
+    ENDLOOP.
+
+    READ TABLE mt_s_sales INDEX 1 INTO ls_invoice.
+
+    lv_bukrs = ls_invoice-invoice_data-invoice_header-tax_subject_identification-company_code.
+
+    CLEAR: ls_invoice.
+
+* ~ Select data
+
+    SELECT SINGLE b~street b~post_code1 b~house_num1 b~city1 b~region b~country b~taxjurcode
+      FROM t001 AS a INNER JOIN adrc AS b ON a~adrnr = b~addrnumber
+ INTO CORRESPONDING FIELDS OF ls_adrc
+      WHERE a~bukrs = lv_bukrs
+        AND b~date_from <= sy-datum.
+
+    SELECT SINGLE waers
+      FROM t005
+      INTO lv_waers
+     WHERE land1 = ls_adrc-country.
+
+    SELECT a~vbeln a~posnr b~kunnr b~name1 b~adrnr c~street c~house_num1 c~post_code1 c~city1 c~region c~country c~taxjurcode a~parvw
+      FROM vbpa AS a INNER JOIN kna1 AS b ON a~kunnr = b~kunnr
+INNER JOIN adrc AS c ON b~adrnr = c~addrnumber
+INTO CORRESPONDING FIELDS OF TABLE lt_partners
+     WHERE vbeln IN lt_selopt_vbeln
+       AND c~date_from LE sy-datum.
+
+    SORT lt_partners BY vbeln posnr kunnr parvw.
+    DELETE ADJACENT DUPLICATES FROM lt_partners COMPARING vbeln posnr kunnr parvw.
+
+    IF mv_is_s4 EQ abap_true.
+      CONCATENATE lv_select 'k~vbeln k~vkorg k~knumv k~gjahr k~xblnr k~vbtyp k~fkdat k~erdat k~stceg k~kurrf_dat k~erzet k~fkart k~blart k~waerk k~stwae k~kurrf' INTO lv_select.
+      CONCATENATE lv_select 'k~intra_rel k~intra_excl k~xegdr k~landtx k~bupla k~vbund k~land1 k~inco1 k~inco2 k~zlsch k~grwcu' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 'p~posnr p~fkimg p~meins p~netwr p~ntgew p~gewei p~aubel p~matnr p~arktx p~prctr p~kostl p~kursk_dat p~txjcd p~mwskz' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 'p~aland p~werks p~wkcou p~lgort p~pstyv p~wkreg p~regio_auft' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 'm~stawn a~matkl' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 't~isocode' INTO lv_select SEPARATED BY space.
+    ELSE.
+      CONCATENATE lv_select 'k~vbeln k~vkorg k~knumv k~gjahr k~xblnr k~vbtyp k~fkdat k~erdat k~stceg k~kurrf_dat k~erzet k~fkart k~waerk k~stwae k~kurrf' INTO lv_select.
+      CONCATENATE lv_select 'k~xegdr k~landtx k~bupla k~vbund k~land1 k~inco1 k~inco2 k~zlsch k~exnum' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 'p~posnr p~fkimg p~meins p~netwr p~ntgew p~gewei p~aubel p~matnr p~arktx p~prctr p~kostl p~kursk_dat p~txjcd p~mwskz' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 'p~aland p~werks p~wkcou p~lgort p~pstyv p~wkreg p~regio_auft' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 'm~stawn a~matkl' INTO lv_select SEPARATED BY space.
+      CONCATENATE lv_select 't~isocode' INTO lv_select SEPARATED BY space.
+    ENDIF.
+
+    SELECT (lv_select)
+      FROM vbrk AS k
+INNER JOIN vbrp AS p ON k~vbeln = p~vbeln
+LEFT OUTER JOIN marc AS m ON p~werks = m~werks AND p~matnr = m~matnr
+LEFT OUTER JOIN mara AS a ON p~matnr = a~matnr
+LEFT OUTER JOIN t006 AS t ON p~meins = t~msehi
+INTO CORRESPONDING FIELDS OF TABLE lt_data
+     WHERE p~vbeln IN lt_selopt_vbeln.
+
+    CHECK lt_data IS NOT INITIAL.
+
+    IF mv_is_s4 EQ abap_true.
+
+* ~ asandu @ 26.10.20
+
+      SELECT ('knumv kposn kbetr mwsk1')
+        FROM ('prcd_elements')
+        INTO CORRESPONDING FIELDS OF TABLE lt_prcd
+        FOR ALL ENTRIES IN lt_data
+      WHERE knumv = lt_data-knumv
+        AND kposn = lt_data-posnr
+        AND kntyp = 'D'
+        AND kvsl1 = 'MWS'.
+
+    ELSE. " is ECC
+
+      SELECT knumv kposn kbetr mwsk1 krech
+        FROM konv
+        INTO CORRESPONDING FIELDS OF TABLE lt_konv
+         FOR ALL ENTRIES IN lt_data
+       WHERE knumv = lt_data-knumv
+         AND kposn = lt_data-posnr
+         AND kntyp = 'D'
+         AND kvsl1 = 'MWS'.
+
+      SELECT exnum grwcu
+        FROM eikp
+        INTO CORRESPONDING FIELDS OF TABLE lt_eikp
+         FOR ALL ENTRIES IN lt_data
+       WHERE exnum = lt_data-exnum.
+
+      SORT lt_eikp BY exnum.
+
+* ~ end of selection @ asandu
+    ENDIF.
+
+* ~ Check for STCEG - ASANDU @ 18.10.20
+    SELECT bukrs butxt land1 waers stceg
+      FROM t001
+      INTO CORRESPONDING FIELDS OF TABLE lt_t001
+      FOR ALL ENTRIES IN lt_data
+      WHERE land1 = lt_data-landtx.
+
+    IF sy-subrc = 0.
+      SELECT vkorg bukrs FROM tvko
+        INTO TABLE lt_tvko
+        FOR ALL ENTRIES IN lt_data
+        WHERE vkorg = lt_data-vkorg.
+
+    ELSE.
+
+      SELECT  bukrs butxt land1 stceg
+        FROM t001n
+        INTO CORRESPONDING FIELDS OF TABLE lt_t001n
+      WHERE bukrs = lv_bukrs.
+
+    ENDIF.
+* ~ End of check
+
+* ~ Get WERKS data - T001W
+
+    LOOP AT lt_data INTO ls_data.
+
+      APPEND INITIAL LINE TO lt_selopt_werks ASSIGNING <ls_selopt>.
+
+      <ls_selopt>-low    = ls_data-werks.
+      <ls_selopt>-option = 'EQ'.
+      <ls_selopt>-sign   = 'I'.
+
+    ENDLOOP.
+
+    SELECT werks land1
+      FROM t001w
+      INTO CORRESPONDING FIELDS OF TABLE lt_t001w
+     WHERE werks IN lt_selopt_werks
+     ORDER BY werks.
+
+* ~ Assign data to structure
+
+    SORT lt_data BY vbeln.
+
+    LOOP AT mt_s_sales ASSIGNING <ls_invoice>.
+
+* ~ Invoice data - invoice_header-tax_subject_identification
+
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-street            = ls_adrc-street.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-house_nr          = ls_adrc-house_num1.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-postal_code       = ls_adrc-post_code1.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-city              = ls_adrc-city1.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-region            = ls_adrc-region.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-country_code      = ls_adrc-country.
+      <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_address-jurisdiction_code = ls_adrc-taxjurcode.
+
+      READ TABLE lt_data
+            INTO ls_data
+        WITH KEY vbeln = <ls_invoice>-invoice_data-invoice_header-header_details-invoice_number
+          BINARY SEARCH.
+
+      CHECK sy-subrc IS INITIAL.
+
+      "CHECK STCEG
+      READ TABLE lt_t001 WITH KEY bukrs = lv_bukrs TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+
+        READ TABLE lt_tvko INTO ls_tvko WITH KEY vkorg = ls_data-vkorg .
+
+        READ TABLE lt_t001 INTO  ls_t001 WITH KEY bukrs = ls_tvko-bukrs.
+        <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-own_vat_nr = ls_t001-stceg.
+        <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_name = ls_t001-butxt.
+
+      ELSE.
+        READ TABLE lt_tvko INTO ls_tvko WITH KEY vkorg = ls_data-vkorg .
+
+        READ TABLE lt_t001w INTO ls_land1w WITH KEY werks = ls_data-werks .
+
+        READ TABLE lt_t001n INTO ls_t001n WITH KEY bukrs = ls_tvko-bukrs land1 = ls_land1w-land1.
+
+        <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-own_vat_nr = ls_t001n-stceg.
+        <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-subject_name = ls_t001n-butxt.
+      ENDIF.
+      " END OF STCEG
+
+* ~ Invoice data - invoice_header-header_details
+
+*      <ls_invoice>-invoice_data-invoice_header-header_details-fiscal_year                 = ls_data-gjahr. => Always from BKPF is better.
+      <ls_invoice>-invoice_data-invoice_header-header_details-official_document_number    = ls_data-xblnr.
+      <ls_invoice>-invoice_data-invoice_header-header_details-invoice_reference           = ls_data-xblnr.
+      <ls_invoice>-invoice_data-invoice_header-header_details-invoice_category            = ls_data-vbtyp.
+      <ls_invoice>-invoice_data-invoice_header-header_details-invoice_date                = ls_data-fkdat.
+      <ls_invoice>-invoice_data-invoice_header-header_details-invoice_entry_date          = ls_data-erdat.
+      <ls_invoice>-invoice_data-invoice_header-header_details-accounting_translation_date = ls_data-kurrf_dat.
+      <ls_invoice>-invoice_data-invoice_header-header_details-invoice_entry_time          = ls_data-erzet.
+      <ls_invoice>-invoice_data-invoice_header-header_details-invoice_type                = ls_data-fkart.
+      <ls_invoice>-invoice_data-invoice_header-header_details-document_currency           = ls_data-waerk.
+      <ls_invoice>-invoice_data-invoice_header-header_details-incoterm                    = ls_data-inco1.
+      <ls_invoice>-invoice_data-invoice_header-header_details-intrastat_relevance         = ls_data-intra_rel.
+      <ls_invoice>-invoice_data-invoice_header-header_details-intrastat_exclusion         = ls_data-intra_excl.
+      <ls_invoice>-invoice_data-invoice_header-header_details-payment_method              = ls_data-zlsch.
+      <ls_invoice>-invoice_data-invoice_header-header_details-triangulation_indicator     = ls_data-xegdr.
+      <ls_invoice>-invoice_data-invoice_header-header_details-tax_departure_country       = ls_data-landtx.
+      <ls_invoice>-invoice_data-invoice_header-header_details-destination_country         = ls_data-land1.
+      <ls_invoice>-invoice_data-invoice_header-header_details-business_place              = ls_data-bupla.
+      <ls_invoice>-invoice_data-invoice_header-header_details-trading_partner             = ls_data-vbund.
+      <ls_invoice>-invoice_data-invoice_header-header_details-reporting_currency          = lv_waers.
+      IF ls_data-blart IS NOT INITIAL AND mv_is_s4 EQ abap_true.
+        <ls_invoice>-invoice_data-invoice_header-header_details-document_type             = ls_data-blart.
+      ENDIF.
+      IF ls_data-kurrf < 0.
+        <ls_invoice>-invoice_data-invoice_header-header_details-accounting_exchange_rate  = ls_data-kurrf * -1.
+      ELSE.
+        <ls_invoice>-invoice_data-invoice_header-header_details-accounting_exchange_rate  = ls_data-kurrf.
+      ENDIF.
+      IF mv_is_s4 = abap_true.
+        <ls_invoice>-invoice_data-invoice_header-header_details-statistical_currency       = ls_data-grwcu.
+      ELSE.
+        CLEAR: ls_eikp.
+
+        READ TABLE lt_eikp INTO ls_eikp WITH KEY exnum = ls_data-exnum
+                                        BINARY SEARCH.
+        IF sy-subrc = 0.
+          <ls_invoice>-invoice_data-invoice_header-header_details-statistical_currency     = ls_eikp-grwcu.
+        ENDIF.
+      ENDIF.
+
+* ~ Invoice data - invoice_summary
+
+      <ls_invoice>-invoice_data-invoice_summary-net_amount_document_curr = ls_data-netwr.
+
+      CLEAR: ls_data.
+
+      LOOP AT lt_data INTO ls_data WHERE vbeln = <ls_invoice>-invoice_data-invoice_header-header_details-invoice_number.
+
+        CLEAR: ls_t001w, ls_partner, ls_p_funct, ls_prcd, ls_konv.
+
+        APPEND INITIAL LINE TO <ls_invoice>-invoice_data-invoice_lines-line_item ASSIGNING <ls_line_item>.
+
+* ~ Line item - root
+
+        <ls_line_item>-line_index              = ls_data-posnr.
+        <ls_line_item>-quantity                = ls_data-fkimg.
+        <ls_line_item>-net_weight              = ls_data-ntgew.
+        <ls_line_item>-weight_unit             = ls_data-gewei.
+        <ls_line_item>-reference_document      = ls_data-aubel.
+        <ls_line_item>-profit_center           = ls_data-prctr.
+        <ls_line_item>-cost_center             = ls_data-kostl.
+        <ls_line_item>-translation_date        = ls_data-kursk_dat.
+        <ls_line_item>-tax_jurisdiction        = ls_data-txjcd.
+        <ls_line_item>-incoterm                = ls_data-inco1.
+        <ls_line_item>-inco_location           = ls_data-inco2.
+        <ls_line_item>-goods_departure_country = ls_data-aland.
+        <ls_line_item>-goods_departure_region  = ls_data-wkreg.
+        <ls_line_item>-destination_country     = ls_data-land1.
+        <ls_line_item>-destination_region      = ls_data-regio_auft.
+        <ls_line_item>-plant                   = ls_data-werks.
+        <ls_line_item>-storage_location        = ls_data-lgort.
+        <ls_line_item>-item_category           = ls_data-pstyv.
+        READ TABLE lt_t001w INTO ls_t001w WITH KEY werks = ls_data-werks BINARY SEARCH.
+        IF sy-subrc = 0.
+          <ls_line_item>-plant_country = ls_t001w-land1.
+        ENDIF.
+        IF ls_data-isocode IS INITIAL.
+          <ls_line_item>-unit_of_measure       = ls_data-meins.
+        ELSE.
+          <ls_line_item>-unit_of_measure       = ls_data-isocode.
+        ENDIF.
+
+        " asandu @ 26.1020
+        IF mv_is_s4 EQ abap_true.
+          READ TABLE lt_prcd INTO ls_prcd WITH KEY knumv = ls_data-knumv kposn = ls_data-posnr.
+          <ls_line_item>-tax_code               = ls_prcd-mwsk1.
+          <ls_line_item>-tax_percentage         = ls_prcd-kbetr.
+        ELSE.
+          READ TABLE lt_konv INTO ls_konv WITH KEY knumv = ls_data-knumv kposn = ls_data-posnr.
+          <ls_line_item>-tax_code               = ls_konv-mwsk1.
+          IF ls_konv-krech = 'A'.
+            <ls_line_item>-tax_percentage         = ls_konv-kbetr / 10.
+          ELSE.
+            <ls_line_item>-tax_percentage         = ls_konv-kbetr.
+          ENDIF.
+        ENDIF.
+        " end of asandu
+
+* ~ Line item - partner_info
+
+        READ TABLE lt_partners INTO ls_partner
+                           WITH KEY vbeln = ls_data-vbeln
+                                    posnr = ls_data-posnr.
+        READ TABLE mt_p_funct INTO ls_p_funct
+                          WITH KEY partner_function = ls_partner-parvw.
+
+        APPEND INITIAL LINE TO <ls_line_item>-partner_identification-partner_info ASSIGNING <ls_partner>.
+
+        <ls_partner>-partner_category                  = ls_p_funct-itc_category.
+        <ls_partner>-partner_number                    = ls_partner-kunnr.
+        <ls_partner>-partner_name                      = ls_partner-name1.
+        <ls_partner>-partner_address-street            = ls_partner-street.
+        <ls_partner>-partner_address-housenumber       = ls_partner-house_num1. " asandu @ 19.10.20
+        <ls_partner>-partner_address-postal_code       = ls_partner-post_code1.
+        <ls_partner>-partner_address-city              = ls_partner-city1.
+        <ls_partner>-partner_address-region            = ls_partner-region.
+        <ls_partner>-partner_address-country_code      = ls_partner-country.
+        <ls_partner>-partner_address-jurisdiction_code = ls_partner-taxjurcode.
+
+        UNASSIGN <ls_partner>.
+
+* ~ Line item - product_info
+
+        <ls_line_item>-product_info-material_number      = ls_data-matnr.
+        <ls_line_item>-product_info-material_description = ls_data-arktx.
+        <ls_line_item>-product_info-material_group       = ls_data-matkl.
+        <ls_line_item>-product_info-commodity_code       = ls_data-stawn.
+
+        " Material classification
+
+        IF ls_data-stawn IS INITIAL AND mv_is_s4 EQ abap_true.
+
+          APPEND ls_data-matnr TO lt_matnr.
+          GET REFERENCE OF lt_matnr INTO lo_matnr.
+
+          ls_ptab-name  = 'IT_MATNR'.
+          ls_ptab-kind  = cl_abap_objectdescr=>exporting.
+          ls_ptab-value = lo_matnr.
+
+          INSERT ls_ptab INTO TABLE lt_ptab.
+
+          GET REFERENCE OF <ls_invoice>-invoice_data-invoice_header-tax_subject_identification-tax_reporting_country
+                      INTO lo_land1.
+
+          ls_ptab-name  = 'IV_LAND1'.
+          ls_ptab-kind  = cl_abap_objectdescr=>exporting.
+          ls_ptab-value = lo_land1.
+
+          INSERT ls_ptab INTO TABLE lt_ptab.
+
+          GET REFERENCE OF <ls_invoice>-invoice_data-invoice_header-header_details-invoice_date
+                      INTO lo_valid_on.
+
+          ls_ptab-name  = 'IV_VALID_ON'.
+          ls_ptab-kind  = cl_abap_objectdescr=>exporting.
+          ls_ptab-value = lo_valid_on.
+
+          INSERT ls_ptab INTO TABLE lt_ptab.
+
+          CREATE DATA lo_comm_code TYPE (lc_cc_type).
+
+          ls_ptab-name  = 'ET_CLASSIFICATIONS'.
+          ls_ptab-kind  = cl_abap_objectdescr=>importing.
+          ls_ptab-value = lo_comm_code.
+
+          INSERT ls_ptab INTO TABLE lt_ptab.
+
+          CREATE OBJECT lo_cc_class TYPE (lc_cc_class).
+
+          CALL METHOD lo_cc_class->(lc_cc_method)
+            PARAMETER-TABLE lt_ptab
+            EXCEPTION-TABLE lt_etab.
+
+          IF sy-subrc = 0.
+
+            READ TABLE lt_ptab INTO ls_ptab WITH KEY name = 'ET_CLASSIFICATIONS'
+                                                     kind = 'I'.
+            IF sy-subrc = 0.
+              ASSIGN ls_ptab-value->* TO <lt_comm_code>.
+              IF <lt_comm_code> IS ASSIGNED.
+                LOOP AT <lt_comm_code> ASSIGNING <ls_comm_code>.
+                  ASSIGN COMPONENT 'CCNGN' OF STRUCTURE <ls_comm_code> TO <lv_comm_value>.
+                  IF <lv_comm_value> IS ASSIGNED.
+                    <ls_line_item>-product_info-commodity_code = <lv_comm_value>.
+                  ENDIF.
+                ENDLOOP.
+              ENDIF.
+            ENDIF.
+
+          ENDIF.
+
+          CLEAR: ls_ptab, lt_matnr, lt_ptab.
+
+        ENDIF.
+
+      ENDLOOP.
+
+* ~ Partners
+
+      LOOP AT lt_partners INTO ls_partner WHERE vbeln = <ls_invoice>-invoice_data-invoice_header-header_details-invoice_number.
+
+        APPEND INITIAL LINE TO <ls_invoice>-invoice_data-invoice_header-partner_identification-partner_info ASSIGNING <ls_partner>.
+
+        READ TABLE mt_p_funct INTO ls_p_funct
+                          WITH KEY partner_function = ls_partner-parvw.
+
+        <ls_partner>-partner_category                  = ls_p_funct-itc_category.
+        <ls_partner>-partner_number                    = ls_partner-kunnr.
+        <ls_partner>-partner_name                      = ls_partner-name1.
+        <ls_partner>-partner_address-street            = ls_partner-street.
+        <ls_partner>-partner_address-housenumber       = ls_partner-house_num1.
+        <ls_partner>-partner_address-postal_code       = ls_partner-post_code1.
+        <ls_partner>-partner_address-city              = ls_partner-city1.
+        <ls_partner>-partner_address-region            = ls_partner-region.
+        <ls_partner>-partner_address-country_code      = ls_partner-country.
+        <ls_partner>-partner_address-jurisdiction_code = ls_partner-taxjurcode.
+
+      ENDLOOP.
+
+      SORT <ls_invoice>-invoice_data-invoice_header-partner_identification-partner_info BY partner_number partner_category.
+      DELETE ADJACENT DUPLICATES FROM <ls_invoice>-invoice_data-invoice_header-partner_identification-partner_info COMPARING partner_number partner_category.
+
+    ENDLOOP.
+
+* ~ Line amounts
+
+    DATA: lo_line_am_class TYPE REF TO zcl_jek_ext_amount_types_super,
+          lo_invoices      TYPE REF TO data.
+
+    DATA: lt_line_am TYPE STANDARD TABLE OF zvat_ext_line_am,
+          lt_ptab_2  TYPE abap_parmbind_tab,
+          lt_etab_2  TYPE abap_excpbind_tab.
+
+    DATA: ls_line_am LIKE LINE OF lt_line_am.
+
+    DATA: lv_class TYPE zvat_ext_config-line_am_class.
+
+    SELECT amount_type method calc_order pricing
+      FROM zvat_ext_line_am
+      INTO CORRESPONDING FIELDS OF TABLE lt_line_am
+     ORDER BY calc_order.
+
+    CHECK sy-subrc = 0.
+
+    SELECT SINGLE line_am_class
+      FROM zvat_ext_config
+      INTO lv_class
+     WHERE run_type = 'JEK'.
+
+    CHECK sy-subrc = 0.
+
+    CREATE OBJECT lo_line_am_class TYPE (lv_class).
+
+    CHECK lo_line_am_class IS BOUND.
+
+    LOOP AT lt_line_am INTO ls_line_am WHERE calc_order IS NOT INITIAL.
+
+      CLEAR: ls_ptab, lt_ptab.
+
+      ls_ptab-kind = cl_abap_objectdescr=>changing.
+      ls_ptab-name = 'CT_INVOICES'.
+      GET REFERENCE OF mt_s_sales INTO ls_ptab-value.
+
+      INSERT ls_ptab INTO TABLE lt_ptab.
+
+      IF ls_line_am-pricing EQ abap_true.
+        ls_ptab-kind = cl_abap_objectdescr=>exporting.
+        ls_ptab-name = 'IV_AMOUNT_TYPE'.
+        GET REFERENCE OF ls_line_am-amount_type INTO ls_ptab-value.
+
+        INSERT ls_ptab INTO TABLE lt_ptab.
+      ENDIF.
+
+      CALL METHOD lo_line_am_class->(ls_line_am-method)
+        PARAMETER-TABLE lt_ptab
+        EXCEPTION-TABLE lt_etab.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD split_invoices.
+
+    FIELD-SYMBOLS: <ls_invoice> TYPE zsvat_jek_invoice.
+
+    DATA: ls_invoice LIKE LINE OF it_invoices.
+
+    LOOP AT it_invoices INTO ls_invoice.
+
+      CASE ls_invoice-invoice_data-invoice_header-header_details-invoice_category.
+
+        WHEN 'VBRK'.
+
+          APPEND INITIAL LINE TO mt_s_sales ASSIGNING <ls_invoice>.
+          <ls_invoice> = ls_invoice.
+          UNASSIGN: <ls_invoice>.
+
+        WHEN 'BKPF'.
+
+          APPEND INITIAL LINE TO mt_p_nonpo ASSIGNING <ls_invoice>.
+          <ls_invoice> = ls_invoice.
+          UNASSIGN: <ls_invoice>.
+
+        WHEN 'EKKO'.
+
+          APPEND INITIAL LINE TO mt_p_purch ASSIGNING <ls_invoice>.
+          <ls_invoice> = ls_invoice.
+          UNASSIGN: <ls_invoice>.
+
+        WHEN OTHERS.
+
+      ENDCASE.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,1128 @@
+class ZCL_IM_ME_PROCESS_REQ_CUST definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_EX_ME_PROCESS_REQ_CUST .
+
+  data NO_SAVE type C .
+  class-data GR_ITEM type ref to IF_PURCHASE_REQUISITION_ITEM read-only .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZCL_IM_ME_PROCESS_REQ_CUST IMPLEMENTATION.
+
+
+  METHOD if_ex_me_process_req_cust~check.
+*********************************************************************
+* Описание         : Обработка и контроль полей при создании заявки
+* Код ТС           : DEV.030.01-03E
+* Разработчик      : Хилимон Е.А.
+* Постановка задачи: Громыко В.С.
+* Дата постановки  : 25.07.2012
+* Дата создания    : 24.12.2012
+*********************************************************************
+* Изменения
+* Дата         Автор             Заявка  Характер и причина изменения
+*********************************************************************
+*
+*********************************************************************
+    INCLUDE mm_messages_mac.
+
+    TYPES: BEGIN OF t_err_tab,
+             pos    TYPE eban-bnfpo,
+             number TYPE symsgno,
+             period TYPE symsgv,
+           END OF t_err_tab,
+
+           BEGIN OF lty_s_zsumm,
+             eeind   TYPE eeind,
+             vidb    TYPE zbdgt,
+             werks   TYPE werks_d,
+             gswrt   TYPE gswrt,
+             banfn   TYPE banfn,
+             chng(1) TYPE c,
+           END OF lty_s_zsumm.
+
+    DATA: BEGIN OF err_tab,
+            pos    TYPE eban-bnfpo,
+            number TYPE symsgno,
+            period TYPE symsgv,
+          END OF err_tab.
+
+
+    DATA: lt_items     TYPE mmpur_requisition_items,
+          ls_items     TYPE mmpur_requisition_item,
+          ls_mereqitem TYPE mereq_item,
+          lt_err_tab   TYPE TABLE OF t_err_tab,
+          ls_err_tab   TYPE t_err_tab.
+
+******контроль бюджета
+    CONSTANTS:
+      lc_sum_koef     TYPE i VALUE 1.
+
+    DATA: item        TYPE mereq_item,
+          ls_item     TYPE eban,
+          ls_item1    TYPE mereq_item,
+          ls_item_new TYPE eban,
+          gt_zsumm    TYPE TABLE OF lty_s_zsumm,
+          gs_zsumm    TYPE lty_s_zsumm,
+          gs_zcennik  TYPE zcennik,
+          gt_eban     TYPE TABLE OF eban,
+          gs_eban     TYPE eban.
+
+    DATA: ls_lfdat(7),
+          ls_webaz      TYPE marc-webaz,
+          ls_bklas      TYPE mbew-bklas,
+          ls_z_bazv     TYPE zbazvel-z_bazv,
+          ls_tcode      TYPE sy-tcode,
+          lv_kzfae,
+          wa_eban       TYPE eban,
+          sytabix       TYPE sy-tabix,
+          lv_lfdat(5),
+          lv_old_k      TYPE i VALUE 1,
+          lv_first,
+          lv_vidb       TYPE eban-zvidb,
+          lv_active     TYPE esdus-active,
+          lv_zvidb      TYPE zbdgt,
+          lv_waers_bazv TYPE waers,
+          lv_preis      TYPE rlwrt,
+          ls_werks      TYPE t001w-werks,
+          lv_change,
+          lv_syindex    TYPE sy-index,
+
+          lv_gsval      TYPE plog-plvar,
+          lv_znamp      TYPE eban-znamp,
+          lv_objid      TYPE hrp1000-objid,
+          lv_lines      TYPE i,
+          lv_endda      TYPE sy-datum VALUE '99991231',
+          ls_p1008      TYPE p1008,
+          lv_bukrs      TYPE bukrs,
+          v_type        TYPE char1,
+          lv_mm_error   TYPE char1,
+          lv_mtart      TYPE mara-mtart,
+          lv_save_preis TYPE char1.                                  "Developer7 08.07.2013 #3390
+
+    DATA: ref_obj   TYPE REF TO object,
+          it_header TYPE mereq_header.
+
+    DATA: lv_pr_oblig   TYPE bon_enh_con_flag,                       "{30.01.2014 YVarazhun rm3887 note35
+          ls_clientdata TYPE bapi_mara_ga,
+          l_msg_handler TYPE REF TO cl_message_handler_mm,
+          lt_events     TYPE STANDARD TABLE OF REF TO cl_event_mm,
+          lt_messages   TYPE mepo_t_messages_bapi,
+          l_event       LIKE LINE OF lt_events.                      "}30.01.2014 YVarazhun rm3887 note35
+
+    FIELD-SYMBOLS:
+      <lo_lcl1> TYPE any,
+      <ls_mes>  TYPE mepo_s_messages_bapi.
+
+    DEFINE add_error_msg.
+      ls_err_tab-pos    = &1.
+      ls_err_tab-number = &2.
+      ls_err_tab-period = &3.
+      APPEND ls_err_tab TO lt_err_tab.
+    END-OF-DEFINITION.
+
+    IMPORT lv_save_preis TO lv_save_preis FROM MEMORY ID zfi_memory=>gv_zmm_close.  "Developer7 08.07.2013 #3390
+
+    IF lv_save_preis = ''.                                             "Developer7 08.07.2013 #3390
+
+      CALL METHOD im_header->get_data
+        RECEIVING
+          re_data = it_header.
+
+      SELECT * FROM eban  INTO TABLE gt_eban WHERE banfn = it_header-banfn.
+      SELECT * FROM zsumm INTO CORRESPONDING FIELDS OF TABLE gt_zsumm.
+
+      CALL METHOD im_header->get_items
+        RECEIVING
+          re_items = lt_items.
+
+*проверка Лимитов
+      LOOP AT lt_items INTO ls_items.
+
+        CALL METHOD ls_items-item->get_data
+          RECEIVING
+            re_data = ls_item1.
+        MOVE-CORRESPONDING ls_item1 TO ls_item.
+
+        CLEAR wa_eban.
+        READ TABLE gt_eban INTO wa_eban
+                       WITH KEY banfn = it_header-banfn
+                                bnfpo = ls_item-bnfpo.
+        IF sy-subrc = 0.
+
+          IF    ls_item-loekz <> 'X'                "поз не удалена
+            AND ( ls_item-frgkz <> wa_eban-frgkz OR
+                  ls_item-banpr <> wa_eban-banpr )  "Изменилось деблокирование
+            AND ls_item-banpr <> '08'               "поз не отклонена
+            AND sy-tcode = 'ME54N'.                                           "07.02.2014 YVarazhun rm3887 note48
+
+            CLEAR: ls_clientdata,                                             "{30.01.2014 YVarazhun rm3887 note35
+                   lv_pr_oblig.
+            "Проверка статуса материала
+            CALL FUNCTION 'BAPI_MATERIAL_GET_ALL'
+              EXPORTING
+*               material      = ls_item-matnr                                      "28.10.2016 Hilimon Исправление ошибки с40 символами в материале
+                material_long = ls_item-matnr
+              IMPORTING
+                clientdata    = ls_clientdata.
+
+            IF ls_clientdata-pur_status = '03'.
+
+              SELECT SINGLE pr_oblig
+              FROM zmm_bsart_obs
+              INTO lv_pr_oblig
+              WHERE bstyp = ls_item-bstyp
+                AND bsart = ls_item-bsart.
+
+              IF sy-subrc = 0 AND lv_pr_oblig = 'X'.
+                add_error_msg ls_item-bnfpo 031 ''.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.                                                                   "}30.01.2014 YVarazhun rm3887 note35
+
+        IF ls_item-bsart = 'ZGBZ' AND ls_item-loekz <> 'X'.
+          SELECT SINGLE * FROM zsumm INTO CORRESPONDING FIELDS OF gs_zsumm
+            WHERE eeind = ls_item-lfdat(4)
+              AND vidb  = ls_item-zvidb
+              AND werks = ls_item-werks.
+          IF sy-subrc = 0 AND gs_zsumm-gswrt > ls_item-preis * lc_sum_koef.
+            IF gs_eban-loekz = ''.
+              add_error_msg ls_item-bnfpo 030 ''.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      DO 2 TIMES.   "выполняем 2 раза: 1-й все отнимаем ('C' и 'D')
+        "                              2-й все прибавляем ( 'А', 'C', 'D' и 'R')
+
+        lv_syindex = sy-index.
+
+        LOOP AT lt_items INTO ls_items.
+          CALL METHOD ls_items-item->get_data
+            RECEIVING
+              re_data = ls_item1.
+
+          MOVE-CORRESPONDING ls_item1 TO ls_item.
+
+          CLEAR lv_change.
+
+          READ TABLE gt_eban INTO gs_eban WITH KEY bnfpo = ls_item-bnfpo.
+          IF sy-subrc = 0.
+            IF gs_eban-loekz = 'X' AND ls_item-loekz = ''.
+              lv_change = 'R'.   "восстановление
+            ENDIF.
+            IF gs_eban-loekz = '' AND ls_item-loekz = 'X'.
+              lv_change = 'D'.   "удаление
+            ENDIF.
+            IF gs_eban-loekz = '' AND ls_item-loekz = ''.
+              lv_change = 'C'.   "изменение
+            ENDIF.
+* если меняют тип заявки на не ZGPZ/ZOP
+            IF ( ls_item-bsart <> 'ZGPZ' AND ls_item-bsart <> 'ZOP' )
+              AND ( gs_eban-bsart = 'ZGPZ' OR gs_eban-bsart = 'ZOP' ).
+              ls_item-bsart = gs_eban-bsart.
+              lv_change = 'D'.
+            ENDIF.
+* если меняют тип заявки на ZGPZ/ZOP
+            IF ( ls_item-bsart = 'ZGPZ' OR ls_item-bsart = 'ZOP' )
+              AND ( gs_eban-bsart <> 'ZGPZ' AND gs_eban-bsart <> 'ZOP' ).
+              lv_change = 'A'.
+            ENDIF.
+* если меняем ZGPZ<->ZOP
+            IF ( ls_item-bsart = 'ZGPZ' AND gs_eban-bsart = 'ZOP' )
+              OR ( ls_item-bsart = 'ZOP' AND gs_eban-bsart = 'ZGPZ' ).
+              lv_change = 'C'.
+              IF gs_eban-loekz = 'X' AND ls_item-loekz = ''.
+                lv_change = 'R'.   "восстановление
+              ENDIF.
+            ENDIF.
+          ELSE.
+            lv_change = 'A'.     "добавление
+          ENDIF.
+
+          CLEAR: gs_eban-mandt, ls_item-mandt,           "не учитывать индикатор деблокирования, статус, дату изменения
+                 gs_eban-banfn, ls_item-banfn,
+                 gs_eban-banpr, ls_item-banpr,
+                 gs_eban-erdat, ls_item-erdat,
+                 gs_eban-ztime_release, ls_item-ztime_release,
+                 gs_eban-frgkz, ls_item-frgkz,
+                 gs_eban-frgzu, ls_item-frgzu,
+                 gs_eban-frgst, ls_item-frgst,
+                 gs_eban-banpr, ls_item-banpr,
+                 gs_eban-frggr, ls_item-frggr,
+                 gs_eban-frgrl, ls_item-frgrl,
+                 gs_eban-rlwrt, ls_item-rlwrt,
+                 gs_eban-znamb, ls_item-znamb,
+                 gs_eban-frgdt, ls_item-frgdt.
+
+          IF gs_eban = ls_item.
+            CONTINUE.
+          ENDIF.
+
+          IF lv_change = 'D'.
+            ls_item-zvidb = gs_eban-zvidb.
+          ENDIF.
+
+          CONCATENATE ls_item-lfdat(4) '%' INTO lv_lfdat.
+
+          SELECT SINGLE mtart
+            FROM mara
+            INTO lv_mtart
+           WHERE matnr = ls_item-matnr.
+
+          SELECT SINGLE bklas FROM mbew
+            INTO ls_bklas
+            WHERE matnr = ls_item-matnr
+              AND bwkey = ls_item-werks
+              AND bwtar = ''.
+
+          SELECT SINGLE * FROM zcennik
+            INTO CORRESPONDING FIELDS OF gs_zcennik
+            WHERE matnr = ls_item-matnr.
+
+          SELECT SINGLE z_bazv waers FROM zbazvel
+            INTO (ls_z_bazv, lv_waers_bazv).
+
+          CALL FUNCTION 'CONVERT_TO_FOREIGN_CURRENCY'
+            EXPORTING
+              date             = sy-datum
+              foreign_currency = lv_waers_bazv
+              local_amount     = gs_zcennik-z_cena
+              local_currency   = gs_zcennik-waers
+            IMPORTING
+              foreign_amount   = lv_preis
+            EXCEPTIONS
+              no_rate_found    = 1.
+
+          IF sy-subrc <> 0.
+            lv_preis = ls_item-preis.
+          ENDIF.
+
+          IF ( ls_item-bsart = 'ZGPZ' OR ls_item-bsart = 'ZOP'
+            OR ls_item-bsart = 'ZZPZ'           " AK_BUTVILOVS #8000000691, MM-Настройка нового вида бюджета Зарубеж
+             ) AND ls_item-bstyp = 'B'.
+
+* --> AK_BUTVILOVS #8000000691, MM-Настройка нового вида бюджета Зарубеж
+            IF   	ls_item-bsart = 'ZZPZ'
+              AND ls_item-bstyp = 'B'
+              AND NOT ls_item-werks IS INITIAL
+              AND NOT ls_item-lfdat IS INITIAL
+              AND NOT ls_item-menge IS INITIAL
+              AND NOT ls_item-preis IS INITIAL
+              AND NOT ls_item-peinh IS INITIAL.
+              CLEAR:
+                gs_zsumm,
+                wa_eban,
+                ls_bklas,
+                gs_zcennik,
+                lv_preis.
+
+              READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = ls_item-zvidb " Вид бюджета 'ГБЗЗ'
+                                                         eeind = ls_item-lfdat(4)
+                                                         werks = ls_item-werks.
+              IF sy-subrc = 0.
+                sytabix = sy-tabix.
+
+                SELECT SINGLE * FROM eban INTO @wa_eban
+                  WHERE bsart = 'ZGBZ'
+                    AND lfdat LIKE @lv_lfdat
+                    AND werks = @ls_item-werks
+                    AND zvidb = @gs_zsumm-vidb
+                    AND loekz <> 'X'.
+                IF sy-subrc = 0.
+                  IF (   lv_change = 'A'
+                      OR lv_change = 'R' )
+                    AND  lv_syindex = 2.        " новая запись
+                    IF      ls_item-loekz = ''.
+                      IF ( gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef )
+                           >
+                         ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                        add_error_msg ls_item-bnfpo 035 ls_item-lfdat(4).
+                      ENDIF.
+
+                      gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                      gs_zsumm-chng = 'X'.
+
+                      MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+                    ENDIF.
+
+                  ELSEIF lv_change = 'C'.
+                    IF    lv_syindex = 1
+                      AND gs_eban-memorytype <> 'H'
+                      AND gs_eban-memorytype <> 'P'.
+                      IF NOT ( ls_item-loekz = 'X' AND gs_eban-loekz = 'X' ).
+                        MOVE-CORRESPONDING ls_item TO ls_item_new.
+                        MOVE-CORRESPONDING gs_eban TO ls_item.
+
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = ls_item-zvidb
+                                                                   eeind = ls_item-lfdat(4)
+                                                                   werks = ls_item-werks.
+                        IF sy-subrc = 0.
+                          gs_zsumm-gswrt = gs_zsumm-gswrt - ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                          gs_zsumm-chng = 'X'.
+
+                          MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                        ENDIF.
+
+                        MOVE-CORRESPONDING ls_item_new TO ls_item.
+                      ENDIF.
+                    ENDIF.
+
+                    IF lv_syindex = 2.            " прибавляем новую сумму
+                      IF ls_item-loekz <> 'X'.    " не надо суммировать удаленную позицию
+                        SELECT SINGLE bklas FROM mbew
+                          WHERE matnr = @ls_item-matnr
+                            AND bwkey = @ls_item-werks
+                            AND bwtar = ''
+                          INTO @ls_bklas.
+
+                        SELECT SINGLE * FROM zcennik
+                          WHERE matnr = @ls_item-matnr
+                          INTO CORRESPONDING FIELDS OF @gs_zcennik.
+
+                        CALL FUNCTION 'CONVERT_TO_FOREIGN_CURRENCY'
+                          EXPORTING
+                            date             = sy-datum
+                            foreign_currency = lv_waers_bazv
+                            local_amount     = gs_zcennik-z_cena
+                            local_currency   = gs_zcennik-waers
+                          IMPORTING
+                            foreign_amount   = lv_preis
+                          EXCEPTIONS
+                            no_rate_found    = 1.
+                        IF sy-subrc <> 0.
+                          lv_preis = ls_item-preis.
+                        ENDIF.
+
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = ls_item-zvidb
+                                                                   eeind = ls_item-lfdat(4)
+                                                                   werks = ls_item-werks.
+                        IF      sy-subrc = 0.
+                          IF ( gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef )
+                               >
+                             ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                            add_error_msg ls_item-bnfpo 035 ls_item-lfdat(4).
+                          ENDIF.
+
+                          gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                          gs_zsumm-chng = 'X'.
+
+                          MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                        ENDIF.
+                      ENDIF.
+                    ENDIF.
+                  ELSEIF lv_change = 'D'            " удаляем запись
+                    AND  lv_syindex = 1.
+                    IF gs_eban-loekz <> 'X'.
+                      IF ( gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef )
+                           >
+                         ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                        gs_zsumm-gswrt = gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+
+                        IF ls_item-zvidb = 'ГБЗЗ'.
+                          add_error_msg ls_item-bnfpo 035 gs_eban-lfdat(4).
+                        ENDIF.
+                      ENDIF.
+                    ELSE.
+                      READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = gs_eban-zvidb
+                                                                 eeind = gs_eban-lfdat(4)
+                                                                 werks = gs_eban-werks.
+                      IF sy-subrc = 0.
+                        gs_zsumm-gswrt = gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+* <-- AK_BUTVILOVS #8000000691
+
+            IF ls_item-bsart = 'ZGPZ' AND ls_item-bstyp = 'B' AND NOT ls_item-werks IS INITIAL
+              AND NOT ls_item-lfdat IS INITIAL AND NOT ls_item-menge IS INITIAL AND NOT ls_item-preis IS INITIAL
+              AND NOT ls_item-peinh IS INITIAL.
+
+              IF ( lv_change = 'D' OR lv_change = 'R' ).
+                READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = ls_item-zvidb
+                                                           eeind = ls_item-lfdat(4)
+                                                           werks = ls_item-werks.
+              ELSE.
+                IF ls_item-zvidb = 'ГБНР'.
+                  READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = 'ГБНР'
+                                                             eeind = ls_item-lfdat(4)
+                                                             werks = ls_item-werks.
+                ELSEIF ls_item-zvidb = 'БНРУ'.
+                  READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = 'БНРУ'
+                                                             eeind = ls_item-lfdat(4)
+                                                             werks = ls_item-werks.
+                ELSE.
+                  IF lv_mtart = 'DIEN'.
+                    READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = 'ГБЗУ'
+                                                               eeind = ls_item-lfdat(4)
+                                                               werks = ls_item-werks.
+                  ELSE.
+                    IF ( ls_bklas = '1009' AND lv_preis >= ls_z_bazv ) OR ( ls_bklas CP '08++' OR ls_bklas CP '0702' OR ls_bklas CP '0701' ). "= '0804'.
+                      READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = 'ГБЗО'
+                                                                 eeind = ls_item-lfdat(4)
+                                                                 werks = ls_item-werks.
+                    ELSE.
+                      READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = 'ГБЗМ'
+                                                                 eeind = ls_item-lfdat(4)
+                                                                 werks = ls_item-werks.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+              IF sy-subrc = 0.
+                sytabix = sy-tabix.
+                SELECT SINGLE * FROM eban INTO wa_eban
+                  WHERE bsart = 'ZGBZ'
+                    AND lfdat LIKE lv_lfdat
+                    AND werks = ls_item-werks
+                    AND zvidb = gs_zsumm-vidb
+                    AND loekz <> 'X'.
+                IF sy-subrc = 0.
+                  IF ( lv_change = 'A' OR lv_change = 'R' ) AND lv_syindex = 2.
+*новая запись
+                    IF ls_item-loekz = ''.
+                      IF ( gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef ) > ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                        gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+                        IF ls_item-zvidb = 'ГБНР'.
+                          add_error_msg ls_item-bnfpo 024 ls_item-lfdat(4).
+                        ENDIF.
+                        IF ls_item-zvidb = 'БНРУ'.
+                          add_error_msg ls_item-bnfpo 029 ls_item-lfdat(4).
+                        ENDIF.
+                        IF ls_item-zvidb <> 'ГБНР' AND ls_item-zvidb <> 'БНРУ'.
+                          IF lv_mtart = 'DIEN'.
+                            add_error_msg ls_item-bnfpo 027 ls_item-lfdat(4).
+                          ELSE.
+                            IF ls_item-bsart = 'ZGPZ' AND ( ( ls_bklas = '1009' AND lv_preis >= ls_z_bazv ) OR ( ls_bklas CP '08++' OR ls_bklas CP '0702' OR ls_bklas CP '0701' ) ).
+                              add_error_msg ls_item-bnfpo 009 ls_item-lfdat(4).
+                            ELSE.
+                              add_error_msg ls_item-bnfpo 011 ls_item-lfdat(4).
+                            ENDIF.
+                          ENDIF.
+                        ENDIF.
+                      ELSE.
+                        gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+                      ENDIF.
+                    ENDIF.
+                  ELSEIF lv_change = 'C'.
+*отнимаем старую сумму
+                    IF lv_syindex = 1 AND gs_eban-memorytype <> 'H' AND gs_eban-memorytype <> 'P'.
+                      IF NOT ( ls_item-loekz = 'X' AND gs_eban-loekz = 'X' ).
+                        MOVE-CORRESPONDING ls_item TO ls_item_new.
+                        MOVE-CORRESPONDING gs_eban TO ls_item.
+
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = ls_item-zvidb
+                                                                   eeind = ls_item-lfdat(4)
+                                                                   werks = ls_item-werks.
+                        IF sy-subrc = 0.
+                          gs_zsumm-gswrt = gs_zsumm-gswrt - ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                          gs_zsumm-chng = 'X'.
+                          MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                        ENDIF.
+                        MOVE-CORRESPONDING ls_item_new TO ls_item.
+                      ENDIF.
+                    ENDIF.
+
+*прибавляем новую сумму
+                    IF lv_syindex = 2.
+                      IF ls_item-loekz <> 'X'. "не надо суммировать удаленную позицию
+                        SELECT SINGLE bklas FROM mbew
+                          INTO ls_bklas
+                          WHERE matnr = ls_item-matnr
+                            AND bwkey = ls_item-werks
+                            AND bwtar = ''.
+
+                        SELECT SINGLE * FROM zcennik
+                          INTO CORRESPONDING FIELDS OF gs_zcennik
+                          WHERE matnr = ls_item-matnr.
+
+                        CALL FUNCTION 'CONVERT_TO_FOREIGN_CURRENCY'
+                          EXPORTING
+                            date             = sy-datum
+                            foreign_currency = lv_waers_bazv
+                            local_amount     = gs_zcennik-z_cena
+                            local_currency   = gs_zcennik-waers
+                          IMPORTING
+                            foreign_amount   = lv_preis
+                          EXCEPTIONS
+                            no_rate_found    = 1.
+
+                        IF sy-subrc <> 0.
+                          lv_preis = ls_item-preis.
+                        ENDIF.
+
+                        IF ls_item-zvidb = 'ГБНР'.
+                          lv_vidb = 'ГБНР'.
+                        ELSEIF ls_item-zvidb = 'БНРУ'.
+                          lv_vidb = 'БНРУ'.
+                        ELSE.
+                          IF ls_item-bsart = 'ZGPZ'.
+                            IF lv_mtart = 'DIEN'.
+                              lv_vidb  = 'ГБЗУ'.
+                            ELSE.
+                              IF ( ls_bklas = '1009' AND lv_preis >= ls_z_bazv ) OR ( ls_bklas CP '08++' OR ls_bklas CP '0702' OR ls_bklas CP '0701' ). "= '0804'.
+                                lv_vidb = 'ГБЗО'.
+                              ELSE.
+                                lv_vidb = 'ГБЗМ'.
+                              ENDIF.
+                            ENDIF.
+                          ELSEIF ls_item-bsart = 'ZOP'.
+                            IF lv_mtart = 'DIEN'.
+                              lv_vidb  = 'ГБОЗУ'.
+                            ELSE.
+                              lv_vidb = 'ГБОПЗ'.
+                            ENDIF.
+                          ENDIF.
+                        ENDIF.
+
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = lv_vidb
+                                                                   eeind = ls_item-lfdat(4)
+                                                                   werks = ls_item-werks.
+                        IF sy-subrc = 0.
+                          IF ( gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef ) > ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                            gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                            gs_zsumm-chng = 'X'.
+                            MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                            IF lv_vidb = 'ГБЗО'.
+                              add_error_msg ls_item-bnfpo 009 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБЗМ'.
+                              add_error_msg ls_item-bnfpo 011 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБОПЗ'.
+                              add_error_msg ls_item-bnfpo 012 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБНР'.
+                              add_error_msg ls_item-bnfpo 024 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'БНРУ'.
+                              add_error_msg ls_item-bnfpo 029 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБЗУ'.
+                              add_error_msg ls_item-bnfpo 027 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБОЗУ'.
+                              add_error_msg ls_item-bnfpo 028 ls_item-lfdat(4).
+* --> AK_BUTVILOVS #8000000691, MM-Настройка нового вида бюджета Зарубеж
+                            ELSEIF lv_vidb = 'ГБЗЗ'.
+                              add_error_msg ls_item-bnfpo 035 ls_item-lfdat(4).
+* <-- AK_BUTVILOVS #8000000691
+                            ENDIF.
+                          ELSE.
+                            gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                            gs_zsumm-chng = 'X'.
+                            MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                          ENDIF.
+                        ENDIF.
+                      ENDIF.
+                    ENDIF.
+                  ELSEIF lv_change = 'D' AND lv_syindex = 1.
+*удаляем запись
+                    IF gs_eban-loekz <> 'X'.
+                      IF ( gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef ) > ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                        gs_zsumm-gswrt = gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+                        IF ls_item-zvidb = 'ГБНР'.
+                          add_error_msg ls_item-bnfpo 024 ls_item-lfdat(4).
+                        ENDIF.
+                        IF ls_item-zvidb = 'БНРУ'.
+                          add_error_msg ls_item-bnfpo 029 ls_item-lfdat(4).
+                        ENDIF.
+                        IF ls_item-zvidb <> 'ГБНР' AND ls_item-zvidb <> 'БНРУ'.
+                          IF lv_mtart = 'DIEN'.
+                            add_error_msg ls_item-bnfpo 027 ls_item-lfdat(4).
+                          ELSE.
+                            IF ls_item-bsart = 'ZGPZ' AND ( ( ls_bklas = '1009' AND lv_preis >= ls_z_bazv ) OR ( ls_bklas CP '08++' OR ls_bklas CP '0702' OR ls_bklas CP '0701' ) ).
+                              add_error_msg ls_item-bnfpo 009 ls_item-lfdat(4).
+                            ELSE.
+                              add_error_msg ls_item-bnfpo 011 ls_item-lfdat(4).
+                            ENDIF.
+                          ENDIF.
+                        ENDIF.
+                      ELSE.
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = gs_eban-zvidb
+                                                                   eeind = gs_eban-lfdat(4)
+                                                                   werks = gs_eban-werks.
+                        IF sy-subrc = 0.
+                          gs_zsumm-gswrt = gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef.
+                          gs_zsumm-chng = 'X'.
+                          MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                        ENDIF.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+
+            IF ls_item-bsart = 'ZOP' AND ls_item-bstyp = 'B' AND NOT ls_item-werks IS INITIAL
+              AND NOT ls_item-lfdat IS INITIAL AND NOT ls_item-menge IS INITIAL AND NOT ls_item-preis IS INITIAL
+              AND NOT ls_item-peinh IS INITIAL.
+              IF ls_item-zvidb = 'ГБНР'.
+                lv_vidb = 'ГБНР'.
+              ELSEIF ls_item-zvidb = 'БНРУ'.
+                lv_vidb = 'БНРУ'.
+              ENDIF.
+              IF ls_item-zvidb <> 'ГБНР' AND ls_item-zvidb <> 'БНРУ'.
+                IF lv_mtart = 'DIEN'.
+                  lv_vidb = 'ГБОЗУ'.
+                ELSE.
+                  lv_vidb = 'ГБОПЗ'.
+                ENDIF.
+              ENDIF.
+              READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = lv_vidb
+                                                         eeind = ls_item-lfdat(4)
+                                                         werks = ls_item-werks.
+
+              IF sy-subrc = 0.
+                sytabix = sy-tabix.
+                SELECT SINGLE * FROM eban INTO wa_eban
+                  WHERE bsart = 'ZGBZ'
+                    AND lfdat LIKE lv_lfdat
+                    AND werks = ls_item-werks
+                    AND zvidb = gs_zsumm-vidb
+                    AND loekz <> 'X'.
+                IF sy-subrc = 0.
+                  IF lv_syindex = 2 AND ( lv_change = 'A' OR lv_change = 'R' ).
+*новая запись
+                    IF ls_item-loekz = ''.
+                      IF ( gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef ) > ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                        gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+                        IF lv_vidb = 'ГБОПЗ'.
+                          add_error_msg ls_item-bnfpo 012 ls_item-lfdat(4).
+                        ELSEIF lv_vidb = 'ГБОЗУ'.
+                          add_error_msg ls_item-bnfpo 028 ls_item-lfdat(4).
+                        ELSEIF lv_vidb = 'ГБНР'.
+                          add_error_msg ls_item-bnfpo 024 ls_item-lfdat(4).
+                        ELSEIF lv_vidb = 'БНРУ'.
+                          add_error_msg ls_item-bnfpo 029 ls_item-lfdat(4).
+                        ENDIF.
+                      ELSE.
+                        gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+                      ENDIF.
+                    ENDIF.
+                  ELSEIF lv_change = 'C'.
+*отнимаем старую сумму
+                    IF lv_syindex = 1 AND gs_eban-memorytype <> 'H' AND gs_eban-memorytype <> 'P'.
+                      IF NOT ( ls_item-loekz = 'X' AND gs_eban-loekz = 'X' ).
+                        MOVE-CORRESPONDING ls_item TO ls_item_new.
+                        MOVE-CORRESPONDING gs_eban TO ls_item.
+
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = ls_item-zvidb
+                                                                   eeind = ls_item-lfdat(4)
+                                                                   werks = ls_item-werks.
+                        IF sy-subrc = 0.
+                          gs_zsumm-gswrt = gs_zsumm-gswrt - ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                          gs_zsumm-chng = 'X'.
+                          MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                        ENDIF.
+                        MOVE-CORRESPONDING ls_item_new TO ls_item.
+                      ENDIF.
+                    ENDIF.
+
+*прибавляем новую сумму
+                    IF lv_syindex = 2.
+                      IF ls_item-loekz <> 'X'.  "не надо суммировать удаленную позицию
+                        SELECT SINGLE bklas FROM mbew
+                          INTO ls_bklas
+                          WHERE matnr = ls_item-matnr
+                            AND bwkey = ls_item-werks
+                            AND bwtar = ''.
+
+                        SELECT SINGLE * FROM zcennik
+                          INTO CORRESPONDING FIELDS OF gs_zcennik
+                          WHERE matnr = ls_item-matnr.
+
+                        CALL FUNCTION 'CONVERT_TO_FOREIGN_CURRENCY'
+                          EXPORTING
+                            date             = sy-datum
+                            foreign_currency = lv_waers_bazv
+                            local_amount     = gs_zcennik-z_cena
+                            local_currency   = gs_zcennik-waers
+                          IMPORTING
+                            foreign_amount   = lv_preis
+                          EXCEPTIONS
+                            no_rate_found    = 1.
+
+                        IF sy-subrc <> 0.
+                          lv_preis = ls_item-preis.
+                        ENDIF.
+
+                        IF ls_item-zvidb = 'ГБНР'.
+                          lv_vidb = 'ГБНР'.
+                        ELSEIF ls_item-zvidb = 'БНРУ'.
+                          lv_vidb = 'БНРУ'.
+                        ELSE.
+                          IF ls_item-bsart = 'ZGPZ'.
+                            IF lv_mtart = 'DIEN'.
+                              lv_vidb  = 'ГБЗУ'.
+                            ELSE.
+                              IF ( ls_bklas = '1009' AND lv_preis >= ls_z_bazv ) OR ( ls_bklas CP '08++' OR ls_bklas CP '0702' OR ls_bklas CP '0701' ).
+                                lv_vidb = 'ГБЗО'.
+                              ELSE.
+                                lv_vidb = 'ГБЗМ'.
+                              ENDIF.
+                            ENDIF.
+                          ELSEIF ls_item-bsart = 'ZOP'.
+                            IF lv_mtart = 'DIEN'.
+                              lv_vidb  = 'ГБОЗУ'.
+                            ELSE.
+                              lv_vidb = 'ГБОПЗ'.
+                            ENDIF.
+                          ENDIF.
+                        ENDIF.
+
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = lv_vidb
+                                                                   eeind = ls_item-lfdat(4)
+                                                                   werks = ls_item-werks.
+                        IF sy-subrc = 0.
+                          IF ( gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef ) > ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                            gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                            gs_zsumm-chng = 'X'.
+                            MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                            IF lv_vidb = 'ГБЗО'.
+                              add_error_msg ls_item-bnfpo 009 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБЗМ'.
+                              add_error_msg ls_item-bnfpo 011 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБОПЗ'.
+                              add_error_msg ls_item-bnfpo 012 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБНР'.
+                              add_error_msg ls_item-bnfpo 024 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'БНРУ'.
+                              add_error_msg ls_item-bnfpo 029 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБЗУ'.
+                              add_error_msg ls_item-bnfpo 027 ls_item-lfdat(4).
+                            ELSEIF lv_vidb = 'ГБОЗУ'.
+                              add_error_msg ls_item-bnfpo 028 ls_item-lfdat(4).
+                            ENDIF.
+                          ELSE.
+                            gs_zsumm-gswrt = gs_zsumm-gswrt + ls_item-menge * ls_item-preis / ls_item-peinh * lc_sum_koef.
+                            gs_zsumm-chng = 'X'.
+                            MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                          ENDIF.
+                        ENDIF.
+                      ENDIF.
+                    ENDIF.
+                  ELSEIF lv_change = 'D' AND lv_syindex = 1.
+*удаляем запись
+                    IF gs_eban-loekz <> 'X'.
+                      IF ( gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef ) > ( wa_eban-menge * wa_eban-preis / wa_eban-peinh * lc_sum_koef ).
+                        gs_zsumm-gswrt = gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef.
+                        gs_zsumm-chng = 'X'.
+                        MODIFY gt_zsumm FROM gs_zsumm INDEX sytabix TRANSPORTING gswrt chng.
+                        IF ls_item-zvidb = 'ГБНР'.
+                          add_error_msg ls_item-bnfpo 024 gs_eban-lfdat(4).
+                        ELSEIF ls_item-zvidb = 'БНРУ'.
+                          add_error_msg ls_item-bnfpo 029 gs_eban-lfdat(4).
+                        ELSE.
+                          IF lv_mtart = 'DIEN'.
+                            add_error_msg ls_item-bnfpo 028 gs_eban-lfdat(4).
+                          ELSE.
+                            add_error_msg ls_item-bnfpo 012 gs_eban-lfdat(4).
+                          ENDIF.
+                        ENDIF.
+                      ELSE.
+                        READ TABLE gt_zsumm INTO gs_zsumm WITH KEY vidb  = gs_eban-zvidb
+                                                                   eeind = gs_eban-lfdat(4)
+                                                                   werks = gs_eban-werks.
+                        IF sy-subrc = 0.
+                          gs_zsumm-gswrt = gs_zsumm-gswrt - gs_eban-menge * gs_eban-preis / gs_eban-peinh * lc_sum_koef.
+                          gs_zsumm-chng = 'X'.
+                          MODIFY gt_zsumm FROM gs_zsumm INDEX sy-tabix TRANSPORTING gswrt chng.
+                        ENDIF.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+      ENDDO.
+      SORT lt_err_tab BY pos.
+      DELETE ADJACENT DUPLICATES FROM lt_err_tab COMPARING ALL FIELDS.
+
+      IMPORT v_type TO v_type FROM MEMORY ID zfi_memory=>gv_zmdm_requisition_create_typ.
+      IF NOT v_type IS INITIAL.
+        EXPORT lt_err_tab FROM lt_err_tab TO MEMORY ID zfi_memory=>gv_zmdm_requisition_error_tab.
+      ENDIF.
+
+      IF sy-ucomm = 'MECHECKDOC' OR sy-ucomm = 'MESAVE' "OR sy-ucomm = 'MESAVEPR'
+          OR sy-ucomm = 'YES' OR NOT v_type IS INITIAL.
+        "читаем все сообщения, которые есть к заявке
+        CALL METHOD cl_message_handler_mm=>get_handler                          "{ 11.02.2014 YVarazhun rm3887
+          IMPORTING
+            ex_handler = l_msg_handler.
+        DO.
+          CALL METHOD l_msg_handler->get_event_for_dialog
+            IMPORTING
+              ex_event       = l_event
+            EXCEPTIONS
+              no_event_found = 1.
+          IF NOT sy-subrc IS INITIAL.
+            EXIT.
+          ENDIF.
+          APPEND l_event TO lt_events.
+        ENDDO.                                                                   "} 11.02.2014 YVarazhun rm3887
+
+        CALL METHOD im_header->get_items
+          RECEIVING
+            re_items = lt_items.
+
+        LOOP AT lt_items INTO ls_items.
+          CALL METHOD ls_items-item->get_data
+            RECEIVING
+              re_data = ls_mereqitem.
+
+          READ TABLE lt_err_tab INTO ls_err_tab
+                            WITH KEY pos = ls_mereqitem-bnfpo.
+          IF sy-subrc = 0.
+            SHIFT ls_err_tab-pos LEFT DELETING LEADING '0'.
+
+            IF lt_events IS NOT INITIAL AND ls_err_tab-number = '031'.       "{ 11.02.2014 YVarazhun rm3887
+              LOOP AT  lt_events INTO l_event.
+                CALL METHOD l_event->myhandler->get_list_for_bapi
+                  RECEIVING
+                    re_messages = lt_messages.
+
+                READ TABLE lt_messages ASSIGNING <ls_mes>
+                                        WITH KEY msgno = '032'                 "ZMEREQ001 032 - для позиции об устаревшем материале
+                                                 msgv1 = ls_mereqitem-bnfpo.
+                IF sy-subrc <> 0.
+                  mmpur_message_forced 'E' 'ZMEREQ001' ls_err_tab-number ls_err_tab-pos ls_err_tab-period '' ''.
+                  ch_failed = 'X'.
+                ENDIF.
+              ENDLOOP.
+            ELSE.                                                              "} 11.02.2014 YVarazhun rm3887
+              mmpur_message_forced 'E' 'ZMEREQ001' ls_err_tab-number ls_err_tab-pos ls_err_tab-period '' ''.
+              ch_failed = 'X'.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+
+*блокировка таблицы ZSUMM на запись
+*проверка на наличие "стандартных" ошибок
+        ref_obj = im_header.
+        ASSIGN ref_obj->('MY_STATE') TO <lo_lcl1>.
+        ref_obj = <lo_lcl1>.
+        ASSIGN ref_obj->('MM_ERROR') TO <lo_lcl1>.
+        IF <lo_lcl1> IS ASSIGNED.
+          lv_mm_error = <lo_lcl1>.
+        ENDIF.
+
+        IF it_header-bsart = 'ZGBZ' OR it_header-bsart = 'ZGPZ' OR it_header-bsart = 'ZOP'
+          OR it_header-bsart = 'ZZPZ'.      " AK_BUTVILOVS #8000000691, MM-Настройка нового вида бюджета Зарубеж
+          IF ( sy-ucomm = 'MESAVE' OR sy-ucomm = 'YES' OR v_type = 'P' ) AND ch_failed = '' AND lv_mm_error = ''.
+            LOOP AT gt_zsumm INTO gs_zsumm WHERE chng = 'X'.
+*блокируем измененные записи
+              CALL FUNCTION 'ENQUEUE_EZSUMM'
+                EXPORTING
+                  mode_zsumm = 'E'
+                  mandt      = sy-mandt
+                  eeind      = gs_zsumm-eeind
+                  vidb       = gs_zsumm-vidb
+                  werks      = gs_zsumm-werks.
+              IF sy-subrc <> 0.
+                mmpur_message_forced 'E' 'ZMEREQ001' '020' '' '' '' ''.
+                ch_failed = 'X'.
+*если хотябы одну запись не удалось блокировать - разблокируем все ранее заблокированные
+                LOOP AT gt_zsumm INTO gs_zsumm WHERE chng = 'B'.
+                  CALL FUNCTION 'DEQUEUE_EZSUMM'
+                    EXPORTING
+                      mode_zsumm = 'E'
+                      mandt      = sy-mandt
+                      eeind      = gs_zsumm-eeind
+                      vidb       = gs_zsumm-vidb
+                      werks      = gs_zsumm-werks.
+                ENDLOOP.
+                EXIT.
+              ELSE.
+                gs_zsumm-chng = 'B'.
+                MODIFY gt_zsumm FROM gs_zsumm TRANSPORTING chng.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.                                                             "Developer7 08.07.2013 #3390
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~close.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~fieldselection_header.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~fieldselection_header_refkeys.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~fieldselection_item.
+
+    DATA : lf_aktvt TYPE aktvt.
+
+    lf_aktvt = im_item->get_activity( ).
+* '-' Field is suppressed
+* '*' Field is purely a display field
+* '.' Input field
+* '+' Mandatory field
+
+    IF lf_aktvt = 'A'.
+      LOOP AT ch_fieldselection ASSIGNING FIELD-SYMBOL(<fs>).
+        <fs>-fieldstatus = '*'.                                " Статус поля ПРОСМОТР (+ . * -)
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+METHOD if_ex_me_process_req_cust~fieldselection_item_refkeys.
+  " Описание         : Блокировка и контроль полей при изменении заявки
+  " Код ТС           : DEV.030.01-04E
+  " Разработчик      : Сосновский В.Г.
+  " Постановка задачи: Громыко В.С.
+  " Дата постановки  : 26.07.2012
+  " Дата создания    : 04.10.2012
+  DATA:
+    ls_item TYPE mereq_item.
+
+  DATA:
+    lv_zchange    TYPE zzchange,
+    lv_save_preis TYPE char1.                       "Developer7 08.07.2013 #3390
+
+  gr_item = im_item.
+  IMPORT lv_save_preis TO lv_save_preis FROM MEMORY ID zfi_memory=>gv_zmm_close.  "Developer7 08.07.2013 #3390
+
+  IF lv_save_preis = ''.                            "Developer7 08.07.2013 #3390
+    ls_item = im_item->get_data( ).
+
+    " Блокировка полей неудаленной записи в случае ссылки на документ ЗНЗ/КД
+    IF ls_item-loekz IS INITIAL AND ( NOT ls_item-znum_znzkd IS INITIAL AND NOT ls_item-zpoz_znzkd IS INITIAL ).
+      SELECT SINGLE zchange
+        FROM zrequesth
+        INTO lv_zchange
+       WHERE zbsart = ls_item-bsart.
+
+      IF sy-subrc = 0 AND lv_zchange = 'X'.
+        ch_key1 = 'AKTA'.
+      ENDIF.
+    ENDIF.
+  ENDIF.                                            "Developer7 08.07.2013 #3390
+
+  "Изменение знз из программы ZMM010401_NEW         "03.03.2015 YVarazhun rm1292
+  IF sy-cprog = 'ZMM010401_NEW'.
+    ch_key2 = 'ZNBB'.
+  ENDIF.                                            "03.03.2015 YVarazhun rm1292
+
+  CLEAR lv_save_preis.                              "Developer7 08.07.2013 #3390
+ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~initialize.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~open.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~post.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~process_account.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~process_header.
+  ENDMETHOD.
+
+
+  METHOD if_ex_me_process_req_cust~process_item.
+    INCLUDE mm_messages_mac.
+
+    DATA: ls_item      TYPE mereq_item,
+          ls_item_prev TYPE mereq_item.
+
+    DATA: lf_aktvt         TYPE aktvt,
+          lv_ztime_release TYPE tzntstmps,                                                        "Developer7(Hilimon) 25.06.2013
+          ls_clientdata    TYPE bapi_mara_ga,                                                     " 24.07.2013 Rudzko Проверка статуса материала DEV.02-139Е
+          lv_pr_oblig      TYPE bon_enh_con_flag.                                                 " Hubenka #3887 10.10.2013
+
+    ls_item      = im_item->get_data( ).
+    ls_item_prev = im_item->get_previous_data( ).
+    lf_aktvt     = im_item->get_activity( ).
+
+    CALL FUNCTION 'BAPI_MATERIAL_GET_ALL'                                                         "{ 24.07.2013 Rudzko Проверка статуса материала DEV.02-139Е
+      EXPORTING
+*       material      = ls_item-matnr                                                               "HILIMON 27.09.2016 В S/4 HANA материал(MATNR) теперь 40 символов
+        material_long = ls_item-matnr
+      IMPORTING
+        clientdata    = ls_clientdata.
+
+* Start Блок заполнения времени изменения статуса деблокирования заявки. Задача DEV.01-13E (16.01.2013)
+    IF  lf_aktvt = 'H' OR                        " Начальное создание
+        ( ls_item-frgkz <> ls_item_prev-frgkz OR
+          ls_item-banpr <> ls_item_prev-banpr ).
+
+*    GET TIME STAMP FIELD ls_item-ztime_release.                                                "{Developer7(Hilimon) 25.06.2013 из-за замены типа EBAN-ZTIME_RELEASE
+      GET TIME STAMP FIELD lv_ztime_release.
+      ls_item-ztime_release = lv_ztime_release.                                                   "}Developer7(Hilimon) 25.06.2013
+
+      CALL METHOD im_item->set_data
+        EXPORTING
+          im_data = ls_item.
+    ENDIF.
+
+* AK_GORDEYKO  8000001035 Внесение структурного подразделения
+    DATA : lv_gsval TYPE plog-plvar.
+
+    IF ( lf_aktvt = 'H' OR lf_aktvt = 'V' ) AND
+        ls_item-zstr_pod <> ls_item_prev-zstr_pod.
+
+
+      SELECT SINGLE gsval INTO lv_gsval
+                          FROM t77s0
+                          WHERE grpid = 'PLOGI'
+                            AND semid = 'PLOGI'.
+      SELECT SINGLE mc_stext
+        FROM hrp1000
+        INTO ls_item-znamp
+       WHERE plvar = lv_gsval
+         AND otype = 'O'
+         AND langu = 'R'
+         AND objid = ls_item-zstr_pod
+         AND begda <= sy-datum
+         AND endda >= sy-datum.
+
+      CALL METHOD im_item->set_data
+        EXPORTING
+          im_data = ls_item.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

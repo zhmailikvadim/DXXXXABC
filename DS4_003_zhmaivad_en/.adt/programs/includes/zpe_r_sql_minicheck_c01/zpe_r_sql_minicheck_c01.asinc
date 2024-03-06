@@ -1,0 +1,218 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 23.01.2024 | 28374: Creation                          *
+*              |            | DS4K977203                               *
+************************************************************************
+CLASS lcl_main DEFINITION CREATE PUBLIC FINAL.
+
+  PUBLIC SECTION.
+
+    METHODS at_ss_ovr_for_query.
+    METHODS initialization.
+    METHODS start_of_selection.
+
+  PRIVATE SECTION.
+
+    METHODS check_authority.
+
+    METHODS get_query RETURNING VALUE(rv_result) TYPE string.
+
+    METHODS run_query IMPORTING iv_query       TYPE string
+                      RETURNING VALUE(ro_data) TYPE REF TO data.
+
+    METHODS send_mail IMPORTING io_data   TYPE REF TO data.
+
+    METHODS build_attachment IMPORTING io_data       TYPE REF TO data
+                             EXPORTING et_data_solix TYPE solix_tab
+                                       ev_data_bytes TYPE i.
+
+    METHODS send IMPORTING iv_data_bytes TYPE i
+                           it_data_solix TYPE solix_tab.
+
+ENDCLASS.
+
+CLASS lcl_main IMPLEMENTATION.
+
+  METHOD initialization.
+    check_authority( ).
+  ENDMETHOD.
+
+  METHOD check_authority.
+
+    CALL FUNCTION 'DB6_ADM_CHECK_AUTHORITY'
+      EXCEPTIONS
+        permission_denied    = 1
+        read_only_permission = 2
+        OTHERS               = 3.
+    IF sy-subrc <> 0.
+      MESSAGE e010(ad) WITH TEXT-001.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD at_ss_ovr_for_query.
+
+    DATA: lt_values  TYPE vrm_values,
+          lt_scripts TYPE STANDARD TABLE OF db6scripthdr.
+
+    CALL FUNCTION 'DB6_ADM_GET_SCRIPT_OVERVIEW'
+      EXPORTING
+        script_name = '*'
+      TABLES
+        scripts     = lt_scripts
+      EXCEPTIONS
+        not_found   = 1
+        OTHERS      = 2.
+    IF sy-subrc <> 0.
+      MESSAGE e010(ad) WITH TEXT-002.
+    ENDIF.
+
+    lt_values = CORRESPONDING #( lt_scripts MAPPING key = scriptname text = scriptname ).
+
+    CALL FUNCTION 'VRM_SET_VALUES'
+      EXPORTING
+        id              = 'P_QUERY'
+        values          = lt_values
+      EXCEPTIONS
+        id_illegal_name = 1
+        OTHERS          = 2.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD start_of_selection.
+
+    DATA(lv_query) = get_query( ).
+
+    DATA(lo_data) = run_query( lv_query ).
+    send_mail( lo_data ).
+
+  ENDMETHOD.
+
+
+  METHOD get_query.
+
+    DATA lt_query TYPE STANDARD TABLE OF db6admcmd.
+
+    CALL FUNCTION 'DB6_ADM_READ_SCRIPT'
+      EXPORTING
+        script_name = p_query
+      TABLES
+        lines       = lt_query
+      EXCEPTIONS
+        not_found   = 1
+        OTHERS      = 2.
+    IF sy-subrc <> 0.
+      MESSAGE e978(ad).
+    ENDIF.
+
+    rv_result = concat_lines_of( table = lt_query sep = cl_abap_char_utilities=>newline ).
+
+  ENDMETHOD.
+
+  METHOD run_query.
+
+    DATA lo_header TYPE REF TO cl_abap_structdescr.
+
+    TRY.
+        DATA(lo_sql)      = NEW cl_sql_statement( ).
+        DATA(lo_result)   = lo_sql->execute( iv_query ).
+        DATA(lt_metadata) = lo_result->get_metadata( ).
+        DATA(lo_metadata) = lo_result->get_struct_ref( md_tab      = lt_metadata
+                                                       string_only = 'X'
+                                                       p_strict    = abap_false ).
+
+        lo_header ?= cl_abap_typedescr=>describe_by_data_ref( lo_metadata ).
+        DATA(lo_tab_desc) = cl_abap_tabledescr=>create( p_line_type  = lo_header
+                                                        p_table_kind = cl_abap_tabledescr=>tablekind_std ).
+
+        CREATE DATA ro_data TYPE HANDLE lo_tab_desc.
+
+        lo_result->set_param_table( ro_data ).
+        lo_result->next_package( ).
+        lo_result->close( ).
+
+      CATCH cx_sql_exception cx_parameter_invalid INTO DATA(lo_exc).
+        MESSAGE lo_exc->get_text( ) TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD send_mail.
+
+    build_attachment( EXPORTING io_data       = io_data
+                      IMPORTING et_data_solix = DATA(lt_data_solix)
+                                ev_data_bytes = DATA(lv_data_bytes) ).
+
+    send( iv_data_bytes = lv_data_bytes
+          it_data_solix = lt_data_solix ).
+
+  ENDMETHOD.
+
+
+  METHOD build_attachment.
+
+    TRY.
+        cl_salv_table=>factory( IMPORTING r_salv_table = DATA(lo_table)
+                                CHANGING  t_table      = io_data->* ).
+      CATCH cx_salv_msg INTO DATA(lo_exc_alv).
+        MESSAGE lo_exc_alv->get_text( ) TYPE 'E'.
+    ENDTRY.
+
+    TRY.
+        DATA(lo_filters) = lo_table->get_filters( ).    "'X' if value found on the system is outside of the expected values (indication for potentially critical problem)
+        lo_filters->add_filter( columnname = 'C'
+                                sign       = 'I'
+                                option     = 'EQ'
+                                low        = 'X'  ).
+      CATCH cx_salv_not_found cx_salv_data_error cx_salv_existing.
+        " Without filter
+    ENDTRY.
+
+    DATA(lv_table_xstring) = lo_table->to_xml( if_salv_bs_xml=>c_type_xlsx ).
+    et_data_solix = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_table_xstring ).
+    ev_data_bytes = xstrlen( lv_table_xstring ).
+
+  ENDMETHOD.
+
+
+  METHOD send.
+
+    TRY.
+
+        DATA(lo_message)  = cl_bcs=>create_persistent( ).
+        DATA(lo_document) = cl_document_bcs=>create_document( i_type    = 'RAW'
+                                                              i_subject = |{ sy-sysid } - { p_query }| ).
+
+        lo_document->add_attachment( i_attachment_type    = 'XLS'
+                                     i_attachment_subject = CONV #( p_query )
+                                     i_attachment_size    = CONV #( iv_data_bytes )
+                                     i_att_content_hex    = it_data_solix ).
+
+        lo_message->set_document( lo_document ).
+        LOOP AT s_rec ASSIGNING FIELD-SYMBOL(<ls_rec>).
+          DATA(lo_rec) = cl_cam_address_bcs=>create_internet_address( <ls_rec>-low ).
+          lo_message->add_recipient( lo_rec ).
+        ENDLOOP.
+        DATA(lo_sender) = cl_cam_address_bcs=>create_internet_address( p_sender ).
+        lo_message->set_sender( lo_sender ).
+        IF lo_message->send( ).
+          COMMIT WORK.
+          MESSAGE TEXT-002 TYPE 'S'.
+        ELSE.
+          MESSAGE e978(ad).
+        ENDIF.
+      CATCH cx_document_bcs cx_send_req_bcs cx_address_bcs INTO DATA(lo_exc_mail).
+        MESSAGE lo_exc_mail->get_text( ) TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+ENDCLASS.

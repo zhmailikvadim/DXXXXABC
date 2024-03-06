@@ -1,0 +1,212 @@
+CLASS zcl_pe_parallel_processing_abs DEFINITION
+  PUBLIC
+  ABSTRACT
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES zif_pe_parallel_processing .
+
+    METHODS constructor
+      IMPORTING
+        !iv_task_prefix TYPE char6
+        !iv_threads     TYPE i
+        !iv_group       TYPE rzlli_apcl .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_PARALLEL_PROCESSING_ABS IMPLEMENTATION.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* IVANOKON     | 29.09.2022 | 13856     : Parallel processing          *
+*              |            | DS4K931119                               *
+*----------------------------------------------------------------------*
+    DATA lv_threadn TYPE n LENGTH 2 VALUE '00'.
+
+    zif_pe_parallel_processing~gv_group = iv_group.
+    zif_pe_parallel_processing~gv_task_prefix = iv_task_prefix.
+
+    " No more than 100 threads
+    IF iv_threads > 100.
+      zif_pe_parallel_processing~gv_threads = 100.
+      MESSAGE w001(zpe_pprcs) WITH zif_pe_parallel_processing~gv_threads INTO DATA(lv_message) ##needed.
+      cl_msr_vrm_data=>convert_symessage2bapiret2(
+        CHANGING
+          ct_bapiret2 = zif_pe_parallel_processing~gt_message_log ).
+    ELSEIF iv_threads <= 0.
+      zif_pe_parallel_processing~gv_threads = 1.
+
+      MESSAGE w002(zpe_pprcs) INTO lv_message.
+      cl_msr_vrm_data=>convert_symessage2bapiret2(
+        CHANGING
+          ct_bapiret2 = zif_pe_parallel_processing~gt_message_log ).
+
+      MESSAGE w001(zpe_pprcs) WITH zif_pe_parallel_processing~gv_threads INTO lv_message.
+      cl_msr_vrm_data=>convert_symessage2bapiret2(
+        CHANGING
+          ct_bapiret2 = zif_pe_parallel_processing~gt_message_log ).
+    ELSE.
+      zif_pe_parallel_processing~gv_threads = iv_threads.
+    ENDIF.
+
+    DATA(lv_free_threads) = zif_pe_parallel_processing~get_free_threads( ).
+
+    " Ensure that no more than half of the free threads are used
+    lv_free_threads = lv_free_threads / 2 + 1.
+    IF lv_free_threads LT zif_pe_parallel_processing~gv_threads.
+      zif_pe_parallel_processing~gv_threads = lv_free_threads.
+    ENDIF.
+
+    " Threads Initialization
+    DO zif_pe_parallel_processing~gv_threads TIMES.
+      INSERT VALUE #( thread = zif_pe_parallel_processing~gv_task_prefix && lv_threadn used = abap_false )
+             INTO TABLE zif_pe_parallel_processing~gt_threads_list.
+      lv_threadn = lv_threadn + 1.
+    ENDDO.
+
+  ENDMETHOD.
+
+
+  METHOD zif_pe_parallel_processing~all_threads_are_finished.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* IVANOKON     | 29.09.2022 | 13856     : Parallel processing          *
+*              |            | DS4K931119                               *
+*----------------------------------------------------------------------*
+    rv_empty = xsdbool( zif_pe_parallel_processing~gv_used_threads EQ 0 ).
+  ENDMETHOD.
+
+
+  METHOD zif_pe_parallel_processing~clear_thread.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* IVANOKON     | 29.09.2022 | 13856     : Parallel processing          *
+*              |            | DS4K931119                               *
+*----------------------------------------------------------------------*
+
+    READ TABLE zif_pe_parallel_processing~gt_threads_list WITH KEY used = abap_true thread = iv_task
+           ASSIGNING FIELD-SYMBOL(<ls_thread>).          "#EC CI_STDSEQ
+
+    IF sy-subrc = 0 AND <ls_thread> IS ASSIGNED.
+      <ls_thread>-used = abap_false.
+    ENDIF.
+    zif_pe_parallel_processing~gv_used_threads = zif_pe_parallel_processing~gv_used_threads - 1.
+  ENDMETHOD.
+
+
+  METHOD zif_pe_parallel_processing~get_free_thread.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* IVANOKON     | 29.09.2022 | 13856     : Parallel processing          *
+*              |            | DS4K931119                               *
+*----------------------------------------------------------------------*
+    " Wait for a free thread
+    WAIT UNTIL zif_pe_parallel_processing~gv_used_threads LT zif_pe_parallel_processing~gv_threads.
+
+    " Get number of first free thread
+    READ TABLE zif_pe_parallel_processing~gt_threads_list WITH KEY used = abap_false ASSIGNING FIELD-SYMBOL(<ls_thread>). "#EC CI_STDSEQ
+
+    IF sy-subrc = 0 AND <ls_thread> IS ASSIGNED.
+      zif_pe_parallel_processing~gv_used_threads = zif_pe_parallel_processing~gv_used_threads + 1.
+      <ls_thread>-used = abap_true.
+      rv_thread = <ls_thread>-thread.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD zif_pe_parallel_processing~get_free_threads.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* IVANOKON     | 29.09.2022 | 13856     : Parallel processing          *
+*              |            | DS4K931119                               *
+*----------------------------------------------------------------------*
+
+    " Get number of free threads
+    CALL FUNCTION 'SPBT_INITIALIZE'
+      EXPORTING
+        group_name                     = zif_pe_parallel_processing~gv_group
+      IMPORTING
+        free_pbt_wps                   = rv_free_threads
+      EXCEPTIONS
+        invalid_group_name             = 1
+        internal_error                 = 2
+        pbt_env_already_initialized    = 3
+        currently_no_resources_avail   = 4
+        no_pbt_resources_found         = 5
+        cant_init_different_pbt_groups = 6
+        OTHERS                         = 7.
+
+    CASE sy-subrc.
+      WHEN 0. " Do nothing
+
+      WHEN 3.
+        " Already initialised - get current number of free threads
+        CALL FUNCTION 'SPBT_GET_CURR_RESOURCE_INFO'
+          IMPORTING
+            free_pbt_wps                = rv_free_threads
+          EXCEPTIONS
+            internal_error              = 1
+            pbt_env_not_initialized_yet = 2
+            OTHERS                      = 3.
+
+        IF sy-subrc <> 0.
+          zif_pe_parallel_processing~gt_message_log = VALUE #( BASE zif_pe_parallel_processing~gt_message_log
+            ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 message_v2 = sy-msgv2 message_v3 = sy-msgv3 message_v4 = sy-msgv4 ) ).
+        ENDIF.
+
+      WHEN OTHERS.
+        zif_pe_parallel_processing~gt_message_log = VALUE #( BASE zif_pe_parallel_processing~gt_message_log
+        ( type = sy-msgty id = sy-msgid number = sy-msgno message_v1 = sy-msgv1 message_v2 = sy-msgv2 message_v3 = sy-msgv3 message_v4 = sy-msgv4 ) ).
+        " throw the message: can't determine free threads
+        MESSAGE ID sy-msgid TYPE 'X' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD zif_pe_parallel_processing~handle_resource_failure.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* IVANOKON     | 29.09.2022 | 13856     : Parallel processing          *
+*              |            | DS4K931119                               *
+*----------------------------------------------------------------------*
+
+    DATA(lv_free_threads) = zif_pe_parallel_processing~get_free_threads( ).
+    IF lv_free_threads LE 1 AND zif_pe_parallel_processing~gv_threads GT 1.
+      zif_pe_parallel_processing~gv_threads = zif_pe_parallel_processing~gv_threads - 1.
+    ENDIF.
+
+    WAIT UNTIL zif_pe_parallel_processing~gv_used_threads LT zif_pe_parallel_processing~gv_threads. " Now there's an available thread
+  ENDMETHOD.
+ENDCLASS.

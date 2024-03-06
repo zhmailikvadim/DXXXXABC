@@ -1,41 +1,35 @@
-@AccessControl.authorizationCheck: #NOT_REQUIRED
-@EndUserText.label: 'Stock Reconciliation Summary - SAP amt'
+/***********************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 13.04.2023 | 20028 Stock Reconciliation Summary       *
+*              |            | DS4K949671                               *
+************************************************************************/
+
+@VDM.viewType: #BASIC
+@AccessControl.authorizationCheck: #CHECK
+@EndUserText.label: 'Stock Reconciliation Summary SAP amounts'
 
 define view entity zsd_i_stock_recon_summ_sap_amt
-  as select from I_MaterialDocumentItem_2
+  as select from I_MaterialDocumentItem_2     as _mdocitem
+    join         zsd_i_stock_recon_summ_bwart as _bwart on _bwart.goodsmovementtype = _mdocitem.GoodsMovementType
 {
-  PostingDate,
-  Plant,
-  StorageLocation,
-  
-  case when GoodsMovementType = '251' then 'sale'
-  
-       when GoodsMovementType = '252' then 'return'
-       
-       when GoodsMovementType = '641'
-       or GoodsMovementType = '643'
-       or GoodsMovementType = '905'
-       or GoodsMovementType = '551'
-       or GoodsMovementType = '161'
-       or GoodsMovementType = '702' then 'gi'
-       
-       when GoodsMovementType = '101'
-       or GoodsMovementType = '552'
-       or GoodsMovementType = '701' then 'gr'
-  end as amttype,
-  
-  QuantityInBaseUnit,
-  MaterialBaseUnit
+  key _mdocitem.PostingDate,
+  key _mdocitem.CompanyCode,
+  key _mdocitem.Plant,
+  key _mdocitem.StorageLocation,
+  key _mdocitem.MaterialBaseUnit,
+  key _bwart.goodsmovementtypecategory,
+
+      @Semantics.quantity.unitOfMeasure: 'MaterialBaseUnit'
+      sum(_mdocitem.QuantityInBaseUnit) as quantityinbaseunit
 }
-where
-     GoodsMovementType = '251'
-  or GoodsMovementType = '252'
-  or GoodsMovementType = '641'
-  or GoodsMovementType = '643'
-  or GoodsMovementType = '905'
-  or GoodsMovementType = '551'
-  or GoodsMovementType = '161'
-  or GoodsMovementType = '702'
-  or GoodsMovementType = '101'
-  or GoodsMovementType = '552'
-  or GoodsMovementType = '701'
+group by
+  _mdocitem.PostingDate,
+  _mdocitem.CompanyCode,
+  _mdocitem.Plant,
+  _mdocitem.StorageLocation,
+  _mdocitem.MaterialBaseUnit,
+  _bwart.goodsmovementtypecategory

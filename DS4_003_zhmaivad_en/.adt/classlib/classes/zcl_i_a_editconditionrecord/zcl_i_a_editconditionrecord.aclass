@@ -1,0 +1,714 @@
+CLASS zcl_i_a_editconditionrecord DEFINITION
+  PUBLIC
+  INHERITING FROM /bobf/cl_lib_a_supercl_simple
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+
+    TYPES:
+      BEGIN OF ty_activ_draft_admin_data_link,
+        active_key                TYPE /bobf/conf_key,
+        active_etag               TYPE hash160,
+        admin_data_existing_draft TYPE sdraft_admin_s,
+        draft_admin_data_key      TYPE sdraft_admin_key,
+        enqueue_context_id        TYPE enq_context_id,
+      END OF ty_activ_draft_admin_data_link.
+
+    TYPES tt_activ_draft_admin_data_link TYPE SORTED TABLE OF ty_activ_draft_admin_data_link
+                                                         WITH UNIQUE KEY primary_key ALIAS active_key COMPONENTS active_key
+                                                         WITH NON-UNIQUE SORTED      KEY   draft_key  COMPONENTS draft_admin_data_key-draft_key.
+    METHODS constructor .
+
+    METHODS /bobf/if_frw_action~execute
+        REDEFINITION .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA mo_cond_checks TYPE REF TO if_cnd_maint_ltd_check .
+    DATA mo_sls_api TYPE REF TO if_slsprcg_cndnrecd_api .
+    DATA mo_dep TYPE REF TO if_cnd_maint_ltd_dep .
+    DATA mo_service_manager TYPE REF TO /bobf/if_tra_service_manager .
+    DATA mt_cndnrecord_criteria_item TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_item_t .
+    DATA mo_prcg_util TYPE REF TO if_cndnrecord_public_utility .
+    DATA mo_req_util TYPE REF TO if_cndnrecord_request_utility .
+
+    METHODS calculate_condition_etag
+      IMPORTING
+        !ir_entity     TYPE REF TO data
+      RETURNING
+        VALUE(rv_etag) TYPE char40 .
+    METHODS check_authority
+      EXPORTING
+        !es_msg      TYPE symsg
+      CHANGING
+        !cs_recordtp TYPE zsislspricingconditionrecordt .
+    METHODS constructor_draft
+      IMPORTING
+        !is_cndn_cds          TYPE zsislspricingconditionrecordt
+      EXPORTING
+        !es_active_draft_link TYPE ty_activ_draft_admin_data_link
+        !es_modification      TYPE /bobf/s_frw_modification .
+ENDCLASS.
+
+
+
+CLASS ZCL_I_A_EDITCONDITIONRECORD IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_action~execute.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    TYPES: BEGIN OF ty_keys,
+             conditionrecord           TYPE zc_slspricingconditionrecordtp-conditionrecord,
+             conditionsequentialnumber TYPE zc_slspricingconditionrecordtp-conditionsequentialnumber,
+             conditionvalidityenddate  TYPE zc_slspricingconditionrecordtp-conditionvalidityenddate,
+           END OF ty_keys.
+    TYPES:
+      BEGIN OF ty_activ_draft_admin_data_link,
+        active_key                TYPE /bobf/conf_key,
+        active_etag               TYPE hash160,
+        admin_data_existing_draft TYPE sdraft_admin_s,
+        draft_admin_data_key      TYPE sdraft_admin_key,
+        enqueue_context_id        TYPE enq_context_id,
+      END OF ty_activ_draft_admin_data_link,
+
+      tt_activ_draft_admin_data_link TYPE SORTED TABLE OF ty_activ_draft_admin_data_link
+                                                       WITH UNIQUE KEY primary_key ALIAS active_key COMPONENTS active_key
+                                                       WITH NON-UNIQUE SORTED      KEY   draft_key  COMPONENTS draft_admin_data_key-draft_key.
+    DATA: ls_keys                       TYPE ty_keys,
+          lt_keys                       TYPE TABLE OF ty_keys,
+          ls_active_draft_link          TYPE ty_activ_draft_admin_data_link,
+          lt_active_draft_link          TYPE tt_activ_draft_admin_data_link,
+          lv_enqueue_context_id         TYPE enq_context_id,
+          ls_set                        TYPE zc_slspricingconditionrecordtp,
+          lo_message                    TYPE REF TO /bobf/if_frw_message,
+          lo_message_exception          TYPE REF TO /bobf/if_frw_message,
+          lt_failed_key                 TYPE /bobf/t_frw_key,
+          lt_cndn_cds                   TYPE TABLE OF zsislspricingconditionrecordt,
+          ls_cndn_cds                   LIKE LINE OF lt_cndn_cds,
+          lv_knumh                      TYPE knumh,
+          lt_message                    TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_message_t,
+          ls_message                    TYPE symsg,
+          lt_modification               TYPE /bobf/t_frw_modification,
+          ls_modification               TYPE /bobf/s_frw_modification,
+          lt_condition_record_c         TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_record_t,
+          lt_condition_record_u         TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_record_t,
+          ls_condition_record           LIKE LINE OF lt_condition_record_c,
+          ls_cndnrecord_criteria_header TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_header_s,
+          lt_cndnrecord_criteria_item   TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_item_t,
+          ls_cndnrecord_criteria_item   TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_criteria_item_s,
+          ls_cndnrecord_query_option    TYPE if_slsprcg_cndnrecd_api_types=>ty_cndnrecd_query_option_s,
+          lt_condition_validity         TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_validity_enh_t,
+          lt_condition_record           TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_record_t,
+          ls_cndn_query_option_response TYPE if_slsprcg_cndnrecd_api_types=>ty_query_option_response_s,
+          lo_change                     TYPE REF TO /bobf/if_tra_change,
+          lo_sls_api                    TYPE REF TO if_slsprcg_cndnrecd_api,
+          lo_draft_access               TYPE REF TO cl_draft_admin_access,
+          lo_lock                       TYPE REF TO if_draft_admin_lock,
+          lv_draft_entity_record        TYPE sdraft_admin-draft_entity VALUE 'ZI_SLSPRICINGCONDITIONRECORDTP',
+          lv_mess                       TYPE string,
+          ls_mess                       TYPE symsg,
+          lt_mess                       TYPE STANDARD TABLE OF symsg,
+          lr_data                       TYPE REF TO data,
+          ls_draft_admin_key            TYPE sdraft_admin_key,
+          mo_configuration              TYPE REF TO /bobf/if_frw_configuration,
+          lt_uuid                       TYPE TABLE OF /bobf/uuid,
+          lt_key_delete                 TYPE /bobf/t_frw_key,
+          lv_char20                     TYPE char20,
+          lr_validity                   TYPE REF TO data,
+          ls_result                     TYPE if_swf_flex_ifs_sim=>t_sim_result,
+          lv_sibfboriid                 TYPE sibfboriid,
+          lv_wbs_ext                    TYPE ps_posid,
+          lv_workpackage_ext            TYPE ps_posid.
+
+    CONSTANTS:cv_comma TYPE c VALUE ','.
+    CONSTANTS: lc_feature_toggle_id TYPE sftgl_ft_id VALUE 'SD_PRICE_APPROVAL_BASIC_FUNCTION'.
+
+    FIELD-SYMBOLS:
+      <ls_parameters> TYPE sdprcg_conditionuuid,
+      <fs_cds>        TYPE any.
+
+    ev_static_action_failed = abap_false.
+    ASSIGN is_parameters->* TO <ls_parameters>.
+    IF NOT <ls_parameters> IS ASSIGNED OR <ls_parameters> IS INITIAL.
+      ev_static_action_failed = abap_true.
+      RETURN.
+    ENDIF.
+
+    IF eo_message IS NOT BOUND.
+      eo_message = /bobf/cl_frw_message_factory=>create_container( ).
+    ENDIF.
+
+    CLEAR:et_data.
+    lr_data = REF #( et_data ).
+
+**Get the non-neccessary sign, e.g. '-'
+    DATA(lv_uuid_str) = <ls_parameters>-conditionrecorduuid.
+    DATA(lv_offset) = 0.
+    DATA(lv_len) = 1.
+    DATA(lv_workflow_index) = 0.
+    DATA(lv_strlen) = strlen( lv_uuid_str ).
+    WHILE ( lv_strlen > lv_offset ).
+      DATA(lv_link_sign) = lv_uuid_str+lv_offset(lv_len).
+      IF lv_link_sign NA '0123456789'.
+        EXIT.
+      ELSE.
+        lv_offset = lv_offset + lv_len.
+        CLEAR:lv_link_sign.
+      ENDIF.
+    ENDWHILE.
+    IF lv_link_sign <> cv_comma AND lv_link_sign <> space.
+      REPLACE ALL OCCURRENCES OF lv_link_sign IN lv_uuid_str WITH space.
+    ENDIF.
+    CONDENSE lv_uuid_str NO-GAPS.
+    SPLIT lv_uuid_str AT cv_comma INTO TABLE DATA(lt_uuid_char).
+    lt_uuid = lt_uuid_char.
+    lt_keys = CONV #( lt_uuid ).
+
+    LOOP AT lt_keys INTO ls_keys.
+      APPEND VALUE #( sign = 'I' option = 'EQ' low = ls_keys-conditionrecord ) TO ls_cndnrecord_criteria_item-conditionrecord.
+    ENDLOOP.
+    APPEND ls_cndnrecord_criteria_item TO lt_cndnrecord_criteria_item.
+    APPEND LINES OF lt_cndnrecord_criteria_item TO mt_cndnrecord_criteria_item.
+
+**For Active-based Draft, get DB data as its initial data
+    TRY.
+        CALL METHOD mo_sls_api->get_condition_record
+          EXPORTING
+            is_cndnrecord_criteria_header = ls_cndnrecord_criteria_header
+            it_cndnrecord_criteria_item   = lt_cndnrecord_criteria_item
+            is_cndnrecord_query_option    = ls_cndnrecord_query_option
+          IMPORTING
+            et_condition_validity_enh     = lt_condition_validity
+            et_condition_record           = lt_condition_record
+            es_cndn_query_option_response = ls_cndn_query_option_response
+            et_condition_record_text      = DATA(lt_record_text)
+            et_condition_supplement_text  = DATA(lt_supplement_text).
+      CATCH cx_prcg_cndnrecord_exception INTO DATA(le_cndn).
+*       add message to BOPF
+        CLEAR ls_message.
+        ls_message-msgid = le_cndn->if_t100_message~t100key-msgid.
+        ls_message-msgno = le_cndn->if_t100_message~t100key-msgno.
+        ls_message-msgty = le_cndn->if_t100_dyn_msg~msgty.
+        ls_message-msgv1 = le_cndn->if_t100_dyn_msg~msgv1.
+        ls_message-msgv2 = le_cndn->if_t100_dyn_msg~msgv2.
+        ls_message-msgv3 = le_cndn->if_t100_dyn_msg~msgv3.
+        ls_message-msgv4 = le_cndn->if_t100_dyn_msg~msgv4.
+
+        DATA(lv_root_key) = /bopf/cl_frw_factory=>get_new_key( ).
+        lv_root_key = <ls_parameters>-conditionrecorduuid.
+        eo_message->add_message(
+          EXPORTING
+            is_msg       = ls_message
+            iv_node      = ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_node-zi_slspricingconditionrecordtp
+            iv_key       = lv_root_key
+            iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition ).
+
+        ev_static_action_failed = abap_true.
+        APPEND VALUE #( key = lv_root_key ) TO et_failed_key.
+
+        EXIT.
+    ENDTRY.
+
+    IF NOT lt_uuid IS INITIAL.
+      SELECT *
+        FROM i_draftadministrativedata WITH PRIVILEGED ACCESS
+         FOR ALL ENTRIES IN @lt_uuid
+       WHERE draftentitytype = @lv_draft_entity_record "'I_SLSPRICINGCONDITIONRECORDTP'
+         AND draftuuid = @lt_uuid-table_line
+        INTO TABLE @DATA(lt_draft_admin).
+    ENDIF.
+
+    SORT lt_keys BY conditionrecord conditionvalidityenddate.
+    SORT lt_record_text BY conditionrecord language.
+    LOOP AT lt_condition_validity ASSIGNING FIELD-SYMBOL(<fs_validity>).
+      CLEAR:lv_wbs_ext,lv_workpackage_ext.
+
+      DATA(lv_tabix) = sy-tabix.
+      IF <fs_validity>-conditionvalidityenddate IS NOT INITIAL.
+        READ TABLE lt_keys WITH KEY conditionrecord           = <fs_validity>-conditionrecord
+                                    conditionvalidityenddate  = <fs_validity>-conditionvalidityenddate
+                                    BINARY SEARCH TRANSPORTING NO FIELDS.
+      ELSE."condition table without validity period
+        READ TABLE lt_keys WITH KEY conditionrecord           = <fs_validity>-conditionrecord
+                                    BINARY SEARCH TRANSPORTING NO FIELDS.
+      ENDIF.
+      IF sy-subrc <> 0.
+        DELETE lt_condition_validity INDEX lv_tabix.
+        CONTINUE.
+      ENDIF.
+
+      READ TABLE lt_condition_record ASSIGNING FIELD-SYMBOL(<fs_record>)
+       WITH KEY conditionrecord = <fs_validity>-conditionrecord.
+      CHECK <fs_record> IS ASSIGNED.
+      CLEAR: ls_modification,lv_root_key,ls_set,ls_cndn_cds.
+
+      lv_root_key = /bopf/cl_frw_factory=>get_new_key( ).
+      lv_root_key = |{ <fs_validity>-conditionrecord }| & |{ <fs_record>-conditionsequentialnumber }| & |{ <fs_validity>-conditionvalidityenddate }| .
+
+      MOVE-CORRESPONDING <fs_validity> TO ls_cndn_cds.
+      MOVE-CORRESPONDING <fs_record> TO ls_cndn_cds.
+      ls_cndn_cds-conditionvalidityenddate = <fs_validity>-conditionvalidityenddate.
+      ls_cndn_cds-conditionvaliditystartdate = <fs_validity>-conditionvaliditystartdate.
+
+      ls_cndn_cds-key = lv_root_key.
+      ls_cndn_cds-root_key = lv_root_key.
+      ls_cndn_cds-hasactiveentity = abap_true.
+      ls_cndn_cds-isactiveentity = abap_false.
+
+      READ TABLE lt_record_text INTO DATA(ls_record_text) WITH KEY conditionrecord = <fs_validity>-conditionrecord
+                                                                   language = sy-langu
+                                                                   BINARY SEARCH.
+      IF sy-subrc = 0.
+        ls_cndn_cds-conditiontext = ls_record_text-conditiontext.
+      ENDIF.
+
+      MOVE-CORRESPONDING ls_cndn_cds TO ls_set.
+      GET REFERENCE OF ls_set INTO DATA(lr_set).
+      "calculate ETag using internal format, consider to keep the same as Save
+      ls_cndn_cds-etag = calculate_condition_etag( lr_set ).
+
+      "Convert to external to save to draft table
+      CREATE DATA lr_validity TYPE if_slsprcg_cndnrecd_api_types=>ty_condition_validity_s.
+      ASSIGN lr_validity->* TO FIELD-SYMBOL(<fs_val>).
+      <fs_val> = <fs_validity>.
+      TRY.
+          mo_prcg_util->convert_value_to_output(
+            EXPORTING
+              iv_tabname = 'CSLSPRCGCNDNRTP'   " Table Name
+            CHANGING
+              cr_data    = lr_validity
+          ).
+        CATCH cx_prcg_cndnrecord_exception INTO DATA(lx_ex). " Exception for Condition Public API
+          RETURN.
+      ENDTRY.
+
+      ASSIGN COMPONENT ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_node_attribute-zi_slspricingconditionrecordtp-wbselementinternalid
+          OF STRUCTURE <fs_validity> TO FIELD-SYMBOL(<fs_wbs>).
+      IF <fs_wbs> IS ASSIGNED AND NOT <fs_wbs> IS INITIAL.
+        CALL FUNCTION 'CONVERSION_EXIT_ABPSP_OUTPUT'
+          EXPORTING
+            input  = <fs_wbs>
+          IMPORTING
+            output = lv_wbs_ext.
+      ENDIF.
+
+      ASSIGN COMPONENT ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_node_attribute-zi_slspricingconditionrecordtp-workpackage
+          OF STRUCTURE <fs_validity> TO FIELD-SYMBOL(<fs_workpackage>).
+      IF <fs_workpackage> IS ASSIGNED AND NOT <fs_workpackage> IS INITIAL.
+        CALL FUNCTION 'CONVERSION_EXIT_ABPSP_OUTPUT'
+          EXPORTING
+            input  = <fs_workpackage>
+          IMPORTING
+            output = lv_workpackage_ext.
+      ENDIF.
+      MOVE-CORRESPONDING <fs_validity> TO ls_cndn_cds.
+      ls_cndn_cds-wbselementinternalid = lv_wbs_ext.
+      ls_cndn_cds-workpackage = lv_workpackage_ext.
+
+      check_authority(
+        IMPORTING
+          es_msg      = ls_mess                 " Structure of message variables
+        CHANGING
+          cs_recordtp = ls_cndn_cds
+      ).
+
+      APPEND ls_cndn_cds TO lt_cndn_cds.
+
+      " Add check for contract condition type
+      IF ls_cndn_cds-conditiontable IS NOT INITIAL.
+        TEST-SEAM contract_check.
+          CALL METHOD cl_wlf_kotabnr_check=>check
+            EXPORTING
+              i_kotabnr = ls_cndn_cds-conditiontable " Condition Table
+              i_kappl   = if_ct_constants=>c_application_sales   " Application
+              i_kvewe   = if_ct_constants=>c_usage_pricing   " Usage of the Condition Table
+              i_aktyp   = ' '   " Activity Category in the Transaction
+            EXCEPTIONS
+              error     = 4.
+        END-TEST-SEAM.
+
+        IF sy-subrc <> 0.
+          CLEAR: ls_message.
+          MESSAGE i682(ws) WITH ls_cndn_cds-conditiontable INTO DATA(lv_message).
+          ls_message-msgty = 'I'. " 'E'
+          ls_message-msgid = 'WS'. " 'WS'
+          ls_message-msgno = 682. " 682
+          ls_message-msgv1 = ls_cndn_cds-conditiontable. " ls_cndn_cds-conditiontable.
+
+          APPEND VALUE #( key = ls_cndn_cds-key ) TO et_failed_key.
+          APPEND ls_message TO lt_mess.
+          CONTINUE.
+        ENDIF.
+      ENDIF.
+
+      IF ls_cndn_cds-conditionrecordiseditable = abap_false. "no edit authorization
+        APPEND VALUE #( key = lv_root_key ) TO et_failed_key.
+        MESSAGE e001(00) WITH 'No Authorization,' ls_cndn_cds-conditionrecord
+                         INTO lv_mess. "do not change, Fiori will replace it with new message
+        CLEAR:ls_mess.
+        MOVE-CORRESPONDING sy TO ls_mess.
+        APPEND ls_mess TO lt_mess.
+      ELSE.
+        READ TABLE lt_draft_admin INTO DATA(ls_draft_admin) WITH KEY draftuuid = lv_root_key.
+        IF sy-subrc <> 0.
+**1. new draft for active with edit authority
+** Check records releate workflow
+          CLEAR ls_result.
+          TEST-SEAM feature_toggle_fine.
+            IF cl_feature_toggle=>is_defined( lc_feature_toggle_id )
+              AND cl_feature_toggle=>is_active( lc_feature_toggle_id ).
+              DATA(lv_ft_fine) = abap_true.
+            ENDIF.
+          END-TEST-SEAM.
+          IF lv_ft_fine EQ abap_true.
+            CLEAR ls_result.
+            lv_sibfboriid = ls_cndn_cds-conditionrecord.
+            mo_req_util->simulate(
+              EXPORTING
+                iv_kappl      = 'V'
+                iv_sibfboriid = lv_sibfboriid
+              IMPORTING
+                es_sim_result = ls_result
+                et_sim_result = DATA(lt_result)
+            ).
+            IF ls_result-selected = abap_true.
+              IF ( ls_cndn_cds-conditionreleasestatus EQ 'A' ) OR ( ls_cndn_cds-conditionreleasestatus EQ 'B' ) OR ( ls_cndn_cds-conditionreleasestatus EQ 'C' ).
+                CLEAR: ls_modification.
+                constructor_draft(
+                  EXPORTING
+                    is_cndn_cds          = ls_cndn_cds
+                  IMPORTING
+                    es_active_draft_link = ls_active_draft_link
+                    es_modification      = ls_modification
+                ).
+                APPEND ls_modification TO lt_modification.
+                INSERT ls_active_draft_link INTO TABLE lt_active_draft_link.
+              ELSE.
+                lv_workflow_index = lv_workflow_index + 1.
+                IF lv_workflow_index EQ 1.
+                  MESSAGE i115(prcg_cndnrecord_api) INTO lv_message.
+                  CLEAR:ls_mess.
+                  MOVE-CORRESPONDING sy TO ls_mess.
+                  APPEND ls_mess TO lt_mess.
+                ENDIF.
+              ENDIF.
+            ELSE.
+              CLEAR: ls_modification.
+              constructor_draft(
+                EXPORTING
+                  is_cndn_cds          = ls_cndn_cds
+                IMPORTING
+                  es_active_draft_link = ls_active_draft_link
+                  es_modification      = ls_modification
+              ).
+              APPEND ls_modification TO lt_modification.
+              INSERT ls_active_draft_link INTO TABLE lt_active_draft_link.
+            ENDIF.
+          ELSE.
+            CLEAR: ls_modification.
+            constructor_draft(
+              EXPORTING
+                is_cndn_cds          = ls_cndn_cds
+              IMPORTING
+                es_active_draft_link = ls_active_draft_link
+                es_modification      = ls_modification
+            ).
+            APPEND ls_modification TO lt_modification.
+            INSERT ls_active_draft_link INTO TABLE lt_active_draft_link.
+          ENDIF.
+
+        ELSEIF sy-subrc = 0 AND ls_draft_admin-inprocessbyuser = space AND ls_draft_admin-lastchangedbyuser <> sy-uname
+          AND <ls_parameters>-preservechanges = abap_false.
+**2. draft exists, but not in process by other users, then descard the exist one (not preserve changes)
+
+          APPEND VALUE #( key = lv_root_key ) TO lt_key_delete.
+
+        ELSEIF sy-subrc = 0 AND ls_draft_admin-inprocessbyuser = space AND ls_draft_admin-lastchangedbyuser <> sy-uname
+          AND <ls_parameters>-preservechanges = abap_true.
+**3. draft exist, and is not processing by other user, and not discard draft
+
+          ev_static_action_failed = abap_true.
+          APPEND VALUE #( key = lv_root_key ) TO et_failed_key.
+
+          lv_char20 = lv_root_key.
+          MESSAGE e001(00) WITH 'Take Over,' lv_char20 INTO lv_mess. "do not change, Fiori will replace it with new message
+          CLEAR ls_mess.
+          MOVE-CORRESPONDING sy TO ls_mess.
+          APPEND ls_mess TO lt_mess.
+        ELSEIF sy-subrc = 0 AND ls_draft_admin-inprocessbyuser <> space AND ls_draft_admin-inprocessbyuser <> sy-uname.
+**4. draft exist, but is processing by other user (locked)
+
+          ev_static_action_failed = abap_true.
+          APPEND VALUE #( key = lv_root_key ) TO et_failed_key.
+
+          MESSAGE e076(prcg_cndnrecord_api) WITH <fs_validity>-conditionrecord ls_draft_admin-inprocessbyuser INTO lv_mess.
+          CLEAR ls_mess.
+          MOVE-CORRESPONDING sy TO ls_mess.
+          APPEND ls_mess TO lt_mess.
+        ENDIF.
+      ENDIF.
+
+      UNASSIGN: <fs_val>,<fs_wbs>,<fs_workpackage>.
+    ENDLOOP.
+    DELETE ADJACENT DUPLICATES FROM lt_mess.
+    CLEAR ls_mess.
+    LOOP AT lt_mess INTO ls_mess.
+      eo_message->add_message(
+        EXPORTING
+          is_msg       = ls_mess       " Message that is to be added to the message object
+          iv_node      = ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_node-zi_slspricingconditionrecordtp      " Node to be used in the origin location
+          iv_lifetime  = /bobf/cm_frw=>co_lifetime_transition  " Lifetime of the message
+      ).
+    ENDLOOP.
+
+
+    GET REFERENCE OF lt_cndn_cds INTO lr_data.
+
+**1. new draft for active with edit authority
+    IF NOT lt_modification IS INITIAL.
+      TRY.
+          mo_configuration = /bobf/cl_frw_factory=>get_configuration( iv_bo_key = ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_bo_key ).
+          DATA(mo_lock_manager) = /bobf/cl_lib_durable_lock_mngr=>get_instance( mo_configuration ).
+        CATCH /bobf/cx_frw INTO DATA(lx_bopf). " BOPF Exception Class
+      ENDTRY.
+      TEST-SEAM modify.
+        CALL METHOD mo_service_manager->modify
+          EXPORTING
+            it_modification = lt_modification
+          IMPORTING
+            eo_change       = lo_change
+            eo_message      = lo_message.
+      END-TEST-SEAM.
+**Refer class /BOBF/CL_LIB_A_EDIT and /BOBF/CL_LIB_V_NEW_DURA_LOCK
+** Create enqueue context for lock check SDRAFT_ADMIN-ENQUEUE_CONTEXT
+      LOOP AT lt_modification INTO ls_modification.
+        lv_tabix = sy-tabix.
+        ls_draft_admin_key = VALUE sdraft_admin_key( draft_entity = mo_configuration->ms_obj-bo_name
+                                                     draft_key  = ls_modification-key ).
+        TRY.
+            TEST-SEAM create_context.
+              DATA(lv_success) = mo_lock_manager->create_enqueue_context_for_new(
+                                   EXPORTING
+                                     is_draft_admin_key    = ls_draft_admin_key
+                                   IMPORTING
+                                     ev_enqueue_context_id = lv_enqueue_context_id
+                                 ).
+            END-TEST-SEAM.
+          CATCH /bobf/cx_frw INTO lx_bopf. " BOPF Exception Class
+        ENDTRY.
+        IF lv_success = abap_false.
+          " error handling...
+          ev_static_action_failed = abap_true.
+          APPEND VALUE #( key = lv_root_key ) TO et_failed_key.
+          eo_message->add_cm( NEW /bobf/cm_lib(
+                                    textid             = /bobf/cm_lib=>lock_system_failure
+                                    severity           = /bobf/cm_lib=>co_severity_error
+                                    symptom            = /bobf/if_frw_message_symptoms=>co_foreign_lock
+                                    lifetime           = /bobf/cm_lib=>co_lifetime_transition
+                                    ms_origin_location = VALUE #( bo_key   = is_ctx-bo_key
+                                                                  node_key = is_ctx-node_key
+                                                                  key      = lv_root_key ) ) ).
+        ENDIF.
+      ENDLOOP.
+
+      "--------------------------------------------------------------------------------------
+      " register etag for writing to admin table (writing happens during SAVE in the admin determination)
+      " --------------------------------------------------------------------------------------
+      TEST-SEAM draft_admin_register_mass.
+        cl_draft_admin_access=>register_etags_for_keys( CORRESPONDING #( lt_active_draft_link MAPPING draft_entity         = draft_admin_data_key-draft_entity
+                                                                                                      draft_key            = draft_admin_data_key-draft_key
+                                                                                                      active_document_etag = active_etag ) ).
+      END-TEST-SEAM.
+    ENDIF.
+
+**2. draft exists, but not in process by other users, then descard the exist one (not preserve changes)
+    IF NOT lt_key_delete IS INITIAL.
+      TEST-SEAM delete_draft.
+        io_modify->delete(
+          EXPORTING
+            iv_node = ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_node-zi_slspricingconditionrecordtp                 " Node to Delete
+            it_key  = lt_key_delete
+        ).
+      END-TEST-SEAM.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD calculate_condition_etag.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    DATA:lv_xstring TYPE xstring.
+    DATA:lv_string TYPE string.
+    DATA:lv_field TYPE string.
+
+    ASSIGN ir_entity->* TO FIELD-SYMBOL(<fs_entity>).
+    IF <fs_entity> IS ASSIGNED.
+      DO.
+        ASSIGN COMPONENT sy-index OF STRUCTURE <fs_entity> TO FIELD-SYMBOL(<fs_field>).
+        IF sy-subrc = 0 AND <fs_field> IS ASSIGNED.
+          lv_field = <fs_field>.
+          CONCATENATE lv_string lv_field INTO lv_string.
+        ELSE.
+          EXIT.
+        ENDIF.
+      ENDDO.
+      EXPORT id = lv_string TO DATA BUFFER lv_xstring.
+
+      TRY.
+          TEST-SEAM calculate.
+            cl_abap_message_digest=>calculate_hash_for_raw(
+              EXPORTING
+                if_data          = lv_xstring
+              IMPORTING
+                ef_hashstring    = DATA(lv_string1)
+            ).
+          END-TEST-SEAM.
+        CATCH cx_abap_message_digest. " Exception Class for Message Digest
+          RETURN.
+      ENDTRY.
+      rv_etag = lv_string1.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD check_authority.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    DATA:ls_record_int TYPE if_cnd_maint_ltd_types=>ty_cond_record_usage_a_s,
+         ls_komg       TYPE komg.
+
+    CLEAR: es_msg.
+
+    cs_recordtp-conditionrecordiseditable = abap_true.
+
+    IF cs_recordtp-conditionrecord+0(2) <> '$$'.
+      mo_dep->get_wlf_mp_fields(
+*      EXPORTING
+*        iv_bor_obj_spec  = 'BUS30110'       " Object Type
+*        iv_map_data_cat  = 'B'              " Mapping Data Category
+       IMPORTING
+         et_wlf_mp_fields = DATA(lt_map) " Mapping external to internal fields
+     ).
+
+      LOOP AT lt_map INTO DATA(ls_map).
+        ASSIGN COMPONENT ls_map-ext_fieldname OF STRUCTURE cs_recordtp TO FIELD-SYMBOL(<fs_ext_value>).
+        IF <fs_ext_value> IS ASSIGNED AND NOT <fs_ext_value> IS INITIAL.
+          ASSIGN COMPONENT ls_map-int_fieldname OF STRUCTURE ls_record_int TO FIELD-SYMBOL(<fs_record_value>).
+          IF <fs_record_value> IS ASSIGNED.
+            <fs_record_value> = <fs_ext_value>.
+          ENDIF.
+          ASSIGN COMPONENT ls_map-int_fieldname OF STRUCTURE ls_komg TO FIELD-SYMBOL(<fs_komg_value>).
+          IF <fs_komg_value> IS ASSIGNED.
+            <fs_komg_value> = <fs_ext_value>.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      " 1. Authorization check on each record
+      ls_record_int-tabix = 1.
+      TRY.
+          mo_cond_checks->check_authority(
+            EXPORTING
+              is_cond_record = ls_record_int
+              iv_aktyp       = if_cnd_maint_ltd_check=>c_aktyp_change
+              iv_tabix       = ls_record_int-tabix
+              is_komg        = ls_komg
+              ).
+        CATCH cx_cnd_maint_ltd_exception INTO DATA(lr_exc).
+          " The user has no authority to change the condition record
+          es_msg-msgid = lr_exc->if_t100_message~t100key-msgid.
+          es_msg-msgty = lr_exc->if_t100_dyn_msg~msgty.
+          es_msg-msgno = lr_exc->if_t100_message~t100key-msgno.
+          es_msg-msgv1 = lr_exc->if_t100_dyn_msg~msgv1.
+          es_msg-msgv2 = lr_exc->if_t100_dyn_msg~msgv2.
+          es_msg-msgv3 = lr_exc->if_t100_dyn_msg~msgv3.
+          es_msg-msgv4 = lr_exc->if_t100_dyn_msg~msgv4.
+          cs_recordtp-conditionrecordiseditable = abap_false.
+      ENDTRY.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    super->constructor( ).
+    mo_sls_api = NEW zcl_slsprcg_cndnrecord_api( ).
+    mo_dep = cl_cnd_maint_ltd_dep_mgr=>get_instance( ).
+    mo_cond_checks = cl_cnd_maint_ltd_check_mgr=>get_instance( ).
+    mo_service_manager = /bobf/cl_tra_serv_mgr_factory=>get_service_manager( ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_bo_key ).
+    mo_prcg_util = cl_cndnrecord_public_utility=>get_instance( ).
+    mo_req_util = cl_cndnrecord_request_utility=>get_instance( ).
+  ENDMETHOD.
+
+
+  METHOD constructor_draft.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    DATA: lv_draft_entity_record TYPE sdraft_admin-draft_entity VALUE 'ZI_SLSPRICINGCONDITIONRECORDTP'.
+
+    FIELD-SYMBOLS:
+        <fs_cds>        TYPE any.
+
+
+    es_modification-node = ZIF_I_SLSPRICINGCONDITIONREC_C=>sc_node-zi_slspricingconditionrecordtp.
+    es_modification-key = is_cndn_cds-root_key.
+    es_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+    CREATE DATA es_modification-data TYPE ZSISLSPRICINGCONDITIONRECORDT.
+    ASSIGN es_modification-data->* TO <fs_cds>.
+    <fs_cds> = is_cndn_cds.
+    UNASSIGN <fs_cds>.
+
+    es_active_draft_link-active_key                        = is_cndn_cds-key.
+    es_active_draft_link-active_etag                       = is_cndn_cds-etag.
+    es_active_draft_link-draft_admin_data_key-draft_entity = lv_draft_entity_record.
+    es_active_draft_link-draft_admin_data_key-draft_key    = is_cndn_cds-key.
+
+
+
+  ENDMETHOD.
+ENDCLASS.

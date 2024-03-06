@@ -1,0 +1,417 @@
+class ZCL_FI_CASH_DISP_360T definition
+  public
+  create public .
+
+public section.
+
+  class-methods GET_INSTANCE
+    returning
+      value(RO_INSTANCE) type ref to ZCL_FI_CASH_DISP_360T .
+  methods EXECUTE_360T_PUSH
+    importing
+      !IT_LINES type ZFI_TT_CASH_DISP_AIF_RAW
+    exporting
+      !ET_RETURN type BAPIRET2_TAB .
+  methods READ_RESPONSE
+    importing
+      !IV_XML_RESPONSE type STRING
+    exporting
+      !ET_RETURN type BAPIRET2_TAB .
+  methods SEND_TO_AIF
+    importing
+      !IS_AIF_LINE type ZFI_S_CASH_DISP_AIF_HEADER
+    raising
+      /AIF/CX_INF_DET_BASE
+      /AIF/CX_ENABLER_BASE
+      /AIF/CX_AIF_ENGINE_NOT_FOUND
+      /AIF/CX_ERROR_HANDLING_GENERAL
+      /AIF/CX_AIF_ENGINE_BASE .
+  PROTECTED SECTION.
+private section.
+
+  class-data GO_INSTANCE type ref to ZCL_FI_CASH_DISP_360T .
+  data MT_HM_MAP type ZPE_TT_HM_TABLE .
+
+  methods PREPARE_XML
+    importing
+      !IT_LINES type ZFI_TT_CASH_DISP_AIF_RAW
+    exporting
+      !EV_XML type STRING .
+  methods SEND_XML
+    importing
+      !IV_XML type STRING
+    exporting
+      !ET_RETURN type BAPIRET2_TAB .
+  methods READ_HM
+    exporting
+      !ET_RETURN type BAPIRET2_TAB .
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_CASH_DISP_360T IMPLEMENTATION.
+
+
+  METHOD execute_360t_push.
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* LIKHAALI     | 14.02.2023 | FB_12952_FI - BE - Dispo report for      *
+*              |            | automatic trade creation                 *
+*              |            | DS4K927469                               *
+*----------------------------------------------------------------------*
+* LIKHAALI     | 27.04.2023 | FB_20341_FI_FDES - Defect solving        *
+*              |            | DS4K950157                               *
+*----------------------------------------------------------------------*
+
+    IF it_lines IS INITIAL.
+      RETURN.
+    ENDIF.
+
+*   Read Customizing
+    read_hm( IMPORTING et_return = et_return ).
+
+    IF et_return IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+*   Prepare XML file
+    prepare_xml( EXPORTING it_lines = it_lines
+                 IMPORTING ev_xml   = DATA(lv_xml) ).
+
+*   Send XML file
+    send_xml( EXPORTING iv_xml    = lv_xml
+              IMPORTING et_return = et_return ).
+
+*   Delete old lines from buffer table
+    zcl_fi_cash_disp_buffer_maint=>delete_old_lines( ).
+
+  ENDMETHOD.
+
+
+  METHOD get_instance.
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* LIKHAALI     | 14.02.2023 | FB_12952_FI - BE - Dispo report for      *
+*              |            | automatic trade creation                 *
+*              |            | DS4K927469                               *
+*----------------------------------------------------------------------*
+
+    IF go_instance IS NOT BOUND.
+      go_instance = NEW zcl_fi_cash_disp_360t( ).
+    ENDIF.
+
+    ro_instance = go_instance.
+
+  ENDMETHOD.
+
+
+  METHOD prepare_xml.
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* LIKHAALI     | 14.02.2023 | FB_12952_FI - BE - Dispo report for      *
+*              |            | automatic trade creation                 *
+*              |            | DS4K927469                               *
+*----------------------------------------------------------------------*
+* LIKHAALI     | 27.04.2023 | FB_20341_FI_FDES - Defect solving        *
+*              |            | DS4K950157                               *
+*----------------------------------------------------------------------*
+* SUFIYKON     | 08.01.2024 | FB_25678_FI_CR-Daily Liquidity           *
+*              |            | and Cash Management Disposion            *
+*              |            | DS4K965948                               *
+*----------------------------------------------------------------------*
+
+    CONSTANTS: lc_erv        TYPE char3  VALUE 'ERV',
+               lc_false      TYPE char5  VALUE 'false',
+               lc_individual TYPE char16 VALUE 'ADIDAS.EmsUpload',
+               lc_action_b   TYPE char5  VALUE 'BUYER',
+               lc_action_s   TYPE char6  VALUE 'SELLER',
+               lc_strategy   TYPE char8  VALUE 'Strategy',
+               lc_category   TYPE char8  VALUE 'Category',
+               lc_cat_value  TYPE char20 VALUE 'LIQUIDITY SWAPS (AG)',
+               lc_id         TYPE char2  VALUE 'ID'.
+
+    DATA: ls_sourse_to_xml TYPE zfi_s_cash_disp_t360_root.
+
+    READ TABLE mt_hm_map ASSIGNING FIELD-SYMBOL(<ls_hm>) INDEX 1.
+    IF sy-subrc = 0.
+      DATA(lv_legal) = <ls_hm>-field3. " Legal Entity from HM
+    ENDIF.
+
+    LOOP AT it_lines ASSIGNING FIELD-SYMBOL(<ls_lines>).
+      APPEND INITIAL LINE TO ls_sourse_to_xml-tradeintention ASSIGNING FIELD-SYMBOL(<ls_tradeintention>).
+
+*     EXTERNALID
+      GET TIME STAMP FIELD DATA(lv_ts).
+      <ls_tradeintention>-externalid =  <ls_lines>-cf_legal && <ls_lines>-cf_currency && <ls_lines>-cf_currency2 && lc_erv && <ls_lines>-cf_effective_date && <ls_lines>-cf_maturity_date &&
+                                     lv_ts && sy-uname.
+*     GROUPID
+
+*     EDITABLE
+      <ls_tradeintention>-editable = lc_false.
+
+*     INDIVIDUAL
+      <ls_tradeintention>-trade-individual = lc_individual.
+
+*     LEGALENTITY
+      <ls_tradeintention>-trade-legalentity = lv_legal.
+
+*---------------------NearLeg
+
+*     ACTIONTYPE
+      IF <ls_lines>-round_down <= 0.
+        <ls_tradeintention>-trade-product-fxswap-fxnearleg-actiontype = lc_action_s.
+      ELSE.
+        <ls_tradeintention>-trade-product-fxswap-fxnearleg-actiontype = lc_action_b.
+      ENDIF.
+
+*     CURRENCY1
+      <ls_tradeintention>-trade-product-fxswap-fxnearleg-currency1 = <ls_lines>-cf_currency.
+
+*     CURRENCY2
+      <ls_tradeintention>-trade-product-fxswap-fxnearleg-currency2 = <ls_lines>-cf_currency2.
+
+*     OUTRIGHTVALUEDATE
+      <ls_tradeintention>-trade-product-fxswap-fxnearleg-outrightvaluedate = <ls_lines>-cf_effective_date.
+
+*     NOTIONALCURRENCY
+      <ls_tradeintention>-trade-product-fxswap-fxnearleg-notionalcurrency = <ls_lines>-cf_notional_currency.
+
+*     Buffer
+      <ls_tradeintention>-trade-product-fxswap-fxnearleg-notionalamount = abs( <ls_lines>-round_down ).
+
+*---------------------FarLeg
+
+*     ACTIONTYPE (vice versa from NearLeg)
+      IF <ls_lines>-round_down <= 0.
+        <ls_tradeintention>-trade-product-fxswap-fxfarleg-actiontype = lc_action_b.
+      ELSE.
+        <ls_tradeintention>-trade-product-fxswap-fxfarleg-actiontype = lc_action_s.
+      ENDIF.
+
+*     CURRENCY1
+      <ls_tradeintention>-trade-product-fxswap-fxfarleg-currency1 = <ls_lines>-cf_currency.
+
+*     CURRENCY2
+      <ls_tradeintention>-trade-product-fxswap-fxfarleg-currency2 = <ls_lines>-cf_currency2.
+
+*     OUTRIGHTVALUEDATE
+      <ls_tradeintention>-trade-product-fxswap-fxfarleg-outrightvaluedate = <ls_lines>-cf_maturity_date.
+
+*     NOTIONALCURRENCY
+      <ls_tradeintention>-trade-product-fxswap-fxfarleg-notionalcurrency = <ls_lines>-cf_notional_currency.
+
+*     NOTIONALAMOUNT
+      <ls_tradeintention>-trade-product-fxswap-fxfarleg-notionalamount = abs( <ls_lines>-round_down ).
+
+*     CUSTOM FIELDS
+      APPEND INITIAL LINE TO <ls_tradeintention>-trade-customfields ASSIGNING FIELD-SYMBOL(<ls_customfields>).
+      APPEND INITIAL LINE TO <ls_customfields>-customfield ASSIGNING FIELD-SYMBOL(<ls_customfield>).
+      <ls_customfield>-name  = lc_strategy.
+      <ls_customfield>-value = lc_erv.
+      APPEND INITIAL LINE TO <ls_tradeintention>-trade-customfields ASSIGNING <ls_customfields>.
+      APPEND INITIAL LINE TO <ls_customfields>-customfield ASSIGNING <ls_customfield>.
+      <ls_customfield>-name  = lc_category.
+      <ls_customfield>-value = lc_cat_value.
+      APPEND INITIAL LINE TO <ls_tradeintention>-trade-customfields ASSIGNING <ls_customfields>.
+      APPEND INITIAL LINE TO <ls_customfields>-customfield ASSIGNING <ls_customfield>.
+      <ls_customfield>-name  = lc_id.
+      <ls_customfield>-value = <ls_tradeintention>-externalid.
+
+    ENDLOOP.
+
+*   Call Transformation
+    CALL TRANSFORMATION zfi_order_360t
+          SOURCE  tradeintentionsubmit = ls_sourse_to_xml
+          RESULT XML ev_xml.
+
+*   Do not remove! XML transformation adds special symbol, 360T can't accept. Need to delete it
+    ev_xml = ev_xml+1.
+
+  ENDMETHOD.
+
+
+  METHOD send_xml.
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* LIKHAALI     | 14.02.2023 | FB_12952_FI - BE - Dispo report for      *
+*              |            | automatic trade creation                 *
+*              |            | DS4K927469                               *
+*----------------------------------------------------------------------*
+
+    CONSTANTS: lc_parameter TYPE string VALUE 'trade'.
+
+    READ TABLE mt_hm_map ASSIGNING FIELD-SYMBOL(<ls_hm>) INDEX 1.
+    IF sy-subrc = 0.
+      DATA(lv_destination) = <ls_hm>-field2. " Legal Entity from HM
+    ENDIF.
+
+*   Create HTTP client
+    cl_http_client=>create_by_destination( EXPORTING destination = lv_destination
+                                           IMPORTING client      = DATA(lif_http_client)
+                                          ).
+
+    lif_http_client->request->set_form_field( name  = lc_parameter
+                                              value = iv_xml ).
+
+    lif_http_client->request->set_method( if_http_request=>co_request_method_post ).
+
+*   Send request
+    lif_http_client->send( ).
+
+*   Catch result
+    lif_http_client->receive( ).
+
+    lif_http_client->response->get_status( IMPORTING code = DATA(lv_recive) ) ##NEEDED.
+
+*   Catch data
+    DATA(lv_xml_response) = lif_http_client->response->get_cdata( ).
+
+*   Save masages from XML responce to return table
+    IF lv_xml_response IS NOT INITIAL.
+      read_response( EXPORTING iv_xml_response = lv_xml_response
+                     IMPORTING et_return       = et_return
+                   ).
+    ENDIF.
+
+*   Close connection
+    lif_http_client->close( ).
+
+  ENDMETHOD.
+
+
+  METHOD send_to_aif.
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* LIKHAALI     | 14.02.2023 | FB_12952_FI - BE - Dispo report for      *
+*              |            | automatic trade creation                 *
+*              |            | DS4K927469                               *
+*----------------------------------------------------------------------*
+    CONSTANTS: lc_custom         TYPE /aif/pers_rtcfgr_ns   VALUE 'ZFI_O',
+               lc_processing_rfc TYPE /aif/pers_rtcfgr_name VALUE 'RFC'.
+
+        /aif/cl_enabler_xml=>transfer_to_aif( is_any_structure = is_aif_line
+                                              iv_queue_ns      = lc_custom
+                                              iv_queue_name    = lc_processing_rfc ).
+
+  ENDMETHOD.
+
+
+  METHOD read_hm.
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* LIKHAALI     | 14.02.2023 | FB_12952_FI - BE - Dispo report for      *
+*              |            | automatic trade creation                 *
+*              |            | DS4K927469                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+
+        mt_hm_map = zcl_pe_hm_basic=>get_table( iv_id = '1308' ).
+
+      CATCH zcx_pe_hm.
+        MESSAGE e003(zfi_cash_disp) INTO DATA(lv_dummy)  ##NEEDED.
+        APPEND VALUE #( id = sy-msgid type = sy-msgty number = sy-msgno ) TO et_return.
+        RETURN.
+    ENDTRY.
+
+*   Check if there are settings for current system
+    READ TABLE mt_hm_map TRANSPORTING NO FIELDS WITH KEY field1 = sy-sysid(2).
+    IF sy-subrc <> 0.
+      MESSAGE e004(zfi_cash_disp) WITH sy-sysid INTO lv_dummy ##NEEDED.
+      APPEND VALUE #( id = sy-msgid type = sy-msgty number = sy-msgno ) TO et_return.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD read_response.
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* LIKHAALI     | 14.02.2023 | FB_12952_FI - BE - Dispo report for      *
+*              |            | automatic trade creation                 *
+*              |            | DS4K927469                               *
+*----------------------------------------------------------------------*
+* LIKHAALI     | 18.04.2023 | FB_20341_FI_FDES - Defect solving        *
+*              |            | DS4K950157                               *
+*----------------------------------------------------------------------*
+
+    CONSTANTS: lc_externalid TYPE char10     VALUE 'externalId',
+               lc_status     TYPE char6      VALUE 'status',
+               lc_message    TYPE char7      VALUE 'message',
+               lc_nack       TYPE char4      VALUE 'NACK',
+               lc_ack        TYPE char3      VALUE 'ACK',
+               lc_status_e   TYPE syst_msgty VALUE 'E',
+               lc_status_s   TYPE syst_msgty VALUE 'S'.
+
+
+    DATA: lv_responce_xml TYPE xstring,
+          lt_xml_data     TYPE typ_smum_xmltb,
+          lt_return       TYPE bapiret2_tab,
+
+          lv_externalid   TYPE char255,
+          lv_status       TYPE syst_msgty.
+
+*   Convert to xstring
+    CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+      EXPORTING
+        text   = iv_xml_response
+      IMPORTING
+        buffer = lv_responce_xml.
+
+*   XML to Table
+    CALL FUNCTION 'SMUM_XML_PARSE'
+      EXPORTING
+        xml_input = lv_responce_xml
+      TABLES
+        xml_table = lt_xml_data
+        return    = lt_return.
+
+    LOOP AT lt_xml_data ASSIGNING FIELD-SYMBOL(<ls_xml>).
+      CASE <ls_xml>-cname.
+        WHEN lc_externalid.
+          lv_externalid = <ls_xml>-cvalue.
+        WHEN lc_status.
+          IF <ls_xml>-cvalue = lc_nack.
+            lv_status = lc_status_e.
+          ELSEIF <ls_xml>-cvalue = lc_ack.
+            lv_status = lc_status_s.
+            MESSAGE i002(zfi_cash_disp) WITH lv_externalid <ls_xml>-cvalue(50) <ls_xml>-cvalue+50(50) <ls_xml>-cvalue+100(50) INTO DATA(lv_message) ##NEEDED. " In case of succ message
+            APPEND INITIAL LINE TO et_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+            <ls_return>-id         = sy-msgid.
+            <ls_return>-number     = sy-msgno.
+            <ls_return>-type       = lv_status.
+            <ls_return>-message_v1 = sy-msgv1.
+            <ls_return>-message_v2 = sy-msgv2.
+            <ls_return>-message_v3 = sy-msgv3.
+            <ls_return>-message_v4 = sy-msgv4.
+            CLEAR: lv_status, lv_status.
+          ENDIF.
+        WHEN lc_message.
+          MESSAGE i002(zfi_cash_disp) WITH lv_externalid <ls_xml>-cvalue(50) <ls_xml>-cvalue+50(50) <ls_xml>-cvalue+100(50) INTO lv_message ##NEEDED. " In case of Error
+          APPEND INITIAL LINE TO et_return ASSIGNING <ls_return>.
+          <ls_return>-id         = sy-msgid.
+          <ls_return>-number     = sy-msgno.
+          <ls_return>-type       = lv_status.
+          <ls_return>-message_v1 = sy-msgv1.
+          <ls_return>-message_v2 = sy-msgv2.
+          <ls_return>-message_v3 = sy-msgv3.
+          <ls_return>-message_v4 = sy-msgv4.
+      ENDCASE.
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

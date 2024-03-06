@@ -1,0 +1,623 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 17101 Inventory Allowance                *
+*              |            | DS4K940968                               *
+************************************************************************
+* SUFIYKON     | 27.01.2023 | 19688 Inventory Allowance                *
+*              |            | DS4K949108                               *
+************************************************************************
+* SUFIYKON     | 01.11.2023 | 26448 Inventory Allowance                *
+*              |            | DS4K968899                               *
+************************************************************************
+
+CLASS lhc_inventoryallowance
+  DEFINITION
+    INHERITING FROM cl_abap_behavior_handler
+    FINAL.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF gtyp_s_allowance_lines,
+             prctr TYPE prctr,
+             value TYPE zfi_inventory_allow_value,
+           END OF gtyp_s_allowance_lines.
+
+    DATA: mr_matnr                   TYPE if_rap_query_filter=>tt_range_option,
+          mr_bwkey                   TYPE if_rap_query_filter=>tt_range_option,
+          mt_accountgl               TYPE bapiacgl09_tab,
+          mt_currencyamount          TYPE bapiaccr09_tab,
+          mt_belnr_cancellation      TYPE zfi_tt_inv_allow_belnr_canc,
+          mt_allowance_lines         TYPE TABLE OF gtyp_s_allowance_lines,
+          mt_hkont_hm                TYPE TABLE OF hkont,
+          mt_hkont_assigned          TYPE TABLE OF hkont,
+          mt_calc_grades             TYPE zif_fi_inventory_allowance_con=>gtyp_t_inv_grades,
+
+          ms_documentheader          TYPE bapiache09,
+
+          mv_bukrs                   TYPE bukrs,
+          mv_lfgja                   TYPE lfgja,
+          mv_lfmon                   TYPE lfmon,
+          mv_allowance_value         TYPE zfi_inventory_allow_value,
+          mv_waers                   TYPE waers,
+          mv_curr_season             TYPE fsh_saiso,
+          mv_bktxt_prefix            TYPE bktxt,
+          mv_bktxt_static            TYPE bktxt,
+          mv_blart                   TYPE blart,
+          mv_records_to_be_processed TYPE i,
+
+          mo_utl                     TYPE REF TO zcl_fi_inventory_allowance_utl.
+
+    METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
+      IMPORTING keys REQUEST requested_authorizations FOR inventoryallowance RESULT result ##NEEDED.
+
+    METHODS lock FOR LOCK
+      IMPORTING keys FOR LOCK inventoryallowance ##NEEDED.
+
+    METHODS read FOR READ
+      IMPORTING
+        keys FOR READ inventoryallowance RESULT result ##NEEDED.
+
+    METHODS do_validations FOR MODIFY
+      IMPORTING
+        keys FOR ACTION inventoryallowance~dovalidationsallow RESULT result.
+
+    METHODS simulate FOR MODIFY
+      IMPORTING
+        keys FOR ACTION inventoryallowance~simulateallow RESULT result.
+
+    METHODS post FOR MODIFY
+      IMPORTING
+        keys FOR ACTION inventoryallowance~postallow.
+
+    METHODS get_bukrs_currency.
+    METHODS calc_curr_season.
+    METHODS calc_allowance.
+    METHODS build_bktxt_prefix.
+    METHODS build_bktxt_static.
+    METHODS get_blart.
+    METHODS build_header.
+    METHODS build_items.
+    METHODS get_belnr_cancellation.
+    METHODS set_utl.
+
+    METHODS get_filters
+      IMPORTING
+        it_filters TYPE if_rap_query_filter=>tt_name_range_pairs.
+
+    METHODS get_hkonts.
+ENDCLASS.
+
+CLASS lsc_inventoryallowance
+  DEFINITION
+    INHERITING FROM cl_abap_behavior_saver
+    FINAL.
+
+  PROTECTED SECTION.
+    METHODS save REDEFINITION.
+ENDCLASS.
+
+CLASS lhc_inventoryallowance IMPLEMENTATION.
+  METHOD get_instance_authorizations.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD read.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD lock.
+    RETURN.
+  ENDMETHOD.
+
+  METHOD do_validations.
+    DATA lv_result_txt TYPE natxt.
+
+    set_utl( ).
+
+    " Will always be populated.
+    DATA(ls_key)     = keys[ 1 ].
+    DATA(lt_filters) = mo_utl->get_filters( ls_key-%param-filters ).
+    DATA(lv_cid)     = ls_key-%cid.
+
+    " Will always be populated; single value only.
+    mv_bukrs = lt_filters[ name = `COMPANYCODE` ]-range[ 1 ]-low.
+    AUTHORITY-CHECK OBJECT 'F_BKPF_BUK' ID 'BUKRS' FIELD mv_bukrs ID 'ACTVT' FIELD '01'.
+
+    IF sy-subrc <> 0.
+      MESSAGE e003(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        %cid            = lv_cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    " Will always be populated; single value only.
+    mv_lfgja = lt_filters[ name = `FISCALYEAR` ]-range[ 1 ]-low.
+    " Will always be populated; single value only.
+    mv_lfmon = lt_filters[ name = `CURRENTPERIOD` ]-range[ 1 ]-low.
+
+    build_bktxt_prefix( ).
+    get_blart( ).
+
+    IF mo_utl->is_belnr_exists(
+      iv_bukrs = mv_bukrs
+      iv_gjahr = mv_lfgja
+      iv_monat = mv_lfmon
+      iv_bktxt = mv_bktxt_prefix
+      iv_blart = mv_blart ).
+
+      MESSAGE w004(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        %cid            = lv_cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_warning
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    INSERT VALUE #(
+      %cid            = lv_cid
+      %param-severity = zif_fi_inventory_allowance_con=>mc_severity_success ) INTO TABLE result.
+  ENDMETHOD.
+
+  METHOD simulate.
+    DATA: lt_return     TYPE bapiret2_t,
+
+          lv_result_txt TYPE natxt.
+
+    set_utl( ).
+
+    " Will always be populated.
+    DATA(ls_key) = keys[ 1 ].
+
+    DATA(lt_filters) = mo_utl->get_filters( ls_key-%param-filters ).
+
+    get_filters( lt_filters ).
+    get_hkonts( ).
+
+    LOOP AT mt_hkont_hm ASSIGNING FIELD-SYMBOL(<lv_hkont_hm>).
+      IF xsdbool( line_exists( mt_hkont_assigned[ table_line = <lv_hkont_hm> ] ) ) = abap_false.
+        MESSAGE e019(zfi_inv_allowance) INTO lv_result_txt WITH <lv_hkont_hm> mv_bukrs.
+        INSERT VALUE #(
+          type       = zif_fi_inventory_allowance_con=>mc_severity_error
+          id         = zif_fi_inventory_allowance_con=>mc_msg_class
+          number     = '19'
+          message_v1 = <lv_hkont_hm>
+          message_v2 = mv_bukrs
+          message    = lv_result_txt ) INTO TABLE lt_return.
+        INSERT VALUE #(
+          %cid            = ls_key-%cid
+          %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+          %param-text     = lv_result_txt ) INTO TABLE result.
+      ENDIF.
+    ENDLOOP.
+
+    IF result IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    get_bukrs_currency( ).
+    calc_curr_season( ).
+    calc_allowance( ).
+
+    IF mv_allowance_value = 0.
+      MESSAGE e006(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        type    = zif_fi_inventory_allowance_con=>mc_severity_error
+        id      = zif_fi_inventory_allowance_con=>mc_msg_class
+        number  = '6'
+        message = lv_result_txt ) INTO TABLE lt_return.
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = zif_fi_inventory_allowance_con=>mc_severity_error
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    build_bktxt_prefix( ).
+    build_bktxt_static( ).
+    get_blart( ).
+    build_header( ).
+    build_items( ).
+    get_belnr_cancellation( ).
+
+    CALL FUNCTION 'ZFI_FM_INVENTORY_ALLOWANCE_SIM' DESTINATION 'NONE'
+      EXPORTING
+        iv_bktxt_static       = mv_bktxt_static
+        is_documentheader     = ms_documentheader ##ENH_OK
+        it_accountgl          = mt_accountgl
+        it_currencyamount     = mt_currencyamount
+        it_belnr_cancellation = mt_belnr_cancellation
+      IMPORTING
+        et_return             = lt_return
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2
+        OTHERS                = 3.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO lv_result_txt.
+      INSERT VALUE #(
+        type       = sy-msgty
+        id         = sy-msgid
+        number     = sy-msgno
+        message_v1 = sy-msgv1
+        message_v2 = sy-msgv2
+        message_v3 = sy-msgv3
+        message_v4 = sy-msgv4
+        message    = lv_result_txt ) INTO TABLE lt_return.
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = sy-msgty
+        %param-text     = lv_result_txt ) INTO TABLE result.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_return ASSIGNING FIELD-SYMBOL(<ls_return>).
+      MESSAGE ID <ls_return>-id TYPE <ls_return>-type NUMBER <ls_return>-number
+      WITH <ls_return>-message_v1 <ls_return>-message_v2 <ls_return>-message_v3 <ls_return>-message_v4
+      INTO lv_result_txt.
+
+      INSERT VALUE #(
+        %cid            = ls_key-%cid
+        %param-severity = <ls_return>-type
+        %param-text     = lv_result_txt ) INTO TABLE result.
+    ENDLOOP.
+
+    MESSAGE i020(zfi_inv_allowance) WITH mv_allowance_value INTO lv_result_txt.
+    INSERT VALUE #(
+      %cid            = ls_key-%cid
+      %param-severity = zif_fi_inventory_allowance_con=>mc_severity_info
+      %param-text     = lv_result_txt ) INTO TABLE result.
+
+    MESSAGE i021(zfi_inv_allowance) WITH mv_records_to_be_processed INTO lv_result_txt.
+    INSERT VALUE #(
+      %cid            = ls_key-%cid
+      %param-severity = zif_fi_inventory_allowance_con=>mc_severity_info
+      %param-text     = lv_result_txt ) INTO TABLE result.
+  ENDMETHOD.
+
+  METHOD post.
+    DATA: lt_return     TYPE bapiret2_t,
+
+          lv_result_txt TYPE natxt.
+
+    set_utl( ).
+
+    " Will always be populated.
+    DATA(lt_filters) = mo_utl->get_filters( keys[ 1 ]-%param-filters ).
+
+    get_filters( lt_filters ).
+    get_hkonts( ).
+
+    LOOP AT mt_hkont_hm ASSIGNING FIELD-SYMBOL(<lv_hkont_hm>).
+      IF xsdbool( line_exists( mt_hkont_assigned[ table_line = <lv_hkont_hm> ] ) ) = abap_false.
+        MESSAGE e019(zfi_inv_allowance) INTO lv_result_txt WITH <lv_hkont_hm> mv_bukrs.
+        INSERT VALUE #(
+          type       = zif_fi_inventory_allowance_con=>mc_severity_error
+          id         = zif_fi_inventory_allowance_con=>mc_msg_class
+          number     = '19'
+          message_v1 = <lv_hkont_hm>
+          message_v2 = mv_bukrs
+          message    = lv_result_txt ) INTO TABLE lt_return.
+      ENDIF.
+    ENDLOOP.
+
+    IF lt_return IS NOT INITIAL.
+      mo_utl->write_appl_log(
+        iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_allow_post
+        it_return = lt_return ).
+      RETURN.
+    ENDIF.
+
+    get_bukrs_currency( ).
+    calc_curr_season( ).
+    calc_allowance( ).
+
+    IF mv_allowance_value = 0.
+      MESSAGE e006(zfi_inv_allowance) INTO lv_result_txt.
+      INSERT VALUE #(
+        type    = zif_fi_inventory_allowance_con=>mc_severity_error
+        id      = zif_fi_inventory_allowance_con=>mc_msg_class
+        number  = '6'
+        message = lv_result_txt ) INTO TABLE lt_return.
+      mo_utl->write_appl_log(
+        iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_allow_post
+        it_return = lt_return ).
+      RETURN.
+    ENDIF.
+
+    build_bktxt_prefix( ).
+    build_bktxt_static( ).
+    get_blart( ).
+    build_header( ).
+    build_items( ).
+    get_belnr_cancellation( ).
+
+    CALL FUNCTION 'ZFI_FM_INVENTORY_ALLOWANCE_PST' DESTINATION 'NONE'
+      EXPORTING
+        iv_bktxt_static       = mv_bktxt_static
+        is_documentheader     = ms_documentheader ##ENH_OK
+        it_accountgl          = mt_accountgl
+        it_currencyamount     = mt_currencyamount
+        it_belnr_cancellation = mt_belnr_cancellation
+      IMPORTING
+        et_return             = lt_return
+      TABLES
+        it_calc_grades        = mt_calc_grades
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2
+        OTHERS                = 3.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO lv_result_txt.
+      INSERT VALUE #(
+        type       = sy-msgty
+        id         = sy-msgid
+        number     = sy-msgno
+        message_v1 = sy-msgv1
+        message_v2 = sy-msgv2
+        message_v3 = sy-msgv3
+        message_v4 = sy-msgv4
+        message = lv_result_txt ) INTO TABLE lt_return.
+      mo_utl->write_appl_log(
+        iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_allow_post
+        it_return = lt_return ).
+      RETURN.
+    ENDIF.
+
+    mo_utl->write_appl_log(
+      iv_subobj = zif_fi_inventory_allowance_con=>mc_bal_subobj_allow_post
+      it_return = lt_return ).
+  ENDMETHOD.
+
+  METHOD get_bukrs_currency.
+    mv_waers = mo_utl->get_bukrs_currency( mv_bukrs ).
+  ENDMETHOD.
+
+  METHOD calc_curr_season.
+    mv_curr_season = mo_utl->calc_curr_season(
+      iv_lfmon = mv_lfmon
+      iv_lfgja = mv_lfgja ).
+  ENDMETHOD.
+
+  METHOD calc_allowance.
+    DATA lt_result TYPE zif_fi_inventory_allowance_con=>gtyp_t_inventory_allowance.
+
+    DATA(lv_poper) = CONV poper( mv_lfmon ).
+
+    SELECT mbewh~lbkum AS totalvaluatedstock,
+
+           ckmlcr~stprs AS standardprice,
+
+           i_product~zzmls AS lastseason,
+
+           grades~mtart AS producttype,
+           grades~grade AS materialgrade,
+
+           i_productplant~profitcenter AS profitcenter
+      FROM mbewh
+      LEFT JOIN mbew ON  mbew~matnr = mbewh~matnr
+                     AND mbew~bwkey = mbewh~bwkey
+                     AND mbew~bwtar = mbewh~bwtar
+      LEFT JOIN ckmlcr ON  ckmlcr~kalnr  = mbew~kaln1
+                       AND ckmlcr~bdatj  = mbewh~lfgja
+                       AND ckmlcr~poper  = @lv_poper
+                       AND ckmlcr~untper = @space
+                       AND ckmlcr~curtp  = @zif_fi_inventory_allowance_con=>mc_curtp_bukrs_currency
+      LEFT JOIN i_valuationarea ON i_valuationarea~valuationarea = mbewh~bwkey
+      LEFT JOIN i_product ON i_product~product = mbewh~matnr
+      JOIN zfi_i_inventory_allow_grades AS grades ON grades~mtart = i_product~producttype
+      LEFT JOIN i_productplant ON  i_productplant~product = mbewh~matnr
+                               AND i_productplant~plant   = mbewh~bwkey
+      WHERE mbewh~matnr                 IN @mr_matnr
+      AND   mbewh~bwkey                 IN @mr_bwkey
+      AND   mbewh~lfgja                 =  @mv_lfgja
+      AND   mbewh~lfmon                 =  @mv_lfmon
+      AND   mbewh~salk3                 > '0.00'
+      AND   i_valuationarea~companycode =  @mv_bukrs
+      INTO CORRESPONDING FIELDS OF TABLE @lt_result ##TOO_MANY_ITAB_FIELDS.
+
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    DELETE lt_result WHERE lastseason    = space.
+    DELETE lt_result WHERE standardprice = 0.
+    DELETE lt_result WHERE profitcenter  = space.
+
+    IF lt_result IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_result ASSIGNING FIELD-SYMBOL(<ls_result>).
+      <ls_result>-totalvalue = <ls_result>-totalvaluatedstock * <ls_result>-standardprice.
+    ENDLOOP.
+
+    mo_utl->calc_allowance(
+      EXPORTING
+        iv_lfmon       = mv_lfmon
+        iv_curr_season = mv_curr_season
+      CHANGING
+        ct_result      = lt_result ).
+
+    DELETE lt_result WHERE allowancepercentage = space.
+
+    IF lt_result IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    mv_records_to_be_processed = lines( lt_result ).
+
+    LOOP AT lt_result ASSIGNING <ls_result>
+    GROUP BY ( prctr = <ls_result>-profitcenter )
+    ASSIGNING FIELD-SYMBOL(<ls_group>).
+      INSERT VALUE #( prctr = <ls_group>-prctr ) INTO TABLE mt_allowance_lines ASSIGNING FIELD-SYMBOL(<ls_allowance_line>).
+
+      LOOP AT GROUP <ls_group> ASSIGNING FIELD-SYMBOL(<ls_group_wa>).
+        <ls_allowance_line>-value += <ls_group_wa>-allowancevalue.
+        mv_allowance_value        += <ls_group_wa>-allowancevalue.
+      ENDLOOP.
+    ENDLOOP.
+
+    mt_calc_grades = VALUE #( FOR <ls_result_wa> IN lt_result
+      ( mtart = <ls_result_wa>-producttype grade = <ls_result_wa>-materialgrade ) ).
+
+    SORT mt_calc_grades BY mtart grade.
+
+    DELETE ADJACENT DUPLICATES FROM mt_calc_grades COMPARING mtart grade.
+  ENDMETHOD.
+
+  METHOD build_header.
+    ms_documentheader-username  = sy-uname.
+    ms_documentheader-comp_code = mv_bukrs.
+    ms_documentheader-doc_date  = sy-datum.
+    ms_documentheader-doc_type  = mv_blart.
+
+    SELECT accountingdocumentheadertext
+      FROM i_accountingdocument
+      WHERE companycode                  =    @mv_bukrs
+      AND   fiscalyear                   =    @mv_lfgja
+      AND   fiscalperiod                 =    @mv_lfmon
+      AND   accountingdocumenttype       =    @mv_blart
+      AND   accountingdocumentheadertext LIKE @mv_bktxt_prefix
+      ORDER BY CAST( substring( accountingdocumentheadertext, 24, 2 ) AS NUMC ) DESCENDING
+      INTO @ms_documentheader-header_txt
+      UP TO 1 ROWS.
+    ENDSELECT.
+
+    IF sy-subrc <> 0.
+      DATA(lv_initial_counter)     = abap_true.
+      ms_documentheader-header_txt = mv_bktxt_prefix.
+    ENDIF.
+
+    mo_utl->increment_post_counter(
+      EXPORTING
+        iv_initial = lv_initial_counter
+      CHANGING
+        cv_bktxt   = ms_documentheader-header_txt ).
+
+    CALL FUNCTION 'RP_LAST_DAY_OF_MONTHS'
+      EXPORTING
+        day_in            = CONV syst_datum( |{ mv_lfgja }{ mv_lfmon }01| )
+      IMPORTING
+        last_day_of_month = ms_documentheader-pstng_date
+      EXCEPTIONS
+        day_in_no_date    = 1
+        OTHERS            = 2. "#EC CI_SUBRC
+  ENDMETHOD.
+
+  METHOD build_items.
+    TRY.
+        DATA(lt_hkont) = zcl_pe_hm_basic=>get_table( '1318' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    " Will always be populated.
+    DATA(lv_hkont_debit) =
+      CONV hkont( lt_hkont[ field1 = zif_fi_inventory_allowance_con=>mc_bschl_debit ]-field2 ).
+
+    " Will always be populated.
+    DATA(lv_hkont_credit) =
+      CONV hkont( lt_hkont[ field1 = zif_fi_inventory_allowance_con=>mc_bschl_credit ]-field2 ).
+
+    DO 2 TIMES.
+      mt_accountgl = VALUE #( BASE mt_accountgl
+        FOR <ls_allowance_line> IN mt_allowance_lines item_text = ms_documentheader-header_txt
+        ( gl_account = COND #( WHEN sy-index = 1 THEN lv_hkont_debit ELSE lv_hkont_credit )
+          profit_ctr = <ls_allowance_line>-prctr ) ).
+
+      mt_currencyamount = VALUE #( BASE mt_currencyamount
+        FOR <ls_allowance_line> IN mt_allowance_lines
+        curr_type = zif_fi_inventory_allowance_con=>mc_curtp_doc_currency
+        currency  = mv_waers
+        ( amt_doccur = COND #( WHEN sy-index = 1 THEN <ls_allowance_line>-value ELSE - <ls_allowance_line>-value ) ) ).
+    ENDDO.
+
+    DO lines( mt_allowance_lines ) * 2 TIMES.
+      mt_accountgl[ sy-index ]-itemno_acc      = sy-index.
+      mt_currencyamount[ sy-index ]-itemno_acc = sy-index.
+    ENDDO.
+  ENDMETHOD.
+
+  METHOD get_belnr_cancellation.
+    mt_belnr_cancellation = mo_utl->get_belnr_cancellation(
+      iv_bukrs        = mv_bukrs
+      iv_gjahr        = mv_lfgja
+      iv_monat        = mv_lfmon
+      iv_bktxt_prefix = mv_bktxt_prefix
+      iv_bktxt_static = mv_bktxt_static
+      iv_blart        = mv_blart ).
+  ENDMETHOD.
+
+  METHOD set_utl.
+    mo_utl = zcl_fi_inventory_allowance_utl=>get_instance( ).
+  ENDMETHOD.
+
+  METHOD get_filters.
+    " Will always be populated.
+    mr_matnr = it_filters[ name = `PRODUCT` ]-range.
+    " Will always be populated.
+    mr_bwkey = it_filters[ name = `PLANT` ]-range.
+
+    " Will always be populated; single value only.
+    mv_bukrs = it_filters[ name = `COMPANYCODE` ]-range[ 1 ]-low.
+    " Will always be populated; single value only.
+    mv_lfgja = it_filters[ name = `FISCALYEAR` ]-range[ 1 ]-low.
+    " Will always be populated; single value only.
+    mv_lfmon = it_filters[ name = `CURRENTPERIOD` ]-range[ 1 ]-low.
+  ENDMETHOD.
+
+  METHOD build_bktxt_prefix.
+    mv_bktxt_prefix = |{ zif_fi_inventory_allowance_con=>mc_bktxt_allow_src_prefix } { mv_lfmon }.{ mv_lfgja }-%|.
+  ENDMETHOD.
+
+  METHOD build_bktxt_static.
+    mv_bktxt_static = |{ zif_fi_inventory_allowance_con=>mc_bktxt_allow_rev_prefix } { mv_lfmon }.{ mv_lfgja }|.
+  ENDMETHOD.
+
+  METHOD get_blart.
+    mv_blart = mo_utl->get_blart( ).
+  ENDMETHOD.
+
+  METHOD get_hkonts.
+    DATA lr_hkont TYPE RANGE OF hkont.
+
+    TRY.
+        DATA(lt_hkont) = zcl_pe_hm_basic=>get_table( '1318' ).
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+    mt_hkont_hm = VALUE #(
+      FOR <ls_hkont> IN lt_hkont
+      ( CONV #( <ls_hkont>-field2 ) ) ).
+
+    lr_hkont = VALUE #(
+      FOR <ls_hkont> IN lt_hkont sign = 'I' option = 'EQ'
+      ( low = <ls_hkont>-field2 ) ).
+
+    SELECT glaccount
+      FROM i_glaccountincompanycode
+      INTO TABLE @mt_hkont_assigned
+      WHERE glaccount   IN @lr_hkont
+      AND   companycode =  @mv_bukrs.
+
+    IF sy-subrc <> 0.
+      CLEAR mt_hkont_assigned.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS lsc_inventoryallowance IMPLEMENTATION.
+  METHOD save.
+    RETURN.
+  ENDMETHOD.
+ENDCLASS.

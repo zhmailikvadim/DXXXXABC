@@ -1,0 +1,163 @@
+CLASS zcl_i_d_cndn_rcrd_dtrmn_number DEFINITION
+ PUBLIC
+  INHERITING FROM /bobf/cl_lib_d_supercl_simple
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    METHODS constructor .
+
+    METHODS /bobf/if_frw_determination~execute
+        REDEFINITION .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA mo_ltd_util TYPE REF TO if_cnd_maint_ltd_util .
+ENDCLASS.
+
+
+
+CLASS ZCL_I_D_CNDN_RCRD_DTRMN_NUMBER IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_determination~execute.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    TYPES:BEGIN OF ty_cndnr_d,
+            conditionrecorduuid TYPE zsdprcg_cndnr_d-conditionrecorduuid,
+            conditionrecord     TYPE zsdprcg_cndnr_d-conditionrecord,
+          END OF ty_cndnr_d.
+    DATA: lt_sls_record  TYPE ztislspricingconditionrecordt,
+          ls_last_record TYPE zsislspricingconditionrecordt,
+          lv_num8        TYPE num8,
+          lv_timestampl  TYPE timestampl,
+          lv_timestring  TYPE string,
+          lv_seed        TYPE i,
+          lv_knumh       TYPE knumh,
+          lt_cndnr_d     TYPE TABLE OF ty_cndnr_d.
+
+    "Get the draft keys
+    TEST-SEAM get_draft_key.
+      /bobf/cl_lib_draft_active=>get_instance( is_ctx-bo_key )->separate_keys(
+        EXPORTING
+          iv_node_key   = is_ctx-node_key
+          it_key        = it_key
+        IMPORTING
+          et_draft_key = DATA(lt_draft_bopf_keys)
+        ).
+    END-TEST-SEAM.
+
+    io_read->retrieve(
+      EXPORTING
+        iv_node                 = is_ctx-node_key
+        it_key                  = lt_draft_bopf_keys
+        iv_fill_data            = abap_true
+      IMPORTING
+        et_data                 = lt_sls_record  ).
+
+    SELECT conditionrecorduuid conditionrecord
+      FROM zsdprcg_cndnr_d
+      INTO TABLE lt_cndnr_d
+     WHERE conditionrecord LIKE '$$%'.
+    SORT lt_cndnr_d BY conditionrecord.
+
+    "The first loop only to calculate the property
+    LOOP AT lt_sls_record ASSIGNING FIELD-SYMBOL(<fs_record>).
+
+      ASSIGN COMPONENT 'KEY' OF STRUCTURE <fs_record> TO FIELD-SYMBOL(<fs_key>).
+
+      ASSIGN COMPONENT zif_i_slspricingconditionrec_c=>sc_node_attribute-zi_slspricingconditionrecordtp-conditionrecord
+      OF STRUCTURE <fs_record> TO FIELD-SYMBOL(<fs_conditionrecord>).
+
+      ASSIGN COMPONENT zif_i_slspricingconditionrec_c=>sc_node_attribute-zi_slspricingconditionrecordtp-conditionsequentialnumber
+      OF STRUCTURE <fs_record> TO FIELD-SYMBOL(<fs_conditionsequentialnumber>).
+
+      ASSIGN COMPONENT zif_i_slspricingconditionrec_c=>sc_node_attribute-zi_slspricingconditionrecordtp-conditionvaliditystartdate
+      OF STRUCTURE <fs_record> TO FIELD-SYMBOL(<fs_startdate>).
+      IF <fs_startdate> IS ASSIGNED AND <fs_startdate> IS INITIAL.
+        <fs_startdate> = sy-datum.
+      ENDIF.
+      ASSIGN COMPONENT zif_i_slspricingconditionrec_c=>sc_node_attribute-zi_slspricingconditionrecordtp-conditionvalidityenddate
+      OF STRUCTURE <fs_record> TO FIELD-SYMBOL(<fs_enddate>).
+      IF <fs_enddate> IS ASSIGNED AND <fs_enddate> IS INITIAL.
+        <fs_enddate> = '99991231'.
+      ENDIF.
+
+      IF <fs_conditionrecord> IS INITIAL.
+
+**Generate 8-length random number as temp condition record number for draft
+        DO.
+          GET TIME STAMP FIELD lv_timestampl.
+          TEST-SEAM get_timestamp.
+            lv_timestring = lv_timestampl.
+          END-TEST-SEAM.
+          DATA(lv_len) = strlen( lv_timestring ) - 7.
+          lv_seed = lv_timestring+lv_len(7).
+
+          TRY.
+              TEST-SEAM random_int_create.
+                cl_abap_random_int=>create(
+                  EXPORTING
+                    seed = lv_seed        " Initial Value of PRNG
+                    min  = 1              " Lower Limit for Value Area
+                    max  = 99999999       " Upper Limit for Value Area
+                  RECEIVING
+                    prng = DATA(lo_random)" Random Number Generator Object
+                ).
+              END-TEST-SEAM.
+            CATCH cx_abap_random. " Exception for CL_ABAP_RANDOM*
+              RETURN.
+          ENDTRY.
+
+          lv_num8 = lo_random->get_next( ).
+          CONCATENATE '$$' lv_num8 INTO lv_knumh.
+          READ TABLE lt_cndnr_d WITH KEY conditionrecord = lv_knumh BINARY SEARCH TRANSPORTING NO FIELDS.
+          IF sy-subrc <> 0.
+            EXIT.
+          ENDIF.
+          CLEAR:lv_knumh.
+        ENDDO.
+        <fs_conditionrecord> = lv_knumh.
+        <fs_conditionsequentialnumber> = '01'.
+      ENDIF.
+
+    ENDLOOP.
+
+    "The second LOOP to update, as after first LOOP finished, all properties can be calculate correctly
+    LOOP AT lt_sls_record ASSIGNING <fs_record>.
+      ASSIGN COMPONENT 'KEY' OF STRUCTURE <fs_record> TO <fs_key>.
+      io_modify->update(
+        EXPORTING
+          iv_node           = is_ctx-node_key
+          iv_key            = <fs_key>
+          is_data           = REF #( <fs_record> )
+      ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* DEREVOLE     | 21.10.2022 | T4MTEMP-846 [Build] BE -                 *
+*              |            | Pricing Mass Upload Tool                 *
+*              |            | DS4K929425, Change number 13489          *
+*----------------------------------------------------------------------*
+    super->constructor( ).
+
+    mo_ltd_util ?= cl_cnd_maint_ltd_util=>get_instance( ).
+  ENDMETHOD.
+ENDCLASS.

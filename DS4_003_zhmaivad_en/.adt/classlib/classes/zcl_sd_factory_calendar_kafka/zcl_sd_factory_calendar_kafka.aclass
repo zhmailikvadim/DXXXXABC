@@ -27,13 +27,17 @@ public section.
       !IT_RANGE_PLANT type GTYP_RANGE_PLANT optional
       !IT_RANGE_CALENDAR_ID type GTYP_RANGE_CALENDAR_ID optional
       !IT_RANGE_DATE type GTYP_RANGE_DATE optional
-      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional .
+      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional
+      !IV_FROM type VJAHR optional
+      !IV_TO type BJAHR optional .
   methods GET_DB_DATA
     importing
       !IT_RANGE_PLANT type GTYP_RANGE_PLANT optional
       !IT_RANGE_CALENDAR_ID type GTYP_RANGE_CALENDAR_ID optional
       !IT_RANGE_DATE type GTYP_RANGE_DATE optional
-      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional .
+      !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional
+      !IV_FROM type VJAHR optional
+      !IV_TO type BJAHR optional .
   methods GET_PAYLOAD .
   class-methods VALIDATIONS
     importing
@@ -59,6 +63,8 @@ public section.
       !IT_RANGE_CALENDAR_ID type GTYP_RANGE_CALENDAR_ID optional
       !IT_RANGE_DATE type GTYP_RANGE_DATE optional
       !IT_RANGE_SPRAS type GTYP_RANGE_SPRAS optional
+      !IV_FROM type VJAHR optional
+      !IV_TO type BJAHR optional
     exporting
       !EV_ID_NOT_FOUND type ABAP_BOOLEAN .
 private section.
@@ -82,10 +88,15 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
 * BATCHVIN     | 24.01.2024 | 27871     : Factory Calendar Replication *
 *              |            | DS4K975156                               *
 *----------------------------------------------------------------------*
+    DATA: lv_suc_msg TYPE char200,
+          lv_name_sou TYPE string.
+
     get_db_data( it_range_calendar_id = it_range_calendar_id
            it_range_plant = it_range_plant
            it_range_date = it_range_date
-           it_range_spras = it_range_spras ).
+           it_range_spras = it_range_spras
+           iv_from        = iv_from
+           iv_to          = iv_to ).
 
     get_payload(  ).
 
@@ -96,6 +107,22 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
         CATCH cx_root INTO DATA(lo_cx) ##CATCH_ALL.
           MESSAGE lo_cx->get_longtext( ) TYPE 'I'.
       ENDTRY.
+
+      lv_name_sou =  <ls_kafka_factory_calendar>-value-metadata-event_name
+                     && ',' &&
+                     <ls_kafka_factory_calendar>-value-metadata-event_source
+                     && ',' &&
+                     <ls_kafka_factory_calendar>-value-metadata-event_key
+                     && ',' &&
+                     <ls_kafka_factory_calendar>-value-metadata-event_time.
+
+      MESSAGE s002(zsd_fact_cal_replica) WITH
+                                         lv_name_sou
+                                         <ls_kafka_factory_calendar>-value-metadata-event_id
+                                         INTO  lv_suc_msg.
+
+      create_log_message( iv_type    = 'S'
+                          iv_message = lv_suc_msg ).
     ENDLOOP.
 
     MESSAGE s002(zsd_fact_cal_replica).
@@ -147,6 +174,12 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
       IF sy-subrc <> 0.
         DATA(lv_plant_not_found) = abap_true.
       ELSE.
+        DATA(lv_plant_cnt) = lines( it_range_plant[]  ).
+        DATA(lv_fact_cal)  = lines( mt_db_data_tmp ).
+        IF lv_plant_cnt NE lv_fact_cal.
+          lv_plant_not_found = abap_true.
+        ENDIF.
+
         SORT mt_db_data_tmp BY plantname factorycal.
         DELETE ADJACENT DUPLICATES FROM  mt_db_data_tmp COMPARING
                         plantname factorycal.
@@ -169,14 +202,36 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
           LOOP AT mt_db_data_tmp ASSIGNING FIELD-SYMBOL(<ls_db_data_tmp>).
             MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
 
-            create_log_message( iv_type    = 'E'
+            create_log_message( iv_type    = 'W'
                                 iv_message = lv_err_msg ).
             save_log( ).
             CLEAR: lv_err_msg.
 
+            IF iv_from IS NOT INITIAL .
+              <ls_db_data_tmp>-fromyear = iv_from.
+            ENDIF.
+            IF iv_to IS NOT INITIAL.
+              <ls_db_data_tmp>-toyear = iv_to.
+            ENDIF.
+
             APPEND <ls_db_data_tmp> TO mt_db_data.
           ENDLOOP.
         ELSE.
+          IF iv_from IS NOT INITIAL OR
+             iv_to IS NOT INITIAL.
+            LOOP  AT mt_db_data_tmp ASSIGNING <ls_db_data_tmp>.
+
+              IF iv_from IS NOT INITIAL .
+                <ls_db_data_tmp>-fromyear = iv_from.
+              ENDIF.
+
+              IF iv_to IS NOT INITIAL.
+                <ls_db_data_tmp>-toyear = iv_to.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+
+          SORT lt_holiday BY PublicHolidayDate ASCENDING.
           LOOP AT lt_holiday ASSIGNING FIELD-SYMBOL(<ls_holiday>).
             READ TABLE mt_db_data_tmp ASSIGNING <ls_db_data_tmp>
                        WITH KEY plantname  = <ls_holiday>-plantname
@@ -191,11 +246,10 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
           LOOP AT mt_db_data_tmp ASSIGNING <ls_db_data_tmp> WHERE holidaycal IS INITIAL.
 
             MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
-            create_log_message( iv_type    = 'E'
+            create_log_message( iv_type    = 'W'
                                 iv_message = lv_err_msg ).
             save_log( ).
             CLEAR: lv_err_msg.
-
             APPEND <ls_db_data_tmp> TO mt_db_data.
           ENDLOOP.
 
@@ -209,25 +263,22 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
              it_range_plant = it_range_plant
              it_range_date = it_range_date
              it_range_spras = it_range_spras
+             iv_from        = iv_from
+             iv_to          = iv_to
              IMPORTING ev_id_not_found = lv_id_not_found
              ).
     ENDIF.
 
-    IF lines( mt_db_data ) = 0 AND lv_plant_not_found = abap_true AND it_range_plant IS NOT INITIAL.
+    IF lv_plant_not_found = abap_true AND it_range_plant IS NOT INITIAL.
       create_log_message( iv_type    = 'E'
                           iv_message = TEXT-001 ).
-      save_log( ).
-      MESSAGE e001(zsd_fact_cal_replica).
-    ELSEIF lines( mt_db_data ) = 0 AND lv_id_not_found = abap_true AND it_range_calendar_id IS NOT INITIAL.
+
+    ELSEIF lv_id_not_found = abap_true AND it_range_calendar_id IS NOT INITIAL.
       create_log_message( iv_type    = 'E'
                           iv_message = TEXT-002 ).
-      save_log( ).
-      MESSAGE e003(zsd_fact_cal_replica).
-    ELSEIF lines( mt_db_data ) = 0.
+    ELSEIF lines( mt_db_data_tmp ) = 0.
       create_log_message( iv_type    = 'E'
                           iv_message = TEXT-003 ).
-      save_log( ).
-      MESSAGE e004(zsd_fact_cal_replica).
     ENDIF.
   ENDMETHOD.
 
@@ -409,6 +460,7 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
 
 
   METHOD get_db_data_calendar_id.
+
 ************************************************************************
 *  R E V I S I O N   H I S T O R Y                                     *
 ************************************************************************
@@ -447,6 +499,7 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
       SORT mt_db_data_tmp BY plantname factorycal.
       DELETE ADJACENT DUPLICATES FROM  mt_db_data_tmp COMPARING
                       plantname factorycal.
+      DELETE mt_db_data_tmp WHERE plantname IS INITIAL.
       SELECT i_plant~plant AS plantname,           "#EC CI_NO_TRANSFORM
              I_FactoryCalendar~FactoryCalendar AS factorycal,
              I_PublHolidayCalHolidayDate~PublicHolidayDate,                               "thoc~datum  AS holiday_date,
@@ -465,14 +518,35 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
       IF sy-subrc NE 0.
         LOOP AT mt_db_data_tmp ASSIGNING FIELD-SYMBOL(<ls_db_data_tmp>).
           MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
-          create_log_message( iv_type    = 'E'
+          create_log_message( iv_type    = 'W'
                               iv_message = lv_err_msg ).
           save_log( ).
           CLEAR: lv_err_msg.
 
+          IF iv_from IS NOT INITIAL .
+            <ls_db_data_tmp>-fromyear = iv_from.
+          ENDIF.
+          IF iv_to IS NOT INITIAL.
+            <ls_db_data_tmp>-toyear = iv_to.
+          ENDIF.
+
           APPEND <ls_db_data_tmp> TO mt_db_data.
         ENDLOOP.
       ELSE.
+        IF iv_from IS NOT INITIAL OR
+           iv_to IS NOT INITIAL.
+          LOOP  AT mt_db_data_tmp ASSIGNING <ls_db_data_tmp>.
+            IF iv_from IS NOT INITIAL .
+              <ls_db_data_tmp>-fromyear = iv_from.
+            ENDIF.
+
+            IF iv_to IS NOT INITIAL.
+              <ls_db_data_tmp>-toyear = iv_to.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        SORT lt_holiday BY PublicHolidayDate ASCENDING.
         LOOP AT lt_holiday ASSIGNING FIELD-SYMBOL(<ls_holiday>).
           READ TABLE mt_db_data_tmp ASSIGNING <ls_db_data_tmp>
                      WITH KEY plantname  = <ls_holiday>-plantname
@@ -486,11 +560,10 @@ CLASS ZCL_SD_FACTORY_CALENDAR_KAFKA IMPLEMENTATION.
 
         LOOP AT mt_db_data_tmp ASSIGNING <ls_db_data_tmp> WHERE holidaycal IS INITIAL.
           MESSAGE e006(zsd_fact_cal_replica) WITH  <ls_db_data_tmp>-factorycal INTO lv_err_msg.
-          create_log_message( iv_type    = 'E'
+          create_log_message( iv_type    = 'W'
                               iv_message = lv_err_msg ).
           save_log( ).
           CLEAR: lv_err_msg.
-
           APPEND <ls_db_data_tmp> TO mt_db_data.
         ENDLOOP.
       ENDIF.

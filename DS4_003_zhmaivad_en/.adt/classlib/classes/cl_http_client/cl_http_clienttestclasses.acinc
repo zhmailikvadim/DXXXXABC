@@ -1,0 +1,2320 @@
+*----------------------------------------------------------------------*
+*       CLASS cl_http_client_test DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+
+CLASS lcl_http_client_test DEFINITION DEFERRED.
+
+CLASS cl_http_client DEFINITION LOCAL FRIENDS lcl_http_client_test.
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_http_client_test
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_http_client_test
+  DEFINITION FINAL FOR TESTING
+  DURATION MEDIUM
+  RISK LEVEL HARMLESS.
+
+  PRIVATE SECTION.
+*    CLASS-METHODS: class_setup, class_teardown, _cleanup.
+    DATA: gl_client TYPE REF TO if_http_client.
+    DATA: gl_error_text  TYPE string.
+    DATA: gl_subrc       TYPE n LENGTH 4.
+    DATA: gl_action_successful TYPE abap_bool.
+
+    METHODS:
+      create_client,
+      create_dest_none_client,
+      send_request,
+      receive_response,
+      send_its_request,
+      receive_its_response,
+      listen_for_response,
+      close_connection,
+      create_send_receive_test FOR TESTING,
+      create_its_send_receive_test FOR TESTING.
+ENDCLASS.                    "cl_http_client_test DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS cl_http_client_test IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_http_client_test IMPLEMENTATION.
+  METHOD create_client.
+    DATA: l_plg_service TYPE plg_srv,
+          l_plg_host    TYPE plg_host.
+
+    DATA: l_service     TYPE string,
+          l_host        TYPE string.
+    gl_action_successful = abap_false.
+
+* determine my HTTP host and port nummber
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING   " NAME =
+        host             = l_plg_host
+        service          = l_plg_service
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    gl_subrc = sy-subrc.
+    IF sy-subrc <> 0.
+      CONCATENATE 'TH_GET_PLUGIN_INFO failed with rc ' gl_subrc INTO gl_error_text.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+* type cast
+    l_host    = l_plg_host.
+    l_service = l_plg_service.
+
+* create HTTP client object for communication
+    CALL METHOD cl_http_client=>create
+      EXPORTING
+        host               = l_host
+        service            = l_service
+      IMPORTING
+        client             = gl_client
+      EXCEPTIONS
+        argument_not_found = 1
+        internal_error     = 2
+        plugin_not_active  = 3
+        OTHERS             = 4.
+
+    gl_subrc = sy-subrc.
+
+    IF sy-subrc <> 0 OR gl_client IS INITIAL.
+      CONCATENATE 'CL_HTTP_CLIENT=>CREATE failed with rc ' gl_subrc INTO gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+* set global client properties
+    gl_client->propertytype_accept_cookie     = if_http_client=>co_enabled.
+    gl_client->propertytype_logon_popup       = if_http_client=>co_disabled.
+    gl_client->propertytype_send_sap_passport = if_http_client=>co_enabled.
+* try a logon with sap logon assertion/MYSAPSSO2
+    gl_client->send_sap_logon_ticket( ).
+* action was successful
+    gl_action_successful = abap_true.
+  ENDMETHOD.                    "create_client
+
+  METHOD create_dest_none_client.
+    gl_action_successful = abap_false.
+
+* create HTTP client object for communication
+    CALL METHOD cl_http_client=>create_by_destination
+      EXPORTING
+        destination        = 'NONE'
+      IMPORTING
+        client             = gl_client
+      EXCEPTIONS
+        argument_not_found = 1
+        internal_error     = 2
+        plugin_not_active  = 3
+        OTHERS             = 4.
+
+    gl_subrc = sy-subrc.
+
+    IF sy-subrc <> 0 OR gl_client IS INITIAL.
+      CONCATENATE 'CL_HTTP_CLIENT=>CREATE failed with rc ' gl_subrc INTO gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+* set global client properties
+    gl_client->propertytype_accept_cookie     = if_http_client=>co_enabled.
+    gl_client->propertytype_logon_popup       = if_http_client=>co_disabled.
+* action was successful
+    gl_action_successful = abap_true.
+  ENDMETHOD.
+
+  METHOD send_request.
+    DATA: l_uri         TYPE string.
+    DATA: gl_error_text  TYPE string.
+    DATA: l_subrc       TYPE sysubrc.                       "#EC NEEDED
+    gl_action_successful = abap_false.
+
+    IF gl_client IS INITIAL.
+      gl_error_text = 'Client object initial'.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+    l_uri  = '/sap/bc/echo?header=1'.
+    cl_http_utility=>set_request_uri(
+        request = gl_client->request
+        uri     = l_uri ).
+    gl_subrc = cl_http_utility=>get_last_error( ).
+    IF gl_subrc <> 0.
+      CONCATENATE 'CL_HTTP_UTILITY=>SET_REQUEST_URI failed with rc ' gl_subrc INTO gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CALL METHOD gl_client->send
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+    l_subrc = sy-subrc.
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = l_subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+* action was successful
+    gl_action_successful = abap_true.
+  ENDMETHOD.                    "send_request
+
+  METHOD receive_response.
+    DATA: l_subrc       TYPE sysubrc.                       "#EC NEEDED
+    gl_action_successful = abap_false.
+
+    IF gl_client IS INITIAL.
+      gl_error_text = 'Client object initial'.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+    CALL METHOD gl_client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    l_subrc = sy-subrc.
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = l_subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    DATA: l_status TYPE i,
+          l_reason TYPE string.
+
+    CALL METHOD gl_client->response->get_status
+      IMPORTING
+        code   = l_status
+        reason = l_reason.
+
+    IF l_status <> 200.
+      cl_aunit_assert=>abort( msg = l_reason ).
+    ENDIF.
+
+* action was successful
+    gl_action_successful = abap_true.
+  ENDMETHOD.                    "receive_response
+
+  METHOD send_its_request.
+    DATA: l_uri         TYPE string.
+    DATA: gl_error_text TYPE string.
+    DATA: l_subrc       TYPE sysubrc.                       "#EC NEEDED
+    DATA: l_value(1).
+    DATA: VALUE(128) TYPE c.
+
+    gl_action_successful = abap_false.
+
+    IF gl_client IS INITIAL.
+      gl_error_text = 'Client object initial'.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+    l_uri  = '/sap/bc/gui/sap/its/test/it/it00?~USERAGENTCHECK=0&~OkCode=/nex'.
+    cl_http_utility=>set_request_uri(
+        request = gl_client->request
+        uri     = l_uri ).
+    gl_subrc = cl_http_utility=>get_last_error( ).
+    IF gl_subrc <> 0.
+      CONCATENATE 'CL_HTTP_UTILITY=>SET_REQUEST_URI failed with rc ' gl_subrc INTO gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+**********
+    CALL FUNCTION 'TH_GET_PROFILE_VALUE'
+      EXPORTING
+        name           = 'login/create_sso2_ticket'
+        server         = space
+*       WP             =
+      IMPORTING
+        value          = l_value
+      EXCEPTIONS
+        internal_error = 1
+        too_large      = 2
+        not_found      = 3
+        OTHERS         = 4.
+
+    IF sy-subrc NE 0.
+      VERIFICATION-MESSAGE 'ABORT' 'Unable to read profile parameter' PRIORITY 4.
+      EXIT.
+    ENDIF.
+    IF l_value = '0'.
+      VERIFICATION-MESSAGE 'ABORT' 'SSO2 not activated on this server' PRIORITY 4.
+      EXIT.
+    ENDIF.
+    IF l_value <> 1 AND l_value <> 2.
+      CALL FUNCTION 'TH_CHANGE_PARAMETER'
+        EXPORTING
+          parameter_name     = 'login/create_sso2_ticket'
+          parameter_value    = '2' "Create SSO ticket without certificate
+*         CHECK_PARAMETER    = 1
+        EXCEPTIONS
+          not_authorized     = 1
+          not_in_same_system = 2
+          not_changeable     = 3
+          not_found          = 4
+          invalid_value      = 5
+          shmprf_error       = 6
+          unknown_opcode     = 7
+          OTHERS             = 8.
+
+      IF sy-subrc <> 0.
+        VERIFICATION-MESSAGE 004 'Changing value failed for login/create_sso2_ticket'.
+        EXIT.
+      ENDIF.
+    ENDIF.
+**********
+
+    CALL METHOD gl_client->send
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+    l_subrc = sy-subrc.
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = l_subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+* action was successful
+    gl_action_successful = abap_true.
+
+**********
+    IF l_value <> 1 AND l_value <> 2.
+      value = l_value.
+      CALL FUNCTION 'TH_CHANGE_PARAMETER'
+        EXPORTING
+          parameter_name     = 'login/create_sso2_ticket'
+          parameter_value    = value
+*         CHECK_PARAMETER    = 1
+        EXCEPTIONS
+          not_authorized     = 1
+          not_in_same_system = 2
+          not_changeable     = 3
+          not_found          = 4
+          invalid_value      = 5
+          shmprf_error       = 6
+          unknown_opcode     = 7
+          OTHERS             = 8.
+    ENDIF.
+**********
+
+  ENDMETHOD.                    "send_its_request
+
+  METHOD receive_its_response.
+    DATA: l_subrc       TYPE sysubrc.                       "#EC NEEDED
+    gl_action_successful = abap_false.
+
+    IF gl_client IS INITIAL.
+      gl_error_text = 'Client object initial'.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+    CALL METHOD gl_client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    l_subrc = sy-subrc.
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = l_subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    DATA: l_status TYPE i,
+          l_reason TYPE string.
+
+    CALL METHOD gl_client->response->get_status
+      IMPORTING
+        code   = l_status
+        reason = l_reason.
+
+    IF l_status <> 200.
+      cl_aunit_assert=>abort( msg = l_reason ).
+    ENDIF.
+
+* action was successful
+    gl_action_successful = abap_true.
+  ENDMETHOD.                    "receive_its_response
+
+  METHOD listen_for_response.
+    DATA: l_subrc       TYPE sysubrc.                       "#EC NEEDED
+    gl_action_successful = abap_false.
+
+    IF gl_client IS INITIAL.
+      gl_error_text = 'Client object initial'.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+* ensure the receipt of an valid client object
+    CLEAR gl_client.
+
+    CALL METHOD cl_http_client=>if_http_client~listen
+      RECEIVING
+        client                     = gl_client
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_no_open_connection    = 2
+        OTHERS                     = 4.
+    l_subrc = sy-subrc.
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = l_subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+* action was successful
+    gl_action_successful = abap_true.
+  ENDMETHOD.                    "listen_for_response
+
+  METHOD close_connection.
+    DATA: l_subrc       TYPE sysubrc.                       "#EC NEEDED
+    gl_action_successful = abap_false.
+
+    IF gl_client IS INITIAL.
+      gl_error_text = 'Client object initial'.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+    CALL METHOD gl_client->close
+      EXCEPTIONS
+        http_invalid_state = 1
+        OTHERS             = 2.
+    l_subrc = sy-subrc.
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = l_subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+* action was successful
+    gl_action_successful = abap_true.
+  ENDMETHOD.                    "close_connection
+
+*
+* start of componed tests
+*
+  METHOD create_send_receive_test.
+
+    create_dest_none_client( ).
+* create action was successful ?
+    IF gl_action_successful = abap_false.
+      RETURN.
+    ENDIF.
+
+    send_request( ).
+* send action was successful ?
+    IF gl_action_successful = abap_false.
+* release allocated resources
+      close_connection( ).
+      CLEAR gl_client.
+      RETURN.
+    ENDIF.
+
+    listen_for_response( ).
+* listen action was successful ?
+    IF gl_action_successful = abap_false.
+* release allocated resources
+      close_connection( ).
+      CLEAR gl_client.
+      RETURN.
+    ENDIF.
+
+    receive_response( ).
+* receive action was successful ?
+    IF gl_action_successful = abap_false.
+* release allocated resources
+      close_connection( ).
+      CLEAR gl_client.
+      RETURN.
+    ENDIF.
+
+    close_connection( ).
+    CLEAR gl_client.
+
+  ENDMETHOD.                    "create_send_receive_test
+
+  METHOD create_its_send_receive_test.
+
+    create_client( ).
+* create action was successful ?
+    IF gl_action_successful = abap_false.
+      RETURN.
+    ENDIF.
+
+    send_its_request( ).
+* send action was successful ?
+    IF gl_action_successful = abap_false.
+* release allocated resources
+      close_connection( ).
+      CLEAR gl_client.
+      RETURN.
+    ENDIF.
+
+    receive_its_response( ).
+* receive action was successful ?
+    IF gl_action_successful = abap_false.
+* release allocated resources
+      close_connection( ).
+      CLEAR gl_client.
+      RETURN.
+    ENDIF.
+
+    close_connection( ).
+    CLEAR gl_client.
+
+  ENDMETHOD.                    "create_its_send_receive_test
+ENDCLASS.                    "cl_http_client_test IMPLEMENTATION
+
+CLASS lcl_client_test_assert_ticket DEFINITION FOR TESTING
+  DURATION MEDIUM
+  RISK LEVEL HARMLESS
+.
+*?#<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
+*?<asx:values>
+*?<TESTCLASS_OPTIONS>
+*?<TEST_CLASS>lcl_Client_Test_Assert_Ticket
+*?</TEST_CLASS>
+*?<TEST_MEMBER>f_Cut
+*?</TEST_MEMBER>
+*?<OBJECT_UNDER_TEST>CL_HTTP_CLIENT
+*?</OBJECT_UNDER_TEST>
+*?<OBJECT_IS_LOCAL/>
+*?<GENERATE_FIXTURE/>
+*?<GENERATE_CLASS_FIXTURE/>
+*?<GENERATE_INVOCATION/>
+*?<GENERATE_ASSERT_EQUAL/>
+*?</TESTCLASS_OPTIONS>
+*?</asx:values>
+*?</asx:abap>
+
+* This test class creates destinations from type G and H with different logon options
+* in combination with creating an assertion ticket. The logon data in
+* the correspondent header fields will then be checked.
+
+  PRIVATE SECTION.
+* ================
+    DATA:
+      gl_subrc  TYPE n LENGTH 4,
+      gl_error_text  TYPE string,
+      gl_headervalue TYPE string,
+      gl_dest   TYPE rfcdest VALUE 'TEST_DEST_WITH_ASSERT_TICKET',
+      gl_descr  TYPE rfcdoc_d VALUE 'Created by Unittest HTTP Client', "#EC NOTEXT
+      gl_client TYPE REF TO if_http_client.  "class under test
+
+    METHODS:
+      create_desth_rfcauth,         "Create a destination of type H with RFC logon option
+      create_desth_basicauth,       "Create a destination of type H with data for basic auth. option
+      create_desth_trusted,         "Create a destination of type H with logon over trusted relationship
+      create_desth_rfcauth_assert,  "Create a destination of type H with RFC and assertion ticket logon option.
+      create_desth_trusted_assert,  "Create a destination of type H with trusted rel. and assert. ticket.
+      create_desth_basicauth_assert,"Create a destination of type H with basic auth and assert. ticket.
+      create_destg,                 "Create a destination of type G without any logon data.
+      create_destg_assert_ticket,   "Create a destination of type G with assertion ticket option.
+      create_destg_sso_ticket,      "Create a destination of type G with SSO ticket.
+      create_destg_basicauth,       "Create a destination of type G with logon data for basic authentication.
+      create_destg_basicauth_assert,"Create a destination of type G with basic auth and assert. ticket.
+      create_destg_basicauth_sso,   "Create a destination of type G with basic auth and SSO ticket.
+      create_http_client,
+      close_conn_and_delete_dest,
+      send_assert_ticket_rfc_h FOR TESTING,
+      send_assert_ticket_basicauth_h FOR TESTING,
+      send_assert_ticket_trusted_h FOR TESTING,
+      send_request_rfc_assert_h FOR TESTING,
+      send_request_trusted_assert_h FOR TESTING,
+      send_request_basic_assert_h FOR TESTING,
+      send_request_dest_g FOR TESTING,
+      send_request_assert_g FOR TESTING,
+      send_request_sso_ticket_g FOR TESTING,
+      send_request_basicauth_g FOR TESTING,
+      send_request_basic_assert_g FOR TESTING,
+      send_request_basic_sso_g FOR TESTING.
+
+ENDCLASS.       "lcl_Client_Test_Assert_Ticket
+
+
+CLASS lcl_client_test_assert_ticket IMPLEMENTATION.
+* ===================================================
+  METHOD create_desth_rfcauth. "Create a destination type H with RFC logon option
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_ABAP_CREATE'
+      EXPORTING
+        name           = gl_dest
+        description    = gl_descr
+        server_name    = server_name
+        service_number = serv_num
+        logon_method   = if_dest_http=>co_logon_method_sap_standard
+        accept_cookie  = '1'
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_ABAP_CREATE failed' ).
+    ENDIF.
+
+  ENDMETHOD. "Create_DestH_RFCAuth
+
+  METHOD create_desth_basicauth.
+    "Create a destination type H with basic auth. option
+
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_ABAP_CREATE'
+      EXPORTING
+        name           = gl_dest
+        description    = gl_descr
+        server_name    = server_name
+        service_number = serv_num
+        logon_method   = if_dest_http=>co_logon_method_basic_auth
+        logon_user     = 'AAA'
+        logon_client   = sy-mandt
+        accept_cookie  = '1'
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_ABAP_CREATE failed' ).
+    ENDIF.
+
+    CALL FUNCTION 'DEST_SET_PASSWORD'
+      EXPORTING
+        name     = gl_dest
+        password = 'BBB'.
+
+  ENDMETHOD.
+
+  METHOD create_desth_trusted.
+    "Create a destination type H with logon over trusted relationship
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_ABAP_CREATE'
+      EXPORTING
+        name           = gl_dest
+        description    = gl_descr
+        server_name    = server_name
+        service_number = serv_num
+        logon_method   = if_dest_http=>co_logon_method_sap_trusted
+        accept_cookie  = '1'
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_ABAP_CREATE failed' ).
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD create_desth_rfcauth_assert.
+    "Create a destination of type H with RFC and assertion ticket logon option.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_ABAP_CREATE'
+      EXPORTING
+        name                    = gl_dest
+        description             = gl_descr
+        server_name             = server_name
+        service_number          = serv_num
+        logon_method            = if_dest_http=>co_logon_method_sap_standard
+        assertion_ticket        = 'X'
+        assertion_ticket_sysid  = sy-sysid
+        assertion_ticket_client = sy-mandt
+        accept_cookie           = '1'
+      EXCEPTIONS
+        OTHERS                  = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_ABAP_CREATE failed' ).
+    ENDIF.
+  ENDMETHOD. "Create_DestH_RFCAuth_Assert
+
+  METHOD create_desth_trusted_assert.
+    "Create a destination of type H with trusted rel. and assertion ticket logon option.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_ABAP_CREATE'
+      EXPORTING
+        name                    = gl_dest
+        description             = gl_descr
+        server_name             = server_name
+        service_number          = serv_num
+        logon_method            = if_dest_http=>co_logon_method_sap_trusted
+        assertion_ticket        = 'X'
+        assertion_ticket_sysid  = sy-sysid
+        assertion_ticket_client = sy-mandt
+        accept_cookie           = '1'
+      EXCEPTIONS
+        OTHERS                  = 1.
+
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_ABAP_CREATE failed' ).
+    ENDIF.
+
+  ENDMETHOD. "Create_DestH_Trusted_Assert
+
+  METHOD create_desth_basicauth_assert.
+    "Create a destination of type H with basic authentication and assertion ticket.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_ABAP_CREATE'
+      EXPORTING
+        name                    = gl_dest
+        description             = gl_descr
+        server_name             = server_name
+        service_number          = serv_num
+        logon_method            = if_dest_http=>co_logon_method_basic_auth
+        logon_user              = 'AAA'
+        logon_client            = sy-mandt
+        assertion_ticket        = 'X'
+        assertion_ticket_sysid  = sy-sysid
+        assertion_ticket_client = sy-mandt
+        accept_cookie           = '1'
+      EXCEPTIONS
+        OTHERS                  = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_ABAP_CREATE failed' ).
+    ENDIF.
+
+    CALL FUNCTION 'DEST_SET_PASSWORD'
+      EXPORTING
+        name     = gl_dest
+        password = 'BBB'.
+
+  ENDMETHOD. "Create_DestH_BasicAuth_Assert
+
+  METHOD create_destg.
+    "Create a destination of type G without any logon data
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_EXT_CREATE'
+      EXPORTING
+        name           = gl_dest
+        description    = gl_descr
+        server_name    = server_name
+        service_number = serv_num
+        accept_cookie  = '1'
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_EXT_CREATE failed' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD create_destg_assert_ticket.
+    "Create a destination of type G with assertion ticket option.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_EXT_CREATE'
+      EXPORTING
+        name                    = gl_dest
+        description             = gl_descr
+        server_name             = server_name
+        service_number          = serv_num
+        assertion_ticket        = 'X'
+        assertion_ticket_sysid  = sy-sysid
+        assertion_ticket_client = sy-mandt
+        accept_cookie           = '1'
+      EXCEPTIONS
+        OTHERS                  = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_EXT_CREATE failed' ).
+    ENDIF.
+  ENDMETHOD. "Create_DestG_Assert_Ticket
+
+  METHOD create_destg_sso_ticket.
+    "Create a destination of type G with SSO ticket.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_EXT_CREATE'
+      EXPORTING
+        name           = gl_dest
+        description    = gl_descr
+        server_name    = server_name
+        service_number = serv_num
+        sso_ticket     = 'X'
+        accept_cookie  = '1'
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_EXT_CREATE failed' ).
+    ENDIF.
+
+  ENDMETHOD. "Create_DestG_SSO_Ticket
+
+  METHOD create_destg_basicauth.
+    "Create a destination of type G with logon data for basic authentication.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_EXT_CREATE'
+      EXPORTING
+        name           = gl_dest
+        description    = gl_descr
+        server_name    = server_name
+        service_number = serv_num
+        logon_method   = if_dest_http=>co_logon_method_basic_auth
+        logon_user     = 'AAA'
+        accept_cookie  = '1'
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_EXT_CREATE failed' ).
+    ENDIF.
+
+    CALL FUNCTION 'DEST_SET_PASSWORD'
+      EXPORTING
+        name     = gl_dest
+        password = 'BBB'.
+
+
+  ENDMETHOD. "Create_DestG_BasicAuth
+
+  METHOD create_destg_basicauth_assert.
+    "Create a destination of type G with basic auth and assert. ticket.
+
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_EXT_CREATE'
+      EXPORTING
+        name                    = gl_dest
+        description             = gl_descr
+        server_name             = server_name
+        service_number          = serv_num
+        logon_method            = if_dest_http=>co_logon_method_basic_auth
+        logon_user              = 'AAA'
+        assertion_ticket        = 'X'
+        assertion_ticket_sysid  = sy-sysid
+        assertion_ticket_client = sy-mandt
+        accept_cookie           = '1'
+      EXCEPTIONS
+        OTHERS                  = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_EXT_CREATE failed' ).
+    ENDIF.
+
+    CALL FUNCTION 'DEST_SET_PASSWORD'
+      EXPORTING
+        name     = gl_dest
+        password = 'BBB'.
+
+  ENDMETHOD.
+
+  METHOD create_destg_basicauth_sso.
+    "Create a destination of type G with basic auth and SSO ticket.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_EXT_CREATE'
+      EXPORTING
+        name           = gl_dest
+        description    = gl_descr
+        server_name    = server_name
+        service_number = serv_num
+        logon_method   = if_dest_http=>co_logon_method_basic_auth
+        logon_user     = 'AAA'
+        sso_ticket     = 'X'
+        accept_cookie  = '1'
+      EXCEPTIONS
+        OTHERS         = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_EXT_CREATE failed' ).
+    ENDIF.
+
+    CALL FUNCTION 'DEST_SET_PASSWORD'
+      EXPORTING
+        name     = gl_dest
+        password = 'BBB'.
+
+  ENDMETHOD.
+
+  METHOD create_http_client.
+    DATA: myurl TYPE string VALUE '/sap/bc/echo',
+          method TYPE string VALUE 'GET'.
+
+
+    CALL METHOD cl_http_client=>create_by_destination
+      EXPORTING
+        destination              = gl_dest
+      IMPORTING
+        client                   = gl_client
+      EXCEPTIONS
+        destination_not_found    = 1
+        internal_error           = 2
+        argument_not_found       = 3
+        destination_no_authority = 4
+        plugin_not_active        = 5
+        OTHERS                   = 6.
+
+    gl_subrc = sy-subrc.
+    IF sy-subrc <> 0 OR gl_client IS INITIAL.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+
+      CONCATENATE 'CL_HTTP_CLIENT=>CREATE failed with rc ' gl_subrc INTO gl_error_text.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+    gl_client->propertytype_accept_cookie = gl_client->co_enabled.
+    gl_client->propertytype_logon_popup = gl_client->co_disabled.
+    gl_client->request->set_method( method ).
+    gl_client->request->set_version( if_http_request=>co_protocol_version_1_1 ).
+    cl_http_utility=>set_request_uri( request = gl_client->request
+                                      uri     = myurl ).
+  ENDMETHOD. "Create_Http_Client
+
+  METHOD close_conn_and_delete_dest.
+    CALL METHOD gl_client->close
+      EXCEPTIONS
+        http_invalid_state = 1
+        OTHERS             = 2.
+
+    CALL FUNCTION 'DEST_DELETE'
+      EXPORTING
+        name = gl_dest.
+
+  ENDMETHOD. "Close_Conn_And_Delete_Dest
+
+  METHOD send_assert_ticket_rfc_h.
+* =================================
+* Sending a request over a destination of type H  with RFC logon data,
+* adding an assertion ticket to the request via method call.
+    DATA: subrc TYPE sysubrc.
+
+    create_desth_rfcauth( ).
+    create_http_client( ).
+    CALL METHOD gl_client->send_sap_assertion_ticket(
+        client    = sy-mandt
+        system_id = sy-sysid ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+
+  ENDMETHOD.       "Send_Assert_Ticket_RFC_H
+
+  METHOD send_assert_ticket_basicauth_h.
+* =================================
+* Sending a request over a destination of type H  with data for basic auth.,
+* adding an assertion ticket to the request via method call.
+    DATA: subrc TYPE sysubrc,
+          moff TYPE i.
+
+    create_desth_basicauth( ).
+    create_http_client( ).
+    CALL METHOD gl_client->send_sap_assertion_ticket(
+        client    = sy-mandt
+        system_id = sy-sysid ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+    CLEAR sy-subrc.
+    FIND 'Basic' IN gl_headervalue MATCH OFFSET moff.
+    cl_aunit_assert=>assert_equals( exp = 0 act = sy-subrc ).
+    cl_aunit_assert=>assert_equals( exp = 0 act = moff ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+
+  ENDMETHOD. "Send_Assert_Ticket_BasicAuth_H
+
+  METHOD send_assert_ticket_trusted_h.
+* =================================
+* Sending a request over a destination of type H  with logon data for trusted relationship,
+* adding an assertion ticket to the request via method call.
+    DATA: subrc TYPE sysubrc.
+
+    create_desth_trusted( ).
+    create_http_client( ).
+    CALL METHOD gl_client->send_sap_assertion_ticket(
+        client    = sy-mandt
+        system_id = sy-sysid ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+  ENDMETHOD.
+
+  METHOD send_request_rfc_assert_h.
+* =================================
+* Sending a request over a destination of type H  with logon data for RFC and assertion ticket
+* logon option.
+
+    DATA: subrc TYPE sysubrc.
+
+    create_desth_rfcauth_assert( ).
+    create_http_client( ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+  ENDMETHOD. "Send_Request_RFC_Assert_H
+
+  METHOD send_request_trusted_assert_h.
+* =================================
+* Sending a request over a destination of type H  with logon data for trusted relationship
+* and assertion ticket logon option.
+
+    DATA: subrc TYPE sysubrc.
+
+    create_desth_trusted_assert( ).
+    create_http_client( ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+  ENDMETHOD. "Send_Request_Trusted_Assert_H
+
+  METHOD send_request_basic_assert_h.
+* =================================
+* Sending a request over a destination of type H  with logon data for basic authentication
+* and assertion ticket logon option.
+
+    DATA: subrc TYPE sysubrc,
+          moff TYPE i.
+
+    create_desth_basicauth_assert( ).
+    create_http_client( ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+    CLEAR sy-subrc.
+    FIND 'Basic' IN gl_headervalue MATCH OFFSET moff.
+    cl_aunit_assert=>assert_equals( exp = 0 act = sy-subrc ).
+    cl_aunit_assert=>assert_equals( exp = 0 act = moff ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+  ENDMETHOD.
+
+  METHOD send_request_dest_g.
+* =================================
+* Sending a request over a destination of type G without any logon data
+
+    DATA: subrc TYPE sysubrc.
+
+    create_destg( ).
+    create_http_client( ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+  ENDMETHOD.
+
+  METHOD send_request_assert_g.
+* =================================
+* Sending a request over a destination of type G with assertion ticket
+
+    DATA: subrc TYPE sysubrc.
+
+    create_destg_assert_ticket( ).
+    create_http_client( ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+
+  ENDMETHOD.
+
+  METHOD send_request_sso_ticket_g.
+* =================================
+* Sending a request over a destination of type G with SSO ticket
+
+    DATA: subrc TYPE sysubrc.
+    DATA: l_value(1).
+    DATA: VALUE(128) TYPE c.
+
+    create_destg_sso_ticket( ).
+    create_http_client( ).
+
+**********
+    CALL FUNCTION 'TH_GET_PROFILE_VALUE'
+      EXPORTING
+        name           = 'login/create_sso2_ticket'
+        server         = space
+*       WP             =
+      IMPORTING
+        value          = l_value
+      EXCEPTIONS
+        internal_error = 1
+        too_large      = 2
+        not_found      = 3
+        OTHERS         = 4.
+
+    IF sy-subrc NE 0.
+      VERIFICATION-MESSAGE 'ABORT' 'Unable to read profile parameter' PRIORITY 4.
+      EXIT.
+    ENDIF.
+    IF l_value = '0'.
+      VERIFICATION-MESSAGE 'ABORT' 'SSO2 not activated on this server' PRIORITY 4.
+      EXIT.
+    ENDIF.
+    IF l_value <> 1 AND l_value <> 2.
+      CALL FUNCTION 'TH_CHANGE_PARAMETER'
+        EXPORTING
+          parameter_name     = 'login/create_sso2_ticket'
+          parameter_value    = '2' "Create SSO ticket without certificate
+*         CHECK_PARAMETER    = 1
+        EXCEPTIONS
+          not_authorized     = 1
+          not_in_same_system = 2
+          not_changeable     = 3
+          not_found          = 4
+          invalid_value      = 5
+          shmprf_error       = 6
+          unknown_opcode     = 7
+          OTHERS             = 8.
+
+      IF sy-subrc <> 0.
+        VERIFICATION-MESSAGE 006 'Changing value failed for login/create_sso2_ticket'.
+        EXIT.
+      ENDIF.
+    ENDIF.
+**********
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+**********
+    IF l_value <> 1 AND l_value <> 2.
+      value = l_value.
+      CALL FUNCTION 'TH_CHANGE_PARAMETER'
+        EXPORTING
+          parameter_name     = 'login/create_sso2_ticket'
+          parameter_value    = value
+*         CHECK_PARAMETER    = 1
+        EXCEPTIONS
+          not_authorized     = 1
+          not_in_same_system = 2
+          not_changeable     = 3
+          not_found          = 4
+          invalid_value      = 5
+          shmprf_error       = 6
+          unknown_opcode     = 7
+          OTHERS             = 8.
+    ENDIF.
+**********
+
+    close_conn_and_delete_dest( ).
+
+  ENDMETHOD.
+
+  METHOD send_request_basicauth_g.
+* =================================
+* Sending a request over a destination of type G with logon data for basic authentication.
+
+    DATA: subrc TYPE sysubrc.
+
+    create_destg_basicauth( ).
+    create_http_client( ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+  ENDMETHOD. "Send_Request_BasicAuth_G
+
+  METHOD send_request_basic_assert_g.
+* =================================
+* Sending a request over a destination of type G with basic auth and assert. ticket.
+
+    DATA: subrc TYPE sysubrc.
+
+    create_destg_basicauth_assert( ).
+    create_http_client( ).
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    close_conn_and_delete_dest( ).
+  ENDMETHOD.
+
+  METHOD send_request_basic_sso_g.
+* =================================
+* Sending a request over a destination of type G with basic auth and SSO ticket.
+
+    DATA: subrc TYPE sysubrc.
+    DATA: l_value(1).
+    DATA: VALUE(128) TYPE c.
+
+    create_destg_basicauth_sso( ).
+    create_http_client( ).
+
+**********
+    CALL FUNCTION 'TH_GET_PROFILE_VALUE'
+      EXPORTING
+        name           = 'login/create_sso2_ticket'
+        server         = space
+*       WP             =
+      IMPORTING
+        value          = l_value
+      EXCEPTIONS
+        internal_error = 1
+        too_large      = 2
+        not_found      = 3
+        OTHERS         = 4.
+
+    IF sy-subrc NE 0.
+      VERIFICATION-MESSAGE 'ABORT' 'Unable to read profile parameter' PRIORITY 4.
+      EXIT.
+    ENDIF.
+    IF l_value = '0'.
+      VERIFICATION-MESSAGE 'ABORT' 'SSO2 not activated on this server' PRIORITY 4.
+      EXIT.
+    ENDIF.
+    IF l_value <> 1 AND l_value <> 2.
+      CALL FUNCTION 'TH_CHANGE_PARAMETER'
+        EXPORTING
+          parameter_name     = 'login/create_sso2_ticket'
+          parameter_value    = '2' "Create SSO ticket without certificate
+*         CHECK_PARAMETER    = 1
+        EXCEPTIONS
+          not_authorized     = 1
+          not_in_same_system = 2
+          not_changeable     = 3
+          not_found          = 4
+          invalid_value      = 5
+          shmprf_error       = 6
+          unknown_opcode     = 7
+          OTHERS             = 8.
+
+      IF sy-subrc <> 0.
+        VERIFICATION-MESSAGE 005 'Changing value failed for login/create_sso2_ticket'.
+        EXIT.
+      ENDIF.
+    ENDIF.
+**********
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('authorization').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('sap-r3auth').
+    cl_aunit_assert=>assert_initial( gl_headervalue ).
+
+    CLEAR gl_headervalue.
+    gl_headervalue = gl_client->request->get_header_field('MYSAPSSO2').
+    cl_aunit_assert=>assert_not_initial( gl_headervalue ).
+**********
+    IF l_value <> 1 AND l_value <> 2.
+      value = l_value.
+      CALL FUNCTION 'TH_CHANGE_PARAMETER'
+        EXPORTING
+          parameter_name     = 'login/create_sso2_ticket'
+          parameter_value    = value
+*         CHECK_PARAMETER    = 1
+        EXCEPTIONS
+          not_authorized     = 1
+          not_in_same_system = 2
+          not_changeable     = 3
+          not_found          = 4
+          invalid_value      = 5
+          shmprf_error       = 6
+          unknown_opcode     = 7
+          OTHERS             = 8.
+    ENDIF.
+**********
+    close_conn_and_delete_dest( ).
+  ENDMETHOD.
+
+ENDCLASS.       "lcl_Client_Test_Assert_Ticket
+
+CLASS lcl_test_assertion_ticket DEFINITION FOR TESTING
+  DURATION MEDIUM
+  RISK LEVEL HARMLESS
+.
+*?#<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
+*?<asx:values>
+*?<TESTCLASS_OPTIONS>
+*?<TEST_CLASS>lcl_Test_Assertion_Ticket
+*?</TEST_CLASS>
+*?<TEST_MEMBER>f_Cut
+*?</TEST_MEMBER>
+*?<OBJECT_UNDER_TEST>CL_HTTP_CLIENT
+*?</OBJECT_UNDER_TEST>
+*?<OBJECT_IS_LOCAL/>
+*?<GENERATE_FIXTURE/>
+*?<GENERATE_CLASS_FIXTURE/>
+*?<GENERATE_INVOCATION/>
+*?<GENERATE_ASSERT_EQUAL/>
+*?</TESTCLASS_OPTIONS>
+*?</asx:values>
+*?</asx:abap>
+  PRIVATE SECTION.
+* ================
+    DATA:
+      gl_icfname TYPE icfname VALUE 'ASSERT_VERI',
+      gl_url     TYPE string  VALUE '/sap/bc/icf/verification/assert_veri',
+      gl_icfparguid TYPE icfparguid VALUE '1QBCICAABY582BKELTN0ZFWL6',
+      gl_dest   TYPE rfcdest VALUE 'TEST_DEST_WITH_ASSERT_TICKET',
+      gl_descr  TYPE rfcdoc_d VALUE 'Created by Unittest HTTP Client', "#EC NOTEXT
+      gl_client TYPE REF TO if_http_client,
+      gl_subrc  TYPE n LENGTH 4,
+      gl_error_text  TYPE string.
+
+    METHODS:
+      create_service,
+      del_service_if_exist,
+      create_dest_h_assert,
+      create_http_client,
+      close_conn_and_delete_dest,
+      send_request,
+      receive_response,
+      check_status,
+      test_authentication FOR TESTING.
+
+ENDCLASS.       "lcl_Test_Assertion_Ticket
+
+
+CLASS lcl_test_assertion_ticket IMPLEMENTATION.
+* ===============================================
+
+  METHOD create_service.
+* ======================
+* Create an ICF-Service (/sap/bc/icf/verification/assert_test) with
+* logon option assertion ticket.
+    DATA: l_icfserdesc  TYPE icfserdesc,
+          l_icfdocu     TYPE icfdocu,
+          l_icfhandler TYPE icfhndlist.
+
+    l_icfserdesc-log_order = 'AUTH_ASSERT'.
+    l_icfserdesc-log_flag  = abap_true.
+    l_icfdocu              = 'Service for testing Assertion Ticket'.
+    APPEND 'CL_HTTP_EXT_ECHO' TO l_icfhandler.
+
+    CALL METHOD cl_icf_tree=>if_icf_tree~insert_node
+      EXPORTING
+        icf_name                  = gl_icfname
+        icfparguid                = gl_icfparguid "/sap/bc/icf/verification/
+        icfdocu                   = l_icfdocu
+        doculang                  = 'E'
+        icfserdesc                = l_icfserdesc
+        icfhandlst                = l_icfhandler
+        icfactive                 = abap_true
+        package                   = '$TMP'
+        application               = space
+      EXCEPTIONS
+        empty_icf_name            = 1
+        no_new_virtual_host       = 2
+        special_service_error     = 3
+        parent_not_existing       = 4
+        enqueue_error             = 5
+        node_already_existing     = 6
+        empty_docu                = 7
+        doculang_not_installed    = 8
+        security_info_error       = 9
+        user_password_error       = 10
+        password_encryption_error = 11
+        invalid_url               = 12
+        invalid_otr_concept       = 13
+        formflg401_error          = 14
+        handler_error             = 15
+        transport_error           = 16
+        tadir_error               = 17
+        package_not_found         = 18
+        wrong_application         = 19
+        not_allow_application     = 20
+        no_application            = 21
+        invalid_icfparguid        = 22
+        alt_name_invalid          = 23
+        alternate_name_exist      = 24
+        wrong_icf_name            = 25
+        no_authority              = 26
+        OTHERS                    = 27.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function INSERT_NODE failed' ).
+    ENDIF.
+
+  ENDMETHOD. "CREATE_SERVICE
+
+  METHOD del_service_if_exist.
+
+    DATA: l_icfname TYPE icfname.
+
+    CALL METHOD cl_icf_tree=>if_icf_tree~service_from_url
+      EXPORTING
+        url        = gl_url
+        hostnumber = 0
+      IMPORTING
+        icf_name   = l_icfname
+      EXCEPTIONS
+        OTHERS     = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function SERVICE_FROM_URL failed' ).
+    ENDIF.
+
+    IF l_icfname = gl_icfname.
+      CALL METHOD cl_icf_tree=>if_icf_tree~delete_node
+        EXPORTING
+          icfparguid                  = gl_icfparguid
+        CHANGING
+          icf_name                    = l_icfname
+        EXCEPTIONS
+          no_virtual_host_delete      = 1
+          special_service_error       = 2
+          enqueue_error               = 3
+          node_not_existing           = 4
+          node_has_childs             = 5
+          node_is_aliased             = 6
+          node_not_in_original_system = 7
+          transport_error             = 8
+          tadir_error                 = 9
+          db_error                    = 10
+          no_authority                = 11
+          OTHERS                      = 12.
+      IF sy-subrc <> 0.
+        cl_aunit_assert=>abort( msg = 'Call function DELETE_NOTE failed' ).
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD. "Del_Service_If_Exist
+
+  METHOD create_dest_h_assert.
+    DATA:
+      bflag       TYPE flag,
+      myhost      TYPE plg_host,
+      myservice   TYPE plg_srv,
+      serv_num    TYPE rfcsysid,
+      server_name TYPE rfchost_ext.
+
+    CALL FUNCTION 'DEST_EXISTS'
+      EXPORTING
+        name   = gl_dest
+      IMPORTING
+        exists = bflag.
+
+    IF bflag EQ 'X'.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        "   NAME                   =
+        host             = myhost
+        service          = myservice
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function TH_GET_PLUGIN_INFO failed' ).
+    ENDIF.
+
+    server_name = myhost.
+    serv_num = myservice.
+    CALL FUNCTION 'DEST_HTTP_ABAP_CREATE'
+      EXPORTING
+        name                    = gl_dest
+        description             = gl_descr
+        server_name             = server_name
+        service_number          = serv_num
+        assertion_ticket        = 'X'
+        assertion_ticket_sysid  = sy-sysid
+        assertion_ticket_client = sy-mandt
+        accept_cookie           = '1'
+      EXCEPTIONS
+        OTHERS                  = 1.
+
+    IF sy-subrc <> 0.
+      cl_aunit_assert=>abort( msg = 'Call function DEST_HTTP_ABAP_CREATE failed' ).
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD create_http_client.
+    DATA: method TYPE string VALUE 'GET'.
+
+    CALL METHOD cl_http_client=>create_by_destination
+      EXPORTING
+        destination              = gl_dest
+      IMPORTING
+        client                   = gl_client
+      EXCEPTIONS
+        destination_not_found    = 1
+        internal_error           = 2
+        argument_not_found       = 3
+        destination_no_authority = 4
+        plugin_not_active        = 5
+        OTHERS                   = 6.
+
+    gl_subrc = sy-subrc.
+    IF sy-subrc <> 0 OR gl_client IS INITIAL.
+      CALL FUNCTION 'DEST_DELETE'
+        EXPORTING
+          name = gl_dest.
+
+      CONCATENATE 'CL_HTTP_CLIENT=>CREATE failed with rc ' gl_subrc INTO gl_error_text.
+      cl_aunit_assert=>abort( msg = gl_error_text ).
+    ENDIF.
+
+    gl_client->propertytype_accept_cookie = gl_client->co_enabled.
+    gl_client->propertytype_logon_popup = gl_client->co_disabled.
+    gl_client->request->set_method( method ).
+    gl_client->request->set_version( if_http_request=>co_protocol_version_1_1 ).
+    cl_http_utility=>set_request_uri( request = gl_client->request
+                                      uri     = gl_url ).
+
+  ENDMETHOD.
+
+  METHOD close_conn_and_delete_dest.
+    CALL METHOD gl_client->close
+      EXCEPTIONS
+        http_invalid_state = 1
+        OTHERS             = 2.
+
+    CALL FUNCTION 'DEST_DELETE'
+      EXPORTING
+        name = gl_dest.
+  ENDMETHOD.
+
+  METHOD send_request.
+    DATA: subrc TYPE sysubrc.
+
+    CALL METHOD gl_client->send
+      EXPORTING
+        timeout                    = 0
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD receive_response.
+    DATA: subrc TYPE sysubrc.
+
+    CALL METHOD gl_client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2.
+    IF sy-subrc <> 0.
+      CALL METHOD gl_client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = gl_error_text.
+      cl_aunit_assert=>fail( msg = gl_error_text ).
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD check_status.
+    DATA: l_code TYPE i,
+          l_reason TYPE string.
+    CALL METHOD gl_client->response->get_status
+      IMPORTING
+        code   = l_code
+        reason = l_reason.
+
+    cl_aunit_assert=>assert_equals( exp = 200 act = l_code ).
+
+  ENDMETHOD.
+
+  METHOD test_authentication.
+* ======================
+    del_service_if_exist( ).
+    create_service( ).
+    create_dest_h_assert( ).
+    create_http_client( ).
+
+    send_request( ).
+    receive_response( ).
+    check_status( ).
+
+    close_conn_and_delete_dest( ).
+    del_service_if_exist( ).
+
+  ENDMETHOD.       "authentication
+
+
+
+
+ENDCLASS.       "lcl_Test_Assertion_Ticket

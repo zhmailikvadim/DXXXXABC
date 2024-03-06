@@ -1,0 +1,455 @@
+CLASS zcl_pe_aif_send_to_kafka DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    CLASS-METHODS run IMPORTING is_data            TYPE any
+                      RETURNING VALUE(rt_messages) TYPE bapirettab.
+
+  PROTECTED SECTION.
+private section.
+
+  class-methods CONVERT_INTO_TABLE
+    importing
+      !IS_DATA type ANY
+    returning
+      value(RO_T_DATA) type ref to DATA .
+  class-methods GET_KEY
+    importing
+      !IS_DATA type ANY
+    returning
+      value(RO_KEY) type ref to DATA
+    raising
+      ZCX_PE_AIF .
+  class-methods GET_TOPIC
+    importing
+      !IS_DATA type ANY
+    returning
+      value(RO_TOPIC) type ref to DATA
+    raising
+      ZCX_PE_AIF .
+  class-methods GET_VALUE
+    importing
+      !IS_DATA type ANY
+    returning
+      value(RO_VALUE) type ref to DATA
+    raising
+      ZCX_PE_AIF .
+  class-methods SEND
+    importing
+      !IO_PRODUCER type ref to ZCL_PE_KAFKA_PRODUCER
+    returning
+      value(RT_MESSAGES) type BAPIRETTAB .
+  class-methods GET_NAMESPACE
+    importing
+      !IS_DATA type ANY
+    returning
+      value(RO_NAMESPACE) type ref to DATA
+    raising
+      ZCX_PE_AIF .
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_AIF_SEND_TO_KAFKA IMPLEMENTATION.
+
+
+  METHOD get_key.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 03.11.2022 | 14940     : Kafka Integration best pract *
+*              |            | DS4K934517                               *
+*----------------------------------------------------------------------*
+
+    DATA: lv_event_source TYPE string.
+
+
+*-- Get key (not mandatory)
+    ASSIGN COMPONENT 'KEY' OF STRUCTURE is_data TO FIELD-SYMBOL(<ls_key>).
+    IF sy-subrc = 0 AND <ls_key> IS ASSIGNED.
+      CREATE DATA ro_key LIKE <ls_key>.
+      ro_key->* = <ls_key>.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+*-- If EVENT_SOURCE is part of the key and empty, it is defaulted to system ID & client
+    ASSIGN COMPONENT 'EVENT_SOURCE' OF STRUCTURE ro_key->* TO FIELD-SYMBOL(<lv_event_source>).
+    IF sy-subrc = 0 AND <lv_event_source> IS INITIAL.
+      CALL FUNCTION 'ZPE_FM_AIF_GET_EVENT_SOURCE'
+        EXPORTING
+          value_in       = lv_event_source
+        CHANGING
+          value_out      = lv_event_source
+        EXCEPTIONS
+          no_value_found = 1
+          OTHERS         = 2.
+      IF sy-subrc = 0.
+        <lv_event_source> = CONV #( lv_event_source ).
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_topic.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 03.11.2022 | 14940     : Kafka Integration best pract *
+*              |            | DS4K934517                               *
+*----------------------------------------------------------------------*
+
+    ASSIGN COMPONENT 'TOPIC' OF STRUCTURE is_data TO FIELD-SYMBOL(<lv_topic>).
+    IF sy-subrc = 0 AND <lv_topic> IS ASSIGNED.
+      CREATE DATA ro_topic LIKE <lv_topic>.
+      ro_topic->* = <lv_topic>.
+    ELSE.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'TOPIC'.
+    ENDIF.
+
+*   Check data type
+    IF cl_abap_datadescr=>describe_by_data_ref( p_data_ref = ro_topic )->kind NE cl_abap_typedescr=>kind_elem.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e040(/aif/mes) WITH 'TOPIC'.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_value.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 03.11.2022 | 14940     : Kafka Integration best pract *
+*              |            | DS4K934517                               *
+*----------------------------------------------------------------------*
+
+    DATA: lv_event_version TYPE string,
+          lv_event_source  TYPE string,
+          lv_event_time    TYPE string,
+          lv_event_id      TYPE string.
+
+
+
+*   Read VALUE - Mandatory
+    ASSIGN COMPONENT 'VALUE' OF STRUCTURE is_data TO FIELD-SYMBOL(<ls_value>).
+    IF sy-subrc = 0 AND <ls_value> IS ASSIGNED.
+      CREATE DATA ro_value LIKE <ls_value>.
+      ro_value->* = <ls_value>.
+    ELSE.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'VALUE'.
+    ENDIF.
+
+*   VALUE must be a structure with METADATA and PAYLOAD
+    IF cl_abap_datadescr=>describe_by_data( <ls_value> )->kind NE cl_abap_typedescr=>kind_struct.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e040(/aif/mes) WITH 'VALUE'.
+    ENDIF.
+
+*   Read PAYLOAD - Mandatory
+    ASSIGN COMPONENT 'PAYLOAD' OF STRUCTURE ro_value->* TO FIELD-SYMBOL(<lv_payload>).
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'PAYLOAD'.
+    ENDIF.
+
+*   Read METADATA - Mandatory
+    ASSIGN COMPONENT 'METADATA' OF STRUCTURE ro_value->* TO FIELD-SYMBOL(<ls_metadata>).
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'METADATA'.
+    ENDIF.
+
+*   METADATA must be a structure with some mandatory fields
+    IF cl_abap_datadescr=>describe_by_data( <ls_metadata> )->kind NE cl_abap_typedescr=>kind_struct.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e040(/aif/mes) WITH 'METADATA'.
+    ENDIF.
+
+*   Read EVENT_VERSION - Mandatory but can be defaulted if empty
+    ASSIGN COMPONENT 'EVENT_VERSION' OF STRUCTURE <ls_metadata> TO FIELD-SYMBOL(<lv_event_version>).
+    IF sy-subrc = 0 AND <lv_event_version> IS INITIAL.
+      CALL FUNCTION 'ZPE_FM_AIF_GET_EVENT_VERSION'
+        EXPORTING
+          value_in       = lv_event_version
+        CHANGING
+          value_out      = lv_event_version
+        EXCEPTIONS
+          no_value_found = 1
+          OTHERS         = 2.
+      IF sy-subrc = 0.
+        <lv_event_version> = CONV #( lv_event_version ).
+      ENDIF.
+    ELSEIF sy-subrc NE 0.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'EVENT_VERSION'.
+    ENDIF.
+
+*   Read EVENT_SOURCE - Mandatory
+    ASSIGN COMPONENT 'EVENT_SOURCE' OF STRUCTURE <ls_metadata> TO FIELD-SYMBOL(<lv_event_source>).
+    IF sy-subrc = 0 AND <lv_event_source> IS INITIAL.
+      CALL FUNCTION 'ZPE_FM_AIF_GET_EVENT_SOURCE'
+        EXPORTING
+          value_in       = lv_event_source
+        CHANGING
+          value_out      = lv_event_source
+        EXCEPTIONS
+          no_value_found = 1
+          OTHERS         = 2.
+      IF sy-subrc = 0.
+        <lv_event_source> = CONV #( lv_event_source ).
+      ENDIF.
+    ELSEIF sy-subrc NE 0.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'EVENT_SOURCE'.
+    ENDIF.
+
+*   Read EVENT_TIME - Mandatory but can be defaulted if empty
+    ASSIGN COMPONENT 'EVENT_TIME' OF STRUCTURE <ls_metadata> TO FIELD-SYMBOL(<lv_event_time>).
+    IF sy-subrc = 0 AND <lv_event_time> IS ASSIGNED.
+      CALL FUNCTION 'ZPE_FM_AIF_GET_EVENT_TIME'
+        EXPORTING
+          value_in       = lv_event_time
+        CHANGING
+          value_out      = lv_event_time
+        EXCEPTIONS
+          no_value_found = 1
+          OTHERS         = 2.
+      IF sy-subrc = 0.
+        <lv_event_time> = CONV #( lv_event_time ).
+      ENDIF.
+    ELSEIF sy-subrc NE 0.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'EVENT_TIME'.
+    ENDIF.
+
+*   Read EVENT_ID - Mandatory but can be defaulted if empty
+    ASSIGN COMPONENT 'EVENT_ID' OF STRUCTURE <ls_metadata> TO FIELD-SYMBOL(<lv_event_id>).
+    IF sy-subrc = 0 AND <lv_event_id> IS INITIAL.
+      CALL FUNCTION 'ZPE_FM_AIF_GET_EVENT_ID'
+        EXPORTING
+          value_in       = lv_event_id
+        CHANGING
+          value_out      = lv_event_id
+        EXCEPTIONS
+          no_value_found = 1
+          OTHERS         = 2.
+      IF sy-subrc = 0.
+        <lv_event_id> = CONV #( lv_event_id ).
+      ELSE.
+        RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e008(zpe_aif).
+      ENDIF.
+    ELSEIF sy-subrc NE 0.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e149(/aif/mes) WITH 'EVENT_ID'.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD convert_into_table.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 07.02.2023 | 17660: Handle multiple messages          *
+*              |            | DS4K943132                               *
+*----------------------------------------------------------------------*
+
+    FIELD-SYMBOLS: <lt_messages> TYPE ANY TABLE.
+
+
+*   If we are sending multiple messages at the same time, structure must contain a field
+*   called MESSAGES with a table of records
+    ASSIGN COMPONENT 'MESSAGES' OF STRUCTURE is_data TO <lt_messages>.
+    IF sy-subrc = 0.
+      CREATE DATA ro_t_data LIKE <lt_messages>.
+      ro_t_data->* = <lt_messages>.
+*   Else we assume it is one single record but we return a table anyway to have one single implementation
+    ELSE.
+      CREATE DATA ro_t_data LIKE TABLE OF is_data.
+      INSERT is_data INTO TABLE ro_t_data->*.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_namespace.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* ASPERDAN     | 27.02.2023 | 17660     : Kafka helper tool v3         *
+*              |            | DS4K943132
+*----------------------------------------------------------------------*
+
+    ASSIGN COMPONENT 'NAMESPACE' OF STRUCTURE is_data TO FIELD-SYMBOL(<lv_namespace>).
+    IF sy-subrc = 0 AND <lv_namespace> IS ASSIGNED.
+      CREATE DATA ro_namespace LIKE <lv_namespace>.
+      ro_namespace->* = <lv_namespace>.
+    ELSE.
+      ro_namespace = NEW zpe_kafka_namespace( ).
+      ro_namespace->* = ''.
+    ENDIF.
+
+*   Check data type
+    IF cl_abap_datadescr=>describe_by_data_ref( p_data_ref = ro_namespace )->kind NE cl_abap_typedescr=>kind_elem.
+      RAISE EXCEPTION TYPE zcx_pe_aif MESSAGE e040(/aif/mes) WITH 'NAMESPACE'.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD run.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 03.11.2022 | 14940     : Kafka Integration best pract *
+*              |            | DS4K934517                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 07.02.2023 | 17660: Handle multiple messages          *
+*              |            | DS4K943132                               *
+*----------------------------------------------------------------------*
+
+    DATA(lo_t_data) = convert_into_table( is_data ).
+
+    TRY.
+
+        LOOP AT lo_t_data->* ASSIGNING FIELD-SYMBOL(<ls_data>).
+
+*         TOPIC: All records go to the same topic
+          AT FIRST.
+            DATA(lo_topic)     = get_topic( <ls_data> ).
+            DATA(lo_namespace) = get_namespace( <ls_data> ).
+            DATA(lo_producer)  = NEW zcl_pe_kafka_producer( iv_topic = lo_topic->* iv_namespace = lo_namespace->* ).
+          ENDAT.
+
+*         KEY & VALUE
+          DATA(lo_key)   = get_key( <ls_data> ).
+          DATA(lo_value) = get_value( <ls_data> ).
+
+          IF lo_key IS BOUND.
+            lo_producer->add_record( is_data_key = lo_key->* is_data_value = lo_value->* ).
+          ELSE.
+            lo_producer->add_record( is_data_value = lo_value->* ).
+          ENDIF.
+
+*         Send messages
+          AT LAST.
+            rt_messages = send( lo_producer ).
+          ENDAT.
+
+        ENDLOOP.
+
+      CATCH zcx_pe_aif INTO DATA(lo_exception).
+        CALL FUNCTION '/AIF/UTIL_ADD_MSG'
+          EXPORTING
+            msgty      = lo_exception->if_t100_dyn_msg~msgty
+            msgid      = lo_exception->if_t100_message~t100key-msgid
+            msgno      = lo_exception->if_t100_message~t100key-msgno
+            msgv1      = lo_exception->if_t100_dyn_msg~msgv1
+            msgv2      = lo_exception->if_t100_dyn_msg~msgv2
+            msgv3      = lo_exception->if_t100_dyn_msg~msgv3
+            msgv4      = lo_exception->if_t100_dyn_msg~msgv4
+          TABLES
+            return_tab = rt_messages.
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD send.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 07.02.2023 | 17660: Handle multiple messages          *
+*              |            | DS4K943132                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+        io_producer->send_kafka_message( IMPORTING es_response = DATA(ls_response) ).
+      CATCH zcx_pe_kafka_producer INTO DATA(lo_exc).
+        CALL FUNCTION '/AIF/UTIL_ADD_MSG'
+          EXPORTING
+            msgty      = lo_exc->if_t100_dyn_msg~msgty
+            msgid      = lo_exc->if_t100_message~t100key-msgid
+            msgno      = lo_exc->if_t100_message~t100key-msgno
+            msgv1      = lo_exc->if_t100_dyn_msg~msgv1
+            msgv2      = lo_exc->if_t100_dyn_msg~msgv2
+            msgv3      = lo_exc->if_t100_dyn_msg~msgv3
+            msgv4      = lo_exc->if_t100_dyn_msg~msgv4
+          TABLES
+            return_tab = rt_messages.
+        RETURN.
+    ENDTRY.
+
+    IF cl_rest_status_code=>is_success( ls_response-status ).
+
+      LOOP AT ls_response-offsets ASSIGNING FIELD-SYMBOL(<ls_offset>).
+        MESSAGE s010(zpe_aif) WITH <ls_offset>-partition <ls_offset>-offset INTO DATA(lv_dummy4) ##NEEDED.
+        CALL FUNCTION '/AIF/UTIL_ADD_MSG'
+          EXPORTING
+            msgty      = 'S'
+            msgid      = 'ZPE_AIF'
+            msgno      = '010'
+            msgv1      = CONV string( <ls_offset>-partition )
+            msgv2      = CONV string( <ls_offset>-offset )
+          TABLES
+            return_tab = rt_messages.
+      ENDLOOP.
+
+    ELSE.
+
+      MESSAGE e002(zpe_aif) INTO DATA(lv_dummy1) ##NEEDED.
+      CALL FUNCTION '/AIF/UTIL_ADD_MSG'
+        EXPORTING
+          msgty      = 'E'
+          msgid      = 'ZPE_AIF'
+          msgno      = '002'
+          msgv1      = CONV string( ls_response-status )
+          msgv2      = ls_response-error_message
+        TABLES
+          return_tab = rt_messages.
+
+      IF ls_response-json_message-pathprefix IS NOT INITIAL.
+        MESSAGE e003(zpe_aif) INTO DATA(lv_dummy2) ##NEEDED.
+        CALL FUNCTION '/AIF/UTIL_ADD_MSG'
+          EXPORTING
+            msgty       = 'E'
+            msgid       = 'ZPE_AIF'
+            msgno       = '003'
+            msg_string1 = ls_response-json_message-pathprefix
+          TABLES
+            return_tab  = rt_messages.
+      ENDIF.
+
+      IF ls_response-json_message-body IS NOT INITIAL.
+        MESSAGE e004(zpe_aif) INTO DATA(lv_dummy3) ##NEEDED.
+        CALL FUNCTION '/AIF/UTIL_ADD_MSG'
+          EXPORTING
+            msgty       = 'E'
+            msgid       = 'ZPE_AIF'
+            msgno       = '004'
+            msg_string1 = ls_response-json_message-body
+          TABLES
+            return_tab  = rt_messages.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,154 @@
+CLASS zcl_pe_atc_extended_check DEFINITION
+  PUBLIC
+  INHERITING FROM cl_ci_test_extended_check
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    METHODS constructor.
+
+  PROTECTED SECTION.
+    METHODS out_head REDEFINITION.
+
+  PRIVATE SECTION.
+
+    CLASS-DATA: gts_scimessages     TYPE scimessages,
+                gts_cust_priorities TYPE SORTED TABLE OF scipriorities WITH UNIQUE KEY checkname checkcode.
+
+    CONSTANTS: mc_myname TYPE sci_chk VALUE 'ZCL_PE_ATC_EXTENDED_CHECK',
+               mc_parent TYPE sci_chk VALUE 'CL_CI_TEST_EXTENDED_CHECK'.
+
+    METHODS adjust_messages.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_PE_ATC_EXTENDED_CHECK IMPLEMENTATION.
+
+
+  METHOD adjust_messages.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 17.03.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+* CANOCAR      | 22.12.2022 | 16320: Buffer results                    *
+*              |            | DS4K938346                               *
+*----------------------------------------------------------------------*
+    TYPES: BEGIN OF ltyp_s_message,
+             message_code  TYPE sci_errc,
+             message_kind  TYPE sci_errty,
+             pseudocomment TYPE zpe_hm_text,
+             pragma        TYPE zpe_hm_text,
+           END OF ltyp_s_message.
+
+    DATA: lt_messages TYPE STANDARD TABLE OF ltyp_s_message WITH KEY message_code.
+
+
+*-- Buffer
+    IF gts_cust_priorities IS NOT INITIAL AND gts_scimessages IS NOT INITIAL.
+      cust_priorities = gts_cust_priorities.
+      scimessages     = gts_scimessages.
+      RETURN.
+    ENDIF.
+
+    TRY.
+*--     Get custom messages from BRF+
+        zcl_pe_hm_complex=>get_table( EXPORTING iv_id    = '0239FC3B8D041EDCA2ACE8B2D05E9F59'
+                                      IMPORTING et_table = lt_messages ).
+
+*--     Turn standard into custom messages (needed for pragma changes)
+        LOOP AT scimessages REFERENCE INTO DATA(lo_msg) WHERE test = mc_parent.
+          INSERT VALUE #( BASE lo_msg->* test = mc_myname ) INTO TABLE scimessages.
+        ENDLOOP.
+        DELETE scimessages WHERE test = mc_parent.
+
+*--     Replace priority and pragmas
+        LOOP AT lt_messages ASSIGNING FIELD-SYMBOL(<ls_msg_new>).
+          READ TABLE scimessages ASSIGNING FIELD-SYMBOL(<ls_msg_old>) WITH KEY test =  mc_myname
+                                                                               code = <ls_msg_new>-message_code.
+          IF sy-subrc = 0.
+            <ls_msg_old>-kind = <ls_msg_new>-message_kind.
+            IF <ls_msg_new>-pseudocomment IS NOT INITIAL.
+              <ls_msg_old>-pcom = <ls_msg_new>-pseudocomment.
+            ENDIF.
+            IF <ls_msg_new>-pragma IS NOT INITIAL.
+              <ls_msg_old>-pragma = <ls_msg_new>-pragma.
+            ENDIF.
+          ELSE.
+
+            INSERT VALUE #( test =  mc_myname
+                            code = <ls_msg_new>-message_code
+                            kind = <ls_msg_new>-message_kind
+                            pcom = <ls_msg_new>-pseudocomment
+                            pragma = <ls_msg_new>-pragma ) INTO TABLE scimessages.
+
+*           Priority O needs a different table (see INFORM method in parent class)
+            IF <ls_msg_new>-message_kind = 'O'.
+              INSERT VALUE #( checkname =  mc_myname
+                              checkcode = <ls_msg_new>-message_code
+                              custom_prio = <ls_msg_new>-message_kind ) INTO TABLE cust_priorities.
+            ENDIF.
+
+          ENDIF.
+        ENDLOOP.
+
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+
+
+*-- Update buffer
+    gts_scimessages      = scimessages.
+    gts_cust_priorities  = cust_priorities.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 01.02.2022 | 9784      : ATC Development              *
+*              |            | DS4K913083                               *
+*----------------------------------------------------------------------*
+
+    super->constructor( ).
+
+    description         = 'Extended Program Check (SLIN)'(000).
+    category            = zcl_pe_atc_category_004=>gc_my_name.
+    position            = '100'.
+    version             = '001'.
+    myname              = mc_myname.
+
+    adjust_messages( ).
+
+  ENDMETHOD.
+
+
+  METHOD out_head.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* CANOCAR      | 22.12.2022 | 16320: Remove not relevant               *
+*              |            | DS4K938346                               *
+*----------------------------------------------------------------------*
+
+    IF zcl_pe_atc_aoc_super=>is_relevant( iv_program = CONV #( p_head-src_incl ) ).
+      super->out_head( p_head = p_head
+                       p_test = p_test ).
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

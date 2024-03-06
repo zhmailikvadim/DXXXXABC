@@ -1,0 +1,139 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* USTINKON     | 29.12.2022 | 15912     : [Build] - BE - Tool to mass  *
+*              |            | DS4K938202                               *
+*----------------------------------------------------------------------*
+* KONRANAR     | 08.02.2024 | 28597     : CR: Mass update single DD    *
+*              |            | DS4K979003                               *
+*----------------------------------------------------------------------*
+* RAPANKON     | 22.03.2024 | 30235     : Feature - DD update IBDs cha *
+*              |            | DS4K984101                               *
+*----------------------------------------------------------------------*
+* RAPANKON     | 27.03.2024 | 30516     : Delivery Date update po      *
+*              |            | DS4K985239                               *
+*----------------------------------------------------------------------*
+CLASS lhc__ibounddelivery DEFINITION INHERITING FROM cl_abap_behavior_handler FINAL.
+  PUBLIC SECTION.
+    METHODS on_end_of_task_dd_update
+      IMPORTING !p_task TYPE clike.
+
+  PRIVATE SECTION.
+    DATA: mt_return_local TYPE bapiret2_t.
+
+    METHODS changedeliverydate FOR MODIFY
+      IMPORTING keys   FOR ACTION _ibounddelivery~changedeliverydate
+      RESULT    result.
+ENDCLASS.
+
+CLASS lhc__ibounddelivery IMPLEMENTATION.
+
+  METHOD changedeliverydate.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* USTINKON     | 29.12.2022 | 15912     : [Build] - BE - Tool to mass  *
+*              |            | DS4K938202                               *
+*----------------------------------------------------------------------*
+* KONRANAR     | 08.02.2024 | 28597     : CR: Mass update single DD    *
+*              |            | DS4K979003                               *
+*----------------------------------------------------------------------*
+* ISAICSVI     | 18.03.2024 | 29279     : Feature - [Build] - [CR][AB] *
+*              |            | DS4K980520                               *
+* RAPANKON     | 27.03.2024 | 30516     : Delivery Date update po      *
+*              |            | DS4K985239                               *
+*----------------------------------------------------------------------*
+
+    DATA(lv_input_date) = VALUE #( keys[ 1 ]-%param-deliverydate OPTIONAL ).
+
+    IF lv_input_date IS NOT INITIAL AND lv_input_date < sy-datum.
+      APPEND VALUE #( %msg = NEW zcx_sc_delivery_factory_date(
+                                   severity = if_abap_behv_message=>severity-information
+                                   textid   = zcx_sc_delivery_factory_date=>date_fail ) )
+      TO reported-_ibounddelivery.
+      RETURN.
+    ENDIF.
+
+    READ ENTITIES OF zsd_i_inbound_delivery_items IN LOCAL MODE
+    ENTITY _ibounddelivery
+    ALL FIELDS WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_delivery_items).
+
+    IF lt_delivery_items IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_delivery_items ASSIGNING FIELD-SYMBOL(<ls_item>)
+    GROUP BY ( delivery_document = <ls_item>-deliverydocument ).
+
+      CLEAR mt_return_local.
+
+      DATA(lo_delivery_status) = zcl_sd_ibd_processed=>get_instance( iv_delivery = <ls_item>-deliverydocument ).
+
+      CALL FUNCTION 'ZSD_FM_ACTION_CHANGE_DD'
+        STARTING NEW TASK 'UPDATE'
+        DESTINATION 'NONE'
+        CALLING on_end_of_task_dd_update ON END OF TASK
+        EXPORTING
+          iv_lfdat              = lv_input_date
+          iv_vbeln              = <ls_item>-deliverydocument
+        CHANGING
+          ct_return             = mt_return_local
+        EXCEPTIONS
+          communication_failure = 1
+          system_failure        = 2.
+      IF sy-subrc <> 0.
+        APPEND VALUE #( %msg = NEW zcx_sc_delivery_factory_date( severity = if_abap_behv_message=>severity-information
+                                     textid   = zcx_sc_delivery_factory_date=>error_in_factory
+                                     gv_mess  = CONV #( <ls_item>-deliverydocument ) ) )
+                                            TO reported-_ibounddelivery.
+      ENDIF.
+
+      WAIT UNTIL mt_return_local IS NOT INITIAL UP TO 15 SECONDS ##NUMBER_OK.
+
+      IF line_exists( mt_return_local[ type = 'E' ] ).   "#EC CI_STDSEQ
+        lo_delivery_status->set_criticality( iv_criticality = 1 ).
+        APPEND VALUE #( deliverydocument    = <ls_item>-deliverydocument
+                        referencesddocument = <ls_item>-referencesddocument
+                        material            = <ls_item>-material
+                        %msg = NEW zcx_sc_delivery_factory_date(
+                                     severity = if_abap_behv_message=>severity-information
+                                     textid   = zcx_sc_delivery_factory_date=>multi_fail ) )
+        TO reported-_ibounddelivery.
+      ELSE.
+        lo_delivery_status->set_criticality( iv_criticality = 3 ).
+        APPEND VALUE #( %msg = NEW zcx_sc_delivery_factory_date(
+                                     severity = if_abap_behv_message=>severity-success
+                                     textid   = zcx_sc_delivery_factory_date=>success
+                                     gv_mess  = CONV #( <ls_item>-deliverydocument ) ) )
+        TO reported-_ibounddelivery.
+      ENDIF.
+
+    ENDLOOP.
+
+    READ ENTITIES OF zsd_i_inbound_delivery_items IN LOCAL MODE
+    ENTITY _ibounddelivery
+    ALL FIELDS WITH CORRESPONDING #( keys )
+    RESULT lt_delivery_items.
+
+    result = VALUE #( FOR ls_delivery_items IN lt_delivery_items ( %tky   = ls_delivery_items-%tky
+                                                                   %param = ls_delivery_items ) ).
+
+  ENDMETHOD.
+
+  METHOD on_end_of_task_dd_update.
+    RECEIVE RESULTS FROM FUNCTION 'ZSD_FM_ACTION_CHANGE_DD'
+      CHANGING
+        ct_return = mt_return_local
+      EXCEPTIONS
+        communication_failure = 1
+        system_failure        = 2.
+  ENDMETHOD.
+
+ENDCLASS.

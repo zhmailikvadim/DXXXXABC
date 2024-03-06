@@ -1,0 +1,378 @@
+class ZCL_PD_PH_MRP_TYPE_UPDATE definition
+  public
+  final
+  create public .
+
+public section.
+
+  data MIF_APPL_LOG type ref to IF_BALI_LOG .
+  constants GC_APPL_LOG_OBJECT type BALOBJ_D value 'ZPD_PH_ARTICLES' ##NO_TEXT.
+  constants GC_APPL_LOG_SUBOBJECT type BALSUBOBJ value 'ZPD_MRP_TYPE_UPDATE' ##NO_TEXT.
+
+  methods PROCESS
+    importing
+      !IT_PARAMETERS type IF_APJ_RT_EXEC_OBJECT=>TT_TEMPL_VAL .
+  PROTECTED SECTION.
+
+private section.
+
+  types:
+    BEGIN OF gtyp_s_controller_lsproc,
+      dismm TYPE dismm,
+      dispo TYPE dispo,
+      disls TYPE disls,
+    END OF gtyp_s_controller_lsproc .
+  types:
+    gtyp_t_controller_lsproc TYPE SORTED TABLE OF gtyp_s_controller_lsproc WITH NON-UNIQUE KEY dismm .
+
+  data MTS_CONTROLLER_LSPROC type GTYP_T_CONTROLLER_LSPROC .
+
+  methods CREATE_LOG
+    importing
+      !IV_EXTERNAL_ID type CL_BALI_HEADER_SETTER=>TY_EXTERNAL_ID optional .
+  methods SAVE_LOG
+    raising
+      CX_BALI_RUNTIME .
+  methods ADD_SYS_MESSAGE .
+  methods COLLECT_DATA
+    importing
+      !IT_R_PLANT type STANDARD TABLE
+      !IT_R_SATNR type STANDARD TABLE
+    returning
+      value(RT_DATA) type ZPD_TT_MRP_TYPE_CHANGE .
+  methods CHANGE_DATA
+    importing
+      !IS_DATA type ZPD_S_MRP_TYPE_CHANGE .
+  methods GET_CONTROLLER_LSPROC
+    importing
+      !IV_DISMM type DISMM
+    exporting
+      !EV_DISPO type DISPO
+      !EV_DISLS type DISLS .
+ENDCLASS.
+
+
+
+CLASS ZCL_PD_PH_MRP_TYPE_UPDATE IMPLEMENTATION.
+
+
+  METHOD process.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.02.2024 | FB_29193_PD MRPType logic for PH articles*
+*              |            | DS4K980265                               *
+*----------------------------------------------------------------------*
+    DATA lr_plant TYPE RANGE OF i_productplantbasic-plant.
+    DATA lr_satnr TYPE RANGE OF i_product-crossplantconfigurableproduct.
+    DATA lv_extid TYPE balnrext.
+
+    LOOP AT it_parameters ASSIGNING FIELD-SYMBOL(<ls_parameter>).
+      CASE <ls_parameter>-selname.
+        WHEN zcl_pd_apj_mrp_type_update=>gc_apj_parameter-plant.
+          lr_plant = VALUE #( BASE lr_plant ( sign   = <ls_parameter>-sign
+                                              option = <ls_parameter>-option
+                                              low    = <ls_parameter>-low
+                                              high   = <ls_parameter>-high  ) ).
+        WHEN zcl_pd_apj_mrp_type_update=>gc_apj_parameter-satnr.
+          lr_satnr = VALUE #( BASE lr_satnr ( sign   = <ls_parameter>-sign
+                                              option = <ls_parameter>-option
+                                              low    = <ls_parameter>-low
+                                              high   = <ls_parameter>-high  ) ).
+      ENDCASE.
+    ENDLOOP.
+
+    lv_extid = 'MRP_Type_Update_' && sy-datum && '_' && sy-uzeit.
+    create_log( lv_extid ).
+
+    " Changing of MRP Type in MARC
+    LOOP AT collect_data( it_r_plant = lr_plant
+                          it_r_satnr = lr_satnr ) ASSIGNING FIELD-SYMBOL(<ls_chdata>).
+      change_data( <ls_chdata> ).
+    ENDLOOP.
+
+    TRY.
+        save_log( ).
+      CATCH cx_bali_runtime.
+        MESSAGE e003 INTO DATA(lv_dummy) ##NEEDED.
+    ENDTRY.
+
+
+  ENDMETHOD.
+
+
+  METHOD add_sys_message.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.02.2024 | FB_29193_PD MRPType logic for PH articles*
+*              |            | DS4K980265                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+        mif_appl_log->add_item( item = cl_bali_message_setter=>create( severity   = sy-msgty
+                                                                       id         = sy-msgid
+                                                                       number     = sy-msgno
+                                                                       variable_1 = sy-msgv1
+                                                                       variable_2 = sy-msgv2
+                                                                       variable_3 = sy-msgv3
+                                                                       variable_4 = sy-msgv4 ) ).
+      CATCH cx_bali_runtime.
+        MESSAGE e003 INTO DATA(lv_dummy) ##NEEDED.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD change_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.02.2024 | FB_29193_PD MRPType logic for PH articles*
+*              |            | DS4K980265                               *
+*----------------------------------------------------------------------*
+    DATA lv_dummy ##NEEDED.
+    DATA ls_headdata    TYPE bapie1mathead.
+    DATA ls_plantdata   TYPE bapie1marcrt.
+    DATA ls_plantdatax  TYPE bapie1marcrtx.
+    DATA lt_plantdata   TYPE TABLE OF bapie1marcrt.
+    DATA lt_plantdatax  TYPE TABLE OF bapie1marcrtx.
+    DATA ls_return      TYPE bapireturn1.
+
+    ls_headdata-material = is_data-matnr.
+    ls_headdata-logst_view = abap_true.
+
+    ls_plantdata-material = is_data-matnr.
+    ls_plantdata-plant    = is_data-werks.
+    ls_plantdata-mrp_type = is_data-dismm_new.
+    get_controller_lsproc(
+      EXPORTING
+        iv_dismm = is_data-dismm_new
+      IMPORTING
+       ev_dispo = ls_plantdata-mrp_ctrler
+       ev_disls = ls_plantdata-lotsizekey ).
+    APPEND ls_plantdata TO lt_plantdata.
+
+    ls_plantdatax-material = is_data-matnr.
+    ls_plantdatax-plant    = is_data-werks.
+    ls_plantdatax-mrp_type = abap_true.
+    ls_plantdatax-mrp_ctrler = 'X'.
+    ls_plantdatax-lotsizekey = 'X'.
+    APPEND ls_plantdatax TO lt_plantdatax.
+
+    CALL FUNCTION 'BAPI_MATERIAL_MAINTAINDATA_RT'
+      EXPORTING
+        headdata   = ls_headdata
+      IMPORTING
+        return     = ls_return
+      TABLES
+        plantdata  = lt_plantdata
+        plantdatax = lt_plantdatax.
+    IF ls_return-type NA 'EAX'.
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'.
+      MESSAGE s001 WITH is_data-matnr is_data-werks is_data-dismm_old is_data-dismm_new INTO lv_dummy.
+*     Article &1/Plant &2: MRP Type &3 -> &4 is changed successfully
+    ELSE.
+      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+      MESSAGE e002 WITH is_data-matnr is_data-werks is_data-dismm_old is_data-dismm_new INTO lv_dummy.
+*     Article &1/Plant &2: MRP Type &3 -> &4 change error
+    ENDIF.
+    add_sys_message( ).
+
+  ENDMETHOD.
+
+
+  METHOD collect_data.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.02.2024 | FB_29193_PD MRPType logic for PH articles*
+*              |            | DS4K980265                               *
+*----------------------------------------------------------------------*
+    DATA lv_dismm_valid     TYPE dismm.
+    DATA lv_dismm_not_valid TYPE dismm.
+    DATA lr_planning_item   TYPE RANGE OF zpd_spu.
+    DATA lr_mat_type        TYPE RANGE OF mtart.
+    DATA lr_mat_cat         TYPE RANGE OF attyp.
+    DATA lt_change          TYPE STANDARD TABLE OF zpd_s_mrp_type_change WITH NON-UNIQUE KEY matnr werks.
+    DATA lt_change_tmp      TYPE STANDARD TABLE OF zpd_s_mrp_type_change.
+
+    TRY.
+        DATA(lt_dissm_set) = zcl_pe_hm_basic=>get_table( iv_id = CONV #( '3099' ) ).  " MRP type to be set
+        lr_planning_item   = zcl_pe_hm_basic=>get_range( iv_id = CONV #( '3100' ) ).  " FPS relevant Special Usage
+        lr_mat_type        = zcl_pe_hm_basic=>get_range( iv_id = CONV #( '3101' ) ).  " FPS relevant Material Type
+        lr_mat_cat         = zcl_pe_hm_basic=>get_range( iv_id = CONV #( '2287' ) ).  " Material Category - Gen.
+      CATCH zcx_pe_hm.
+        RETURN.
+    ENDTRY.
+    READ TABLE lt_dissm_set ASSIGNING FIELD-SYMBOL(<ls_dissm_set>) INDEX 1.
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+    lv_dismm_valid     = <ls_dissm_set>-field1.
+    lv_dismm_not_valid = <ls_dissm_set>-field2.
+
+    SELECT mc~product AS matnr,
+           mc~plant   AS werks,
+           mc~mrptype AS dismm_old,
+           MAX( ss~zzretailend ) AS zzretailend
+      FROM i_productplantbasic AS mc
+        INNER JOIN zpd_t_mara_seas AS ss
+          ON ss~matnr EQ mc~product
+      WHERE mc~product IN @it_r_satnr
+        AND mc~plant IN @it_r_plant
+        AND mc~\_product-producttype IN @lr_mat_type
+        AND mc~\_product-productcategory IN @lr_mat_cat
+        AND ss~zzspu IN @lr_planning_item
+      GROUP BY mc~product,
+               mc~plant,
+               mc~mrptype
+      INTO TABLE @DATA(lt_generic).
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+
+    SORT lt_generic BY matnr.
+
+    LOOP AT lt_generic ASSIGNING FIELD-SYMBOL(<ls_generic>).
+      APPEND INITIAL LINE TO lt_change ASSIGNING FIELD-SYMBOL(<ls_change>).
+      <ls_change> = CORRESPONDING #( <ls_generic> ).
+      IF <ls_generic>-zzretailend GE sy-datum.
+        <ls_change>-dismm_new = lv_dismm_valid.
+      ELSE.
+        <ls_change>-dismm_new = lv_dismm_not_valid.
+      ENDIF.
+    ENDLOOP.
+
+    IF lt_generic[] IS NOT INITIAL.
+      SELECT DISTINCT
+             mt~crossplantconfigurableproduct AS satnr,
+             mc~product AS matnr,
+             mc~plant   AS werks,
+             mc~mrptype AS dismm_old
+        FROM i_productplantbasic AS mc
+        INNER JOIN i_product AS mt
+          ON mt~product EQ mc~product
+        FOR ALL ENTRIES IN @lt_generic
+        WHERE mc~plant EQ @lt_generic-werks
+          AND mt~crossplantconfigurableproduct EQ @lt_generic-matnr
+        INTO TABLE @DATA(lt_variant).
+      IF sy-subrc EQ 0.
+        SORT lt_variant BY satnr.
+      ENDIF.
+    ENDIF.
+
+    LOOP AT lt_variant ASSIGNING FIELD-SYMBOL(<ls_variant>).
+      READ TABLE lt_change ASSIGNING <ls_change>
+        WITH TABLE KEY matnr = <ls_variant>-satnr
+                       werks = <ls_variant>-werks.
+      IF sy-subrc EQ 0.
+        APPEND INITIAL LINE TO lt_change_tmp ASSIGNING FIELD-SYMBOL(<ls_tmp>).
+        <ls_tmp> = CORRESPONDING #( <ls_variant> ).
+        <ls_tmp>-dismm_new = <ls_change>-dismm_new.
+      ENDIF.
+    ENDLOOP.
+
+    APPEND LINES OF lt_change_tmp TO lt_change.
+    FREE lt_change_tmp.
+    SORT lt_change BY matnr werks.
+    LOOP AT lt_change ASSIGNING <ls_change>.
+      IF <ls_change>-dismm_new EQ <ls_change>-dismm_old.
+        DELETE lt_change.
+      ENDIF.
+    ENDLOOP.
+
+    rt_data = lt_change.
+
+  ENDMETHOD.
+
+
+  METHOD create_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.02.2024 | FB_29193_PD MRPType logic for PH articles*
+*              |            | DS4K980265                               *
+*----------------------------------------------------------------------*
+
+    TRY.
+        mif_appl_log = cl_bali_log=>create_with_header( header = cl_bali_header_setter=>create( object      = gc_appl_log_object
+                                                                                                subobject   = gc_appl_log_subobject
+                                                                                                external_id = iv_external_id ) ).
+      CATCH cx_bali_runtime.
+        MESSAGE e003 INTO DATA(lv_dummy) ##NEEDED.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD save_log.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.02.2024 | FB_29193_PD MRPType logic for PH articles*
+*              |            | DS4K980265                               *
+*----------------------------------------------------------------------*
+
+    cl_bali_log_db=>get_instance( )->save_log( log = mif_appl_log
+                                               assign_to_current_appl_job = abap_true ).
+
+  ENDMETHOD.
+
+
+  METHOD get_controller_lsproc.
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* NIELOOLE     | 20.02.2024 | FB_29193_PD MRPType logic for PH articles*
+*              |            | DS4K980265                               *
+*----------------------------------------------------------------------*
+
+    CLEAR:
+      ev_dispo,
+      ev_disls.
+
+    IF mts_controller_lsproc[] IS INITIAL.
+      TRY.
+          DATA(lt_hm_set) = zcl_pe_hm_basic=>get_table( iv_id = CONV #( '3233' ) ).  " MRP Controller and Lot Size Procedure for MRP Type
+          LOOP AT lt_hm_set ASSIGNING FIELD-SYMBOL(<ls_hm_set>).
+            INSERT VALUE #( dismm = <ls_hm_set>-field1
+                            dispo = <ls_hm_set>-field2
+                            disls = <ls_hm_set>-field3 )
+                            INTO TABLE mts_controller_lsproc.
+          ENDLOOP.
+        CATCH zcx_pe_hm.
+          RETURN.
+      ENDTRY.
+    ENDIF.
+
+    READ TABLE mts_controller_lsproc ASSIGNING FIELD-SYMBOL(<ls_controller_lsproc>)
+      WITH TABLE KEY dismm = iv_dismm.
+    IF sy-subrc EQ 0.
+      ev_dispo = <ls_controller_lsproc>-dispo.
+      ev_disls = <ls_controller_lsproc>-disls.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

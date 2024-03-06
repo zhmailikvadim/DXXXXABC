@@ -30,8 +30,11 @@
 " ----------------------------------------------------------------------*
 " ZHMAIVAD     | 25.10.2023 | 22859     : [Build] - Stock reconciliati -
 "              |            | DS4K957133                               -
+" ----------------------------------------------------------------------*
+" ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re -
+"              |            | DS4K982092                               -
 " ----------------------------------------------------------------------*/
-CLASS lcl_buffer DEFINITION CREATE PRIVATE FINAL.
+CLASS lcl_buffer DEFINITION FINAL CREATE PRIVATE.
 
   PUBLIC SECTION.
     CLASS-METHODS get_instance
@@ -46,10 +49,17 @@ CLASS lcl_buffer DEFINITION CREATE PRIVATE FINAL.
     METHODS get_background_flag
       RETURNING VALUE(rv_background_flag) TYPE abap_boolean.
 
+    METHODS set_foreground_flag_auto_corr
+      IMPORTING iv_foreground_flag TYPE abap_boolean.
+
+    METHODS get_foreground_flag_auto_corr
+      RETURNING VALUE(rv_foreground_flag) TYPE abap_boolean.
+
   PRIVATE SECTION.
     CLASS-DATA go_instance TYPE REF TO lcl_buffer.
 
     DATA mv_run_in_background TYPE abap_boolean.
+    DATA mv_run_in_foreground TYPE abap_boolean.
 ENDCLASS.
 
 
@@ -75,6 +85,14 @@ CLASS lcl_buffer IMPLEMENTATION.
   METHOD set_background_flag.
     mv_run_in_background = iv_background_flag.
   ENDMETHOD.
+
+  METHOD get_foreground_flag_auto_corr.
+    rv_foreground_flag = mv_run_in_foreground.
+  ENDMETHOD.
+
+  METHOD set_foreground_flag_auto_corr.
+    mv_run_in_foreground = iv_foreground_flag.
+  ENDMETHOD.
 ENDCLASS.
 
 
@@ -91,8 +109,8 @@ CLASS lhc_zsd_i_stock_corr_rprt DEFINITION INHERITING FROM cl_abap_behavior_hand
              materialgroup   TYPE zpe_tt_selectall_fe_filter,
              stocktype       TYPE zpe_tt_selectall_fe_filter,
              movetype        TYPE zpe_tt_selectall_fe_filter,
-           END OF mtyp_filters_fe,
-           BEGIN OF mtyp_filters_be,
+           END OF mtyp_filters_fe.
+    TYPES: BEGIN OF mtyp_filters_be,
              status          TYPE if_rap_query_filter=>tt_range_option,
              plant           TYPE if_rap_query_filter=>tt_range_option,
              storagelocation TYPE if_rap_query_filter=>tt_range_option,
@@ -117,14 +135,14 @@ CLASS lhc_zsd_i_stock_corr_rprt DEFINITION INHERITING FROM cl_abap_behavior_hand
     METHODS get_instance_features FOR INSTANCE FEATURES
       IMPORTING keys REQUEST requested_features FOR stockcorrection RESULT result ##NEEDED.
 
-    METHODS checkquantityafteredit FOR VALIDATE ON SAVE
-      IMPORTING keys FOR stockcorrection~checkquantityafteredit ##NEEDED.
-
     METHODS get_instance_authorizations FOR INSTANCE AUTHORIZATION
       IMPORTING keys REQUEST requested_authorizations FOR stockcorrection RESULT result ##NEEDED.
 
     METHODS clearupadjustmentall FOR MODIFY
       IMPORTING keys FOR ACTION stockcorrection~clearupadjustmentall ##NEEDED.
+
+    METHODS clearupadjustmentautocor FOR MODIFY
+      IMPORTING keys FOR ACTION stockcorrection~clearupadjustmentautocor RESULT result ##NEEDED.
 
     METHODS is_clearupadjustment_granted
       IMPORTING iv_plant           TYPE zsd_i_stock_corr_rprt-plant
@@ -147,18 +165,32 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    IF        lines( keys )  > zcl_sd_stock_recon_base=>get_general_setting( )-fiori_max_rows_foreground_proc
-          AND sy-xprog      CS gc_fiori_consumption_cds
+    READ ENTITIES OF zsd_i_stock_corr_rprt IN LOCAL MODE
+         ENTITY stockcorrection
+         ALL FIELDS WITH CORRESPONDING #( keys )
+         RESULT DATA(lt_read_stock_correction).
+
+    DELETE lt_read_stock_correction WHERE status = zcl_sd_stock_recon_base=>gc_stock_corr_status_complete.
+
+    IF        lcl_buffer=>get_instance( )->get_foreground_flag_auto_corr( )  = abap_false
+          AND lines( keys ) > zcl_sd_stock_recon_base=>get_general_setting( )-fiori_max_rows_foreground_proc
+          AND sy-xprog CS gc_fiori_consumption_cds
        OR lcl_buffer=>get_instance( )->get_background_flag( ) = abap_true.
 
       CALL FUNCTION 'ZSD_FM_STOCK_CORR_CLEAR_UP_ADJ'
         STARTING NEW TASK gc_task
-        EXPORTING
-          it_keys               = CORRESPONDING zsd_tt_correction_report_keys( keys )
-        EXCEPTIONS
-          communication_failure = 1
-          system_failure        = 2
-          resource_failure      = 3.
+        EXPORTING  it_keys               = CORRESPONDING zsd_tt_correction_report_keys( keys )
+        EXCEPTIONS communication_failure = 1
+                   system_failure        = 2
+                   resource_failure      = 3.
+
+      IF sy-subrc <> 0.
+        APPEND VALUE #( %tky = keys[ 1 ]-%tky
+                        %msg = NEW zcl_sd_stock_corr_messages(
+                                       iv_textid   = zcl_sd_stock_recon_messages=>communication_error
+                                       iv_severity = if_abap_behv_message=>severity-error ) ) TO reported-stockcorrection.
+        RETURN.
+      ENDIF.
 
       IF lcl_buffer=>get_instance( )->get_background_flag( ) = abap_false.
         APPEND VALUE #( %tky = keys[ 1 ]-%tky
@@ -169,34 +201,22 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
         lcl_buffer=>get_instance( )->set_background_flag( abap_false ).
       ENDIF.
 
-      READ ENTITIES OF zsd_i_stock_corr_rprt IN LOCAL MODE
-           ENTITY stockcorrection
-           ALL FIELDS WITH CORRESPONDING #( keys )
-           RESULT FINAL(lt_stockcorrection).
-
-      result = VALUE #( FOR ls_stockcorrdata IN lt_stockcorrection
+      result = VALUE #( FOR ls_stockcorrdata IN lt_read_stock_correction
                         ( %tky   = ls_stockcorrdata-%tky
                           %param = ls_stockcorrdata ) ).
       RETURN.
     ENDIF.
 
-    READ ENTITIES OF zsd_i_stock_corr_rprt IN LOCAL MODE
-         ENTITY stockcorrection
-         ALL FIELDS WITH CORRESPONDING #( keys )
-         RESULT DATA(lt_read_stock_correction).
-
-    DELETE lt_read_stock_correction WHERE status = zcl_sd_stock_recon_base=>gc_stock_corr_status_complete.
-
     IF lt_read_stock_correction IS NOT INITIAL.
       SELECT material, plant, storagelocation, sddocument, sddocumentitem, inventoryspecialstocktype
-          INTO TABLE @DATA(lt_inventoryspecialstocktype)
-          FROM i_materialstock
-              FOR ALL ENTRIES IN @lt_read_stock_correction
-          WHERE   material = @lt_read_stock_correction-article
-              AND plant = @lt_read_stock_correction-plant
-              AND storagelocation = @lt_read_stock_correction-storagelocation
-              AND sddocument = @lt_read_stock_correction-salesordernumber
-              AND sddocumentitem = @lt_read_stock_correction-salesorderitem. "#EC CI_SUBRC
+        INTO TABLE @DATA(lt_inventoryspecialstocktype)
+        FROM i_materialstock
+        FOR ALL ENTRIES IN @lt_read_stock_correction
+        WHERE material        = @lt_read_stock_correction-article
+          AND plant           = @lt_read_stock_correction-plant
+          AND storagelocation = @lt_read_stock_correction-storagelocation
+          AND sddocument      = @lt_read_stock_correction-salesordernumber
+          AND sddocumentitem  = @lt_read_stock_correction-salesorderitem. "#EC CI_SUBRC
     ENDIF.
 
     LOOP AT lt_read_stock_correction ASSIGNING FIELD-SYMBOL(<ls_stock_correction>).
@@ -208,11 +228,11 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
                TO reported-stockcorrection.
         CONTINUE.
       ENDIF.
-      READ TABLE lt_inventoryspecialstocktype ASSIGNING FIELD-SYMBOL(<ls_sobzkl>) WITH KEY material        = <ls_stock_correction>-article
-                                                                                           plant           = <ls_stock_correction>-plant
-                                                                                           storagelocation = <ls_stock_correction>-storagelocation
-                                                                                           sddocument      = <ls_stock_correction>-salesordernumber
-                                                                                           sddocumentitem  = <ls_stock_correction>-salesorderitem. "#EC CI_STDSEQ
+      ASSIGN lt_inventoryspecialstocktype[ material        = <ls_stock_correction>-article
+                                           plant           = <ls_stock_correction>-plant
+                                           storagelocation = <ls_stock_correction>-storagelocation
+                                           sddocument      = <ls_stock_correction>-salesordernumber
+                                           sddocumentitem  = <ls_stock_correction>-salesorderitem ] TO FIELD-SYMBOL(<ls_sobzkl>). "#EC CI_STDSEQ
       IF sy-subrc = 0.
         DATA(lv_inventoryspecialstocktype) = <ls_sobzkl>-inventoryspecialstocktype.
       ELSE.
@@ -222,12 +242,11 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
       SET LOCKS OF zsd_i_stock_corr_rprt
           ENTITY stockcorrection
           FROM VALUE #( ( uuid = <ls_stock_correction>-uuid ) )
-          FAILED FINAL(ls_failed)
-          " TODO: variable is assigned but never used (ABAP cleaner)
-          REPORTED FINAL(ls_reported).
+          FAILED FINAL(ls_failed).
 
       IF ls_failed-stockcorrection IS NOT INITIAL.
-        APPEND VALUE #( %msg = NEW zcl_sd_stock_corr_messages(
+        APPEND VALUE #( %tky = keys[ 1 ]-%tky
+                        %msg = NEW zcl_sd_stock_corr_messages(
                                        iv_textid   = zcl_sd_stock_corr_messages=>entity_was_blocked
                                        iv_severity = if_abap_behv_message=>severity-error ) )
                TO reported-stockcorrection.
@@ -252,7 +271,8 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
                 sobkz               = lv_inventoryspecialstocktype )
                    TO lt_to_stock_adjustment.
           CATCH zcx_pe_hm.
-            APPEND VALUE #( %msg = NEW zcl_sd_stock_corr_messages(
+            APPEND VALUE #( %tky = keys[ 1 ]-%tky
+                            %msg = NEW zcl_sd_stock_corr_messages(
                                            iv_textid   = zcl_sd_stock_corr_messages=>provide_hardcode_data
                                            iv_severity = if_abap_behv_message=>severity-error ) )
                    TO reported-stockcorrection.
@@ -264,12 +284,10 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
       DO mc_repeat TIMES.
         CALL FUNCTION 'ZSD_FM_STOCK_CORRECTION'
           STARTING NEW TASK mv_task
-          EXPORTING
-            it_stock_correction   = lt_to_stock_adjustment
-          EXCEPTIONS
-            communication_failure = 1
-            system_failure        = 2
-            resource_failure      = 3.
+          EXPORTING  it_stock_correction   = lt_to_stock_adjustment
+          EXCEPTIONS communication_failure = 1
+                     system_failure        = 2
+                     resource_failure      = 3.
 
         IF sy-subrc <> 3.
           EXIT.
@@ -296,10 +314,10 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
          WITH CORRESPONDING #( keys )
          RESULT FINAL(lt_stock_correction).
     SELECT wmssnapshotdate
-        UP TO 1 ROWS
-        FROM zsd_i_stcorr_date_value_help
-        INTO TABLE @DATA(lt_wmsnewestdate)
-        ORDER BY wmssnapshotdate DESCENDING.            "#EC CI_NOWHERE
+      UP TO 1 ROWS
+      FROM zsd_i_stcorr_date_value_help
+      INTO TABLE @DATA(lt_wmsnewestdate)
+      ORDER BY wmssnapshotdate DESCENDING.              "#EC CI_NOWHERE
     IF sy-subrc = 0.
       FINAL(lv_newestdate) = lt_wmsnewestdate[ 1 ]-wmssnapshotdate.
     ENDIF.
@@ -314,23 +332,6 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
                                                                OR ( ls_variable-status        = zcl_sd_stock_recon_base=>gc_stock_corr_status_complete ) )
                                                         THEN if_abap_behv=>fc-o-disabled
                                                         ELSE if_abap_behv=>fc-o-enabled ) ) ).
-  ENDMETHOD.
-
-  METHOD checkquantityafteredit.
-    READ ENTITIES OF zsd_i_stock_corr_rprt IN LOCAL MODE
-         ENTITY stockcorrection
-         FIELDS ( adjustmentqty transferto )
-         WITH CORRESPONDING #( keys )
-         RESULT FINAL(lt_stock_correction).
-
-    LOOP AT lt_stock_correction ASSIGNING FIELD-SYMBOL(<ls_stock_correction>)
-         WHERE adjustmentqty > 0 AND transferto IS NOT INITIAL. "#EC CI_STDSEQ
-      APPEND VALUE #( %tky = <ls_stock_correction>-%tky ) TO failed-stockcorrection.
-
-      APPEND VALUE #( %msg = NEW zcl_sd_stock_corr_messages( iv_textid   = zcl_sd_stock_corr_messages=>need_negative_qnt
-                                                             iv_severity = if_abap_behv_message=>severity-error ) )
-             TO reported-stockcorrection.
-    ENDLOOP.
   ENDMETHOD.
 
   METHOD get_instance_authorizations.
@@ -389,23 +390,27 @@ CLASS lhc_zsd_i_stock_corr_rprt IMPLEMENTATION.
              TO reported-stockcorrection.
     ENDIF.
 
-    SELECT uuid, status
-    FROM zsd_i_stock_corr_rprt
-    WHERE     upper( status ) IN @ls_filters_be-status
-          AND plant  IN @ls_filters_be-plant
-          AND storagelocation IN @ls_filters_be-storagelocation
-          AND wmssnapshotdate IN @ls_filters_be-wmssnapshotdate
-          AND article IN @ls_filters_be-article
-          AND genericarticle IN @ls_filters_be-genericarticle
-          AND materialtype IN @ls_filters_be-materialtype
-          AND materialgroup IN @ls_filters_be-materialgroup
-          AND stocktype IN @ls_filters_be-stocktype
-          AND movetype IN @ls_filters_be-movetype
-              INTO TABLE @DATA(lt_stock_correction_keys).
+    SELECT uuid, status FROM zsd_i_stock_corr_rprt
+      WHERE upper( status ) IN @ls_filters_be-status
+        AND plant           IN @ls_filters_be-plant
+        AND storagelocation IN @ls_filters_be-storagelocation
+        AND wmssnapshotdate IN @ls_filters_be-wmssnapshotdate
+        AND article         IN @ls_filters_be-article
+        AND genericarticle  IN @ls_filters_be-genericarticle
+        AND materialtype    IN @ls_filters_be-materialtype
+        AND materialgroup   IN @ls_filters_be-materialgroup
+        AND stocktype       IN @ls_filters_be-stocktype
+        AND movetype        IN @ls_filters_be-movetype
+      INTO TABLE @FINAL(lt_stock_correction_keys).
 
     IF sy-subrc = 0.
       lcl_buffer=>get_instance( )->set_background_flag( abap_true ).
       clearupadjustment( keys = CORRESPONDING #( lt_stock_correction_keys ) ).
     ENDIF.
+  ENDMETHOD.
+
+  METHOD clearupadjustmentautocor.
+    lcl_buffer=>get_instance( )->set_foreground_flag_auto_corr( abap_true ).
+    clearupadjustment( keys = CORRESPONDING #( keys ) ).
   ENDMETHOD.
 ENDCLASS.

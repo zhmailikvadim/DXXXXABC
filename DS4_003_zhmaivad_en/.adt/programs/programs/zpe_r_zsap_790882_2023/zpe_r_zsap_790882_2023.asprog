@@ -1,0 +1,91 @@
+************************************************************************
+*  R E V I S I O N   H I S T O R Y                                     *
+************************************************************************
+* AUTHOR       | DATE       | CHANGE NUMBER & DESCRIPTION              *
+*              |            | TRANSPORT REQUESTS                       *
+************************************************************************
+* SHYDLSIA     | 06.10.2023 | CH_25775_PE_SAP Incident 790882/2023 (P3) - Issue wi *
+*              |            | DSXK903751                               *
+*----------------------------------------------------------------------*
+
+*&---------------------------------------------------------------------*
+*& Report ZSAP_790882_2023
+*&---------------------------------------------------------------------*
+*& This report corrects an inconsistent state for a single job between
+*& tables TBTCO, TBTCS, BTCEVTJOB
+*&
+*& Author: WO, SAP SE
+*& Original System: RTP
+*& Date: 29.09.2023
+*&---------------------------------------------------------------------*
+REPORT zpe_r_zsap_790882_2023.
+
+INCLUDE lbtchdef.
+
+PARAMETERS jobname TYPE btcjob.
+PARAMETERS jobcount TYPE btcjobcnt.
+
+DATA upd_rc TYPE sy-subrc.
+
+START-OF-SELECTION.
+
+  SELECT SINGLE sdlstrtdt, sdlstrttm, delanfrep FROM tbtcs INTO @DATA(ls_tbtcs) WHERE jobname = @jobname AND jobcount = @jobcount.
+
+  IF ls_tbtcs-delanfrep = btc_put_active.
+    SELECT SINGLE * FROM tbtco INTO @DATA(ls_tbtco) WHERE jobname = @jobname AND jobcount = @jobcount.
+    IF ls_tbtco-status = btc_released.
+      CALL FUNCTION 'ENQUEUE_ESTBTCO'
+        EXPORTING
+*         MODE_TBTCO     = 'E'
+          jobname        = jobname
+          jobcount       = jobcount
+          _scope         = '1'
+        EXCEPTIONS
+          foreign_lock   = 1
+          system_failure = 2
+          OTHERS         = 3.
+      IF sy-subrc <> 0.
+        WRITE:/ 'Job cannot be locked'.
+        RETURN.
+      ELSE.
+        IF ls_tbtco-sdlstrtdt = cl_btch_constants=>c_no_date.
+          UPDATE tbtco SET sdlstrtdt = @ls_tbtcs-sdlstrtdt WHERE jobname = @jobname AND jobcount = @jobcount.
+          upd_rc = sy-subrc.
+        ENDIF.
+        IF upd_rc = 0.
+          IF ls_tbtco-sdlstrttm = cl_btch_constants=>c_no_time.
+            UPDATE tbtco SET sdlstrttm = @ls_tbtcs-sdlstrttm WHERE jobname = @jobname AND jobcount = @jobcount.
+            upd_rc = sy-subrc.
+          ENDIF.
+          IF upd_rc = 0.
+            UPDATE tbtcs SET delanfrep = @space WHERE jobname = @jobname AND jobcount = @jobcount.
+            upd_rc = sy-subrc.
+            IF upd_rc = 0.
+              SELECT SINGLE * FROM btcevtjob INTO @DATA(ls_btcevtjob) WHERE eventid = @ls_tbtco-eventid AND eventcount = @ls_tbtco-eventcount AND jobname = @jobname AND jobcount = @jobcount.
+              IF ls_btcevtjob-activated = abap_true.
+                UPDATE btcevtjob SET activated = @abap_true WHERE eventid = @ls_tbtco-eventid AND eventcount = @ls_tbtco-eventcount AND jobname = @jobname AND jobcount = @jobcount.
+                upd_rc = sy-subrc.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+        CALL FUNCTION 'DEQUEUE_ESTBTCO'
+          EXPORTING
+            mode_tbtco = 'E'
+            jobname    = jobname
+            jobcount   = jobcount
+*           X_JOBNAME  = ' '
+*           X_JOBCOUNT = ' '
+*           _SCOPE     = '3'
+*           _SYNCHRON  = ' '
+*           _COLLECT   = ' '
+          .
+      ENDIF.
+
+      IF upd_rc <> 0.
+        ROLLBACK WORK.
+      ELSE.
+        WRITE:/ 'Job was corrected successfully.'.
+      ENDIF.
+    ENDIF.
+  ENDIF.

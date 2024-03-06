@@ -1,0 +1,430 @@
+FUNCTION BAPI_MATERIAL_AVAILABILITY
+  IMPORTING
+    VALUE(PLANT) LIKE BAPIMATVP-WERKS
+    VALUE(MATERIAL) TYPE MATNR18 OPTIONAL
+    VALUE(UNIT) LIKE BAPIADMM-UNIT
+    VALUE(CHECK_RULE) LIKE BAPIT441V-PRREG OPTIONAL
+    VALUE(STGE_LOC) LIKE BAPICM61V-LGORT OPTIONAL
+    VALUE(BATCH) LIKE BAPICM61V-CHARG OPTIONAL
+    VALUE(CUSTOMER) LIKE BAPIKNVVKY-CUSTOMER OPTIONAL
+    VALUE(DOC_NUMBER) LIKE BAPISDHEAD-DOC_NUMBER OPTIONAL
+    VALUE(ITM_NUMBER) LIKE BAPISDITM-ITM_NUMBER OPTIONAL
+    VALUE(WBS_ELEM) LIKE BAPISDITM-WBS_ELEM OPTIONAL
+    VALUE(STOCK_IND) LIKE BAPICM61V-SOBKZ OPTIONAL
+    VALUE(DEC_FOR_ROUNDING) LIKE BAPICM61M-ANDEC OPTIONAL
+    VALUE(DEC_FOR_ROUNDING_X) TYPE BAPIUPDATE OPTIONAL
+    VALUE(READ_ATP_LOCK) LIKE BAPICM61V-VFPST OPTIONAL
+    VALUE(READ_ATP_LOCK_X) TYPE BAPIUPDATE OPTIONAL
+    VALUE(MATERIAL_EVG) TYPE BAPIMGVMATNR OPTIONAL
+    VALUE(SGT_RCAT) LIKE BAPISDITM-REQ_SEGMENT OPTIONAL
+    VALUE(MATERIAL_LONG) TYPE MATNR40 OPTIONAL
+  EXPORTING
+    VALUE(ENDLEADTME) LIKE BAPICM61M-WZTER
+    VALUE(AV_QTY_PLT) LIKE BAPICM61V-WKBST
+    VALUE(DIALOGFLAG) LIKE BAPICM61V-DIAFL
+    VALUE(RETURN) LIKE BAPIRETURN
+  TABLES
+    WMDVSX LIKE BAPIWMDVS
+    WMDVEX LIKE BAPIWMDVE.
+
+
+
+ENHANCEMENT-POINT bapi_material_availability_g6 SPOTS es_saplw61v.
+
+DATA: lv_material_long TYPE matnr40.
+
+** Start - FLE MATNR BAPI Changes on input
+CL_MATNR_CHK_MAPPER=>convert_on_input(
+  EXPORTING
+    iv_matnr18    = MATERIAL
+    iv_matnr40    = material_long
+    iv_guid       = MATERIAL_EVG-MATERIAL_GUID
+    iv_version    = MATERIAL_EVG-MATERIAL_VERS
+    iv_matnr_ext  = MATERIAL_EVG-MATERIAL_EXT
+  IMPORTING
+    ev_matnr40    = lv_material_long
+).
+** End - FLE MATNR BAPI Changes on input
+
+  DATA:   l_atp_type(1),
+          l_trtyp      LIKE bapicm61v-trtyp,
+          l_wbs_elem   LIKE vbakkom-ps_psp_pnr,
+          l_atpca      LIKE atpca,
+          l_atpcc      LIKE atpcc,
+          l_atpcs      LIKE atpcs  OCCURS 0 WITH HEADER LINE,
+          l_atpmatx    LIKE atpmat OCCURS 0 WITH HEADER LINE,
+          l_atpdsx     LIKE atpds  OCCURS 0 WITH HEADER LINE,
+          l_t441vx     LIKE t441v    OCCURS 0 WITH HEADER LINE,
+        l_atpfield   LIKE atpfield OCCURS 0 WITH HEADER LINE,
+        p_atpmsgx    LIKE atpmsg   OCCURS 0 WITH HEADER LINE,
+        l_return     LIKE return.
+  TABLES: kna1,    "Kundenstamm
+          vbap.    "Belegposition
+
+* initialize message:
+  CLEAR message.
+
+*-->Prüfregel vorbelegen falls initial
+  IF check_rule IS INITIAL.
+    MOVE 'A ' TO  check_rule.
+  ENDIF.
+*--> Materialdaten beschaffen
+  PERFORM read_mt61d USING lv_material_long plant CHANGING return.
+  IF NOT return IS INITIAL.
+    EXIT.
+  ENDIF.
+  MOVE matvp-mtvfp TO tmvf-mtvfp.
+*--> Kundennummer prüfen
+  IF NOT customer IS INITIAL.
+    CALL FUNCTION 'V_KNA1_SINGLE_READ'
+      EXPORTING
+        pi_kunnr         = customer
+        pi_cvp_behavior  = cvp_cl_read_api_deflt_behavior=>CVP_IF_CONST_DCPLD_I1~GC_SINGLE_BEHAVIOR_EXCEPTION
+        pi_bypassing_buffer = 'X'
+      IMPORTING
+        pe_kna1          = kna1
+      EXCEPTIONS
+        no_records_found = 1
+      OTHERS           = 2.
+    IF sy-subrc NE 0.
+      MOVE: sy-subrc  TO message-subrc,
+            'CO'      TO message-msgid,
+            'E'       TO message-msgty,
+            '845'     TO message-msgno.
+*--> FILL RETURN PARAMETER
+      PERFORM fill_output_return
+                 USING
+                    message
+                 CHANGING
+                    return.
+      IF stock_ind CA 'VW'.
+        EXIT.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+*--> User exit für Selektion Werk und Prüfregel
+  CALL CUSTOMER-FUNCTION '001'
+
+                EXPORTING
+                    check_rule          = check_rule
+                    plant               = plant
+                    customer            = customer
+                IMPORTING
+                    customer_check_rule = customer_check_rule
+                    customer_plant      = customer_plant
+                    customer_trtyp      = customer_trtyp.
+
+*--> Prüfregel prüfen
+  IF NOT customer_check_rule IS INITIAL.
+    MOVE customer_check_rule TO check_rule.
+  ENDIF.
+*--> Werk prüfen
+  IF NOT customer_plant IS INITIAL.
+    MOVE customer_plant TO plant.
+  ENDIF.
+*--> TRTYP prüfen (Standard = V)
+  IF NOT customer_trtyp IS INITIAL.
+    IF customer_trtyp = 'H'.
+      SELECT SINGLE * FROM tmvf WHERE mtvfp EQ matvp-mtvfp.
+      IF sy-subrc IS INITIAL.
+        IF tmvf-onvba EQ ' ' OR tmvf-onvba EQ '1'.
+          MOVE: 'CO'        TO message-msgid,
+                'W'         TO message-msgty,
+                725         TO message-msgno,
+                matvp-mtvfp TO message-msgv1.
+*--> Fill return parameter
+          PERFORM fill_output_return
+                      USING
+                         message
+                      CHANGING
+                         return.
+          clear message.
+          MOVE 'V' TO l_trtyp.
+        ELSE.
+          MOVE customer_trtyp TO l_trtyp.
+        ENDIF.
+      ENDIF.
+    ELSE.
+      MOVE 'V' TO l_trtyp.
+    ENDIF.
+  ELSE.
+    MOVE 'V' TO l_trtyp.
+  ENDIF.
+*--> Fabrikkalender beschaffen
+  PERFORM read_t001 USING plant CHANGING l_return.
+  IF NOT l_return IS INITIAL.
+    clear return.
+    return-type       = l_return-type.
+    return-code       = l_return-code.
+    return-message    = l_return-message.
+    return-message_v1 = l_return-message_v1.
+    clear l_return.
+    EXIT.
+  ENDIF.
+*--> Mengeneinheit prüfen
+  IF matvp-meins NE unit.                                   "HW 668316
+    PERFORM unit_conversion CHANGING am61r unit l_return.
+    IF NOT l_return IS INITIAL.
+      clear return.
+      return-type       = l_return-type.
+      return-code       = l_return-code.
+      return-message    = l_return-message.
+      clear l_return.
+      EXIT.
+    ENDIF.
+  ENDIF.                                                    "HW 668316
+*--> Dezimalstellen ermitteln
+  PERFORM read_t006 USING unit CHANGING l_return.
+  IF NOT l_return IS INITIAL.
+    clear return.
+    return-type       = l_return-type.
+    return-code       = l_return-code.
+    return-message    = l_return-message.
+    clear l_return.
+    EXIT.
+  ENDIF.
+*--> Prüfen ob Material an Prüfung teilnehmen soll
+  PERFORM read_tmvf USING matvp-mtvfp.
+  IF tmvf-verpn EQ 'X'.
+    MOVE 'N' TO dialogflag.
+  ENDIF.
+*--> Prüfen, ob Sonderbestandskennzeichen gesetzt ist
+  CASE stock_ind.
+    WHEN 'E'.
+*--> Kundeneinzelbestand
+*--> Prüfen, ob Kundenauftrag / Position vorhanden sind
+      IF NOT doc_number IS INITIAL AND
+         NOT itm_number IS INITIAL.
+        SELECT SINGLE * FROM vbap WHERE vbeln EQ doc_number
+                                  AND posnr EQ itm_number.
+        IF NOT sy-subrc IS INITIAL.
+          MOVE: sy-subrc      TO message-subrc,
+                'CO'          TO message-msgid,
+                'E'           TO message-msgty,
+                '317'         TO message-msgno,
+                doc_number    TO message-msgv1,
+                itm_number    TO message-msgv2.
+*--> FILL RETURN PARAMETER
+          PERFORM fill_output_return
+                     USING
+                        message
+                     CHANGING
+                        return.
+          EXIT.
+        ENDIF.
+      ELSE.
+        MOVE: sy-subrc      TO message-subrc,
+              'CO'          TO message-msgid,
+              'E'           TO message-msgty,
+              '317'         TO message-msgno.
+*--> FILL RETURN PARAMETER
+        PERFORM fill_output_return
+                   USING
+                      message
+                   CHANGING
+                      return.
+        EXIT.
+      ENDIF.
+    WHEN 'Q'.
+*--> Projektbestand
+*--> Prüfen, ob PSP-Element vorhanden sind
+      IF NOT wbs_elem IS INITIAL.
+        CALL FUNCTION 'CJPN_EXTERN_TO_INTERN_CONV'
+          EXPORTING
+            ext_num   = wbs_elem
+          IMPORTING
+            int_num   = l_wbs_elem
+          EXCEPTIONS
+            not_found = 01.
+        IF NOT sy-subrc IS INITIAL.
+          MOVE: sy-subrc      TO message-subrc,
+                'CO'          TO message-msgid,
+                'E'           TO message-msgty,
+                '741'         TO message-msgno,
+                wbs_elem      TO message-msgv1.
+*--> FILL RETURN PARAMETER
+          PERFORM fill_output_return
+                     USING
+                        message
+                     CHANGING
+                        return.
+          EXIT.
+        ENDIF.
+      ELSE.
+        MOVE: sy-subrc      TO message-subrc,
+              'CO'          TO message-msgid,
+              'E'           TO message-msgty,
+              '741'         TO message-msgno.
+*--> FILL RETURN PARAMETER
+        PERFORM fill_output_return
+                   USING
+                      message
+                   CHANGING
+                      return.
+        EXIT.
+      ENDIF.
+    WHEN 'V' OR 'W'.
+*--> Leihgut- oder Konsignationsbestand
+*--> Prüfen, ob Kundennummer übergeben wird
+      IF customer IS INITIAL.
+        MOVE: sy-subrc  TO message-subrc,
+              'CO'      TO message-msgid,
+              'E'       TO message-msgty,
+              '845'     TO message-msgno.
+*--> FILL RETURN PARAMETER
+        PERFORM fill_output_return
+                   USING
+                      message
+                   CHANGING
+                      return.
+        EXIT.
+      ENDIF.
+  ENDCASE.
+
+*--> Initialisieren
+  CLEAR mdvps.
+  REFRESH mdvps.
+  CLEAR mdvex.
+  REFRESH mdvex.
+*--> Übernahme Simulationstabelle in Abhängigkeit von der Eingabe
+  PERFORM take_input TABLES wmdvsx USING am61r-umren am61r-umrez
+                                                     unit.
+*--> take MDVPS to L_ATPCS
+  LOOP AT mdvps.
+    MOVE 'VC'        TO l_atpcs-delkz.
+    MOVE matvp-matnr TO l_atpcs-matnr.
+    MOVE plant       TO l_atpcs-werks.
+    MOVE stge_loc    TO l_atpcs-lgort.
+    MOVE batch       TO l_atpcs-charg.
+    MOVE check_rule  TO l_atpcs-prreg.
+    MOVE 'X'         TO l_atpcs-chkflg.
+    MOVE 'X'         TO l_atpcs-resmd.
+    MOVE mdvps-dat00 TO l_atpcs-bdter.
+    MOVE mdvps-mng01 TO l_atpcs-bdmng.
+    MOVE '1'         TO l_atpcs-idxatp.
+    MOVE 1           TO l_atpcs-xline.
+    MOVE l_trtyp     TO l_atpcs-trtyp.
+    MOVE customer     TO l_atpcs-kunnr.
+    MOVE doc_number   TO l_atpcs-kdauf.
+    MOVE itm_number   TO l_atpcs-kdpos.
+    MOVE doc_number   TO l_atpcs-delnr.
+    MOVE itm_number   TO l_atpcs-delps.
+    MOVE l_wbs_elem   TO l_atpcs-pspel.
+    MOVE stock_ind    TO l_atpcs-sobkz.
+* Pass Requirement segment to ATP
+    IF cl_ops_switch_check=>sfsw_segmentation( ) EQ abap_on.
+      MOVE sgt_rcat   TO l_atpcs-sgt_rcat.
+    ENDIF.
+
+    APPEND l_atpcs.
+  ENDLOOP.
+
+*--> create field catalog
+  MOVE doc_number TO l_atpfield-delnr.
+  MOVE itm_number TO l_atpfield-delps.
+
+  MOVE 'MATNR' TO l_atpfield-kfdna.
+  MOVE lv_material_long TO l_atpfield-value.
+  APPEND l_atpfield.
+  MOVE 'WERKS' TO l_atpfield-kfdna.
+  MOVE plant TO l_atpfield-value.
+  APPEND l_atpfield.
+  MOVE 'KUNNR' TO l_atpfield-kfdna.
+  MOVE customer TO l_atpfield-value.
+  APPEND l_atpfield.
+  MOVE 'PRREG' TO l_atpfield-kfdna.
+  MOVE check_rule TO l_atpfield-value.
+  APPEND l_atpfield.
+
+*--> fill ATPCA
+  MOVE 'A' TO l_atpca-rdmod.
+
+  IF read_atp_lock_x IS INITIAL.
+    MOVE 'N' TO l_atpca-xenqmd.
+  ELSE.
+    IF read_atp_lock IS INITIAL.
+      MOVE 'N' TO l_atpca-xenqmd.
+    ELSE.
+      MOVE 'R' TO l_atpca-xenqmd.
+    ENDIF.
+  ENDIF.
+
+  MOVE '6' TO l_atpca-anwdg.
+*--> call atp server
+  CALL FUNCTION 'AVAILABILITY_CHECK_CONTROLLER'
+    TABLES
+      p_atpcsx    = l_atpcs
+      p_atpdsx    = l_atpdsx
+      p_atpmatx   = l_atpmatx
+      p_mdvex     = mdvex
+      p_t441vx    = l_t441vx
+      p_atpfieldx = l_atpfield
+    CHANGING
+      p_atpca     = l_atpca
+      p_atpcc     = l_atpcc
+    EXCEPTIONS
+      error       = 1.
+
+*--> SY-SUBRC retten
+  subrc = sy-subrc.
+*--> take parameters
+  IF l_t441vx-owbzp NE 'X'.
+    READ TABLE l_atpmatx WITH KEY matnr = lv_material_long
+                                  werks = plant.
+    MOVE l_atpmatx-endwz TO endleadtme.
+  ENDIF.
+  MOVE l_atpcc-wbest TO av_qty_plt.
+*--> Ausgabetabelle initialisieren
+  CLEAR wmdvex.
+  REFRESH wmdvex.
+*--> Fehler in Prüfung
+  IF subrc NE 0.
+    CALL FUNCTION 'MESSAGE_HANDLING'
+      EXPORTING
+        p_fcode   = 'GET'
+      TABLES
+        p_atpmsgx = p_atpmsgx.
+    LOOP AT p_atpmsgx WHERE msgty EQ 'E'.
+      EXIT.
+    ENDLOOP.
+    IF SY-SUBRC EQ 0.
+      MOVE: subrc           TO message-subrc,
+            p_atpmsgx-msgid TO message-msgid,
+            p_atpmsgx-msgty TO message-msgty,
+            p_atpmsgx-msgno TO message-msgno,
+            p_atpmsgx-msgv1 TO message-msgv1,
+            p_atpmsgx-msgv2 TO message-msgv2,
+            p_atpmsgx-msgv3 TO message-msgv3,
+            p_atpmsgx-msgv4 TO message-msgv4.
+    ELSE.
+      MOVE: subrc    TO message-subrc,
+          sy-msgid TO message-msgid,
+          sy-msgty TO message-msgty,
+          sy-msgno TO message-msgno.
+    ENDIF.
+*--> Fill return parameter
+    PERFORM fill_output_return
+                USING
+                   message
+                CHANGING
+                   return.
+    EXIT.
+  ENDIF.
+*--> ATP-Mengen zum gleichen Termin kumulieren.
+  PERFORM cumulate_mdvex.
+
+*--> MDVEX uebernehmen und kum. ATP-Menge zum Bedarfstermin ermitteln
+*--> eventuell Mengenumrechnung.
+  PERFORM take_mdvex TABLES wmdvex USING am61r
+                                         av_qty_plt
+                                         unit.
+*--> Kennzeichen 'nicht verfuegbar' setzen
+  IF cum_atp LT wmdvsx-req_qty.
+    MOVE 'X' TO dialogflag.
+  ENDIF.
+*--> Ende Wiederbeschaffungszeit setzen
+  IF endleadtme EQ '99999999'.
+    MOVE '99991231' TO endleadtme.
+  ENDIF.
+
+ENDFUNCTION.

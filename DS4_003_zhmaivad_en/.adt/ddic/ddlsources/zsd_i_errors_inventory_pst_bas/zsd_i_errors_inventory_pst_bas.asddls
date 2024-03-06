@@ -9,6 +9,9 @@
 *----------------------------------------------------------------------*
 * ZHMAIVAD     | 13.07.2023 | 22859     : [Build] - Stock reconciliati *
 *              |            | DS4K957133                               *
+*----------------------------------------------------------------------*
+* ZHMAIVAD     | 13.03.2024 | 29314     : [Feature] [Build] - Stock re *
+*              |            | DS4K982092                               *
 *----------------------------------------------------------------------*/
 @EndUserText.label: 'Errors Inventory Postings Batch WMS->S4'
 @AccessControl.authorizationCheck: #CHECK
@@ -21,7 +24,7 @@ define view entity zsd_i_errors_inventory_pst_bas
   association to zsd_i_move_types_rows as _MoveTypesAndStockTypes on _MoveTypesAndStockTypes.MoveType = $projection.MovementType
 {
   key                  AifPersistentTable.msgguid                                                                                                          as Msgguid,
-                       AifPersistentTable.zzwms_timestamp                                                                                                  as WmsDate,
+                       AifPersistentTable.zz1_wmsdate_mmi                                                                                                  as WmsDate,
                        AifPersistentTable.plant                                                                                                            as Plant,
                        AifPersistentTable.storage_location                                                                                                 as StorageLocation,
                        cast(left(AifPersistentTable.material,40)  as matnr preserving type )                                                               as Product,
@@ -113,8 +116,8 @@ define view entity zsd_i_errors_inventory_pst_bas
                        AifPersistentTable.unit_code                                                                                                        as UnitCode,
                        AifPersistentTable.content                                                                                                          as Content,
                        AifPersistentTable.content_2                                                                                                        as Content2,
-                       AifPersistentTable.zz1_wmsdate_mmi                                                                                                  as Zz1WmsdateMmi,
-                       AifPersistentTable.zz1_wmstime_mmi                                                                                                  as Zz1WmstimeMmi,
+                       AifPersistentTable.zzwms_timestamp                                                                                                  as WmsTimeStamp,
+                       AifPersistentTable.zz1_wmstime_mmi                                                                                                  as Wmstime,
                        replace_regexpr(pcre => '[^1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ]',
                        value => AifPersistentTable.msgguid,
                        with => '00000000000000000000000000000000',

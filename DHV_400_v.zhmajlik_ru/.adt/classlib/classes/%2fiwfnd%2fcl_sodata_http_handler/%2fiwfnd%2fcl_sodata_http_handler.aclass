@@ -1,0 +1,2692 @@
+"! <p class="shorttext synchronized" lang="en">OData V2 Default HTTP Handler with XSRF Token</p>
+class /IWFND/CL_SODATA_HTTP_HANDLER definition
+  public
+  create public .
+
+public section.
+
+*"* public components of class /IWFND/CL_SODATA_HTTP_HANDLER
+*"* do not include other source files here!!!
+  interfaces IF_HTTP_EXTENSION .
+
+    "! <p class="shorttext synchronized" lang="en">Class name co-deployment proxy</p>
+  constants CO_CODEPLOYMENT_PROXY_IMPL type SEOCLSNAME value '/IWFND/CL_MGW_CO_DEPLOYM_PROXY'. "#EC NOTEXT
+
+  methods CONSTRUCTOR .
+  PROTECTED SECTION.
+*"* protected components of class /IWFND/CL_SODATA_HTTP_HANDLER
+*"* do not include other source files here!!!
+private section.
+
+  types:
+    BEGIN OF ty_s_routing_info,
+      system_alias      TYPE /iwfnd/defi_system_alias,
+      software_version  TYPE /iwfnd/inma_software_version,
+      is_default        TYPE /iwfnd/mgw_inma_default_alias,
+      is_def_for_meta   TYPE /iwfnd/mgw_inma_default_alias,
+      rfc_dest          TYPE /iwfnd/defi_rfc_dest,
+      is_local_iwf      TYPE /iwfnd/defi_is_local_iwf,
+      is_for_bep        TYPE /iwfnd/defi_is_for_bep,
+      use_micro_hub     TYPE /iwfnd/defi_is_micro_hub,
+      gwbep_version     TYPE /iwfnd/defi_gwbep_version,
+      multi_sys_aliases TYPE abap_bool,
+      current_host_name TYPE string,
+      process_mode      TYPE /iwfnd/med_process_mode,
+    END OF ty_s_routing_info .
+  types:
+    BEGIN OF ty_s_soft_state_info,
+      soft_state_possible TYPE abap_bool,
+      cookie_session_id   TYPE string,
+      path                TYPE string,
+      service_name        TYPE string,
+      service_namespace   TYPE string,
+      odata_service_hash  TYPE /iwfnd/coc_odata_service_hash,
+    END OF ty_s_soft_state_info .
+  types:
+    BEGIN OF ty_s_hub_soft_state_info,
+      enabled TYPE abap_bool,                       " X: enabled (from /IWFND/MAINT_SERVICE)
+      mode    TYPE /iwfnd/med_mdl_soft_state_mode,  " Immediate/Delayed
+      before  TYPE abap_bool,                       " Soft State Status of last request
+    END OF ty_s_hub_soft_state_info .
+
+  constants CO_HEADER_SOFT_STATE type STRING value 'sap-iw-soft_state'. "#EC NOTEXT
+  data MO_EVENT_HANDLER type ref to LCL_EVENT_HANDLER .
+  "! <p class="shorttext synchronized" lang="en">OData V2 REST Handler with XSRF Token</p>
+  data MO_REST_HANDLER type ref to /IWFND/CL_SODATA_REST_HANDLER .
+  data MT_QUERY_PARAMETER_ENCODED type TIHTTPNVP .
+  "! <p class="shorttext synchronized" lang="en">Former session was Soft-State?</p>
+  data MV_FORMER_SESSION_WAS_ACTIVE type ABAP_BOOL value ABAP_FALSE. "#EC NOTEXT
+  data MV_PREV_REQ_URL type STRING .
+  data MV_SESSION_FOR_ODATA_SVC_HASH type /IWFND/COC_ODATA_SERVICE_HASH .
+  data MV_SOFT_STATE_RESET_DP type ABAP_BOOL .
+  "! <p class="shorttext synchronized" lang="en">Status Code for erroneous HEAD</p>
+  data MV_STATUS_CODE type I .
+  "! <p class="shorttext synchronized" lang="en">Status Reason erroneous HEAD</p>
+  data MV_STATUS_REASON type STRING .
+
+  methods CHECK_GW_AND_SERVICE_ACCESS
+    importing
+      !IV_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !IV_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !IV_SERVICE_VERSION type /IWFND/MED_MDL_VERSION
+      !IV_SERVICE_ID type /IWFND/MED_MDL_SRG_IDENTIFIER
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME
+    exporting
+      !EV_EXCEPTION_OCCURRED type ABAP_BOOL .
+  "! <p class="shorttext synchronized" lang="en">Create and set Technical Excpetion</p>
+  "!
+  "! @parameter is_textid         | <p class="shorttext synchronized" lang="en">T100 Schlüssel mit Abbildung der Parameter auf Attributnamen</p>
+  "! @parameter iv_exception_type | <p class="shorttext synchronized" lang="en">Object Type Name</p>
+  "! @parameter io_exception      | <p class="shorttext synchronized" lang="en">Abstract Superclass for All Global Exceptions</p>
+  "! @parameter io_sutil_runtime  | <p class="shorttext synchronized" lang="en">Support Utilities: Runtime</p>
+  methods CREATE_AND_SET_TECH_EXCEPTION
+    importing
+      !IS_TEXTID like IF_T100_MESSAGE=>T100KEY optional
+      !IV_EXCEPTION_TYPE type SEOCLSNAME
+      !IO_EXCEPTION type ref to CX_ROOT
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME .
+  "! <p class="shorttext synchronized" lang="en">Determine Service Info</p>
+  "!
+  "! @parameter io_server               | <p class="shorttext synchronized" lang="en">HTTP Framework (iHTTP) HTTP Server</p>
+  "! @parameter io_sutil_runtime        | <p class="shorttext synchronized" lang="en">Support Utilities: Runtime</p>
+  "! @parameter ev_namespace            | <p class="shorttext synchronized" lang="en">Namespace</p>
+  "! @parameter ev_service_version      | <p class="shorttext synchronized" lang="en">Version of Meta Model Entity</p>
+  "! @parameter ev_service_id           | <p class="shorttext synchronized" lang="en">Service Document Identifier</p>
+  "! @parameter ev_service_segment_data | <p class="shorttext synchronized" lang="en">Segment data (;v;moc;o)</p>
+  "! @parameter ev_is_moc               | <p class="shorttext synchronized" lang="en">MOC is used</p>
+  "! @parameter ev_uri_system_alias     | <p class="shorttext synchronized" lang="en">SAP System Alias from Request URI (MOC)</p>
+  "! @parameter ev_is_softstate_enabled | <p class="shorttext synchronized" lang="en">Is softstate enabled?</p>
+  "! @parameter ev_exception_occurred   | <p class="shorttext synchronized" lang="en">Exception already set in SUTIL_RUNTIME</p>
+  methods DETERMINE_SERVICE_INFO
+    importing
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME
+    exporting
+      !EV_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !EV_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !EV_SERVICE_VERSION type /IWFND/MED_MDL_VERSION
+      !EV_SERVICE_ID type /IWFND/MED_MDL_SRG_IDENTIFIER
+      !EV_SERVICE_SEGMENT_DATA type STRING
+      !EV_PROCESS_MODE type /IWFND/MED_PROCESS_MODE
+      !EV_IS_MOC type ABAP_BOOL
+      !EV_URI_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !EV_URI_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !EV_URI_SYSTEM_ALIAS type /IWFND/DEFI_SYSTEM_ALIAS
+      !EV_RESOURCE_PART type STRING
+      !EV_IS_SOFTSTATE_ENABLED type ABAP_BOOL
+      !EV_EXCEPTION_OCCURRED type ABAP_BOOL .
+  methods DISABLE_STATEFUL_SESSION
+    importing
+      !IO_SERVER type ref to IF_HTTP_SERVER .
+  methods ENABLE_SOFT_STATE
+    importing
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IS_SOFT_STATE_INFO type TY_S_SOFT_STATE_INFO
+      !IV_SESSION_START type ABAP_BOOL optional
+      !IV_SESSION_END type ABAP_BOOL optional
+      !IV_USE_MICRO_HUB type ABAP_BOOL .
+  "! <p class="shorttext synchronized" lang="en">Process Microhub Request</p>
+  "!
+  "! @parameter iv_time_start    | <p class="shorttext synchronized" lang="en">Start Time</p>
+  "! @parameter iv_rfc_time      | <p class="shorttext synchronized" lang="en">RFC Client Time</p>
+  "! @parameter is_response_line | <p class="shorttext synchronized" lang="en">Micro Hub Response Line</p>
+  "! @parameter io_server        | <p class="shorttext synchronized" lang="en">HTTP Framework (iHTTP) HTTP Server</p>
+  "! @parameter io_sutil_runtime | <p class="shorttext synchronized" lang="en">Support Utilities: Runtime</p>
+  methods FINALIZE_MICRO_HUB_REQUEST
+    importing
+      !IV_TIME_START type I
+      !IV_RFC_TIME type I
+      !IS_RESPONSE_LINE type /IWFND/S_MHUB_RESPONSE_LINE
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME .
+  methods FINALIZE_MICRO_HUB_REQUEST_17
+    importing
+      !IV_TIME_START type I
+      !IV_REQUEST_URI_ORG type STRING
+      !IV_PROCESSING_INFO type STRING
+      !IS_SAPSTAT_INFO type /IWFND/SUTIL_SAPSTAT_INFO
+      !IV_PERF_HANDLE_BEP type I
+      !IV_RFC_START_TIME type I
+      !IV_RFC_STOP_TIME type I
+      !IV_RFC_REQUEST_SIZE type I
+      !IV_RFC_RESPONSE_SIZE type I
+      !IV_HTTP_REQUEST_SIZE type I
+      !IV_HTTP_RESPONSE_SIZE type I
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME
+    changing
+      !CT_MET_DAT type /IWFND/T_MET_DAT
+      !CT_SUTIL_STATS type /IWFND/SUTIL_STATS_T .
+  methods GET_ICF_TIMEOUT_FOR_SERVICE
+    importing
+      !IV_SERVICE_NAME type STRING
+      !IV_SERVICE_NAMESPACE type STRING
+    returning
+      value(RV_SERVICE_TIMEOUT) type ICFTIME .
+  "! <p class="shorttext synchronized" lang="en">Get Routing Info</p>
+  methods GET_ROUTING_INFO
+    importing
+      !IV_SERVICE_ID type /IWFND/MED_MDL_SRG_IDENTIFIER
+      !IV_URI_SYSTEM_ALIAS type /IWFND/DEFI_SYSTEM_ALIAS
+      !IV_MAPPING_SID type /IWFND/DEFI_SYSTEM_ALIAS
+      !IV_IS_MOC type ABAP_BOOL
+      !IO_SERVER type ref to IF_HTTP_SERVER
+    exporting
+      !ES_ROUTING_INFO type TY_S_ROUTING_INFO .
+  methods GET_SOFT_STATE_INFO
+    importing
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IV_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !IV_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !IV_URI_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !IV_URI_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !IV_RESOURCE_PART type STRING
+      !IV_USE_MICRO_HUB type ABAP_BOOL
+      !IO_TRANSACTION_HANDLER type ref to /IWFND/CL_TRANSACTION_HANDLER
+    exporting
+      !ES_SOFT_STATE_INFO type TY_S_SOFT_STATE_INFO .
+  "! <p class="shorttext synchronized" lang="en">Handle RFC Failure</p>
+  "!
+  "! @parameter iv_subrc         | <p class="shorttext synchronized" lang="en">ABAP System Field: Return Code of ABAP Statements</p>
+  "! @parameter iv_rfc_message   | <p class="shorttext synchronized" lang="en">RFC Exception text</p>
+  "! @parameter iv_rfc_dest      | <p class="shorttext synchronized" lang="en">Logical Destination (Specified in Function Call)</p>
+  "! @parameter io_sutil_runtime | <p class="shorttext synchronized" lang="en">Support Utilities: Runtime</p>
+  methods HANDLE_RFC_FAILURE
+    importing
+      !IV_SUBRC type SY-SUBRC
+      !IV_RFC_MESSAGE type CSEQUENCE
+      !IV_RFC_DEST type RFCDEST
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME .
+  methods IS_SOFT_STATE_ENABLED
+    importing
+      !IV_SERVICE_NAMESPACE type STRING
+      !IV_SERVICE_NAME type STRING
+      !IO_SERVER type ref to IF_HTTP_SERVER
+    exporting
+      value(EV_IS_SOFTSTATE_ENABLED) type ABAP_BOOL .
+  "! <p class="shorttext synchronized" lang="en">Process HTTP HEAD</p>
+  "!
+  "! @parameter io_server             | <p class="shorttext synchronized" lang="en">HTTP Framework (iHTTP) HTTP Server</p>
+  "! @parameter io_sutil_runtime      | <p class="shorttext synchronized" lang="en">Support Utilities: Runtime</p>
+  "! @parameter ev_exception_occurred | <p class="shorttext synchronized" lang="en">Exception already set in SUTIL_RUNTIME</p>
+  methods PROCESS_HTTP_HEAD
+    importing
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME
+    exporting
+      !EV_EXCEPTION_OCCURRED type ABAP_BOOL .
+  "! <p class="shorttext synchronized" lang="en">Process Microhub Request</p>
+  "!
+  "! @parameter iv_namespace        | <p class="shorttext synchronized" lang="en">Namespace</p>
+  "! @parameter iv_service_name     | <p class="shorttext synchronized" lang="en">External Service Document Name</p>
+  "! @parameter iv_service_version  | <p class="shorttext synchronized" lang="en">Version of Meta Model Entity</p>
+  "! @parameter iv_service_id       | <p class="shorttext synchronized" lang="en">Service Document Identifier</p>
+  "! @parameter iv_uri_system_alias | <p class="shorttext synchronized" lang="en">SAP System Alias in URI</p>
+  "! @parameter iv_http_method      | <p class="shorttext synchronized" lang="en">HTTP Method</p>
+  "! @parameter iv_destination      | <p class="shorttext synchronized" lang="en">Logical Destination</p>
+  "! @parameter iv_system_alias     | <p class="shorttext synchronized" lang="en">SAP System Alias</p>
+  "! @parameter iv_is_soft_state    | <p class="shorttext synchronized" lang="en">Soft State is enabled</p>
+  "! @parameter iv_perf_handle      | <p class="shorttext synchronized" lang="en">Performance Trace Handle</p>
+  "! @parameter io_server           | <p class="shorttext synchronized" lang="en">HTTP Framework (iHTTP) HTTP Server</p>
+  "! @parameter io_sutil_runtime    | <p class="shorttext synchronized" lang="en">Support Utilities: Runtime</p>
+  methods PROCESS_MICRO_HUB_REQUEST
+    importing
+      !IV_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !IV_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !IV_SERVICE_VERSION type /IWFND/MED_MDL_VERSION
+      !IV_SERVICE_ID type /IWFND/MED_MDL_SRG_IDENTIFIER
+      !IV_URI_SYSTEM_ALIAS type /IWFND/DEFI_SYSTEM_ALIAS
+      !IV_IS_SOFT_STATE type ABAP_BOOL
+      !IV_HTTP_METHOD type STRING
+      !IV_DESTINATION type RFCDEST
+      !IV_SYSTEM_ALIAS type /IWFND/DEFI_SYSTEM_ALIAS
+      !IV_PERF_HANDLE type I
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME .
+  methods PROCESS_MICRO_HUB_REQUEST_17
+    importing
+      !IV_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !IV_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !IV_SERVICE_VERSION type /IWFND/MED_MDL_VERSION
+      !IV_SERVICE_ID type /IWFND/MED_MDL_SRG_IDENTIFIER
+      !IV_URI_NAMESPACE type /IWFND/MED_MDL_NAMESPACE
+      !IV_URI_SERVICE_NAME type /IWFND/MED_MDL_SERVICE_GRP_ID
+      !IV_URI_SYSTEM_ALIAS type /IWFND/DEFI_SYSTEM_ALIAS
+      !IV_RESOURCE_PART type STRING
+      !IV_HTTP_METHOD type STRING
+      !IV_DESTINATION type RFCDEST
+      !IV_SYSTEM_ALIAS type /IWFND/DEFI_SYSTEM_ALIAS
+      !IV_USE_MICRO_HUB type ABAP_BOOL
+      !IV_PERF_HANDLE type I
+      !IO_SERVER type ref to IF_HTTP_SERVER
+      !IO_SUTIL_RUNTIME type ref to /IWFND/CL_SUTIL_RUNTIME
+      !IO_TRANSACTION_HANDLER type ref to /IWFND/CL_TRANSACTION_HANDLER .
+ENDCLASS.
+
+
+
+CLASS /IWFND/CL_SODATA_HTTP_HANDLER IMPLEMENTATION.
+
+
+  METHOD check_gw_and_service_access.
+
+    " Check GW & Service Access for HTTP Method HEAD or Micro Hub only
+    " because no more framework processing in this system
+
+    DATA: lo_destin_finder TYPE REF TO /iwfnd/cl_destin_finder,
+          lx_dest_finder   TYPE REF TO /iwfnd/cx_destin_finder,
+          lx_access_check  TYPE REF TO /iwfnd/cx_access_check.
+
+
+    CLEAR ev_exception_occurred.
+
+    " Set Service Attributes for GW Tools
+    io_sutil_runtime->set_service_attributes(
+      iv_namespace       = iv_namespace
+      iv_service_name    = iv_service_name
+      iv_service_version = iv_service_version
+    ).
+
+    " Check Active Gateway
+    TRY.
+        lo_destin_finder = /iwfnd/cl_destin_finder=>get_destination_finder( ).
+        lo_destin_finder->check_iwf_is_active( ).
+
+      CATCH /iwfnd/cx_destin_finder INTO lx_dest_finder.
+        ev_exception_occurred = abap_true.
+        create_and_set_tech_exception(
+          iv_exception_type = /iwfnd/cx_sodata=>gcs_cor_exceptions-server_internal_error
+          io_exception      = lx_dest_finder
+          io_sutil_runtime  = io_sutil_runtime
+        ).
+        RETURN.
+    ENDTRY.
+
+    " Check Start Authorization
+    TRY.
+        /iwfnd/cl_access_permission=>check_service_access( iv_service_identifier = iv_service_id ).
+
+      CATCH /iwfnd/cx_access_check INTO lx_access_check.
+        ev_exception_occurred = abap_true.
+        create_and_set_tech_exception(
+          iv_exception_type = /iwfnd/cx_sodata=>gcs_cor_exceptions-client_forbidden
+          io_exception      = lx_access_check
+          io_sutil_runtime  = io_sutil_runtime
+        ).
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    CREATE OBJECT mo_rest_handler TYPE /iwfnd/cl_sodata_rest_handler.
+
+  ENDMETHOD.
+
+
+  METHOD create_and_set_tech_exception.
+
+    DATA lx_tech_exception TYPE REF TO /iwfnd/cx_mgw_tech_exception.
+
+
+    " Create a Technical Exception if needed
+    TRY.
+        lx_tech_exception ?= io_exception.
+      CATCH cx_sy_move_cast_error.                      "#EC NO_HANDLER
+    ENDTRY.
+
+    IF lx_tech_exception IS NOT BOUND.
+      CREATE OBJECT lx_tech_exception
+        EXPORTING
+          textid   = is_textid
+          previous = io_exception.
+    ENDIF.
+
+    " Write an Error Log entry
+    io_sutil_runtime->log_write(
+      EXPORTING
+       iv_main_entry = abap_true
+       io_exception  = lx_tech_exception
+    ).
+
+    " Set Exception in SUTIL_RUNTIME for error handling later in Root Handler
+    io_sutil_runtime->set_http_handler_exception(
+      io_tech_exception = lx_tech_exception
+      iv_exception_type = iv_exception_type
+    ).
+
+    " Save HTTP Status Code and Reason for an erroneous HEAD request
+    CASE iv_exception_type.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_bad_request.
+        mv_status_code = 400.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_forbidden.
+        mv_status_code = 403.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_not_found.
+        mv_status_code = 404.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_methd_not_allowed.
+        mv_status_code = 405.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_not_acceptable.
+        mv_status_code = 406.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_conflict.
+        mv_status_code = 409.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_gone.
+        mv_status_code = 410.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_precond_failed.
+        mv_status_code = 412.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_unsupp_media.
+        mv_status_code = 415.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-client_precond_required.
+        mv_status_code = 428.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-server_internal_error.
+        mv_status_code = 500.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-server_not_implemented.
+        mv_status_code = 501.
+      WHEN /iwfnd/cx_sodata=>gcs_cor_exceptions-server_service_unavailable.
+        mv_status_code = 503.
+      WHEN OTHERS.
+        mv_status_code = 500.
+    ENDCASE.
+
+    mv_status_reason = io_exception->get_text( ).
+
+  ENDMETHOD.
+
+
+  METHOD determine_service_info.
+
+    DATA: lv_path_info         TYPE string,
+          lv_script_name       TYPE string,
+          lv_script_name_exp   TYPE string,
+          lv_expanded_path     TYPE string,
+          lv_request_uri       TYPE string,
+          lv_service_info      TYPE string,
+          lv_uri_part          TYPE string,
+          lt_uri_part          TYPE string_table,
+          lv_index             TYPE i,
+          lv_offset            TYPE i,
+          lv_soft_state_status TYPE /iwfnd/med_mdl_soft_state_stat,
+          ls_match_result      TYPE match_result,
+          lt_match_result      TYPE match_result_tab,
+          lx_model_access      TYPE REF TO /iwfnd/cx_med_mdl_access,
+          lx_tech_exception    TYPE REF TO /iwfnd/cx_mgw_tech_exception,
+          lv_lines             TYPE i,
+          lv_query_string      TYPE string,
+          lt_query_parameter   TYPE string_table,
+          lv_query_parameter   LIKE LINE OF lt_query_parameter,
+          ls_query_parameter   TYPE ihttpnvp.
+
+
+    CLEAR: ev_exception_occurred, ev_service_segment_data.
+
+    lv_path_info       = io_server->request->get_header_field( if_http_header_fields_sap=>path_info ).
+    lv_expanded_path   = io_server->request->get_header_field( if_http_header_fields_sap=>path_translated_expanded ).
+    lv_script_name     = io_server->request->get_header_field( if_http_header_fields_sap=>script_name ).
+    lv_script_name_exp = io_server->request->get_header_field( if_http_header_fields_sap=>script_name_expanded ).
+    lv_request_uri   = io_server->request->get_header_field( if_http_header_fields_sap=>request_uri ).
+
+    IF strlen( lv_expanded_path ) GT 15.
+      IF lv_expanded_path(15) EQ '/sap/opu/odata/'.
+        lv_expanded_path = lv_expanded_path+15.
+      ENDIF.
+    ENDIF.
+
+    SPLIT lv_expanded_path AT '/' INTO TABLE lt_uri_part.
+    DELETE lt_uri_part WHERE table_line IS INITIAL.
+    IF lines( lt_uri_part ) < 2.
+      ev_exception_occurred = abap_true.
+      READ TABLE lt_uri_part INTO ev_uri_namespace INDEX 1.
+      CREATE OBJECT lx_model_access
+        EXPORTING
+          textid                = /iwfnd/cx_med_mdl_access=>no_service_found
+          namespace             = ev_uri_namespace
+          service_group         = space
+          service_group_version = '0001'.
+      create_and_set_tech_exception(
+        iv_exception_type = /iwfnd/cx_sodata=>gcs_cor_exceptions-client_forbidden
+        io_exception      = lx_model_access
+        io_sutil_runtime  = io_sutil_runtime
+      ).
+      RETURN.
+    ENDIF.
+    READ TABLE lt_uri_part INTO ev_uri_namespace INDEX 1.
+    IF sy-subrc EQ 0.
+      CONCATENATE '/' ev_uri_namespace '/' INTO ev_uri_namespace.
+      READ TABLE lt_uri_part INTO ev_uri_service_name INDEX 2.
+      READ TABLE lt_uri_part INTO ev_resource_part INDEX 3.
+      IF ev_resource_part CS '%'.
+        ev_resource_part = cl_http_utility=>unescape_url( ev_resource_part ).
+      ENDIF.
+    ENDIF.
+
+    " URI Namespace and Service Name are needed for Soft State Cookie
+    ev_namespace = ev_uri_namespace.
+    TRANSLATE ev_namespace TO UPPER CASE.
+    ev_service_name = ev_uri_service_name.
+    TRANSLATE ev_service_name TO UPPER CASE.
+
+    " Set Service Info
+    CONCATENATE ev_namespace
+                ev_service_name
+      INTO lv_service_info.
+
+    " Determine Service Version
+    IF lv_script_name = lv_script_name_exp.
+      FIND lv_service_info IN lv_request_uri IGNORING CASE
+      RESULTS lt_match_result.
+    READ TABLE lt_match_result INTO ls_match_result INDEX 1.
+    lv_offset = ls_match_result-offset + ls_match_result-length.
+    lv_request_uri = lv_request_uri+lv_offset.
+    SPLIT lv_request_uri AT '/' INTO TABLE lt_uri_part.
+    READ TABLE lt_uri_part INTO lv_uri_part INDEX 1.
+    ELSE.
+      IF lv_path_info IS INITIAL.
+        lv_uri_part = lv_request_uri.
+        SPLIT lv_uri_part AT '/' INTO TABLE lt_uri_part.
+        lv_index = lines( lt_uri_part ).
+        READ TABLE lt_uri_part INTO lv_uri_part INDEX lv_index.
+        IF lv_uri_part CS '?' AND sy-fdpos = 0.
+          lv_index = lv_index - 1.
+          READ TABLE lt_uri_part INTO lv_uri_part INDEX lv_index.
+        ENDIF.
+      ELSE.
+        FIND lv_path_info IN lv_request_uri IGNORING CASE
+          RESULTS lt_match_result.
+        READ TABLE lt_match_result INTO ls_match_result INDEX 1.
+        lv_uri_part = lv_request_uri(ls_match_result-offset).
+        SPLIT lv_uri_part AT '/' INTO TABLE lt_uri_part.
+        READ TABLE lt_uri_part INTO lv_uri_part INDEX lines( lt_uri_part ).
+      ENDIF.
+    ENDIF.
+    IF lv_uri_part IS NOT INITIAL.
+      CLEAR lt_uri_part.
+      SPLIT lv_uri_part AT '?' INTO TABLE lt_uri_part.
+      CLEAR lv_uri_part.
+      READ TABLE lt_uri_part INTO lv_uri_part INDEX 1.
+      IF lv_uri_part IS NOT INITIAL.
+        CLEAR lt_uri_part.
+        SPLIT lv_uri_part AT ';' INTO TABLE lt_uri_part.
+        CLEAR lv_uri_part.
+        LOOP AT lt_uri_part INTO lv_uri_part FROM 2.
+          IF lv_uri_part CS 'v='.
+            ev_service_version = lv_uri_part+2.
+            IF ev_service_segment_data IS INITIAL.
+              ev_service_segment_data = lv_uri_part.
+            ELSE.
+              CONCATENATE ev_service_segment_data ';' lv_uri_part INTO ev_service_segment_data.
+            ENDIF.
+          ELSEIF lv_uri_part CS 'o='.
+            ev_uri_system_alias = lv_uri_part+2.
+            IF ev_service_segment_data IS INITIAL.
+              ev_service_segment_data = lv_uri_part.
+            ELSE.
+              CONCATENATE ev_service_segment_data ';' lv_uri_part INTO ev_service_segment_data.
+            ENDIF.
+          ELSEIF lv_uri_part = 'mo'.
+            ev_is_moc = abap_true.
+            IF ev_service_segment_data IS INITIAL.
+              ev_service_segment_data = lv_uri_part.
+            ELSE.
+              CONCATENATE ev_service_segment_data ';' lv_uri_part INTO ev_service_segment_data.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+    IF ev_service_version IS INITIAL.
+      ev_service_version = '0001'.
+    ENDIF.
+
+    " Determine Service ID
+    TRY.
+        /iwfnd/cl_med_exploration=>get_service_runtime_info(
+          EXPORTING
+            iv_namespace             = ev_namespace       " Namespace
+            iv_external_name         = ev_service_name    " External Service Group Name
+            iv_version               = ev_service_version " version of meta model entity
+          IMPORTING
+            ev_service_id            = ev_service_id    " Service Group Identifier
+            ev_process_mode          = ev_process_mode  " Service Processing Mode
+            ev_soft_state_status     = lv_soft_state_status
+        ).
+
+        IF lv_soft_state_status EQ 'A'.
+          ev_is_softstate_enabled = abap_true.
+        ELSE.
+          ev_is_softstate_enabled = abap_false.
+        ENDIF.
+
+
+      CATCH /iwfnd/cx_med_mdl_access INTO lx_model_access.
+        ev_exception_occurred = abap_true.
+        create_and_set_tech_exception(
+          iv_exception_type = /iwfnd/cx_sodata=>gcs_cor_exceptions-client_forbidden
+          io_exception      = lx_model_access
+          io_sutil_runtime  = io_sutil_runtime
+        ).
+        RETURN.
+    ENDTRY.
+
+
+    " Query options
+    FIND '?' IN lv_request_uri IGNORING CASE RESULTS lt_match_result.
+    lv_lines = lines(  lt_match_result ).
+    IF lv_lines >= 1.
+      READ TABLE lt_match_result INTO ls_match_result INDEX lv_lines.
+      lv_offset = ls_match_result-offset + ls_match_result-length.
+      lv_query_string = lv_request_uri+lv_offset.
+      SPLIT lv_query_string AT '&' INTO TABLE lt_query_parameter.
+      LOOP AT lt_query_parameter INTO lv_query_parameter.
+        SPLIT lv_query_parameter AT '=' INTO ls_query_parameter-name ls_query_parameter-value.
+        APPEND ls_query_parameter TO mt_query_parameter_encoded.
+      ENDLOOP.
+
+
+    ENDIF.
+
+
+*   Catalog Service:
+*    - Never co-deployed
+*      (of course it is always on the hub, but the co-deployed flag will trigger the co-deployed proxy in the processor which would not work here.
+*       At the same time we will ignore all routing later down in the stack...)
+*    - Allow here o=<System Alias> in URI (Origin segment parameter) - It is used to route to a specific backend when reading an annoation file
+    IF ( ev_service_id = /iwfnd/cl_mgw_inst_man=>gcs_service_ids-catalog_service_2 ).
+      ev_process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-routing_based.
+
+*   All other services
+*    - Combination of co-deployed and ;o=<System Alias> in URI is forbidden (Origin segment parameter)
+    ELSEIF ( ev_uri_system_alias IS NOT INITIAL )
+       AND ( ev_process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-co_deployed_only ).
+      " Exception will be collected and processed in root hadler
+      ev_exception_occurred = abap_true.
+      CREATE OBJECT lx_tech_exception
+        EXPORTING
+          textid             = /iwfnd/cx_mgw_tech_exception=>co_deployment_origin_not_supp
+          service_identifier = ev_service_id.
+      create_and_set_tech_exception(
+        iv_exception_type = /iwfnd/cx_sodata=>gcs_cor_exceptions-client_forbidden
+        io_exception      = lx_tech_exception
+        io_sutil_runtime  = io_sutil_runtime
+      ).
+      RETURN.
+    ENDIF.
+
+
+
+*   catalog service:
+*    - Never co-deployed
+*      (of course it is always on the hub, but the co-deployed flag will trigger the co-deployed proxy in the processor which would not work here.
+*       At the same time we will ignore all routing later down in the stack...)
+    IF ( ev_service_id = /iwfnd/cl_mgw_inst_man=>gcs_service_ids-catalog_service_2 ).
+      ev_process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-routing_based.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD disable_stateful_session.
+
+    DATA: lv_cookie_session_id TYPE string.
+
+
+    io_server->set_session_stateful( stateful = if_http_server=>co_disabled ).
+
+    "@todo no delete_header_field -> spec says empty context id -> clarify
+    io_server->response->set_header_field(
+      EXPORTING
+        name  = /iwfnd/if_sodata_types=>gcs_cor_request_parameters_lc-sap_context_id
+        value = /iwfnd/if_sodata_types=>gcs_cor_request_parameters_va-empty_context_id ).
+
+    io_server->request->get_cookie(
+      EXPORTING
+        name    = if_http_form_fields_sap=>sap_sessioncookie
+      IMPORTING
+        value   = lv_cookie_session_id ).
+    IF NOT lv_cookie_session_id IS INITIAL.
+      io_server->response->delete_cookie_at_client( name = if_http_form_fields_sap=>sap_sessioncookie ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD enable_soft_state.
+    DATA: lv_activate_softstate          TYPE abap_bool,
+          lv_server_session_id           TYPE string,
+          lv_persisted_session_id        TYPE string,
+          lv_new_client_session_id       TYPE string,
+          lt_enq                         TYPE STANDARD TABLE OF seqg3,
+          ls_arg                         TYPE /iwfnd/s_enq_softstate_sec,
+          lv_path_info                   TYPE string,
+          lv_header_value                TYPE string,
+          lv_return_code                 TYPE sysubrc,
+          lv_read_counter                TYPE i,
+          lv_secure                      TYPE i,
+          lv_httponly(4)                 TYPE c,
+          lv_enqarg                      TYPE seqg3-garg,
+* security session handling
+          ls_security_context            TYPE security_context,
+          lv_security_context_reference  TYPE sysuuid_c,
+          lv_x_sec_context_ref_value     TYPE abap_bool,
+          lv_reduced_serv_hand_sessionid TYPE string,
+
+          lv_sap_cntxtid_accpt           TYPE string,
+          lv_sap_cntxtid                 TYPE string,
+          lo_transaction_handler         TYPE REF TO /iwfnd/cl_transaction_handler,
+          lv_is_softstate_enabled        TYPE abap_bool VALUE abap_false,
+          lv_session_end                 TYPE abap_bool,
+          lo_root_handler                TYPE REF TO /iwfnd/cl_sodata_root_handler,
+          lv_session_start               TYPE abap_bool,
+          lv_soft_state_mode             TYPE /iwfnd/med_mdl_soft_state_mode,
+          lv_timeout_i                   TYPE i,
+          lv_timeout_str                 TYPE string,
+          lv_timeout                     TYPE t.
+
+    FIELD-SYMBOLS: <ls_enq>     TYPE seqg3,
+                   <ls_enqargo> TYPE /iwfnd/s_enq_softstate_sec.
+
+    CONSTANTS: lc_sap_cntxtid                TYPE string VALUE 'sap-contextid',
+               lc_sap_cntxtid_accpt          TYPE string VALUE 'sap-contextid-accept',
+               lc_header                     TYPE string VALUE 'header',
+               lc_sap_context_timeout_header TYPE string VALUE 'sap-context-timeout' ##NO_TEXT.
+
+    IF is_soft_state_info-soft_state_possible = abap_false.
+      RETURN.
+    ENDIF.
+
+
+    lo_transaction_handler = /iwfnd/cl_transaction_handler=>get_transaction_handler( ).
+    lo_transaction_handler->get_soft_state_session_info(
+      IMPORTING
+        ev_session_start = lv_session_start
+        ev_session_end   = lv_session_end
+        ev_mode          = lv_soft_state_mode ).
+
+    " Soft State Info from Microhub
+    IF iv_session_start IS SUPPLIED.
+      lv_session_start = iv_session_start.
+    ENDIF.
+    IF iv_session_end IS SUPPLIED.
+      lv_session_end = iv_session_end.
+    ENDIF.
+
+    " client-side termination of soft state session through header
+    " overrides server side settings
+    lv_header_value = io_server->request->get_header_field( name = /iwfnd/if_sodata_types=>gcs_cor_request_parameters_lc-sap_terminate ).
+    TRANSLATE lv_header_value TO LOWER CASE.
+    IF lv_header_value EQ /iwfnd/if_sodata_types=>gcs_cor_request_parameters_va-session.
+      lv_session_end = abap_true.
+    ENDIF.
+
+    " Delayed Soft-State mode enabled?
+    IF lv_soft_state_mode = /iwfnd/if_mgw_core_types=>gcs_soft_state_mode-delayed.
+
+      " End Soft-State session?
+      IF lv_session_end = abap_true.
+
+        disable_stateful_session( io_server ).
+
+        RETURN.
+      ENDIF.
+
+
+      " Delay Invocation enabled and should Soft-State start?
+      IF mv_former_session_was_active = abap_false AND lv_session_start = abap_false.
+
+        RETURN.
+      ENDIF.
+
+    ENDIF.
+
+
+
+    lv_sap_cntxtid = io_server->request->get_header_field( lc_sap_cntxtid ).
+    lv_path_info = io_server->request->get_header_field( if_http_header_fields_sap=>path_info_expanded ).   " Exmpl: /cockpit/.../rest.html
+    lv_sap_cntxtid_accpt = io_server->request->get_header_field( lc_sap_cntxtid_accpt ).
+
+
+
+***************** security session handling ***************************************************************
+* if the service doesn't requires authenthication (public service or service assigned to a configured identiy)
+* the security_context may be empty.
+* we are interested in the security_context-link because its the time invariant security_context_id.
+    TRY.
+        ls_security_context = cl_http_security_session_admin=>get_current_session_context( ).
+      CATCH cx_http_security_session_admin.
+        CLEAR ls_security_context-link.
+    ENDTRY.
+    IF  ls_security_context-link IS INITIAL.
+      CLEAR lv_security_context_reference.
+    ELSE.
+      " 'GUID_CONVERT' is obsolete as of 'SAP EhP2 for SAP NetWeaver 7.0' and 'SAP NetWeaver 7.1'
+      " (Note 935047) and has to be replaced by 'CL_SYSTEM_UUID=>CONVERT_UUID_C32_STATIC'. 'GW_CORE'
+      " and IW_FND' depend on minimum 'SAP NetWeaver 7.0 SPS25' which is a predecessor of
+      " 'SAP EhP2 for SAP NetWeaver 7.0', so the old 'GUID_CONVERT' FM has to be used here.
+      CALL FUNCTION 'GUID_CONVERT' ##fm_olded
+        EXPORTING
+          iv_guid_x16            = ls_security_context-link
+        IMPORTING
+          ev_guid_c32            = lv_security_context_reference
+        EXCEPTIONS
+          no_unicode_support_yet = 1
+          parameters_error       = 2
+          OTHERS                 = 3.
+      IF sy-subrc <> 0.
+        CLEAR lv_security_context_reference.
+      ENDIF.
+    ENDIF.
+
+***************** Session id handling ***************************************************************
+*   read server_session_id SI
+    lv_server_session_id = io_server->session_id.
+
+*   shorten server_session_id
+    REPLACE '-ATT' IN lv_server_session_id WITH ''.       "#EC SYNTCHAR
+    IF sy-subrc NE 0.
+      CLEAR lv_server_session_id.  "if -ATT is not contained something is strange
+    ENDIF.
+
+    ls_arg-security_context_ref = lv_security_context_reference.
+    ls_arg-odata_service_hash   = is_soft_state_info-odata_service_hash.
+*  GET RUN TIME FIELD enqueue_start.
+
+    CLEAR: mv_soft_state_reset_dp.
+
+    IF is_soft_state_info-cookie_session_id NE lv_server_session_id.
+*   persist SI as persisted_session_id () for user;client;service if we are first else
+*   read persisted_session_id PI
+
+
+* memorize the current request URL for the next request directed into the current application session.
+* in case the next request contains a ;mo or ;o or ;v segment parameter
+* the request could get the same session assigned by the ICMAN.
+* in this case the Stack needs to cleared (->Service Group and the Data Provider of the Application)
+      mv_prev_req_url = is_soft_state_info-path.
+
+      lv_reduced_serv_hand_sessionid = lv_server_session_id.
+
+      SHIFT lv_reduced_serv_hand_sessionid BY 9 PLACES.
+      ls_arg-sessionid = lv_reduced_serv_hand_sessionid.
+      IF ls_arg-security_context_ref IS INITIAL.
+        lv_x_sec_context_ref_value = abap_true.
+      ELSE.
+        lv_x_sec_context_ref_value = abap_false.
+      ENDIF.
+
+* Use enqueuing for session managements (to find out if there is already a session)
+      IF    lv_sap_cntxtid_accpt EQ lc_header
+         OR (     lv_sap_cntxtid_accpt IS INITIAL
+              AND lv_sap_cntxtid IS NOT INITIAL ).
+        " Session handling via header field - set binary semaphore for this (user;client;service;session)
+        CALL FUNCTION 'ENQUEUE_/IWFND/E_SOST_RS'
+          EXPORTING
+            sec_context_ref   = ls_arg-security_context_ref
+            odata_svc_hash    = ls_arg-odata_service_hash
+            sessionid         = ls_arg-sessionid
+            x_sec_context_ref = lv_x_sec_context_ref_value
+            _scope            = '1'
+          EXCEPTIONS
+            foreign_lock      = 1
+            system_failure    = 2
+            OTHERS            = 3.
+
+        IF sy-subrc = 0.
+          mv_session_for_odata_svc_hash = ls_arg-odata_service_hash.
+        ELSE.
+          " There is already a session for this (user;client;service), read the session_id to send
+          " it to the client, so he can use and benefit from this session in subsequent calls
+          CLEAR lv_persisted_session_id.
+          ASSIGN lv_enqarg TO <ls_enqargo> CASTING.
+          MOVE-CORRESPONDING ls_arg TO <ls_enqargo>.
+          <ls_enqargo>-sessionid = '*'.
+
+          lv_return_code = 1.
+          lv_read_counter = 0.
+          WHILE ( lv_return_code NE 0 ) OR ( lv_read_counter EQ 10 ).
+            lv_read_counter = lv_read_counter + 1.
+            CALL FUNCTION 'ENQUEUE_READ'
+              EXPORTING
+                gname                 = '/IWFND/S_ENQ_SOFTSTATE_SEC'
+                garg                  = lv_enqarg
+                fast                  = abap_true
+              TABLES
+                enq                   = lt_enq
+              EXCEPTIONS
+                communication_failure = 1
+                system_failure        = 2
+                OTHERS                = 3.
+            lv_return_code = sy-subrc.
+          ENDWHILE.
+          IF lv_return_code = 0.
+            LOOP AT lt_enq ASSIGNING <ls_enq>.
+              ls_arg = <ls_enq>-garg.
+              CHECK ls_arg-sessionid NE space.
+              CONCATENATE 'SID:ANON:' ls_arg-sessionid INTO lv_persisted_session_id.
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+      ELSE.
+        " Session handling via cookie - set binary semaphore for this (user;client;service)
+        CALL FUNCTION 'ENQUEUE_/IWFND/E_SOST_RS'
+          EXPORTING
+            sec_context_ref   = ls_arg-security_context_ref
+            odata_svc_hash    = ls_arg-odata_service_hash
+            x_sec_context_ref = lv_x_sec_context_ref_value
+            x_sessionid       = abap_true
+            _scope            = '1'
+            _collect          = 'X'
+          EXCEPTIONS
+            foreign_lock      = 1
+            system_failure    = 2
+            OTHERS            = 3.
+
+        IF sy-subrc = 0.
+          " We are first! Nail it down and store the SI use the enqueue server
+          " to store the current active session_id for this (user;client;service)
+          CALL FUNCTION 'ENQUEUE_/IWFND/E_SOST_RS'
+            EXPORTING
+              sec_context_ref   = ls_arg-security_context_ref
+              odata_svc_hash    = ls_arg-odata_service_hash
+              sessionid         = ls_arg-sessionid
+              x_sec_context_ref = lv_x_sec_context_ref_value
+              _scope            = '1'
+              _collect          = 'X'
+            EXCEPTIONS
+              foreign_lock      = 1
+              system_failure    = 2
+              OTHERS            = 3.
+
+          IF sy-subrc = 0.
+            CALL FUNCTION 'FLUSH_ENQUEUE'
+              EXCEPTIONS
+                foreign_lock   = 1
+                system_failure = 2
+                OTHERS         = 3.
+            IF sy-subrc = 0.
+              mv_session_for_odata_svc_hash = ls_arg-odata_service_hash.
+            ELSE.
+              " There is already a session for this (user;client;service), read the session_id to send
+              " it to the client, so he can use and benefit from this session in subsequent calls
+              CLEAR lv_persisted_session_id.
+              ASSIGN lv_enqarg TO <ls_enqargo> CASTING.
+              MOVE-CORRESPONDING ls_arg TO <ls_enqargo>.
+              <ls_enqargo>-sessionid  = '*'.
+
+              lv_return_code = 1.
+              lv_read_counter = 0.
+              WHILE ( lv_return_code NE 0 ) OR ( lv_read_counter EQ 10 ).
+                lv_read_counter = lv_read_counter + 1.
+                CALL FUNCTION 'ENQUEUE_READ'
+                  EXPORTING
+                    gname                 = '/IWFND/S_ENQ_SOFTSTATE_SEC'
+                    garg                  = lv_enqarg
+                    fast                  = abap_true
+                  TABLES
+                    enq                   = lt_enq
+                  EXCEPTIONS
+                    communication_failure = 1
+                    system_failure        = 2
+                    OTHERS                = 3.
+                lv_return_code = sy-subrc.
+              ENDWHILE.
+              IF lv_return_code = 0.
+                LOOP AT lt_enq ASSIGNING <ls_enq>.
+                  ls_arg = <ls_enq>-garg.
+                  CHECK ls_arg-sessionid NE space.
+                  CONCATENATE 'SID:ANON:' ls_arg-sessionid INTO lv_persisted_session_id.
+                ENDLOOP.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      IF lv_persisted_session_id IS INITIAL OR lv_persisted_session_id EQ is_soft_state_info-cookie_session_id.
+        lv_activate_softstate = abap_true.
+        lv_new_client_session_id = lv_server_session_id.
+
+      ELSE.
+        IF lv_persisted_session_id NE lv_server_session_id.
+*       don't activate_softstate!
+*       set client_cookie_session_id to PI:
+          lv_new_client_session_id = lv_persisted_session_id.
+
+        ENDIF.
+      ENDIF.
+    ELSE.
+*   cookie_session_id eq server_session_id.     CI = SI
+*   soft_state_session is still_valid. Nothing to do.
+*       compare the curent request URL with the request URL of the previous call
+      IF mv_prev_req_url IS NOT INITIAL AND mv_prev_req_url NE is_soft_state_info-path.
+        IF iv_use_micro_hub = abap_true.
+          mv_soft_state_reset_dp = abap_true.
+        ELSE.
+          lo_root_handler ?= mo_rest_handler->/iwcor/if_rest_application~get_root_handler( ).
+          lo_root_handler->set_reset_dp_required( abap_true ).
+        ENDIF.
+        mv_prev_req_url = lv_path_info.
+      ENDIF.
+      IF mv_session_for_odata_svc_hash EQ is_soft_state_info-odata_service_hash.
+        " Everthing OK
+        lv_activate_softstate = abap_false.
+      ELSE.
+        " Wrong security session! Ignore framework caches and terminate!
+        lv_activate_softstate = abap_false.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+
+    IF    lv_activate_softstate EQ abap_true
+      AND is_soft_state_info-cookie_session_id IS NOT INITIAL.
+      " Cookie session id  was found, but not valid - check if soft state is possible
+      is_soft_state_enabled(
+        EXPORTING
+          iv_service_namespace    = is_soft_state_info-service_namespace
+          iv_service_name         = is_soft_state_info-service_name
+          io_server               = io_server
+        IMPORTING
+          ev_is_softstate_enabled = lv_is_softstate_enabled ).
+
+      IF lv_is_softstate_enabled EQ abap_false.
+        " Softstate is not enabled
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    " Set header
+    lv_timeout = me->get_icf_timeout_for_service( iv_service_namespace = is_soft_state_info-service_namespace
+                                                  iv_service_name      = is_soft_state_info-service_name ).
+
+    " Set timeout in header
+    lv_timeout_i = lv_timeout. " Delete leading zero's
+    IF lv_timeout_i IS NOT INITIAL.
+      lv_timeout_str = lv_timeout_i.
+      io_server->response->set_header_field(
+        EXPORTING
+          name  = lc_sap_context_timeout_header
+          value = lv_timeout_str ).
+    ENDIF.
+
+
+    IF lv_activate_softstate EQ abap_true.
+*   tell icf that we handled the request lifetime
+      if_http_extension~lifetime_rc = if_http_extension=>co_lifetime_keep.
+      io_server->stateful = if_http_server=>co_enabled.
+
+    ENDIF.
+
+    IF    lv_new_client_session_id IS NOT INITIAL
+      AND lv_sap_cntxtid_accpt IS INITIAL
+      AND lv_sap_cntxtid IS INITIAL.
+*   set the cookie
+
+      CALL 'C_SAPGPARAM'                                 "#EC CI_CCALL.
+         ID 'NAME' FIELD 'icf/set_HTTPonly_flag_on_cookies'
+         ID 'VALUE' FIELD lv_httponly.
+
+      IF lv_httponly EQ '0' OR lv_httponly EQ '1'.
+        lv_secure = 16.
+      ELSE.
+        lv_secure = 0.
+      ENDIF.
+
+      lv_new_client_session_id = lv_new_client_session_id && '-NEW'. "#EC SYNTCHAR
+
+* ensure that the path always ends with '/' in order do avoid the prefix problem at the client side
+* Prefix problem: '/foo' is prefix of '/foo2', but there are different context_ids for '/foo' and '/foo2'
+*                 here the client would always send the context_id of the most specific URL first to the server
+*                 As the ABAP server can only process one context_id per request it will assign the request
+*                 with the URL '/foo2' to the wrong application session (belonging to '/foo')
+      io_server->response->set_cookie( name   = if_http_form_fields_sap=>sap_sessioncookie
+                                           path   = is_soft_state_info-path
+                                           value  = lv_new_client_session_id
+                                           secure = lv_secure ).
+    ENDIF.
+
+    IF   lv_new_client_session_id IS NOT INITIAL
+      AND (    lv_sap_cntxtid_accpt IS NOT INITIAL
+            OR lv_sap_cntxtid IS NOT INITIAL ).
+      " Set header field for header field based session handling
+      lv_new_client_session_id = lv_new_client_session_id && '-NEW'. "#EC SYNTCHAR
+      io_server->response->set_header_field(
+        EXPORTING
+          name  = lc_sap_cntxtid
+          value = lv_new_client_session_id ).
+    ENDIF.
+
+*    " No handling of Session Timeout at this time
+*    " Set Event Handler for Session Termination
+*    IF mo_event_handler IS NOT BOUND.
+*      CREATE OBJECT mo_event_handler.
+*      SET HANDLER mo_event_handler->on_terminate FOR io_server.
+*    ENDIF.
+
+
+
+    mv_former_session_was_active = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD finalize_micro_hub_request.
+
+    DATA: lv_time_stop      TYPE i,
+          lv_time_total     TYPE i,
+          lv_sap_statistics TYPE string,
+          ls_sapstat_info   TYPE /iwfnd/sutil_sapstat_info.
+
+
+    " Add Payload Sizes to Performance Trace
+    io_sutil_runtime->performance_add_payload_sizes( ).
+
+    io_server->response->set_header_field(
+       name  = 'sap-processing-info'                        "#EC NOTEXT
+       value = is_response_line-processing_info
+     ).
+
+    " Performance Trace STOP for HTTP Handler
+    lv_time_stop = io_sutil_runtime->performance_stop( iv_time_start ).
+    IF lv_time_stop IS INITIAL.
+      GET RUN TIME FIELD lv_time_stop.
+    ENDIF.
+    lv_time_total = ( lv_time_stop - iv_time_start ) / 1000.
+
+    " SAP Statistics if required
+    IF io_sutil_runtime->mv_sapstat_required = abap_true.
+      ls_sapstat_info = is_response_line-sapstat_info.
+      ls_sapstat_info-gwrfcoh = iv_rfc_time - ls_sapstat_info-gwtotal.
+      ls_sapstat_info-gwtotal = lv_time_total.
+      ls_sapstat_info-gwhub   = ls_sapstat_info-gwhub + lv_time_total - iv_rfc_time.
+      ls_sapstat_info-gwfw    = ls_sapstat_info-gwhub + ls_sapstat_info-gwbe.
+      lv_sap_statistics = io_sutil_runtime->create_statistics_from_info( ls_sapstat_info ).
+      io_server->response->set_header_field(
+        name  = 'sap-statistics'                            "#EC NOTEXT
+        value = lv_sap_statistics
+      ).
+    ENDIF.
+
+    " Response Payload Trace
+    io_sutil_runtime->payload_server_response( ).
+
+  ENDMETHOD.
+
+
+  METHOD finalize_micro_hub_request_17.
+
+    DATA: lv_time_stop      TYPE i,
+          lv_time_total     TYPE i,
+          lv_rfc_time       TYPE i,
+          lv_sap_statistics TYPE string,
+          ls_sapstat_info   TYPE /iwfnd/sutil_sapstat_info,
+          lo_metering_api   TYPE REF TO /iwfnd/cl_metering_api.
+
+    FIELD-SYMBOLS:
+      <ls_met_dat>     TYPE /iwfnd/s_met_dat,
+      <ls_sutil_stats> TYPE /iwfnd/sutil_stats.
+
+
+    io_server->response->set_header_field(
+       name  = 'sap-processing-info'                        "#EC NOTEXT
+       value = iv_processing_info
+     ).
+
+    " SAP Statistics if required
+    GET RUN TIME FIELD lv_time_stop.
+    lv_time_total = ( lv_time_stop - iv_time_start ) / 1000.
+    lv_rfc_time = ( iv_rfc_stop_time - iv_rfc_start_time ) / 1000.
+    ls_sapstat_info = is_sapstat_info.
+    ls_sapstat_info-gwrfcoh = lv_rfc_time - ls_sapstat_info-gwtotal.
+    ls_sapstat_info-gwtotal = lv_time_total.
+    ls_sapstat_info-gwhub   = ls_sapstat_info-gwhub + lv_time_total - lv_rfc_time.
+    ls_sapstat_info-gwfw    = ls_sapstat_info-gwhub + ls_sapstat_info-gwbe.
+    IF io_sutil_runtime->mv_sapstat_required = abap_true.
+      lv_sap_statistics = io_sutil_runtime->create_statistics_from_info( ls_sapstat_info ).
+      io_server->response->set_header_field(
+        name  = 'sap-statistics'                            "#EC NOTEXT
+        value = lv_sap_statistics
+      ).
+    ENDIF.
+
+    " Add Payload Sizes to Performance Trace
+    io_sutil_runtime->performance_add_payload_sizes( ls_sapstat_info ).
+
+    " Add RFC Info to Performance Trace
+    io_sutil_runtime->performance_add_data(
+      iv_perf_handle_bep   = iv_perf_handle_bep
+      iv_rfc_request_size  = iv_rfc_request_size
+      iv_rfc_response_size = iv_rfc_response_size
+      iv_rfc_start_time    = iv_rfc_start_time
+      iv_rfc_stop_time     = iv_rfc_stop_time
+      iv_app_time          = ls_sapstat_info-gwapp
+      iv_appfw_time        = ls_sapstat_info-gwappfw
+      iv_appdb_time        = ls_sapstat_info-gwappdb
+      iv_appext_time       = ls_sapstat_info-gwappext
+      iv_non_gw_time       = ls_sapstat_info-gwnongw
+      iv_app_sum           = ls_sapstat_info-gwappsum
+      iv_wait_total        = ls_sapstat_info-gwbewait
+    ).
+
+    " Performance Trace STOP for HTTP Handler
+    lv_time_stop = io_sutil_runtime->performance_stop( iv_time_start ).
+
+    " Response Payload Trace
+    io_sutil_runtime->payload_server_response( ).
+
+    " Correct and Save Metering & Statistics Data if required
+    IF ct_met_dat IS NOT INITIAL OR ct_sutil_stats IS NOT INITIAL.
+      READ TABLE ct_met_dat ASSIGNING <ls_met_dat> INDEX lines( ct_met_dat ).
+      IF sy-subrc = 0.
+        <ls_met_dat>-duration        = lv_time_total.
+        <ls_met_dat>-request_address = iv_request_uri_org.
+        <ls_met_dat>-request_size    = iv_http_request_size.
+        <ls_met_dat>-xml_size        = iv_http_response_size.
+      ENDIF.
+      READ TABLE ct_sutil_stats ASSIGNING <ls_sutil_stats> INDEX lines( ct_sutil_stats ).
+      IF sy-subrc = 0.
+        MOVE-CORRESPONDING ls_sapstat_info TO <ls_sutil_stats>.
+        <ls_sutil_stats>-request_address = iv_request_uri_org.
+        <ls_sutil_stats>-request_size    = iv_http_request_size.
+        <ls_sutil_stats>-response_size   = iv_http_response_size.
+      ENDIF.
+      CREATE OBJECT lo_metering_api.
+      lo_metering_api->store_mhub_data(
+        it_met_dat     = ct_met_dat
+        it_sutil_stats = ct_sutil_stats
+      ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_icf_timeout_for_service.
+
+    DATA  ls_icf              TYPE /iwfnd/s_mgw_reg_icf.
+    DATA  lt_icfdocu          TYPE /iwfnd/cl_icf_access=>ty_t_icfdocu.
+    DATA  ls_icfdocu          TYPE icfdocu.
+    DATA  lv_alternative_name TYPE icfaltnme.
+    DATA  lo_icf_access       TYPE REF TO /iwfnd/cl_icf_access.
+
+    DATA: lv_service_name     TYPE /iwfnd/med_mdl_service_grp_id.
+    DATA: lv_service_namespace TYPE /iwfnd/med_mdl_namespace.
+
+    MOVE iv_service_name TO lv_service_name.
+    MOVE iv_service_namespace TO lv_service_namespace.
+
+
+    lo_icf_access = /iwfnd/cl_icf_access=>get_icf_access( ).
+
+    lt_icfdocu = lo_icf_access->get_icf_docu_for_gw_libs_wo_at( ).
+
+    LOOP AT lt_icfdocu INTO ls_icfdocu.
+      CLEAR ls_icf.
+      ls_icf-icf_node         = ls_icfdocu-icf_name.
+      ls_icf-icf_description  = ls_icfdocu-icf_docu.
+
+*---Get the Node GUID
+      lv_alternative_name = ls_icfdocu-icf_name.
+      ls_icf-icf_lib_guid = lo_icf_access->get_node_guid_wo_at(
+                              iv_icf_parent_guid = ls_icfdocu-icfparguid
+                              iv_icf_node_name   = lv_alternative_name
+                            ).
+
+
+*---read selected service
+      ls_icf-srv_identifier   = lv_service_name.
+
+      "Generic Channel Services are in camel case / conflict with ICF Alternative name in table ICFSERVICE
+      TRANSLATE lv_service_name TO UPPER CASE.           "#EC TRANSLANG
+
+*---get all icf node GUIDS for service and lib
+      lo_icf_access->get_icf_guids_for_srv_wo_at(
+        EXPORTING
+          iv_icf_root_node_guid = ls_icf-icf_lib_guid
+          iv_namespace          = lv_service_namespace
+          iv_external_name      = lv_service_name
+        IMPORTING
+          ev_service_timeout    =  rv_service_timeout
+      ).
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get_routing_info.
+
+    DATA ls_alias_assignment  TYPE /iwfnd/cl_mgw_dest_finder=>ty_gs_system_alias.
+    DATA lt_request_header    TYPE tihttpnvp.
+    DATA lo_destin_finder     TYPE REF TO /iwfnd/cl_destin_finder.
+    DATA ls_system_alias_info TYPE /iwfnd/c_dfsyal.
+    DATA lv_multi_sys_aliases TYPE abap_bool.
+
+
+
+*   Catalog Service: No routing needed nor supported
+    IF ( iv_service_id = /iwfnd/cl_mgw_inst_man=>gcs_service_ids-catalog_service_2 ).
+      CLEAR es_routing_info.
+      RETURN.
+    ENDIF.
+
+
+    " Get HTTP Headers
+    es_routing_info-current_host_name = io_server->request->get_header_field( /iwfnd/if_sodata_types=>gcs_cor_request_parameters-host ).
+    io_server->request->get_header_fields(
+      CHANGING
+        fields = lt_request_header
+    ).
+
+    " Get System Alias Assignment
+    TRY.
+        /iwfnd/cl_mgw_dest_finder=>get_single_sys_alias_with_info(
+          EXPORTING
+            iv_service_id              = iv_service_id
+            iv_user                    = sy-uname
+            iv_host_name               = es_routing_info-current_host_name
+            iv_no_log_exception        = abap_true
+            it_request_attributes      = lt_request_header
+            iv_uri_system_alias        = iv_uri_system_alias
+            iv_mapping_sid             = iv_mapping_sid
+            iv_is_moc                  = iv_is_moc
+          IMPORTING
+            es_system_alias            = ls_alias_assignment
+            ev_has_several_sys_aliases = lv_multi_sys_aliases
+        ).
+
+        IF ls_alias_assignment IS INITIAL.
+          CLEAR es_routing_info.
+          RETURN.
+        ENDIF.
+
+        MOVE-CORRESPONDING ls_alias_assignment TO es_routing_info.
+        es_routing_info-multi_sys_aliases = lv_multi_sys_aliases.
+
+        " Get System Alias Configuration
+        lo_destin_finder     = /iwfnd/cl_destin_finder=>get_destination_finder( ).
+        ls_system_alias_info = lo_destin_finder->get_system_alias_info( ls_alias_assignment-system_alias ).
+        MOVE-CORRESPONDING ls_system_alias_info TO es_routing_info.
+
+        IF iv_is_moc = abap_true AND es_routing_info-multi_sys_aliases EQ abap_true.
+          es_routing_info-process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-routing_based.
+        ELSEIF es_routing_info-is_for_bep EQ abap_true. "system alias needs to be always read in taskprocessing (co-deployment not allowed)
+          es_routing_info-process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-routing_based.
+        ELSEIF es_routing_info-is_local_iwf = abap_true.
+          IF iv_is_moc = abap_true.
+            es_routing_info-process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-routing_based.
+          ELSE.
+            es_routing_info-process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-co_deployed_only.
+          ENDIF.
+        ELSE.
+          es_routing_info-process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-routing_based.
+        ENDIF.
+
+      CATCH /iwfnd/cx_destin_finder /iwfnd/cx_mgw_dest_finder.
+        CLEAR es_routing_info.  " No exception here because of e.g. Catalog Service
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD GET_SOFT_STATE_INFO.
+
+    DATA: lv_cookie_session_id       TYPE string,
+          lv_base_url                TYPE string,
+          lv_path                    TYPE string,
+          lv_metadata_timestamp      TYPE string,
+          lv_service_namespace       TYPE string,
+          lv_service_name            TYPE string,
+          lv_service_segment_data    TYPE string,
+          lv_odata_service_hash      TYPE /iwfnd/coc_odata_service_hash,
+          lv_sap_cntxtid_accpt       TYPE string,
+          lv_sap_cntxtid             TYPE string,
+          lt_stringtab               TYPE STANDARD TABLE OF string,
+          lv_string                  TYPE string,
+          lv_is_softstate_enabled    TYPE abap_bool VALUE abap_false,
+          lo_root_handler            TYPE REF TO /iwfnd/cl_sodata_root_handler,
+          lo_service                 TYPE REF TO /iwfnd/if_med_mdl_service_grp,
+          lv_soft_state_mode         TYPE /iwfnd/med_mdl_soft_state_mode,
+          lv_is_busi_data_request    TYPE abap_bool,
+          lv_load_last_modified_only TYPE abap_bool,
+          lv_do_cache_handshake      TYPE abap_bool.
+
+
+    CONSTANTS: lc_sap_cntxtid_accpt TYPE string VALUE 'sap-contextid-accept',
+               lc_sap_cntxtid       TYPE string VALUE 'sap-contextid'.
+
+************************* Prerequisites for the SoftState mode *****************************************
+
+    IF io_transaction_handler->get_is_softstate_enabled( ) = abap_false.
+      RETURN.
+    ENDIF.
+
+
+    " Get header field for "header field" based session handling
+    lv_sap_cntxtid = io_server->request->get_header_field( name = lc_sap_cntxtid ).
+    IF lv_sap_cntxtid IS NOT INITIAL.
+      lv_cookie_session_id = lv_sap_cntxtid.
+    ELSE.
+      io_server->request->get_cookie( EXPORTING name = if_http_form_fields_sap=>sap_sessioncookie
+                                      IMPORTING value = lv_cookie_session_id ).
+    ENDIF.
+
+
+    " Shorten cookie_session_id
+    REPLACE '-NEW' IN lv_cookie_session_id WITH ''.       "#EC SYNTCHAR
+    IF sy-subrc NE 0.
+      CLEAR lv_cookie_session_id. "if -NEW is not contained something is strange.
+    ENDIF.
+
+    "**********************************************************************
+
+    " Retrieve the internal path infos
+    lv_base_url = io_server->request->get_header_field( if_http_header_fields_sap=>script_name ).
+
+    " Get header field for "header field" based session handling
+    lv_sap_cntxtid_accpt = io_server->request->get_header_field( lc_sap_cntxtid_accpt ).
+
+**********************************************************************
+
+    lv_service_namespace = iv_uri_namespace.
+    REPLACE ALL OCCURRENCES OF '/' IN lv_service_namespace WITH ''.
+
+    lv_service_name = iv_uri_service_name.
+
+    lv_service_segment_data = io_transaction_handler->get_service_segment_data( ).
+
+    IF    lv_sap_cntxtid_accpt    IS INITIAL
+      AND lv_sap_cntxtid          IS INITIAL
+      AND lv_service_segment_data IS NOT INITIAL. "Not initial in case of ;mo/;o/;v
+      "For cookie based session management segement parameters are not allowed
+      es_soft_state_info-soft_state_possible = abap_false.
+      RETURN.
+    ELSEIF lv_service_segment_data IS NOT INITIAL.
+      SPLIT lv_service_segment_data AT ';' INTO TABLE lt_stringtab.
+      SORT lt_stringtab BY table_line ASCENDING.
+      CLEAR lv_service_segment_data.
+      LOOP AT lt_stringtab INTO lv_string.
+        CONCATENATE lv_service_segment_data ';' lv_string INTO lv_service_segment_data.
+      ENDLOOP.
+    ENDIF.
+
+    CONCATENATE lv_base_url '/' lv_service_namespace '/' lv_service_name lv_service_segment_data '/' INTO lv_path.
+
+    " If no former session id was found, first check if softstate is enabled
+    IF lv_cookie_session_id IS INITIAL.
+
+      is_soft_state_enabled(
+        EXPORTING
+          iv_service_namespace    = lv_service_namespace
+          iv_service_name         = lv_service_name
+          io_server               = io_server
+        IMPORTING
+          ev_is_softstate_enabled = lv_is_softstate_enabled ).
+
+      IF lv_is_softstate_enabled EQ abap_false.
+        " Softstate is not enabled
+        es_soft_state_info-soft_state_possible = abap_false.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+* SoftState is not supported, if we are not able to calculate a hash
+    CALL FUNCTION 'MD5_CALCULATE_HASH_FOR_CHAR'
+      EXPORTING
+        data           = lv_path
+      IMPORTING
+        hash           = lv_odata_service_hash
+      EXCEPTIONS
+        no_data        = 1
+        internal_error = 2
+        OTHERS         = 3.
+    IF sy-subrc <> 0.
+      es_soft_state_info-soft_state_possible = abap_false.
+*      gv_custom_session_mgmt = abap_false.
+      RETURN.
+    ENDIF.
+
+    IF iv_use_micro_hub = abap_false.
+      lo_root_handler ?= mo_rest_handler->/iwcor/if_rest_application~get_root_handler( ).
+      lo_root_handler->set_softstate_mode( abap_true ).
+    ENDIF.
+
+    es_soft_state_info-soft_state_possible = abap_true.
+    es_soft_state_info-cookie_session_id = lv_cookie_session_id.
+    es_soft_state_info-odata_service_hash = lv_odata_service_hash.
+    es_soft_state_info-path = lv_path.
+    es_soft_state_info-service_name = lv_service_name.
+    es_soft_state_info-service_namespace = lv_service_namespace.
+
+    CASE iv_resource_part.
+      WHEN space.
+        " Service Document
+        lv_is_busi_data_request    = abap_true.
+        lv_load_last_modified_only = abap_false.
+        lv_do_cache_handshake      = abap_true.
+
+      WHEN '$metadata'.
+        lv_is_busi_data_request = abap_false.
+        lv_do_cache_handshake   = abap_true.
+
+        lv_metadata_timestamp = io_server->request->get_header_field( 'if-modified-since' ).
+        IF lv_metadata_timestamp IS NOT INITIAL.
+          " Conditional Metadata: "if-modified-since" is used
+          lv_load_last_modified_only = abap_true.
+        ELSE.
+          " Service Metadata
+          lv_load_last_modified_only = abap_false.
+        ENDIF.
+
+      WHEN OTHERS.
+        " For Catalog Service: Metadata
+        " Otherwise          : Business Data and no cache handshake
+        lv_load_last_modified_only = abap_false.
+        lv_do_cache_handshake      = abap_false.
+
+        IF iv_service_name = 'CATALOGSERVICE' AND iv_namespace = '/IWFND/'.
+          lv_is_busi_data_request = abap_false.
+        ELSE.
+          lv_is_busi_data_request = abap_true.
+        ENDIF.
+    ENDCASE.
+
+    io_transaction_handler->set_metadata_access_info(
+      iv_is_busi_data_request    = lv_is_busi_data_request
+      iv_load_last_modified_only = lv_load_last_modified_only
+      iv_do_cache_handshake      = lv_do_cache_handshake
+    ).
+
+    TRY.
+        lo_service = io_transaction_handler->get_service_group_metadata( ).
+        lv_soft_state_mode = lo_service->get_srv_soft_state_mode( ).
+
+      CATCH /iwfnd/cx_med_mdl_access.
+        " do nothing
+    ENDTRY.
+
+    io_transaction_handler->set_soft_state_session_info(
+      EXPORTING
+        iv_soft_state_before        = mv_former_session_was_active
+        iv_mode                     = lv_soft_state_mode ).
+
+  ENDMETHOD.
+
+
+  METHOD handle_rfc_failure.
+
+    DATA: lv_message_v1     TYPE symsgv,
+          lv_message_v2     TYPE symsgv,
+          lv_message_v3     TYPE symsgv,
+          lv_message_v4     TYPE symsgv,
+          lv_error_text     TYPE bapiret2-message,
+          lx_tech_exception TYPE REF TO /iwfnd/cx_mgw_tech_exception.
+
+
+    CASE iv_subrc.
+      WHEN 1000.          " System failure
+        lx_tech_exception = /iwfnd/cl_mgw_runt_rclnt_utils=>create_rfc_system_exception( iv_rfc_message ).
+
+      WHEN 1001.          " Communication failure
+        IF iv_rfc_message CS 'CM_PRODUCT_SPECIFIC_ERROR'.
+          CONCATENATE 'RFC Error:'(e03)
+                      'Run ''Connection Test'' in sm59 for destination'(e04)
+                      iv_rfc_dest
+                      'for more details'(e05)
+            INTO lv_error_text SEPARATED BY space.          "#EC NOTEXT
+        ELSE.
+          CONCATENATE 'RFC Error:'(e03)
+                      iv_rfc_message
+            INTO lv_error_text SEPARATED BY space.          "#EC NOTEXT
+        ENDIF.
+        lv_message_v1 = lv_error_text.
+        lv_message_v2 = lv_error_text+50.
+        lv_message_v3 = lv_error_text+100.
+        lv_message_v4 = lv_error_text+150.
+        CREATE OBJECT lx_tech_exception
+          EXPORTING
+            textid              = /iwfnd/cx_mgw_tech_exception=>rfc_communication_failure
+            rfc_failure_message = lv_error_text
+            rfc_message_v1      = lv_message_v1
+            rfc_message_v2      = lv_message_v2
+            rfc_message_v3      = lv_message_v3
+            rfc_message_v4      = lv_message_v4.
+    ENDCASE.
+
+    create_and_set_tech_exception(
+      iv_exception_type = /iwfnd/cx_sodata=>gcs_cor_exceptions-server_internal_error
+      io_exception      = lx_tech_exception
+      io_sutil_runtime  = io_sutil_runtime
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD if_http_extension~handle_request.
+
+    DATA: lv_perf_handle          TYPE i,
+          lo_sutil_runtime        TYPE REF TO /iwfnd/cl_sutil_runtime,
+          lv_path_info            TYPE string,
+          lv_path_info_expanded   TYPE string,
+          lv_http_method          TYPE string,
+          lv_request_uri          TYPE string,
+          lo_transaction_handler  TYPE REF TO /iwfnd/cl_transaction_handler,
+          lv_namespace            TYPE /iwfnd/med_mdl_namespace,
+          lv_service_name         TYPE /iwfnd/med_mdl_service_grp_id,
+          lv_service_version      TYPE /iwfnd/med_mdl_version,
+          lv_service_id           TYPE /iwfnd/med_mdl_srg_identifier,
+          lv_process_mode         TYPE /iwfnd/med_process_mode,
+          lv_uri_namespace        TYPE /iwfnd/med_mdl_namespace,
+          lv_uri_service_name     TYPE /iwfnd/med_mdl_service_grp_id,
+          lv_uri_system_alias     TYPE /iwfnd/defi_system_alias,
+          lv_mapping_sid          TYPE /iwfnd/defi_system_alias,
+          lv_resource_part        TYPE string,
+          lv_codeploy_class_exist TYPE abap_bool,
+          lv_exception_occurred   TYPE abap_bool,
+          lv_use_micro_hub        TYPE abap_bool,
+          lv_is_moc               TYPE abap_bool,
+          lv_is_softstate_enabled TYPE abap_bool,
+          lv_service_segment_data TYPE string,
+          ls_routing_info         TYPE ty_s_routing_info,
+          lx_tech_exception       TYPE REF TO /iwfnd/cx_mgw_tech_exception,
+          ls_soft_state_info      TYPE ty_s_soft_state_info.
+
+
+    " Check for skipping this handler
+    lv_path_info          = server->request->get_header_field( if_http_header_fields_sap=>path_info ).
+    lv_path_info_expanded = server->request->get_header_field( if_http_header_fields_sap=>path_info_expanded ).
+    IF lv_path_info_expanded IS NOT INITIAL AND lv_path_info_expanded <> lv_path_info.
+      if_http_extension~flow_rc = if_http_extension=>co_flow_ok_others_mand.
+      RETURN.
+    ENDIF.
+
+    " Initialize GW Support Tools
+    lv_request_uri = server->request->get_header_field( if_http_header_fields_sap=>request_uri ).
+    /iwfnd/cl_sutil_runtime=>set_request_uri( lv_request_uri ).
+    lo_sutil_runtime = /iwfnd/cl_sutil_runtime=>get_instance( ).
+    lv_perf_handle = lo_sutil_runtime->performance_start( ).
+    lo_sutil_runtime->payload_server_request( ).
+
+    " Process HTTP HEAD
+    lv_http_method = server->request->get_header_field( if_http_header_fields_sap=>request_method ).
+    IF lv_http_method = 'HEAD'.
+      CLEAR: mv_status_code, mv_status_reason.
+      process_http_head(
+        EXPORTING
+          io_server             = server
+          io_sutil_runtime      = lo_sutil_runtime
+        IMPORTING
+          ev_exception_occurred = lv_exception_occurred
+      ).
+      IF lv_exception_occurred = abap_false.
+        lo_sutil_runtime->finalize_http_request(
+          EXPORTING
+            io_server      = server
+            iv_perf_handle = lv_perf_handle
+        ).
+      ELSE.
+        server->response->set_status( code = mv_status_code reason = mv_status_reason ).
+        lo_sutil_runtime->reset( ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    " Determine Service Info from URI
+    determine_service_info(
+      EXPORTING
+        io_server               = server
+        io_sutil_runtime        = lo_sutil_runtime
+      IMPORTING
+        ev_namespace            = lv_namespace
+        ev_service_name         = lv_service_name
+        ev_service_version      = lv_service_version
+        ev_service_id           = lv_service_id
+        ev_process_mode         = lv_process_mode
+        ev_uri_namespace        = lv_uri_namespace
+        ev_uri_service_name     = lv_uri_service_name
+        ev_uri_system_alias     = lv_uri_system_alias
+        ev_resource_part        = lv_resource_part
+        ev_is_moc               = lv_is_moc
+        ev_is_softstate_enabled = lv_is_softstate_enabled
+        ev_service_segment_data = lv_service_segment_data
+        ev_exception_occurred   = lv_exception_occurred
+    ).
+    IF lv_exception_occurred = abap_true.
+      " Call Root Handler to handle error (Exception already set!)
+      mo_rest_handler->if_http_extension~handle_request( server ).
+      if_http_extension~flow_rc     = mo_rest_handler->if_http_extension~flow_rc.
+      if_http_extension~lifetime_rc = mo_rest_handler->if_http_extension~lifetime_rc.
+      RETURN.
+    ENDIF.
+
+    lo_transaction_handler = /iwfnd/cl_transaction_handler=>get_transaction_handler( ).
+    " The process mode should be only set to co-deployed via this method if this status was set in the UI
+    " to indicate 'Co-Deployment' use /IWFND/CL_TRANSACTION_HANDLER->SET_IS_CO_DEPLOYMENT_SCENARIO instead
+    lo_transaction_handler->set_process_mode( lv_process_mode ).
+
+    " Get Mapping SID
+    lv_mapping_sid = server->request->get_header_field( /iwfnd/if_sodata_types=>gcs_cor_request_parameters_lc-sap_sid ).
+
+    " Get Routing Info
+    get_routing_info(
+      EXPORTING
+        iv_service_id       = lv_service_id
+        iv_uri_system_alias = lv_uri_system_alias
+        iv_mapping_sid      = lv_mapping_sid
+        iv_is_moc           = lv_is_moc
+        io_server           = server
+      IMPORTING
+        es_routing_info     = ls_routing_info
+    ).
+    IF lv_exception_occurred = abap_true.
+      " Call Root Handler to handle error (Exception already set!)
+      mo_rest_handler->if_http_extension~handle_request( server ).
+      if_http_extension~flow_rc     = mo_rest_handler->if_http_extension~flow_rc.
+      if_http_extension~lifetime_rc = mo_rest_handler->if_http_extension~lifetime_rc.
+      RETURN.
+    ENDIF.
+
+    " Correct Process Mode in some cases
+    IF ls_routing_info IS NOT INITIAL.
+      lv_process_mode = ls_routing_info-process_mode.
+    ENDIF.
+
+    " Set Common Parameters in Transaction Handler for with and without Microhub
+    lo_transaction_handler->set_service_identifier( lv_service_id ).
+    lo_transaction_handler->set_service_name( lv_service_name ).
+    lo_transaction_handler->set_service_namespace( lv_namespace ).
+    lo_transaction_handler->set_service_version( iv_version = lv_service_version ).
+    lo_transaction_handler->set_is_softstate_enabled( lv_is_softstate_enabled ).
+
+    " Check Request for Miro Hub
+    IF ls_routing_info-use_micro_hub IS NOT INITIAL AND
+       ls_routing_info-rfc_dest      IS NOT INITIAL AND
+       ls_routing_info-is_for_bep   = abap_false    AND
+       ls_routing_info-is_local_iwf = abap_false    AND
+       lv_is_moc = abap_false.
+      lv_use_micro_hub = abap_true.
+    ELSE.
+      lv_use_micro_hub = abap_false.
+    ENDIF.
+
+    " Process Micro Hub Request
+    IF lv_use_micro_hub = abap_true.
+      IF ls_routing_info-gwbep_version >= '017'.
+        process_micro_hub_request_17(
+        iv_namespace           = lv_namespace
+        iv_service_name        = lv_service_name
+        iv_service_version     = lv_service_version
+        iv_service_id          = lv_service_id
+        iv_uri_namespace       = lv_uri_namespace
+        iv_uri_service_name    = lv_uri_service_name
+        iv_uri_system_alias    = lv_uri_system_alias
+        iv_resource_part       = lv_resource_part
+        iv_http_method         = lv_http_method
+        iv_destination         = ls_routing_info-rfc_dest
+        iv_system_alias        = ls_routing_info-system_alias
+          iv_use_micro_hub       = lv_use_micro_hub
+        iv_perf_handle         = lv_perf_handle
+        io_server              = server
+        io_sutil_runtime       = lo_sutil_runtime
+        io_transaction_handler = lo_transaction_handler
+        ).
+      ELSE.
+        process_micro_hub_request(
+          iv_namespace        = lv_namespace
+          iv_service_name     = lv_service_name
+          iv_service_version  = lv_service_version
+          iv_service_id       = lv_service_id
+          iv_uri_system_alias = lv_uri_system_alias
+          iv_http_method      = lv_http_method
+          iv_destination      = ls_routing_info-rfc_dest
+          iv_system_alias     = ls_routing_info-system_alias
+          iv_is_soft_state    = lv_is_softstate_enabled
+          iv_perf_handle      = lv_perf_handle
+          io_server           = server
+          io_sutil_runtime    = lo_sutil_runtime
+        ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    " Set more Common Parameters in Transaction Handler for without Microhub
+    lo_transaction_handler->set_system_alias( lv_uri_system_alias ).
+    lo_transaction_handler->set_service_segment_data( lv_service_segment_data ).
+
+    IF lv_is_moc = abap_true.
+      lo_transaction_handler->set_is_mdc( ).
+    ENDIF.
+
+    lv_codeploy_class_exist = /iwfnd/cl_class_util=>does_class_exist( co_codeployment_proxy_impl ).
+
+    IF lv_process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-co_deployed_only AND
+       lv_codeploy_class_exist EQ abap_false.
+
+      " - Exception will be collected and processed in root hadler
+      CREATE OBJECT lx_tech_exception
+        EXPORTING
+          textid = /iwfnd/cx_mgw_tech_exception=>co_deployment_not_supp.
+
+      create_and_set_tech_exception(
+        iv_exception_type = /iwfnd/cx_sodata=>gcs_cor_exceptions-client_forbidden
+        io_exception      = lx_tech_exception
+        io_sutil_runtime  = lo_sutil_runtime
+      ).
+
+      " Call Root Handler to handle error (Exception already set!)
+      mo_rest_handler->if_http_extension~handle_request( server ).
+      if_http_extension~flow_rc     = mo_rest_handler->if_http_extension~flow_rc.
+      if_http_extension~lifetime_rc = mo_rest_handler->if_http_extension~lifetime_rc.
+      RETURN.
+    ENDIF.
+
+    IF ls_routing_info IS NOT INITIAL.
+      lv_process_mode = ls_routing_info-process_mode.
+    ENDIF.
+
+    IF lv_codeploy_class_exist EQ abap_true AND
+       lv_process_mode = /iwfnd/if_mgw_core_types=>gcs_process_mode-co_deployed_only.
+      lo_transaction_handler->set_is_co_deployment_scenario( ).
+    ENDIF.
+
+
+    get_soft_state_info(
+      EXPORTING
+        io_server              = server
+        iv_namespace           = lv_namespace
+        iv_service_name        = lv_service_name
+        iv_uri_namespace       = lv_uri_namespace
+        iv_uri_service_name    = lv_uri_service_name
+        iv_resource_part       = lv_resource_part
+        iv_use_micro_hub       = lv_use_micro_hub
+        io_transaction_handler = lo_transaction_handler
+      IMPORTING
+        es_soft_state_info     = ls_soft_state_info ).
+
+    mo_rest_handler->if_http_extension~handle_request( server ).
+
+
+    enable_soft_state(
+      EXPORTING
+        io_server          = server
+        is_soft_state_info = ls_soft_state_info
+        iv_use_micro_hub   = lv_use_micro_hub ).
+
+
+    if_http_extension~flow_rc     = mo_rest_handler->if_http_extension~flow_rc.
+    if_http_extension~lifetime_rc = mo_rest_handler->if_http_extension~lifetime_rc.
+
+    " Finalize GW Support Tools
+    lo_sutil_runtime->finalize_http_request(
+      EXPORTING
+        io_server      = server
+        iv_perf_handle = lv_perf_handle
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD is_soft_state_enabled.
+
+    DATA: lo_config_info             TYPE REF TO /iwfnd/if_config_info,
+          lv_is_softstate_enabled    TYPE boolean,
+          lv_timeout                 TYPE icftime,
+          lv_sec_session_mgmt_active TYPE abap_bool.
+
+
+    FIELD-SYMBOLS: <ls_parameter> LIKE LINE OF mt_query_parameter_encoded.
+
+    CONSTANTS: lc_force_stateless    TYPE string VALUE 'lv_force_stateless'.
+
+    ev_is_softstate_enabled = abap_true.
+
+    " SoftState mode is not supported if SoftState was deactivated via central switch
+    lo_config_info = /iwfnd/cl_config_info=>get_config_provider( ).
+
+    " Read config for SoftState
+    lo_config_info->get_boolean_parameter(
+      EXPORTING
+        iv_name  = /iwfnd/if_config_info=>gc_softstate_enabled
+      IMPORTING
+        ev_value = lv_is_softstate_enabled ).
+
+    " Undefined -> Softstate is also active (compatibility reasons)
+    IF lv_is_softstate_enabled EQ /iwfnd/if_mgw_core_types=>gcs_softstate_enabled-false.
+      CLEAR lv_timeout.
+      io_server->session_timeout = lv_timeout.
+*      io_csmgmt_handler->set_server_session_timeout( iv_server_session_timeout = lv_timeout ).
+      ev_is_softstate_enabled = abap_false. "gv_custom_session_mgmt
+      RETURN.
+    ENDIF.
+
+    " SoftState MUST NOT be supported, if security_seession_management is not active
+    lv_sec_session_mgmt_active = cl_http_security_session_admin=>session_management_is_active( ).
+    IF lv_sec_session_mgmt_active EQ abap_false.
+      CLEAR lv_timeout.
+      io_server->session_timeout = lv_timeout.
+*      io_csmgmt_handler->set_server_session_timeout( iv_server_session_timeout = lv_timeout ).
+      ev_is_softstate_enabled = abap_false. "gv_custom_session_mgmt
+      RETURN.
+    ENDIF.
+
+    " SoftState is not supported if the client explicitely requests to be stateless
+    READ TABLE mt_query_parameter_encoded WITH TABLE KEY name = lc_force_stateless ASSIGNING <ls_parameter>. "#EC CI_STDSEQ
+    IF sy-subrc = 0 AND <ls_parameter>-value IS NOT INITIAL.
+      CLEAR lv_timeout.
+      io_server->session_timeout = lv_timeout.
+*      io_csmgmt_handler->set_server_session_timeout( iv_server_session_timeout = lv_timeout ).
+      ev_is_softstate_enabled = abap_false. "gv_custom_session_mgmt =
+      RETURN.
+    ENDIF.
+
+
+
+* Get the time-out of the actual ICF node of the service
+    lv_timeout = me->get_icf_timeout_for_service( iv_service_namespace = iv_service_namespace
+                                                  iv_service_name      = iv_service_name ).
+
+    IF lv_timeout IS INITIAL.
+      " SoftState is not supported if the session time-out is initial
+      ev_is_softstate_enabled = abap_false. "gv_custom_session_mgmt
+      RETURN.
+    ENDIF.
+
+
+    " Set the found time-out for further request processing
+    io_server->session_timeout = lv_timeout.
+
+
+
+  ENDMETHOD.
+
+
+  METHOD process_http_head.
+
+    DATA: lv_namespace       TYPE /iwfnd/med_mdl_namespace,
+          lv_service_name    TYPE /iwfnd/med_mdl_service_grp_id,
+          lv_service_version TYPE /iwfnd/med_mdl_version,
+          lv_service_id      TYPE /iwfnd/med_mdl_srg_identifier,
+          lv_header_value    TYPE string,
+          lv_csrf_token      TYPE string.
+
+    CLEAR ev_exception_occurred.
+
+    " Determine Service Info from URI
+    determine_service_info(
+       EXPORTING
+         io_server             = io_server
+         io_sutil_runtime      = io_sutil_runtime
+       IMPORTING
+         ev_namespace          = lv_namespace
+         ev_service_name       = lv_service_name
+         ev_service_version    = lv_service_version
+         ev_service_id         = lv_service_id
+         ev_exception_occurred = ev_exception_occurred
+     ).
+    IF ev_exception_occurred = abap_true. RETURN. ENDIF.
+
+    " Check Gateway and Service Access
+    check_gw_and_service_access(
+      EXPORTING
+        iv_namespace          = lv_namespace
+        iv_service_name       = lv_service_name
+        iv_service_version    = lv_service_version
+        iv_service_id         = lv_service_id
+        io_sutil_runtime      = io_sutil_runtime
+      IMPORTING
+        ev_exception_occurred = ev_exception_occurred
+    ).
+    IF ev_exception_occurred = abap_true. RETURN. ENDIF.
+
+    " client-side termination of soft state session
+    lv_header_value = io_server->request->get_header_field( name = /iwfnd/if_sodata_types=>gcs_cor_request_parameters_lc-sap_terminate ).
+    TRANSLATE lv_header_value TO LOWER CASE.
+    IF lv_header_value EQ /iwfnd/if_sodata_types=>gcs_cor_request_parameters_va-session.
+      disable_stateful_session( io_server ).
+    ENDIF.
+
+    " Check for fetching CSRF Token
+    lv_csrf_token = io_server->request->get_header_field( /iwcor/if_rest_request=>gc_header_csrf_token ).
+    TRANSLATE lv_csrf_token TO LOWER CASE.
+    IF lv_csrf_token <> 'fetch'.
+      io_server->response->set_status( code = 200 reason = if_http_status=>reason_200 ).
+      RETURN.
+    ENDIF.
+
+    " Get CSRF Token
+    io_server->get_xsrf_token(
+      IMPORTING
+        token                    = lv_csrf_token
+      EXCEPTIONS
+        internal_error           = 1
+        called_by_public_service = 2
+        OTHERS                   = 3
+    ).
+    ASSERT sy-subrc = 0 OR sy-subrc = 2.
+
+    " Return CSRF Token to consumer if available
+    IF sy-subrc = 0.
+      io_server->response->set_header_field(
+        name  = 'X-CSRF-Token'                              "#EC NOTEXT
+        value = lv_csrf_token
+      ).
+    ENDIF.
+
+    io_server->response->set_status( code = 200 reason = if_http_status=>reason_200 ).
+
+  ENDMETHOD.
+
+
+  METHOD process_micro_hub_request.
+
+    DATA: lv_rfc_start          TYPE i,
+          lv_rfc_stop           TYPE i,
+          lv_rfc_time           TYPE i,
+          lv_subrc              TYPE sy-subrc,
+          lv_rfc_message        TYPE c LENGTH 220,
+          lv_leng               TYPE i,
+          lv_offset             TYPE i,
+          lv_status_code        TYPE i,
+          lv_exception_occurred TYPE abap_bool,
+          lv_status_reason      TYPE string,
+          lv_csrf_token         TYPE string,
+          lv_segment_data       TYPE string,
+          lv_host               TYPE string,
+          lv_port               TYPE string,
+          lv_protocol           TYPE string,
+          lv_content_type       TYPE string,
+          lv_response_binary    TYPE xstring,
+          ls_request_line       TYPE /iwfnd/s_mhub_request_line,
+          ls_response_line      TYPE /iwfnd/s_mhub_response_line,
+          ls_backend_version    TYPE /iwfnd/cl_mgw_util_versions=>ty_s_mgw_build_version,
+          lo_destin_finder      TYPE REF TO /iwfnd/cl_destin_finder,
+          lx_destin_finder      TYPE REF TO /iwfnd/cx_destin_finder.
+
+
+    " Do nothing here if Gateway is not active
+    TRY.
+        lo_destin_finder = /iwfnd/cl_destin_finder=>get_destination_finder( ).
+        lo_destin_finder->check_iwf_is_active( ).
+      CATCH /iwfnd/cx_destin_finder INTO lx_destin_finder.
+        lv_status_code   = 500.
+        lv_status_reason = lx_destin_finder->get_text( ).
+        io_server->response->set_status( code = lv_status_code reason = lv_status_reason ).
+        RETURN.
+    ENDTRY.
+
+    " Check Gateway and Service Access
+    check_gw_and_service_access(
+      EXPORTING
+        iv_namespace          = iv_namespace
+        iv_service_name       = iv_service_name
+        iv_service_version    = iv_service_version
+        iv_service_id         = iv_service_id
+        io_sutil_runtime      = io_sutil_runtime
+      IMPORTING
+        ev_exception_occurred = lv_exception_occurred
+    ).
+    IF lv_exception_occurred = abap_true.
+      io_server->response->set_status( code = lv_status_code reason = lv_status_reason ).
+      RETURN.
+    ENDIF.
+
+    " CSRF Token will not be handled in BEP system
+    IF iv_http_method = 'GET'.
+      lv_csrf_token = io_server->request->get_header_field( /iwcor/if_rest_request=>gc_header_csrf_token ).
+      TRANSLATE lv_csrf_token TO LOWER CASE.
+      IF lv_csrf_token = 'fetch'.
+        io_server->request->delete_header_field( /iwcor/if_rest_request=>gc_header_csrf_token ).
+      ENDIF.
+    ENDIF.
+
+    " Request Line
+    ls_request_line-method = io_server->request->get_header_field( if_http_header_fields_sap=>request_method ).
+    ls_request_line-uri    = io_server->request->get_header_field( if_http_header_fields_sap=>request_uri ).
+    IF iv_is_soft_state = abap_true.
+      ls_request_line-soft_state = 'X'.
+    ELSE.
+      ls_request_line-soft_state = ' '.
+    ENDIF.
+    ls_request_line-script_name     = io_server->request->get_header_field( if_http_header_fields_sap=>script_name ).
+    ls_request_line-script_name_exp = io_server->request->get_header_field( if_http_header_fields_sap=>script_name_expanded ).
+    io_server->get_location_exception(
+      EXPORTING
+        server              = io_server
+        use_ticket_protocol = abap_false
+      IMPORTING
+        out_protocol        = lv_protocol
+        host                = lv_host
+        port                = lv_port
+    ).
+    TRANSLATE lv_protocol TO LOWER CASE.
+    ls_request_line-script_name_abs = io_server->create_abs_url(
+                                protocol = lv_protocol
+                                host     = lv_host
+                                port     = lv_port
+                                        path     = ls_request_line-script_name
+                                      ).
+    ls_request_line-system_alias = iv_system_alias.
+
+    " Remove segment parameter ';o=xxx' from Request URI
+    IF iv_uri_system_alias IS NOT INITIAL.
+      CONCATENATE ';o='
+                  iv_uri_system_alias
+        INTO lv_segment_data.
+      FIND FIRST OCCURRENCE OF lv_segment_data IN ls_request_line-uri
+        MATCH OFFSET lv_offset
+        MATCH LENGTH lv_leng.
+      IF lv_offset <> 0.
+        lv_leng = lv_leng + lv_offset.
+        CONCATENATE ls_request_line-uri(lv_offset)
+                    ls_request_line-uri+lv_leng
+          INTO ls_request_line-uri.
+        io_server->request->set_header_field(
+          name  = if_http_header_fields_sap=>request_uri
+          value = ls_request_line-uri
+        ).
+      ENDIF.
+    ENDIF.
+
+    " Call BEP via Micro Hub
+    GET RUN TIME FIELD lv_rfc_start.
+    CALL FUNCTION '/IWFND/FM_MICRO_HUB_REQUEST' DESTINATION iv_destination
+      EXPORTING
+        is_request_line       = ls_request_line
+        iv_request_binary     = io_server->request->to_xstring( )
+      IMPORTING
+        es_response_line      = ls_response_line
+        ev_response_binary    = lv_response_binary
+      EXCEPTIONS
+        system_failure        = 1000 MESSAGE lv_rfc_message
+        communication_failure = 1001 MESSAGE lv_rfc_message.
+
+    " RFC Error
+    IF sy-subrc <> 0.
+      lv_subrc = sy-subrc.
+      handle_rfc_failure(
+        EXPORTING
+          iv_subrc         = lv_subrc
+          iv_rfc_message   = lv_rfc_message
+          iv_rfc_dest      = iv_destination
+          io_sutil_runtime = io_sutil_runtime
+      ).
+      lv_status_code   = 500.
+      lv_status_reason = lv_rfc_message.
+      io_server->response->set_status( code = lv_status_code reason = lv_status_reason ).
+      RETURN.
+    ENDIF.
+
+    " Save and Update Backend Version if available
+    IF ls_response_line-backend_version IS INITIAL.
+      ls_backend_version = '          016      '.
+    ELSE.
+      ls_backend_version = ls_response_line-backend_version.
+    ENDIF.
+    /iwfnd/cl_mgw_util_versions=>set_backend_version( is_backend_version = ls_backend_version ).
+    /iwfnd/cl_system_alias_dba=>cond_update_backend_info(
+      EXPORTING
+        iv_system_alias    = iv_system_alias
+        is_backend_version = ls_backend_version
+    ).
+
+    " Micro Hub Error
+    IF lv_response_binary IS INITIAL.
+      lv_status_code   = 500.
+      lv_status_reason = 'OData on Backend: Internal Processing Error'(e01).
+      io_server->response->set_status( code = lv_status_code reason = lv_status_reason ).
+      RETURN.
+    ENDIF.
+
+    " Request processed
+    GET RUN TIME FIELD lv_rfc_stop.
+    lv_rfc_time = ( lv_rfc_stop - lv_rfc_start ) / 1000.
+
+    " Update HTTP Response
+    io_server->response->from_xstring( lv_response_binary ).
+
+    " Correct content-type if necessary
+    lv_content_type = io_server->response->get_header_field( if_http_header_fields=>content_type ).
+    IF lv_content_type = 'text/html'.
+      io_server->response->delete_header_field(
+        name  = if_http_header_fields=>content_type
+      ).
+      io_server->response->suppress_content_type( ).
+    ENDIF.
+
+    " Get CSRF Token if required
+    IF lv_csrf_token = 'fetch'.
+      io_server->get_xsrf_token(
+        IMPORTING
+          token                    = lv_csrf_token
+        EXCEPTIONS
+          internal_error           = 1
+          called_by_public_service = 2
+          OTHERS                   = 3
+      ).
+      IF sy-subrc = 1 OR sy-subrc = 3.
+        lv_status_code   = 500.
+        lv_status_reason = 'OData on Backend: CSRF Processing Error'(e02).
+        io_sutil_runtime->log_write(
+          EXPORTING
+            iv_main_entry = abap_true
+            iv_error_info = lv_status_reason
+        ).
+        io_server->response->set_status( code = lv_status_code reason = lv_status_reason ).
+        RETURN.
+      ENDIF.
+
+      " Return CSRF Token to consumer if available
+      IF sy-subrc = 0.
+        io_server->response->set_header_field(
+          name  = 'X-CSRF-Token'                            "#EC NOTEXT
+          value = lv_csrf_token
+        ).
+      ENDIF.
+    ENDIF.
+
+    " Finalize for successful processing
+    IF ls_response_line-status_code < 400.
+      finalize_micro_hub_request(
+        iv_time_start    = iv_perf_handle
+        iv_rfc_time      = lv_rfc_time
+        is_response_line = ls_response_line
+        io_server        = io_server
+        io_sutil_runtime = io_sutil_runtime
+      ).
+    ELSE.
+      io_server->response->set_header_field(
+         name  = 'sap-processing-info'                      "#EC NOTEXT
+         value = 'ODataBEP=X'
+       ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD process_micro_hub_request_17.
+
+    CONSTANTS: co_xsrf_check      TYPE iac_parameter_2010-name VALUE '~CHECK_CSRF_TOKEN'.
+
+    DATA: lv_rfc_start_time       TYPE i,
+          lv_rfc_stop_time        TYPE i,
+          lv_perf_handle_hub      TYPE i,
+          lv_perf_handle_bep      TYPE i,
+          lv_perf_action_name     TYPE string,
+          lv_subrc                TYPE sy-subrc,
+          lv_rfc_message          TYPE c LENGTH 220,
+          lv_leng                 TYPE i,
+          lv_offset               TYPE i,
+          lv_rfc_request_size     TYPE i,
+          lv_rfc_response_size    TYPE i,
+          lv_http_request_size    TYPE i,
+          lv_http_response_size   TYPE i,
+          lv_segment_data         TYPE string,
+          lv_host                 TYPE string,
+          lv_port                 TYPE string,
+          lv_protocol             TYPE string,
+          lv_request_uri_org      TYPE string,
+          lv_script_name          TYPE string,
+          lv_soft_state_string    TYPE string,
+          lv_request_binary       TYPE xstring,
+          lv_response_binary      TYPE xstring,
+          lv_exception_occurred   TYPE abap_bool,
+          lv_csrf_token           TYPE string,
+          lv_csrf_token_valid     TYPE abap_bool,
+          ls_soft_state_info      TYPE ty_s_soft_state_info,
+          ls_hub_soft_state_info  TYPE ty_s_hub_soft_state_info,
+          ls_sapstat_info         TYPE /iwfnd/sutil_sapstat_info,
+          ls_request_header       TYPE ihttpnvp,
+          lt_request_header       TYPE tihttpnvp,
+          lt_response_header      TYPE tihttpnvp,
+          lt_met_dat              TYPE /iwfnd/t_met_dat,
+          lt_sutil_stats          TYPE /iwfnd/sutil_stats_t,
+          lt_perf_data            TYPE /iwfnd/sutil_perf_detail_t,
+          ls_mhub_response_header TYPE /iwfnd/if_mhub_types=>ty_s_mhub_response_header,
+          ls_backend_version      TYPE /iwfnd/cl_mgw_util_versions=>ty_s_mgw_build_version,
+          lv_extension            TYPE string,
+          lt_param                TYPE iac_parameter_tabtype_2010,
+          lr_http_server          TYPE REF TO cl_http_server.
+
+    FIELD-SYMBOLS:
+      <ls_response_header> TYPE ihttpnvp.
+
+
+    " Check Gateway and Service Access
+    check_gw_and_service_access(
+      EXPORTING
+        iv_namespace          = iv_namespace
+        iv_service_name       = iv_service_name
+        iv_service_version    = iv_service_version
+        iv_service_id         = iv_service_id
+        io_sutil_runtime      = io_sutil_runtime
+      IMPORTING
+        ev_exception_occurred = lv_exception_occurred
+    ).
+    IF lv_exception_occurred = abap_true.
+      " Call Root Handler to handle error (Exception already set!)
+      mo_rest_handler->if_http_extension~handle_request( io_server ).
+      if_http_extension~flow_rc     = mo_rest_handler->if_http_extension~flow_rc.
+      if_http_extension~lifetime_rc = mo_rest_handler->if_http_extension~lifetime_rc.
+      io_sutil_runtime->payload_server_response( ).
+      RETURN.
+    ENDIF.
+
+    " CSRF Token will not be handled in BEP system
+    IF iv_http_method = 'GET'.
+      lv_csrf_token = io_server->request->get_header_field( /iwcor/if_rest_request=>gc_header_csrf_token ).
+      TRANSLATE lv_csrf_token TO LOWER CASE.
+      IF lv_csrf_token = 'fetch'.
+        io_server->request->delete_header_field( /iwcor/if_rest_request=>gc_header_csrf_token ).
+      ENDIF.
+    ENDIF.
+
+    " Request Header
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-method.
+    ls_request_header-value = iv_http_method.
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-script_name.
+    lv_script_name = ls_request_header-value = io_server->request->get_header_field( if_http_header_fields_sap=>script_name ).
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-script_name_exp.
+    ls_request_header-value = io_server->request->get_header_field( if_http_header_fields_sap=>script_name_expanded ).
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-script_name_abs.
+    io_server->get_location_exception(
+      EXPORTING
+        server              = io_server
+        use_ticket_protocol = abap_false
+      IMPORTING
+        out_protocol        = lv_protocol
+        host                = lv_host
+        port                = lv_port
+    ).
+    TRANSLATE lv_protocol TO LOWER CASE.
+    ls_request_header-value = io_server->create_abs_url(
+                                protocol = lv_protocol
+                                host     = lv_host
+                                port     = lv_port
+                                path     = lv_script_name
+                              ).
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-service_id.
+    ls_request_header-value = iv_service_id.
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-service_namespace.
+    IF iv_namespace = '/SAP/'.
+      CLEAR ls_request_header-value.
+    ELSE.
+      ls_request_header-value = iv_namespace.
+    ENDIF.
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-service_name.
+    ls_request_header-value = iv_service_name.
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-service_version.
+    ls_request_header-value = iv_service_version.
+    APPEND ls_request_header TO lt_request_header.
+
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-system_alias.
+    ls_request_header-value = iv_system_alias.
+    APPEND ls_request_header TO lt_request_header.
+
+    " Remove segment parameter ';o=xxx' from Request URI
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-request_uri.
+    ls_request_header-value = lv_request_uri_org = io_server->request->get_header_field( if_http_header_fields_sap=>request_uri ).
+    IF iv_uri_system_alias IS NOT INITIAL.
+      CONCATENATE ';o='
+                  iv_uri_system_alias
+        INTO lv_segment_data.
+      FIND FIRST OCCURRENCE OF lv_segment_data IN ls_request_header-value
+        MATCH OFFSET lv_offset
+        MATCH LENGTH lv_leng.
+      IF lv_offset <> 0.
+        lv_leng = lv_leng + lv_offset.
+        CONCATENATE ls_request_header-value(lv_offset)
+                    ls_request_header-value+lv_leng
+          INTO ls_request_header-value.
+        io_server->request->set_header_field(
+          name  = if_http_header_fields_sap=>request_uri
+          value = ls_request_header-value
+        ).
+      ENDIF.
+    ENDIF.
+    APPEND ls_request_header TO lt_request_header.
+
+    " Check Soft State
+    get_soft_state_info(
+      EXPORTING
+        io_server              = io_server
+        iv_namespace           = iv_namespace
+        iv_service_name        = iv_service_name
+        iv_uri_namespace       = iv_uri_namespace
+        iv_uri_service_name    = iv_uri_service_name
+        iv_resource_part       = iv_resource_part
+        iv_use_micro_hub       = iv_use_micro_hub
+        io_transaction_handler = io_transaction_handler
+      IMPORTING
+        es_soft_state_info     = ls_soft_state_info
+    ).
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-softstate_enabled.
+    ls_request_header-value = ls_soft_state_info-soft_state_possible.
+    APPEND ls_request_header TO lt_request_header.
+
+    IF ls_soft_state_info-soft_state_possible = abap_true.
+      ls_hub_soft_state_info-enabled = ls_soft_state_info-soft_state_possible.
+      io_transaction_handler->get_soft_state_session_info(
+        IMPORTING
+          ev_mode              = ls_hub_soft_state_info-mode
+          ev_soft_state_before = ls_hub_soft_state_info-before
+      ).
+      lv_soft_state_string = ls_hub_soft_state_info.
+      io_server->request->set_header_field(
+        name  = co_header_soft_state
+        value = lv_soft_state_string
+      ).
+      ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-softstate_mode.
+      ls_request_header-value = ls_hub_soft_state_info-mode.
+      APPEND ls_request_header TO lt_request_header.
+
+      ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-softstate_before.
+      ls_request_header-value = ls_hub_soft_state_info-before.
+      APPEND ls_request_header TO lt_request_header.
+
+      ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-softstate_reset_dp.
+      ls_request_header-value = mv_soft_state_reset_dp.
+      APPEND ls_request_header TO lt_request_header.
+    ENDIF.
+
+    " Hub Performance Trace if active
+    IF io_sutil_runtime->mv_perf_level IS NOT INITIAL.
+      ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-hub_perf_trace.
+      ls_request_header-value = abap_true.
+      APPEND ls_request_header TO lt_request_header.
+    ENDIF.
+
+    " Check CSRF Token
+    ls_request_header-name  = /iwfnd/if_mhub_types=>gcs_mhub_request_header-check_csrf_token.
+    ls_request_header-value = abap_true.
+    lr_http_server ?= io_server.
+    CALL METHOD lr_http_server->get_service_extension
+      EXPORTING
+        kind          = ihttp_icfservice_extension_its
+      IMPORTING
+        configuration = lv_extension
+      EXCEPTIONS
+        OTHERS        = 0.
+    IF lv_extension IS NOT INITIAL.
+      CALL METHOD cl_icf_its_service=>params_string_to_table
+        EXPORTING
+          paramstr      = lv_extension
+        IMPORTING
+          paramtab_2010 = lt_param.
+      READ TABLE lt_param
+        WITH KEY name  = co_xsrf_check
+                 value = '0'
+        TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+        ls_request_header-value = abap_false.
+      ENDIF.
+    ENDIF.
+    IF ls_request_header-value = abap_true.
+      IF iv_http_method = 'POST'  OR
+         iv_http_method = 'PUT'   OR
+         iv_http_method = 'PATCH' OR
+         iv_http_method = 'MERGE' OR
+         iv_http_method = 'DELETE'.
+        lv_csrf_token = io_server->request->get_header_field( /iwcor/if_rest_request=>gc_header_csrf_token ).
+        IF lv_csrf_token IS INITIAL.
+          IF NOT ( iv_http_method = 'POST' AND lv_request_uri_org CS '$batch' ).
+            io_server->response->set_header_field(
+              name  = /iwcor/if_rest_request=>gc_header_csrf_token
+              value = 'Required' ).                         "#EC NOTEXT
+            io_server->response->set_status( code = '403' reason = 'Forbidden' ).
+            io_sutil_runtime->payload_server_response( ).
+            RETURN.
+          ENDIF.
+        ELSE.
+          io_server->validate_xsrf_token(
+            EXPORTING
+              token                    = lv_csrf_token
+            IMPORTING
+              successful               = lv_csrf_token_valid
+            EXCEPTIONS
+              token_not_found          = 1
+              cookie_not_found         = 2
+              internal_error           = 3
+              called_by_public_service = 4
+              OTHERS                   = 5
+          ).
+          ASSERT sy-subrc = 0 OR sy-subrc = 1 OR sy-subrc = 2 OR sy-subrc = 4.
+          IF sy-subrc = 0 AND lv_csrf_token_valid = abap_true.
+            lv_csrf_token_valid = abap_true.
+          ELSE.
+            lv_csrf_token_valid = abap_false.
+          ENDIF.
+          IF lv_csrf_token_valid = abap_true.
+            ls_request_header-value = abap_false.
+          ELSE.
+            io_server->response->set_header_field(
+              name  = /iwcor/if_rest_request=>gc_header_csrf_token
+              value = 'Required' ).                         "#EC NOTEXT
+            io_server->response->set_status( code = '403' reason = 'Forbidden' ).
+            io_sutil_runtime->payload_server_response( ).
+            RETURN.
+          ENDIF.
+        ENDIF.
+      ELSE.
+        ls_request_header-value = abap_false.
+      ENDIF.
+    ENDIF.
+    APPEND ls_request_header TO lt_request_header.
+
+    " Call BEP via Micro Hub
+    CONCATENATE 'Call BEP System' iv_destination
+      INTO lv_perf_action_name SEPARATED BY ' - '.          "#EC NOTEXT
+    lv_perf_handle_hub  = io_sutil_runtime->performance_start(
+                            iv_action_name = lv_perf_action_name
+                            iv_agent       = 'MGW_REMOTE_PROXY'
+                          ).
+    lv_request_binary   = io_server->request->to_xstring( ).
+    lv_rfc_request_size = xstrlen( lv_request_binary ).
+
+    lv_perf_handle_bep = io_sutil_runtime->performance_start( iv_agent = 'MGW_REMOTE_PROXY' ).
+    IF lv_perf_handle_bep IS INITIAL.
+      GET RUN TIME FIELD lv_rfc_start_time.
+    ELSE.
+      lv_rfc_start_time = lv_perf_handle_bep.
+    ENDIF.
+
+    CALL FUNCTION '/IWFND/FM_MICRO_HUB_REQUEST_17' DESTINATION iv_destination
+      EXPORTING
+        it_request_header     = lt_request_header
+        iv_request_binary     = lv_request_binary
+      IMPORTING
+        et_response_header    = lt_response_header
+        ev_response_binary    = lv_response_binary
+        et_met_dat            = lt_met_dat
+        et_sutil_stats        = lt_sutil_stats
+        et_perf_trace         = lt_perf_data
+      EXCEPTIONS
+        system_failure        = 1000 MESSAGE lv_rfc_message
+        communication_failure = 1001 MESSAGE lv_rfc_message.
+
+    lv_subrc = sy-subrc.
+
+    lv_rfc_stop_time = io_sutil_runtime->performance_stop( lv_perf_handle_bep ).
+    IF lv_rfc_stop_time IS INITIAL.
+      GET RUN TIME FIELD lv_rfc_stop_time.
+    ENDIF.
+
+    " RFC Error
+    IF lv_subrc <> 0 OR lv_response_binary IS INITIAL.
+      IF lv_subrc = 0.
+        lv_subrc = 1000.
+        lv_rfc_message = 'OData on Backend: Internal Processing Error'(e01).
+      ENDIF.
+      handle_rfc_failure(
+        EXPORTING
+          iv_subrc         = lv_subrc
+          iv_rfc_message   = lv_rfc_message
+          iv_rfc_dest      = iv_destination
+          io_sutil_runtime = io_sutil_runtime
+      ).
+
+      " Call Root Handler to handle error (Exception already set in SUTIL_RUNTIME!)
+      mo_rest_handler->if_http_extension~handle_request( io_server ).
+      if_http_extension~flow_rc     = mo_rest_handler->if_http_extension~flow_rc.
+      if_http_extension~lifetime_rc = mo_rest_handler->if_http_extension~lifetime_rc.
+      io_sutil_runtime->payload_server_response( ).
+      RETURN.
+    ENDIF.
+
+    lv_rfc_response_size = xstrlen( lv_response_binary ).
+
+    " Add Performance Trace from "OData on Backend"
+    IF lt_perf_data IS NOT INITIAL.
+      io_sutil_runtime->performance_add_data_mhub(
+        iv_destination       = iv_destination
+        iv_perf_handle_bep   = lv_perf_handle_bep
+        iv_rfc_request_size  = lv_rfc_request_size
+        iv_rfc_response_size = lv_rfc_response_size
+        iv_rfc_start_time    = lv_rfc_start_time
+        iv_rfc_stop_time     = lv_rfc_stop_time
+        it_perf_data         = lt_perf_data
+      ).
+    ENDIF.
+
+    " Get Microhub Response Header
+    LOOP AT lt_response_header ASSIGNING <ls_response_header>.
+      CASE <ls_response_header>-name.
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-status_code.
+          ls_mhub_response_header-status_code = <ls_response_header>-value.
+
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-sapstat_info.
+          ls_mhub_response_header-sapstat_info = <ls_response_header>-value.
+          MOVE-CORRESPONDING ls_mhub_response_header-sapstat_info TO ls_sapstat_info.
+
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-processing_info.
+          ls_mhub_response_header-processing_info = <ls_response_header>-value.
+
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-backend_version.
+          ls_mhub_response_header-backend_version = <ls_response_header>-value.
+
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-session_start.
+          ls_mhub_response_header-session_start = <ls_response_header>-value.
+
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-session_end.
+          ls_mhub_response_header-session_end = <ls_response_header>-value.
+
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-error_message.
+          ls_mhub_response_header-error_message = <ls_response_header>-value.
+
+        WHEN /iwfnd/if_mhub_types=>gcs_mhub_response_header-error_timestamp.
+          ls_mhub_response_header-error_timestamp = <ls_response_header>-value.
+      ENDCASE.
+    ENDLOOP.
+
+    " Save and Update Backend Version if necessary
+    ls_backend_version = ls_mhub_response_header-backend_version.
+    /iwfnd/cl_mgw_util_versions=>set_backend_version( is_backend_version = ls_backend_version ).
+    /iwfnd/cl_system_alias_dba=>cond_update_backend_info(
+      EXPORTING
+        iv_system_alias    = iv_system_alias
+        is_backend_version = ls_backend_version
+    ).
+
+    " Update HTTP Response
+    io_server->response->from_xstring( lv_response_binary ).
+
+    " Suppress default Content Type if not exists
+    io_server->response->suppress_content_type( ).
+
+    " Write an Error Log entry in case of error
+    IF ls_mhub_response_header-error_message IS NOT INITIAL.
+      io_sutil_runtime->log_write(
+        iv_error_info      = ls_mhub_response_header-error_message
+        iv_msgid           = '/IWFND/CM_MGW'
+        iv_msgno           = 121
+        iv_system_alias    = iv_system_alias
+        iv_destination     = iv_destination
+        iv_error_location  = /iwfnd/if_sutil_constants=>gcs_location-backend
+        iv_error_timestamp = ls_mhub_response_header-error_timestamp
+      ).
+    ENDIF.
+
+    " Get CSRF Token if required
+    IF lv_csrf_token = 'fetch'.
+      io_server->get_xsrf_token(
+        IMPORTING
+          token                    = lv_csrf_token
+        EXCEPTIONS
+          internal_error           = 1
+          called_by_public_service = 2
+          OTHERS                   = 3
+      ).
+      ASSERT sy-subrc = 0 OR sy-subrc = 2.
+
+      " Return CSRF Token to consumer if available
+      IF sy-subrc = 0.
+        io_server->response->set_header_field(
+          name  = 'X-CSRF-Token'                            "#EC NOTEXT
+          value = lv_csrf_token
+        ).
+      ENDIF.
+    ENDIF.
+
+    io_sutil_runtime->performance_stop( lv_perf_handle_hub ).
+
+    " Finalize for successful processing
+    IF ls_mhub_response_header-status_code < 400.
+
+      " Enable Soft State if required
+      enable_soft_state(
+        EXPORTING
+          io_server          = io_server
+          is_soft_state_info = ls_soft_state_info
+          iv_session_start   = ls_mhub_response_header-session_start
+          iv_session_end     = ls_mhub_response_header-session_end
+          iv_use_micro_hub   = iv_use_micro_hub
+      ).
+
+      " Finalize a Microhub Request
+      io_server->request->if_http_entity~get_data_length(
+        IMPORTING
+          data_length = lv_http_request_size
+      ).
+      lv_http_response_size = xstrlen( lv_response_binary ).
+      finalize_micro_hub_request_17(
+        EXPORTING
+          iv_time_start         = iv_perf_handle
+          iv_request_uri_org    = lv_request_uri_org
+          iv_processing_info    = ls_mhub_response_header-processing_info
+          is_sapstat_info       = ls_sapstat_info
+          iv_perf_handle_bep    = lv_perf_handle_bep
+          iv_rfc_start_time     = lv_rfc_start_time
+          iv_rfc_stop_time      = lv_rfc_stop_time
+          iv_rfc_request_size   = lv_rfc_request_size
+          iv_rfc_response_size  = lv_rfc_response_size
+          iv_http_request_size  = lv_http_request_size
+          iv_http_response_size = lv_http_response_size
+          io_server             = io_server
+          io_sutil_runtime      = io_sutil_runtime
+        CHANGING
+          ct_met_dat            = lt_met_dat
+          ct_sutil_stats        = lt_sutil_stats
+      ).
+    ELSE.
+      io_server->response->set_header_field(
+         name  = 'sap-processing-info'                      "#EC NOTEXT
+         value = 'ODataBEP=X'
+       ).
+      io_sutil_runtime->payload_server_response( ).
+    ENDIF.
+
+    " Finalize Transaction Handler
+    io_transaction_handler->finalize( ).
+
+  ENDMETHOD.
+ENDCLASS.

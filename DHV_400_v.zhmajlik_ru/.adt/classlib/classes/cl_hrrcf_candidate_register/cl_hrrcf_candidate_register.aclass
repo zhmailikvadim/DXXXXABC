@@ -1,0 +1,889 @@
+class CL_HRRCF_CANDIDATE_REGISTER definition
+  public
+  final
+  create public .
+
+public section.
+
+*"* public components of class CL_HRRCF_CANDIDATE_REGISTER
+*"* do not include other source files here!!!
+  interfaces IF_HRRCF_CONSTANTS .
+
+  data CANDIDATE type ref to CL_HRRCF_CANDIDATE read-only .
+  data ALIAS type BAPIALIAS .
+  data PASSWORD type BAPIPWD .
+
+  events SEND_EMAIL
+    exporting
+      value(ALIAS) type BAPIALIAS
+      value(PASSWORD) type BAPIPWD .
+
+  methods ASSIGN_NEW_USER
+    importing
+      !P_CANDIDATE type ref to CL_HRRCF_CANDIDATE optional
+      !P_ALIAS type BAPIALIAS optional
+      !P_EMAIL type BAPIADDR3-E_MAIL optional
+      !P_PASSWORD type BAPIPWD optional
+      !P_CHECK_ONLY type BOOLE_D default 'X'
+    exporting
+      !PT_RETURN type BAPIRETTAB
+    raising
+      CX_HRRCF_REGISTRATION .
+  methods CONSTRUCTOR .
+  methods REGISTER_EXTERNAL
+    importing
+      !CENTRALDATAPERSON type BAPIBUS1006_CENTRAL_PERSON optional
+      !CENTRALDATA type BAPIBUS1006_CENTRAL optional
+      !P_EMAIL type BAPIADDR3-E_MAIL optional
+      !P_ALIAS type BAPIALIAS optional
+      !P_PASSWORD type BAPIPWD optional
+      !P_PASSWORD2 type BAPIPWD optional
+      !P_PRIVACY_STATUS type BOOLE_D optional
+      !P_SELF_REG type BOOLE_D default IF_HRRCF_CONSTANTS~FALSE
+      !P_VERIFICATION_STATUS type RCF_VERIFICATION_STATUS default '0'
+      !IV_EA_FLAG type BOOLE_D optional
+    exporting
+      !PT_RETURN type BAPIRETTAB
+    raising
+      CX_HRRCF_REGISTRATION .
+protected section.
+*"* protected components of class CL_HRRCF_CANDIDATE_REGISTER
+*"* do not include other source files here!!!
+private section.
+*"* private components of class CL_HRRCF_CANDIDATE_REGISTER
+*"* do not include other source files here!!!
+
+  aliases FALSE
+    for IF_HRRCF_CONSTANTS~FALSE .
+  aliases MSGCL_ADMIN
+    for IF_HRRCF_CONSTANTS~MSGCL_ADMIN .
+  aliases TRUE
+    for IF_HRRCF_CONSTANTS~TRUE .
+
+  data LASTNAME type BAPIADDR3-LASTNAME .
+  data EMAIL type BAPIADDR3-E_MAIL .
+  data USER type BAPIBNAME-BAPIBNAME .
+
+  methods ASSIGN_EMAIL_TO_CANDIDATE
+    raising
+      CX_HRRCF .
+  methods CHECK_CONSISTENCIES
+    importing
+      !P_PASSWORD2 type BAPIPWD optional
+    exporting
+      !PT_RETURN type BAPIRETTAB
+    raising
+      CX_HRRCF_REGISTRATION .
+  methods CREATE_USER
+    importing
+      !P_SELF_REG type BOOLE_D default IF_HRRCF_CONSTANTS~FALSE
+    exporting
+      !PT_RETURN type BAPIRETTAB
+    raising
+      CX_HRRCF_REGISTRATION .
+  methods DELETE_USER .
+  methods GENERATE_ALIAS
+    raising
+      CX_HRRCF_REGISTRATION .
+  methods GENERATE_PASSWORD
+    raising
+      CX_HRRCF_REGISTRATION .
+  methods GENERATE_USERNAME
+    exporting
+      !PT_RETURN type BAPIRETTAB
+    raising
+      CX_HRRCF_REGISTRATION .
+ENDCLASS.
+
+
+
+CLASS CL_HRRCF_CANDIDATE_REGISTER IMPLEMENTATION.
+
+
+METHOD assign_email_to_candidate .
+* Author Biswas, Bilash 20020710
+* This method assigns the email to a candidate.
+
+  DATA ls_emaildata TYPE rcf_s_emaildata_bp.
+  DATA lt_emaildata TYPE rcf_t_emaildata_bp.
+  DATA bas          TYPE REF TO cl_hrrcf_address_service.
+  DATA lt_return    TYPE bapirettab.
+
+*TRY.
+  CALL METHOD cl_hrrcf_address_service=>get_instance
+    EXPORTING
+      businesspartner = me->candidate->partner
+    IMPORTING
+      instance        = bas
+      return          = lt_return.
+* CATCH CX_HRRCF_MAINTAIN_OBJECT .
+* CATCH CX_HRRCF .
+*ENDTRY.
+
+* Prepare email data to be added
+  ls_emaildata-e_mail = me->email.
+
+*TRY.
+  CALL METHOD bas->add_contact_data
+    IMPORTING
+      return    = lt_return
+    CHANGING
+      emaildata = ls_emaildata.
+* CATCH CX_HRRCF_MAINTAIN_OBJECT .
+* CATCH CX_HRRCF .
+*ENDTRY.
+
+
+ENDMETHOD.
+
+
+METHOD assign_new_user.
+
+* Author: PEV
+* This method generates a new user, alias and password if missing and
+*  assigns them to the candidate object.
+
+
+  DATA: lt_return    TYPE bapirettab.
+
+  DATA: lo_exception TYPE REF TO cx_hrrcf.
+
+  IF p_candidate IS SUPPLIED.
+    me->candidate = p_candidate.
+  ENDIF.
+  me->password  = p_password.
+
+  me->email     = p_email.
+
+  IF p_alias IS NOT INITIAL.
+    me->alias     = p_alias.
+  ELSE.
+    me->alias     = me->candidate->get_cand_alias( ).
+  ENDIF.
+
+  CHECK me->candidate IS BOUND.
+
+  me->lastname  = me->candidate->centraldataperson-lastname.
+
+* Alias
+  IF me->alias IS INITIAL.
+    CALL METHOD me->generate_alias.
+  ENDIF.
+
+* Create user bname from alias.
+  IF me->user IS INITIAL.
+    CALL METHOD me->generate_username
+      IMPORTING
+        pt_return = lt_return.
+
+    DELETE lt_return WHERE type NE 'E' AND type NE 'A'.
+    IF NOT lt_return IS INITIAL.
+      APPEND LINES OF lt_return TO pt_return.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+* Password
+  IF p_password IS INITIAL.
+    CALL METHOD me->generate_password .
+  ENDIF.
+
+  IF p_check_only NE true.
+* Create User, assign it to the candidate
+    TRY.
+        CALL METHOD me->create_user
+          IMPORTING
+            pt_return = lt_return.
+
+*       Only errors of type E can occur.
+        IF NOT lt_return IS INITIAL.
+          APPEND LINES OF lt_return TO pt_return.
+          RETURN.
+        ENDIF.
+
+*       Assign user to the candidate
+        CALL METHOD me->candidate->assign_user
+          EXPORTING
+            userid = me->user.
+
+        IF p_email IS NOT INITIAL.
+          CALL METHOD me->candidate->change_email
+            EXPORTING
+              e_mail = p_email.
+        ENDIF.
+
+      CATCH cx_hrrcf INTO lo_exception.
+        IF 1 = 0.
+          MESSAGE e155(hrrcf0001).
+*       Fehler beim Anlegen eines Kandidaten
+        ENDIF.
+    ENDTRY.
+
+    CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+      EXPORTING
+        wait = 'X'.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD check_consistencies .
+* Author Biswas, Bilash 20020712
+* This method does a formal check if the email entered is unique.
+* changes by FR
+
+  DATA ls_return              TYPE bapiret2.
+  DATA lo_exception           TYPE REF TO cx_hrrcf.
+
+* Email
+* Proceed only if email entered is not initial
+  IF NOT me->email IS INITIAL.
+    TRY.
+      IF cl_hrrcf_address_service=>is_email_unique( me->email ) = false.
+*   the email exists
+          IF 1 EQ 0.
+            MESSAGE e014(hrrcf0002).
+          ENDIF.
+
+          CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+            EXPORTING
+              type   = 'E'
+              cl     = 'HRRCF0002'
+              number = 014
+            IMPORTING
+              return = ls_return.
+
+          APPEND ls_return TO pt_return.
+          EXIT.
+        ENDIF.
+      CATCH cx_hrrcf_address_service INTO lo_exception.
+        RAISE EXCEPTION TYPE cx_hrrcf_registration
+          EXPORTING
+            previous = lo_exception.
+    ENDTRY.
+  ENDIF.
+
+* Alias
+
+ENDMETHOD.
+
+
+METHOD constructor .
+
+*  me->lastname = lastname.
+*  me->email = email.
+*  me->alias = alias.
+*  me->user = user.
+*  me->password = password.
+
+ENDMETHOD.
+
+
+METHOD create_user .
+
+* Authors: Biswas, Bilash 20020708
+* Additions: FR, PEV
+* This method only creates a (su01)user
+* If we have a self-registration, we should create the user directly
+* with the selected password
+
+  DATA: ls_logondata TYPE bapilogond,
+        ls_uclass    TYPE bapiuclass,                                                "INS Note 0001324887
+        ls_address   TYPE bapiaddr3,
+        ls_ref_user  TYPE bapirefus,
+        ls_defaults  TYPE bapidefaul,
+        ls_role      TYPE t77rcf_role,
+        ls_return    TYPE bapiret2,
+        lt_return    TYPE bapirettab,
+        par1         TYPE sy-msgv1.
+  DATA: lo_exception TYPE REF TO cx_hrrcf.
+
+  CONSTANTS c_cand_ext_role   TYPE rcf_role VALUE '0005'.
+* due the user switch all user created via this methode are
+* users of type dialog
+  CONSTANTS c_usertype_dialog               VALUE 'A'.
+
+** LogonData                                                                        "DEL Note 0001324887
+*  ls_logondata-ustyp   = c_usertype_dialog.                                        "DEL Note 0001324887
+*  ls_logondata-class   = space.                                                    "DEL Note 0001324887
+*  ls_logondata-gltgv   = sy-datum.                                                 "DEL Note 0001324887
+*  ls_logondata-gltgb   = '99991231'.                                               "DEL Note 0001324887
+
+  ls_address-lastname  = me->lastname.
+
+* Role / Reference User
+  TRY.
+      CALL METHOD cl_hrrcf_t77rcf_role=>get_role
+        EXPORTING
+          role        = c_cand_ext_role
+        IMPORTING
+          t77rcf_role = ls_role.                    "Contains refuser
+    CATCH cx_hrrcf_customizing INTO lo_exception.
+      RAISE EXCEPTION TYPE cx_hrrcf_registration
+      EXPORTING previous = lo_exception.
+  ENDTRY.
+
+  ls_ref_user-ref_user = ls_role-refus.
+* Get defaults
+  CALL FUNCTION 'BAPI_USER_GET_DETAIL'
+    EXPORTING
+      username = ls_ref_user-ref_user
+    IMPORTING
+      defaults = ls_defaults
+      logondata = ls_logondata                                                      "INS Note 0001324887
+      uclass    = ls_uclass                                                         "INS Note 0001324887
+    TABLES
+      return   = lt_return.
+  clear lt_return.
+
+* LogonData                                                                         "INS Note 0001324887
+  ls_logondata-ustyp   = c_usertype_dialog.                                         "INS Note 0001324887
+  ls_logondata-gltgv   = sy-datum.                                                  "INS Note 0001324887
+  ls_logondata-gltgb   = '99991231'.                                                "INS Note 0001324887
+
+* Create the user with the generated username
+  CALL FUNCTION 'BAPI_USER_CREATE1'
+    EXPORTING
+      username                = me->user
+      logondata               = ls_logondata
+      password                = me->password
+      defaults                = ls_defaults       "Note 888982
+      address                 = ls_address
+      ref_user                = ls_ref_user
+      alias                   = me->alias
+      uclass                  = ls_uclass                                           "INS Note 0001324887
+      force_system_assignment = 'X'
+      self_register           = p_self_reg
+    TABLES
+      return                  = lt_return.
+
+  DELETE lt_return WHERE type NE 'A' AND type NE 'E'.
+  IF NOT lt_return IS INITIAL.
+    READ TABLE lt_return WITH KEY type = 'A' INTO ls_return .
+    IF sy-subrc = 0 .
+      RAISE EXCEPTION TYPE cx_hrrcf_registration
+        EXPORTING
+          textid = cx_hrrcf_registration=>user_create
+          message_type = ls_return-type
+          message_class = ls_return-id
+          message_number = ls_return-number
+          message_par1 = ls_return-message_v1
+          message_par2 = ls_return-message_v2
+          message_par3 = ls_return-message_v3
+          message_par4 = ls_return-message_v4.
+    ENDIF .
+    READ TABLE lt_return WITH KEY type = 'E' INTO ls_return .
+    IF ls_return-number = '491'.
+* missing authorisation user can not do anything so raise exception
+      IF 0 = 1.
+        MESSAGE e491(01) WITH 'NA'.
+*   Keine Berecht. zum Anlegen Benutzer der Gruppe &
+      ENDIF.
+
+      RAISE EXCEPTION TYPE cx_hrrcf_registration
+        EXPORTING
+          textid =
+              cx_hrrcf_registration=>user_create
+          message_type = ls_return-type
+          message_class = ls_return-id
+          message_number = ls_return-number
+          message_par1 = ls_return-message_v1
+          message_par2 = ls_return-message_v2
+          message_par3 = ls_return-message_v3
+          message_par4 = ls_return-message_v4.
+    ELSE.
+      APPEND LINES OF lt_return TO pt_return.
+      EXIT.
+    ENDIF.
+  ENDIF.
+
+
+** Assign user to the candidate
+*  TRY.
+*      CALL METHOD me->candidate->assign_user
+*        EXPORTING
+*          userid = me->user.
+*    CATCH cx_hrrcf_infotype_operation INTO lo_exception.
+*      RAISE EXCEPTION TYPE cx_hrrcf_registration
+*        EXPORTING
+*          previous = lo_exception.
+*  ENDTRY.
+
+ENDMETHOD.
+
+
+METHOD delete_user.
+
+* Author: CG
+* Delete user after failure during registration of external candidates
+
+  DATA lt_return TYPE bapirettab.
+  DATA ls_return TYPE bapiret2.                             "#EC NEEDED
+  DATA lo_ex     TYPE REF TO cx_hrrcf.
+
+  CALL FUNCTION 'BAPI_USER_DELETE'
+    EXPORTING
+      username = me->user
+    TABLES
+      return   = lt_return.
+
+  DELETE lt_return WHERE type NE 'E' AND type NE 'A'.
+
+  IF NOT lt_return IS INITIAL.
+
+    READ TABLE lt_return INTO ls_return WITH KEY type = 'A'. "#EC NEEDED
+    IF NOT sy-subrc IS INITIAL.
+      READ TABLE lt_return INTO ls_return WITH KEY type = 'E'. "#EC NEEDED
+    ENDIF.
+
+    TRY.
+        IF 1 = 2.
+          MESSAGE e155(hrrcf0001).
+*          Fehler beim Anlegen eines Kandidaten.
+*          Error while creating candidate
+        ENDIF.
+
+        RAISE EXCEPTION TYPE cx_hrrcf
+          EXPORTING
+            message_type   = 'E'
+            message_class  = 'hrrcf0001'
+            message_number = '155'.
+
+      CATCH cx_hrrcf INTO lo_ex.
+        cl_hrrcf_exception_handler=>write_exception_log( lo_ex ).
+    ENDTRY.
+
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD generate_alias .
+* Author Biswas, Bilash 20020708
+* This method generates an alias name from the candidate id. We create
+* the alias as APXXXXXXXX where XXXXXXXX is any next available number.
+* Then a HASH is created for the ALIAS and a seecond HASH for the user is created
+* XLV: The method also generates a user name; just import it...
+
+*  DATA l_alias       TYPE bapialias VALUE 'AP00000000'.            "DEL NOTE 0001277391
+  DATA l_number      TYPE plog-objid.
+  DATA l_uname       TYPE bapibname-bapibname.
+
+  DATA l_alias            TYPE bapialias .                          "INS NOTE 0001277391
+  DATA lv_hashed_key_temp TYPE hash160.                             "INS NOTE 0001277391
+  DATA lv_key_char40_temp TYPE bapialias  VALUE 'AP00000000'.       "INS NOTE 0001277391
+  DATA lv_key_str_temp    TYPE string.                              "INS NOTE 0001277391
+  DATA lv_hashx(16)       TYPE x.                                   "INS NOTE 0001277391
+  DATA lv_hash10(5)       TYPE x .                                  "INS NOTE 0001277391
+*
+  DATA l_plvar TYPE plvar.
+  CALL FUNCTION 'RH_GET_ACTIVE_WF_PLVAR'
+    EXPORTING
+      set_default_plvar = 'X'
+    IMPORTING
+      act_plvar         = l_plvar
+    EXCEPTIONS
+      no_active_plvar   = 0
+      OTHERS            = 0.
+*
+  DO.
+    CALL FUNCTION 'RH_GET_NEXT_NUMBER'
+      EXPORTING
+        ext_number                 = '00000000'
+        otype                      = 'NA'
+        plvar                      = l_plvar
+      IMPORTING
+        number                     = l_number
+      EXCEPTIONS
+        invalid_action             = 1
+        number_must_be_zero        = 2
+        invalid_object             = 3
+        no_external_interval_found = 4
+        no_internal_interval_found = 5
+        invalid_number             = 6
+        no_more_numbers_available  = 7
+        OTHERS                     = 8.
+*
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE cx_hrrcf_registration
+        EXPORTING
+          textid         = cx_hrrcf_maintain_object=>hr_number_range
+          message_type   = sy-msgty
+          message_class  = sy-msgid
+          message_number = sy-msgno
+          message_par1   = sy-msgv1
+          message_par2   = sy-msgv2
+          message_par3   = sy-msgv3
+          message_par4   = sy-msgv4.
+    ENDIF.
+*
+*    WRITE l_number TO l_alias+2(8).                                "DEL NOTE 0001277391
+    WRITE l_number TO lv_key_char40_temp+2(8).                      "INS NOTE 0001277391
+    lv_key_str_temp = lv_key_char40_temp.                           "INS NOTE 0001277391
+
+    CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'                         "INS NOTE 0001277391
+      EXPORTING
+        data           = lv_key_str_temp
+      IMPORTING
+        hash           = lv_hashed_key_temp
+      EXCEPTIONS
+        unknown_alg    = 1
+        param_error    = 2
+        internal_error = 3
+        OTHERS         = 4.
+    IF sy-subrc <> 0.                                               "INS NOTE 0001277391
+      RAISE EXCEPTION TYPE cx_hrrcf_registration                    "INS NOTE 0001277391
+        EXPORTING
+          textid         = cx_hrrcf_registration=>username_generation
+          message_type   = 'E'
+          message_class  = 'HRRCF0001'
+          message_number = '121'
+          message_par1   = 'CL_HRRCF_CANDIDATE_REGISTER'
+          message_par2   = 'GENERATE_ALIAS'.
+    ENDIF.                                                          "INS NOTE 0001277391
+
+* Convert HASH 40 into HASH10                                       "INS NOTE 0001277391
+    lv_hashx  = lv_hashed_key_temp.                                 "INS NOTE 0001277391
+    lv_hash10 = lv_hashx(5) BIT-XOR lv_hashx+5(5)                   "INS NOTE 0001277391
+                            BIT-XOR lv_hashx+10(5)
+                            BIT-XOR lv_hashx+15(1).
+
+    l_alias = lv_hash10.                                            "INS NOTE 0001277391
+*
+    CALL FUNCTION 'SUSR_USER_BNAME_GENERATE'
+      EXPORTING
+        alias              = l_alias
+      IMPORTING
+        bname              = l_uname
+      EXCEPTIONS
+        alias_already_used = 1
+        no_data            = 2
+        internal_error     = 3
+        OTHERS             = 4.
+*
+    IF sy-subrc <> 0 .
+      CASE sy-subrc.
+        WHEN 1.                                "Alias already used
+          CLEAR l_number.
+          CONTINUE.                            "next loop
+        WHEN 2 OR 3 OR 4 .
+          RAISE EXCEPTION TYPE cx_hrrcf_registration
+            EXPORTING
+              textid         = cx_hrrcf_registration=>username_generation
+              message_type   = 'E'
+              message_class  = 'HRRCF0001'
+              message_number = '121'
+              message_par1   = 'CL_HRRCF_CANDIDATE_REGISTER'
+              message_par2   = 'GENERATE_ALIAS'   .
+      ENDCASE.
+    ENDIF.
+*
+    me->alias = l_alias.
+    me->user  = l_uname.
+    EXIT.
+*
+  ENDDO.
+*
+ENDMETHOD.
+
+
+METHOD generate_password.
+* Author Biswas, Bilash 20020708
+* This method generates a random password. Not Unicode passwd currently.
+* PESK000304: Use new function module to generate password
+
+  DATA:
+    l_password            TYPE xubcode.
+*
+  CALL FUNCTION 'SUSR_GENERATE_PASSWORD'
+*   EXPORTING
+*     DOWNWARDS_COMPATIBLE       =
+   IMPORTING
+     password                   = l_password
+   EXCEPTIONS
+     generator_error            = 1
+     OTHERS                     = 2.
+*
+  IF sy-subrc <> 0.
+    RAISE EXCEPTION TYPE cx_hrrcf_registration
+      EXPORTING
+        textid         = cx_hrrcf_registration=>password_generation
+        message_type   = 'E'
+        message_class  = 'HRRCF0001'
+        message_number = '121'
+        message_par1   = 'CL_HRRCF_CANDIDATE_REGISTER'
+        message_par2   = 'GENERATE_PASSWORD'
+        message_par3   = 'SUSR_GENERATE_PASSWORD'.
+  ENDIF.
+*
+  me->password-bapipwd = l_password.
+*
+ENDMETHOD.
+
+
+METHOD generate_username .
+* Author Biswas Bilash, 20020711
+* This methods checks if the specified alias exists.
+* If the alias specified exists, the method exits to the caller.
+* It creates a username for the alias only if the alias does not exist.
+
+* NOTE: Username here refers to USER BNAME and NOT the alias.
+
+  DATA l_user                 TYPE bapibname-bapibname.
+  DATA par1                   LIKE sy-msgv1.
+  DATA ls_return              TYPE bapiret2.
+  DATA l_subrc                TYPE sy-subrc.
+
+  TRANSLATE me->alias TO UPPER CASE.   "#EC TRANSLANG
+* Generate the Username from the alias name
+  CALL FUNCTION 'SUSR_USER_BNAME_GENERATE'
+    EXPORTING
+      alias              = me->alias
+    IMPORTING
+      bname              = me->user
+    EXCEPTIONS
+      alias_already_used = 1
+      no_data            = 2
+      internal_error     = 3
+      OTHERS             = 4.
+
+  IF sy-subrc <> 0.
+    MOVE sy-subrc TO l_subrc.
+    CASE l_subrc.
+      WHEN 1.
+        par1 = me->alias.
+        IF 1 EQ 0.
+          MESSAGE e012(hrrcf0002) with me->alias.
+*      The alias & is already in use. Please try again with a new alias.
+        ENDIF.
+        CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+          EXPORTING
+            type   = 'E'
+            cl     = 'HRRCF0002'
+            number = 012
+            par1   = par1
+          IMPORTING
+            return = ls_return.
+        APPEND ls_return TO pt_return.
+        RETURN.
+      WHEN 2 OR 3 OR 4.
+        RAISE EXCEPTION TYPE cx_hrrcf_registration
+        EXPORTING
+          textid = cx_hrrcf_registration=>username_generation
+          message_type   = 'E'
+          message_class  = 'HRRCF0001'
+          message_number = '121'
+          message_par1   = 'CL_HRRCF_CANDIDATE_REGISTER'
+          message_par2   = 'GENERATE_USERNAME' .
+    ENDCASE.
+
+  ENDIF.
+ENDMETHOD.
+
+
+method register_external .
+
+* Author: Biswas, Bilash
+* Additions: FR, CS, PEV, XLV, CG
+* This method registers an external candidate
+* If we have a self-registration, we should create the user directly
+* with the selected password
+
+  data: lo_candidate         type ref to cl_hrrcf_candidate,
+        lo_cand_information  type ref to cl_hrrcf_candidate_info,
+        lo_exception         type ref to cx_hrrcf.
+  data: lt_return            type bapirettab,
+        ls_emaildata         type rcf_s_emaildata_bp,
+        ls_p5102             type p5102,
+        ls_centraldataperson type bapibus1006_central_person.
+
+* Setting the internal attributes
+  me->lastname = centraldataperson-lastname.
+*  me->password = p_password.
+  me->alias    = p_alias.
+  me->email    = p_email.
+
+  try.
+*     Check Consistencies
+      call method me->check_consistencies
+*        EXPORTING
+*          p_password2 = p_password2
+        importing
+          pt_return   = lt_return.
+*     Keep only errors of type E or A. Delete the rest.
+      delete lt_return where type ne 'E' and type ne 'A'.
+      if not lt_return is initial.
+        append lines of lt_return to pt_return.
+        return.
+      endif.
+
+*     Alias
+      if me->alias is initial.
+        call method me->generate_alias .
+      endif.
+
+*     Password
+      if p_password is initial.
+        if p_self_reg = true.
+*         Preliminary; should not occur
+          raise exception type cx_hrrcf_registration.
+        else.
+          call method me->generate_password .
+        endif.
+      else.
+        if p_self_reg = true.
+          me->password = p_password.
+        else.
+*         Preliminary; should not occur
+          raise exception type cx_hrrcf_registration.
+        endif.
+      endif.
+
+*     Create user bname from alias if it isn't already done.
+      if me->user is initial.
+        call method me->generate_username
+          importing
+            pt_return = lt_return.
+
+*        ************  Test begin   *******************
+*       The following can be used for test purposes when debugging.
+*       set the break point after user-switch to a named user as
+*       candidateXX. Of course comment the previous call to
+*       generate_username. (The username might be generated in method
+*       me->generate_alias...
+
+*         me->user = 'ANAKIN'.
+
+*        ************  Test ends    *******************
+
+*       Keep only errors of type E and A. Delete the rest.
+        delete lt_return where type ne 'E' and type ne 'A'.
+        if not lt_return is initial.
+          append lines of lt_return to pt_return.
+          return.
+        endif.
+      endif.
+
+*     Create User
+      call method me->create_user
+        exporting
+          p_self_reg = p_self_reg
+        importing
+          pt_return  = lt_return.
+
+*     Only errors of type E can occur.
+      if not lt_return is initial.
+        append lines of lt_return to pt_return.
+        return.
+      endif.
+
+*     Create candidate
+      move me->email to ls_emaildata-e_mail .
+      move centraldataperson to ls_centraldataperson.
+
+      try.
+          call method cl_hrrcf_candidate=>create
+            exporting
+              centraldataperson = ls_centraldataperson
+              centraldata       = centraldata
+              email             = ls_emaildata
+            importing
+              candidate         = lo_candidate
+              return            = lt_return.
+        catch cx_hrrcf into lo_exception.
+          if 1 = 0.
+            message e155(hrrcf0001).
+*           Fehler beim Anlegen eines Kandidaten
+          endif.
+
+          call method me->delete_user.                  "CG
+
+          raise exception type cx_hrrcf_registration
+            exporting
+              previous       = lo_exception
+              message_type   = 'E'
+              message_class  = 'HRRCF0001'
+              message_number = '155'.
+      endtry.
+
+      if not lt_return is initial.
+
+        call method me->delete_user.                    "CG
+
+        append lines of lt_return to pt_return.
+        return.
+      endif.
+
+      check not lo_candidate is initial.
+      me->candidate = lo_candidate.
+
+*     Create Candidate information
+*     Create Instance STANDARD and Insert Records'.
+
+      call method cl_hrrcf_candidate_info=>get_instance
+        exporting
+          hrobject = lo_candidate->hrobject
+        importing
+          instance = lo_cand_information.
+
+      clear ls_p5102 .
+
+      move sy-datum to ls_p5102-begda .
+      move '99991231' to ls_p5102-endda.
+* in BSP older release - there is no option for recruiter to release a cand.
+*  created using external application
+      IF iv_ea_flag = abap_true.                                " N 2297448
+        move '2' to ls_p5102-status.
+        else.
+        move '0' to ls_p5102-status.         "profile is not released
+      ENDIF.                                                     " N 2297448
+
+
+      ls_p5102-verification = p_verification_status.
+      ls_p5102-privacy_status = p_privacy_status.
+      ls_p5102-e_mail = me->email.               "N1783912
+
+      call method lo_cand_information->insert_record
+        exporting
+          check_only      = space
+        importing
+          return          = lt_return
+        changing
+          infotype_record = ls_p5102.
+
+      if not lt_return is initial.
+        append lines of lt_return to pt_return.
+        return.
+      endif.
+
+*     Assign user to the candidate
+      call method me->candidate->assign_user
+        exporting
+          userid = me->user.
+
+    catch cx_hrrcf into lo_exception.
+*     Rollback eMail creation in bupa
+      if not lo_candidate is initial.
+        try.
+            call method lo_candidate->change_email
+              exporting
+                e_mail = space.
+          catch cx_root.                                "#EC NO_HANDLER
+*           Nothing happens
+        endtry.
+      endif.
+
+      raise exception type cx_hrrcf_registration
+        exporting
+          previous       = lo_exception
+          message_type   = 'E'
+          message_class  = 'HRRCF0001'
+          message_number = '155'.
+  endtry.
+
+  call function 'BAPI_TRANSACTION_COMMIT'
+    exporting
+      wait = 'X'.
+
+endmethod.                    "REGISTER_EXTERNAL
+ENDCLASS.

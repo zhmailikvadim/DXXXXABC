@@ -1,0 +1,285 @@
+FUNCTION SUSR_BAPI_USER_PROFILES_ASSIGN
+  IMPORTING
+    VALUE(USERNAME) LIKE BAPIBNAME-BAPIBNAME
+    VALUE(BAPI_MODE) TYPE CHAR01 DEFAULT ' '
+    VALUE(IV_USE_OLD_IMPL) TYPE CHAR01 DEFAULT SPACE
+  TABLES
+    PROFILES LIKE BAPIPROF
+    RETURN LIKE BAPIRET2.
+
+
+
+*----------------------------------------------------------------------
+* New coding
+* - CUA Target system: User is treated as not transfered to Central System
+* - All other cases:   Same functionality as BAPI_USER*
+* Old coding
+* - Only for SU01_OLD
+* -------------------------------------------------------------------
+
+* Usergroup is required (note 1663177): SU01_OLD, SU10_OLD, SU3_OLD
+* are no longer supported
+  data: lv_active type sesf_boolean.
+  call method cl_suid_tools=>check_user_grp_required
+    importing
+      ev_active = lv_active.
+
+* -------------------------------------------------------------------
+* --- Call new coding -----------------------------------------------
+  if iv_use_old_impl is initial or lv_active eq if_identity=>co_true.
+
+    data: lv_repeat_enq               type sesf_boolean
+        , lv_cua_ts_force_modifaction type sesf_boolean value if_identity=>co_false
+        , lv_cua_child                type sesf_boolean
+        .
+
+    " Is CUA active? Is system central or child?
+    call method cl_suid_cua=>if_suid_cua_runtime~get_cua_landscape
+      importing
+        ev_cua_child = lv_cua_child.
+
+    " In child system - force local creation
+    if lv_cua_child eq if_identity=>co_true.
+      lv_cua_ts_force_modifaction = if_identity=>co_true.
+    endif.
+
+    if bapi_mode is not initial.
+      lv_repeat_enq = 'X'.
+    endif.
+
+    " Assign profiles
+    perform user_profiles_assign
+      using
+        username
+        lv_cua_ts_force_modifaction
+        lv_repeat_enq
+        if_identity=>co_false  " iv_delete_message
+      changing
+        profiles[]
+        return[].
+
+    return.
+  endif.
+
+
+* -------------------------------------------------------------------
+* --- Call old coding -----------------------------------------------
+* - SU01_OLD
+  data: par1 like sy-msgv1,
+        par2 like sy-msgv2,
+        par3 like sy-msgv3,
+        par4 like sy-msgv4.
+
+  data: sender like  bapibname,
+        date like  bapimodda,
+        time like  bapimodti.
+
+  data user_name like usr02-bname.
+* -------------------------- note 841612 ------------------------------
+  data: lt_return type bapirettab,
+        ld_return type bapiret2,
+        ld_repeat_enqueue(1)     type     c.                "1158048
+
+  constants: lc_error  type bapi_mtype value 'E'.
+
+  user_name = username.
+
+  data: lt_profiles like profiles[].
+* In current implementation PROFILES  is changed during runtime.
+* After all authority and existence checks it contains new profiles we
+* can assign and old profiles we can't remove.
+* The problem can occurs, when user who has no authorization to
+* run FM with empty table PROFILES . In this case he will be able
+* to see current profile assignment of the user USERNAME.
+* Temporary solution: roll-back table PROFILES in the end.
+* Plan: display new status in table PROFILES only if something
+* is realy changed.
+
+  lt_profiles[] = profiles[].
+
+  refresh return.
+
+* <<< note 1158048
+  if not bapi_mode is initial.
+    ld_repeat_enqueue = 'X'.
+  endif.
+
+  call function 'SUSR_USER_ENQUEUE'
+    exporting
+      bname          = username
+      repeat_enqueue = ld_repeat_enqueue
+    tables
+      return         = return.
+
+  read table return with key type = 'E' transporting no fields.
+  if sy-subrc = 0.
+    exit.
+  endif.
+* >>> note 1158048
+
+  call function 'SUSR_USER_PROFS_PROFILES_CHECK'
+    exporting
+      user_name                   = user_name
+    tables
+      user_profiles               = profiles
+      errortable                  = return
+    exceptions
+      no_authorisation_some_profs = 0
+      others                      = 0.
+
+
+  read table return with key type = 'E' transporting no fields.
+  if sy-subrc = 0.
+* Antwort schicken
+    sender   = sy-uname.
+    date     = sy-datum.
+    time     = sy-uzeit.
+    call function 'SUSR_ZBV_STATUS_RETURN'
+      exporting
+        username   = username
+        sender     = sender
+        date       = date
+        time       = time
+        usrsection = 'PROFILE'
+      tables
+        protocol   = return.
+
+    perform user_dequeue using username. "note 560548
+    profiles[] = lt_profiles[].
+    exit.
+  endif.
+
+* Note 198339: Merge existing generated profile assignments with new
+* manual profile assignments
+  data user_profiles like line of profiles occurs 0
+         with header line.
+  data i_usr10 like usr10 occurs 0 with header line.
+
+  call function 'SUSR_USER_PROFS_PROFILES_GET'
+    exporting
+      user_name           = user_name
+*     WITH_TEXT           = ' '
+    tables
+      user_profiles       = user_profiles
+    exceptions
+      user_name_not_exist = 0
+      others              = 0.
+
+  if not user_profiles[] is initial.                    "note 198339/2
+    select * from usr10 into table i_usr10              "#EC CI_GENBUFF
+             for all entries in user_profiles
+             where profn  = user_profiles-bapiprof.
+    loop at user_profiles.
+      read table i_usr10 with key profn = user_profiles-bapiprof.
+      if  sy-subrc = 0  and i_usr10-typ =  'G'.
+        profiles-bapiprof = user_profiles-bapiprof .
+        append profiles.
+      endif.
+    endloop.
+  endif.
+* End of note 198339
+
+* With correction of note # 676214 duplicate profiles are deleted
+* inside FM 'SUSR_USER_PROFS_PROFILES_PUT'
+  call function 'SUSR_USER_PROFS_PROFILES_PUT'
+    exporting
+      user_name           = user_name
+    tables
+      user_profiles       = profiles
+    exceptions
+      user_name_not_exist = 1
+      others              = 2.
+
+* <<< note 841612
+  call function 'SUSR_USER_PROFS_BUFFER_SAVECHK'
+    exporting
+      username         = user_name
+      use_message_type = lc_error
+    changing
+      return           = lt_return.
+
+  loop at lt_return into ld_return.
+*   possible messages:
+*   limit of profiles at user &1 exceeded
+    if 1 = 0. message e263(01) with ld_return-message_v1. endif.
+*   -----------------
+    call function 'BALW_BAPIRETURN_GET2'
+      exporting
+        type   = ld_return-type
+        cl     = ld_return-id
+        number = ld_return-number
+        par1   = ld_return-message_v1
+        par2   = ld_return-message_v2
+        par3   = ld_return-message_v3
+        par4   = ld_return-message_v4
+      importing
+        return = return.
+    append return.
+  endloop.
+
+  read table return with key type = 'E' transporting no fields.
+  if sy-subrc = 0.
+* Antwort schicken
+    sender   = sy-uname.
+    date     = sy-datum.
+    time     = sy-uzeit.
+    call function 'SUSR_ZBV_STATUS_RETURN'
+      exporting
+        username   = username
+        sender     = sender
+        date       = date
+        time       = time
+        usrsection = 'PROFILE'
+      tables
+        protocol   = return.
+
+    refresh lt_return.
+    clear   ld_return.
+    call function 'SUSR_USER_PROFS_BUFFER_CLEAR'.
+    perform user_dequeue using username. "note 560548
+    profiles[] = lt_profiles[].
+    exit.
+  endif.
+
+* 'too_many_profiles' can not occur anymore because of new call of
+* SUSR_USER_PROFS_BUFFER_SAVECHK before saving
+  call function 'SUSR_USER_PROFS_BUFFER_TO_DB'
+    exceptions
+      too_many_profiles = 0
+      others            = 2.
+
+  par1 = username.
+* Profilzuordnung für Benutzer & wurde geändert.
+  if 1 = 0. message s046(01) with par1. endif.
+  call function 'BALW_BAPIRETURN_GET2'
+    exporting
+      type   = 'S'
+      cl     = '01'
+      number = 46 " Prfzuordn. geändert
+      par1   = par1
+    importing
+      return = return.
+  append return.
+* >>> note 841612
+
+  call function 'SUSR_USER_PROFS_BUFFER_CLEAR'.
+
+* Antwort schicken
+  sender   = sy-uname.
+  date     = sy-datum.
+  time     = sy-uzeit.
+  call function 'SUSR_ZBV_STATUS_RETURN'
+    exporting
+      username   = username
+      sender     = sender
+      date       = date
+      time       = time
+      usrsection = 'PROFILE'
+    tables
+      protocol   = return.
+
+  perform user_dequeue using username.
+
+  profiles[] = lt_profiles[].
+
+endfunction.

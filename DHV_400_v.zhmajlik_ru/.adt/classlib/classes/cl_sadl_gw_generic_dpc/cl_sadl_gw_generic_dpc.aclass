@@ -1,0 +1,2625 @@
+CLASS cl_sadl_gw_generic_dpc DEFINITION
+  PUBLIC
+  INHERITING FROM /iwbep/cl_mgw_push_abs_data
+  ABSTRACT
+  CREATE PUBLIC
+
+  GLOBAL FRIENDS cl_sadl_aunit_friend
+                 cl_sadl_gw_aunit_friend
+                 cl_sadl_gw_dpc_messages.
+
+  PUBLIC SECTION.
+    TYPES ty_entity_type_name TYPE /iwbep/if_mgw_med_odata_types=>ty_e_med_internal_name.
+
+    INTERFACES /iwbep/if_sb_gen_dpc_injection ALL METHODS FINAL .
+    INTERFACES if_sadl_gw_dpc .
+    INTERFACES if_sadl_gw_query_control .
+    INTERFACES if_sadl_gw_extension_control .
+    INTERFACES if_sadl_gw_transact_control .
+    INTERFACES if_sadl_gw_sadl_binding.
+
+    METHODS constructor IMPORTING !io_context TYPE REF TO /iwbep/if_mgw_context OPTIONAL
+                        RAISING   /iwbep/cx_mgw_tech_exception .
+
+    METHODS /iwbep/if_mgw_appl_srv_runtime~create_deep_entity REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~create_entity FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~delete_entity FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~get_entity FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~get_entityset FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~patch_entity FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~update_entity FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~execute_action FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~get_expanded_entity FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~get_expanded_entityset FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~changeset_begin FINAL REDEFINITION .
+    METHODS /iwbep/if_mgw_appl_srv_runtime~changeset_process FINAL REDEFINITION .
+
+    ALIASES get_expanded_entityset FOR if_sadl_gw_dpc~get_expanded_entityset.
+    ALIASES get_expanded_entity FOR if_sadl_gw_dpc~get_expanded_entity.
+
+  PROTECTED SECTION.
+    DATA mo_mp TYPE REF TO cl_bsa_sadl_mp.
+    DATA mo_mdp TYPE REF TO if_sadl_metadata_provider.
+    DATA mo_model TYPE REF TO /iwbep/if_mgw_odata_re_model.
+    DATA mo_extension_api TYPE REF TO if_cfd_odata_sadl_integration.
+    DATA mt_placeholder_values TYPE if_sadl_public_types=>tt_parameters.
+    DATA mv_is_crp_cached_request TYPE abap_bool VALUE abap_undefined.
+    DATA mv_is_crp_caching_allowed TYPE abap_bool VALUE abap_undefined.
+    DATA mo_cache TYPE REF TO if_sadl_sql_cache_handler.
+
+    METHODS get_sadl_metadata EXPORTING ev_uuid      TYPE if_sadl_types=>ty_uuid
+                                        ev_timestamp TYPE if_sadl_types=>ty_timestamp
+                              RAISING   cx_sadl_static.
+    METHODS get_sadl_xml EXPORTING ev_sadl_xml TYPE string
+                         RAISING   cx_sadl_static.
+    METHODS get_model RETURNING VALUE(ro_model) TYPE REF TO /iwbep/if_mgw_odata_re_model
+                      RAISING   /iwbep/cx_mgw_tech_exception.
+    METHODS check_subscription_authority REDEFINITION .
+
+    METHODS get_mp       RETURNING VALUE(ro_mp) TYPE REF TO cl_bsa_sadl_mp
+                         RAISING   cx_sadl_static cx_sadl_contract_violation ##RELAX. " method used by CL_SADL_GW_GENERIC_MPC
+    METHODS _get_data_table_container IMPORTING iv_entity_set                  TYPE /iwbep/mgw_tech_name
+*                                                it_order_by                    TYPE /iwbep/t_mgw_tech_order OPTIONAL
+                                      RETURNING VALUE(rr_data_table_container) TYPE REF TO data
+                                      RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF ty_function,
+             function_name    TYPE /iwbep/mgw_tech_name,
+             src_es_name      TYPE /iwbep/mgw_tech_name,
+             target_es_name   TYPE /iwbep/mgw_tech_name,
+             target_et_name   TYPE /iwbep/mgw_tech_name,
+             target_data_type TYPE string,
+           END OF ty_function.
+    TYPES: BEGIN OF ty_batch_function,
+             metadata    TYPE ty_function,
+             source_data TYPE REF TO data,
+           END OF ty_batch_function.
+    TYPES tt_batch_functions TYPE STANDARD TABLE OF ty_batch_function WITH DEFAULT KEY.
+
+    CLASS-METHODS _convert_sadl_exception_to_mgw IMPORTING ix_sadl_exception TYPE REF TO cx_root
+                                                 RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+    METHODS get_sadl_api RETURNING VALUE(ro_sadl_api) TYPE REF TO if_sadl_entity_api
+                         RAISING   cx_sadl_static cx_sadl_contract_violation /iwbep/cx_mgw_tech_exception ##RELAX. " method used by CL_SADL_GW_GENERIC_MPC
+    CLASS-METHODS get_extension_api IMPORTING io_gw_context           TYPE REF TO /iwbep/if_mgw_context
+                                    RETURNING VALUE(ro_extension_api) TYPE REF TO if_cfd_odata_sadl_integration.
+
+    DATA mo_sadl_api TYPE REF TO if_sadl_entity_api.
+    DATA mo_common_runtime TYPE REF TO if_sadl_gw_odata_runtime.
+    DATA mt_entity_set_type_map TYPE if_sadl_gw_types_int=>tt_entity_set_type_map.
+    DATA ms_entity_params_for_expand TYPE if_sadl_public_types=>ty_entity_parameters.
+    DATA mo_dbi TYPE REF TO if_sadl_dbi.
+*    DATA mv_line_created TYPE abap_bool.
+
+    METHODS _init RAISING cx_sadl_static cx_sadl_contract_violation /iwbep/cx_mgw_tech_exception.
+    METHODS _init_mp RAISING cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS _create_deep IMPORTING iv_entity_id         TYPE string OPTIONAL
+                                   iv_source_entity_id  TYPE string OPTIONAL
+                                   iv_association       TYPE sadl_entity_association OPTIONAL
+                                   is_source_key_values TYPE data OPTIONAL
+                                   io_expand            TYPE REF TO /iwbep/if_mgw_odata_expand OPTIONAL
+                         CHANGING  cs_data              TYPE data
+                         RAISING   cx_sadl_static cx_sadl_entity_invalid_data cx_sadl_entity_srvice_not_supp
+                                   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+    METHODS _read_data_after_deep_create IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entity_c
+                                                   io_expand               TYPE REF TO /iwbep/if_mgw_odata_expand
+                                         CHANGING  cs_data                 TYPE data
+                                         RAISING   cx_sadl_static cx_sadl_contract_violation
+                                                   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+    METHODS _create_map_for_auts IMPORTING is_gw_entity_path TYPE if_sadl_gw_types_int=>ts_gw_entity_path.
+    METHODS _get_type_name  IMPORTING iv_entity_set       TYPE string
+                            RETURNING VALUE(rv_type_name) TYPE ty_entity_type_name.
+    METHODS _get_data_line_container IMPORTING iv_entity_set                 TYPE /iwbep/mgw_tech_name
+                                     RETURNING VALUE(rr_data_line_container) TYPE REF TO data
+                                     RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+    METHODS _get_deep_data_line_container IMPORTING iv_entity_set                 TYPE /iwbep/mgw_tech_name
+                                                    io_expand                     TYPE REF TO /iwbep/if_mgw_odata_expand OPTIONAL
+                                          RETURNING VALUE(rr_data_line_container) TYPE REF TO data
+                                          RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+    METHODS _get_deep_data_table_container IMPORTING iv_entity_set                  TYPE /iwbep/mgw_tech_name
+                                                     io_expand                      TYPE REF TO /iwbep/if_mgw_odata_expand OPTIONAL
+                                           RETURNING VALUE(rr_data_table_container) TYPE REF TO data
+                                           RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+    METHODS _get_table_container_from_load IMPORTING ir_entity_load            TYPE REF TO if_sadl_load=>ty_entity_load
+                                           RETURNING VALUE(rr_table_container) TYPE REF TO data.
+
+    METHODS _get_entity_elements IMPORTING iv_entity_set TYPE string
+                                 EXPORTING et_elements   TYPE if_sadl_entity=>tt_elements
+                                 RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS _get_non_key_elements IMPORTING iv_entity_set TYPE string
+                                  EXPORTING et_elements   TYPE if_sadl_entity_transactional=>tt_element_names
+                                  RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS _get_key_values IMPORTING iv_entity_set        TYPE string
+                                      is_data_in           TYPE data
+                            RETURNING VALUE(rt_key_values) TYPE /iwbep/t_mgw_tech_pairs
+                            RAISING   cx_sadl_contract_violation
+                                      cx_sadl_static .
+
+    METHODS _get_transact_runtime IMPORTING iv_entity_set     TYPE string
+                                  RETURNING VALUE(ro_runtime) TYPE REF TO if_sadl_entity_transactional
+                                  RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS _get_entity_set_request_detail IMPORTING io_tech_request_context     TYPE REF TO /iwbep/if_mgw_req_entityset
+                                           EXPORTING es_entity_path              TYPE if_sadl_gw_types_int=>ts_gw_entity_path
+                                                     ev_top                      TYPE string
+                                                     ev_skip                     TYPE i
+                                                     ev_has_count                TYPE abap_bool
+                                                     ev_has_inline_count         TYPE abap_bool
+                                                     et_order_by                 TYPE /iwbep/t_mgw_tech_order
+                                                     eo_filter                   TYPE REF TO /iwbep/if_mgw_req_filter
+                                                     eo_filter_tree              TYPE REF TO /iwbep/if_mgw_expr_node
+                                                     ev_search_string            TYPE string
+                                                     et_requested_with_mandatory TYPE stringtab
+                                                     ev_temporal_context         TYPE if_sadl_query_engine_types=>ty_temporal_context
+                                           RAISING   cx_sadl_static cx_sadl_contract_violation /iwbep/cx_mgw_tech_exception /iwbep/cx_mgw_busi_exception.
+    METHODS _get_entity_request_detail  IMPORTING io_tech_request_context     TYPE REF TO /iwbep/if_mgw_req_entity
+                                        EXPORTING es_entity_path              TYPE if_sadl_gw_types_int=>ts_gw_entity_path
+                                                  et_requested_with_mandatory TYPE stringtab
+                                                  ev_temporal_context         TYPE if_sadl_query_engine_types=>ty_temporal_context
+                                        RAISING   cx_sadl_static /iwbep/cx_mgw_tech_exception /iwbep/cx_mgw_busi_exception.
+
+    METHODS _get_query_options_entity_set IMPORTING is_entity_path              TYPE if_sadl_gw_types_int=>ts_gw_entity_path
+                                                    iv_top                      TYPE string OPTIONAL
+                                                    iv_skip                     TYPE i OPTIONAL
+                                                    iv_has_count                TYPE abap_bool OPTIONAL
+                                                    iv_has_inline_count         TYPE abap_bool OPTIONAL
+                                                    it_order_by                 TYPE /iwbep/t_mgw_tech_order OPTIONAL
+                                                    io_filter                   TYPE REF TO /iwbep/if_mgw_req_filter OPTIONAL
+                                                    io_filter_tree              TYPE REF TO /iwbep/if_mgw_expr_node OPTIONAL
+                                                    iv_search_string            TYPE string OPTIONAL
+                                                    it_placeholder_values       TYPE if_sadl_public_types=>tt_parameters OPTIONAL
+                                                    it_requested_with_mandatory TYPE stringtab
+                                                    iv_temporal_context         TYPE if_sadl_query_engine_types=>ty_temporal_context OPTIONAL
+                                          RETURNING VALUE(ro_query_options)     TYPE REF TO cl_sadl_gw_query_options
+                                          RAISING   cx_sadl_static cx_sadl_contract_violation
+                                                    /iwbep/cx_mgw_tech_exception /iwbep/cx_mgw_busi_exception.
+*    METHODS _get_parameters_from_path EXPORTING et_entity_parameters   TYPE if_sadl_query_engine_types=>tt_entity_parameters
+*                                                et_explicit_parameters TYPE if_sadl_query_engine_types=>tt_entity_parameters
+*                                      CHANGING  cs_gw_entity_path      TYPE if_sadl_gw_types_int=>ts_gw_entity_path
+*                                      RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS _get_query_options_entity IMPORTING is_entity_path              TYPE if_sadl_gw_types_int=>ts_gw_entity_path
+                                                it_requested_with_mandatory TYPE stringtab
+                                                iv_temporal_context         TYPE if_sadl_query_engine_types=>ty_temporal_context OPTIONAL
+                                      RETURNING VALUE(ro_query_options)     TYPE REF TO cl_sadl_gw_query_options
+                                      RAISING   cx_sadl_static cx_sadl_contract_violation
+                                                /iwbep/cx_mgw_tech_exception /iwbep/cx_mgw_busi_exception.
+    METHODS _evaluate_analytical_id IMPORTING io_query_options TYPE REF TO cl_sadl_gw_query_options
+                                    RAISING   cx_sadl_static cx_sadl_contract_violation
+                                              /iwbep/cx_mgw_tech_exception
+                                              /iwbep/cx_mgw_busi_exception.
+    METHODS _add_messages_to_header IMPORTING io_message_handler TYPE REF TO if_sadl_message_handler
+                                              iv_entity_set      TYPE string
+                                              it_key_values      TYPE /iwbep/t_mgw_tech_pairs OPTIONAL.
+    METHODS discard_changes.
+    METHODS save RAISING cx_sadl_static
+                         /iwbep/cx_mgw_tech_exception
+                         /iwbep/cx_mgw_busi_exception.
+    CLASS-METHODS _get_count IMPORTING iv_count        TYPE i
+                                       iv_top          TYPE string
+                                       iv_skip         TYPE i
+                             RETURNING VALUE(rv_count) TYPE string.
+
+    METHODS _prepare_update IMPORTING io_data_provider        TYPE REF TO /iwbep/if_mgw_entry_provider
+                                      io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entity_u
+                            EXPORTING et_elements             TYPE if_sadl_entity_transactional=>tt_element_names
+                                      et_key_values           TYPE /iwbep/t_mgw_tech_pairs
+                                      er_sadl_data            TYPE REF TO data
+                            RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception cx_sadl_static.
+
+    METHODS _prepare_create IMPORTING io_data_provider        TYPE REF TO /iwbep/if_mgw_entry_provider
+                                      io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entity_c
+                            EXPORTING er_sadl_data            TYPE REF TO data
+                                      ev_source_entity_set    TYPE string
+                                      ev_navigation_property  TYPE string
+                                      er_source_key           TYPE REF TO data
+                            RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception cx_sadl_static.
+    METHODS _get_creation_source_info IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entity_c
+                                      EXPORTING ev_source_entity_set    TYPE string
+                                                ev_navigation_property  TYPE string
+                                                er_source_key           TYPE REF TO data
+                                      RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception cx_sadl_static.
+    METHODS _prepare_deep_create IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entity_c
+                                           io_data_provider        TYPE REF TO /iwbep/if_mgw_entry_provider
+                                           io_expand               TYPE REF TO /iwbep/if_mgw_odata_expand
+                                 EXPORTING et_create               TYPE if_sadl_batch=>tt_create
+                                           er_root_key             TYPE REF TO data
+                                           er_data_container       TYPE REF TO data
+                                 RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception cx_sadl_static.
+    TYPES tt_name_value_keys_multi_inst TYPE STANDARD TABLE OF /iwbep/t_mgw_tech_pairs WITH DEFAULT KEY.
+    TYPES tt_ref_to_data TYPE STANDARD TABLE OF REF TO data WITH DEFAULT KEY.
+    METHODS preprocess_batch IMPORTING it_changeset_request          TYPE /iwbep/if_mgw_appl_types=>ty_t_changeset_request
+                             EXPORTING et_update                     TYPE if_sadl_batch=>tt_update
+                                       et_updated_instances_keys     TYPE tt_name_value_keys_multi_inst
+                                       et_create                     TYPE if_sadl_batch=>tt_create
+                                       et_create_keys                TYPE tt_ref_to_data
+                                       et_deep_create_keys           TYPE tt_ref_to_data
+                                       et_deep_create_data_container TYPE tt_ref_to_data
+                                       et_delete                     TYPE if_sadl_batch=>tt_delete
+                                       et_action                     TYPE if_sadl_batch=>tt_action
+                                       et_functions                  TYPE tt_batch_functions
+                             RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception
+                                       cx_sadl_contract_violation cx_sadl_static .
+
+    METHODS postprocess_batch IMPORTING it_changeset_request          TYPE /iwbep/if_mgw_appl_types=>ty_t_changeset_request
+                                        it_update                     TYPE if_sadl_batch=>tt_update
+                                        it_updated_instances_keys     TYPE tt_name_value_keys_multi_inst
+                                        it_create_keys                TYPE tt_ref_to_data
+                                        it_deep_create_keys           TYPE tt_ref_to_data
+                                        it_deep_create_data_container TYPE tt_ref_to_data
+                                        it_delete                     TYPE if_sadl_batch=>tt_delete
+                                        it_action                     TYPE if_sadl_batch=>tt_action
+                                        it_functions                  TYPE tt_batch_functions
+                                        io_sadl_message_handler       TYPE REF TO if_sadl_message_handler
+                              CHANGING  ct_changeset_response         TYPE /iwbep/if_mgw_appl_types=>ty_t_changeset_response
+                              RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception
+                                        cx_sadl_contract_violation cx_sadl_static .
+
+    METHODS _prepare_delete IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entity_d
+                            EXPORTING er_sadl_key             TYPE REF TO data
+                            RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception cx_sadl_static.
+
+    METHODS _read_modified_entity IMPORTING it_key_values  TYPE /iwbep/t_mgw_tech_pairs
+                                            iv_entity_set  TYPE string
+                                            iv_entity_type TYPE ty_entity_type_name
+                                  EXPORTING es_data        TYPE data
+                                  RAISING   /iwbep/cx_mgw_busi_exception
+                                            /iwbep/cx_mgw_tech_exception
+                                            cx_sadl_contract_violation
+                                            cx_sadl_static .
+    METHODS get_action_return_data_type IMPORTING is_function     TYPE ty_function
+                                        EXPORTING er_data         TYPE REF TO data
+                                                  ev_is_structure TYPE abap_bool
+                                        RAISING   /iwbep/cx_mgw_busi_exception
+                                                  /iwbep/cx_mgw_tech_exception
+                                                  cx_sadl_contract_violation
+                                                  cx_sadl_static .
+    METHODS get_action_ret_data_from_input IMPORTING is_function     TYPE ty_function
+                                                     ir_data_in      TYPE REF TO data
+                                                     iv_is_structure TYPE abap_bool
+                                                     ir_return_data  TYPE REF TO data
+                                           RAISING   /iwbep/cx_mgw_busi_exception
+                                                     /iwbep/cx_mgw_tech_exception
+                                                     cx_sadl_contract_violation
+                                                     cx_sadl_static .
+    METHODS get_action_data_from_result IMPORTING iv_is_structure TYPE abap_bool
+                                                  is_function     TYPE ty_function
+*                                                  iv_target_es_name TYPE ty_function-target_es_name
+                                                  ir_data_in      TYPE REF TO data
+                                        RAISING   cx_sadl_static
+                                                  /iwbep/cx_mgw_tech_exception
+                                                  /iwbep/cx_mgw_busi_exception .
+    METHODS map_action_return_data_to_sadl IMPORTING iv_target_es_name TYPE /iwbep/mgw_tech_name
+                                                     iv_source_es_name TYPE /iwbep/mgw_tech_name
+                                                     iv_function_name  TYPE /iwbep/mgw_tech_name
+                                                     it_ret_data       TYPE ANY TABLE
+                                                     iv_is_structure   TYPE abap_bool
+                                                     ir_data           TYPE REF TO data
+                                           RAISING   /iwbep/cx_mgw_busi_exception
+                                                     /iwbep/cx_mgw_tech_exception
+                                                     cx_sadl_static
+*                                                     cx_bsa_compile_time
+                                                     cx_sadl_contract_violation .
+    METHODS get_return_data_ref IMPORTING is_act      TYPE if_sadl_entity=>ty_action
+                                          iv_src_es   TYPE /iwbep/mgw_tech_name
+                                EXPORTING er_ret_data TYPE REF TO data
+                                RAISING   cx_sadl_contract_violation cx_sadl_static /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+
+    METHODS _prepare_execute_action IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_func_import
+                                    EXPORTING es_function             TYPE        ty_function
+                                              er_source_es_key_data   TYPE REF TO data
+                                              er_action_param         TYPE REF TO data
+                                              er_ret_data             TYPE REF TO data
+                                    RAISING   /iwbep/cx_mgw_busi_exception
+                                              /iwbep/cx_mgw_tech_exception
+                                              cx_sadl_contract_violation
+                                              cx_sadl_static .
+    METHODS _execute_action IMPORTING is_function     TYPE cl_sadl_gw_generic_dpc=>ty_function
+                                      ir_data_in      TYPE REF TO data
+                                      ir_action_param TYPE REF TO data
+                            EXPORTING ev_failed       TYPE abap_bool
+                                      et_ret_data     TYPE ANY TABLE
+                                      eo_msg_handler  TYPE REF TO if_sadl_message_handler
+                            RAISING   /iwbep/cx_mgw_med_exception
+                                      cx_sadl_contract_violation
+                                      cx_sadl_static .
+    METHODS _get_entity_load IMPORTING iv_entity_set  TYPE string
+                             RETURNING VALUE(rr_load) TYPE REF TO if_sadl_load=>ty_entity_load
+                             RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS get_action_source IMPORTING " io_tech_request_context     TYPE REF TO /iwbep/if_mgw_req_func_import " auskommentieren wenn TC_GEN_DPC ok!
+                                        " iv_target_entity_set        TYPE        cl_sadl_gw_generic_dpc=>ty_function-target_es_name " auskommentieren wenn TC_GEN_DPC ok!
+                                        iv_function_name            TYPE        cl_sadl_gw_generic_dpc=>ty_function-function_name
+                              RETURNING VALUE(rv_source_entity_set) TYPE        cl_sadl_gw_generic_dpc=>ty_function-target_es_name
+                              RAISING   /iwbep/cx_mgw_med_exception
+                                        cx_sadl_contract_violation
+                                        cx_sadl_static.
+    METHODS _postprocess_action IMPORTING is_function             TYPE cl_sadl_gw_generic_dpc=>ty_batch_function
+                                          ir_action_returning_par TYPE REF TO data
+                                          io_message_container    TYPE REF TO /iwbep/if_message_container
+                                EXPORTING er_gw_action_ret_data   TYPE REF TO data
+                                CHANGING  ct_sadl_messages        TYPE if_sadl_message_handler=>tt_messages
+                                RAISING   /iwbep/cx_mgw_busi_exception
+                                          /iwbep/cx_mgw_tech_exception
+                                          cx_sadl_contract_violation
+                                          cx_sadl_static .
+    METHODS _get_entity IMPORTING io_query_options     TYPE REF TO cl_sadl_gw_query_options
+                                  iv_suppress_messages TYPE abap_bool DEFAULT abap_false
+                        EXPORTING es_data              TYPE data
+                        RAISING   /iwbep/cx_mgw_busi_exception
+                                  /iwbep/cx_mgw_tech_exception
+                                  cx_sadl_contract_violation
+                                  cx_sadl_static.
+    METHODS _get_expanded_entity IMPORTING is_entity_path              TYPE if_sadl_gw_types_int=>ts_gw_entity_path
+                                           it_requested_with_mandatory TYPE stringtab
+                                           io_expand_node              TYPE REF TO /iwbep/if_mgw_odata_expand
+                                           iv_suppress_messages        TYPE abap_bool DEFAULT abap_false
+                                           ir_entity                   TYPE REF TO data
+                                           iv_temporal_context         TYPE if_sadl_query_engine_types=>ty_temporal_context OPTIONAL
+                                 EXPORTING et_expanded_tech_clauses    TYPE string_table
+                                 RAISING   /iwbep/cx_mgw_busi_exception
+                                           /iwbep/cx_mgw_tech_exception
+                                           cx_sadl_contract_violation
+                                           cx_sadl_static.
+    METHODS _does_entityset_support_fetch IMPORTING iv_entityset             TYPE /iwbep/mgw_tech_name
+                                          RETURNING VALUE(rv_supports_fetch) TYPE abap_bool
+                                          RAISING   cx_sadl_contract_violation cx_sadl_static.
+    METHODS _raise_business_exception IMPORTING io_sadl_message_handler TYPE REF TO if_sadl_message_handler
+                                                iv_entitytype           TYPE /iwbep/mgw_tech_name OPTIONAL
+                                                iv_textid               TYPE scx_t100key OPTIONAL
+                                                iv_action_involved      TYPE abap_bool OPTIONAL
+                                      RAISING   /iwbep/cx_mgw_busi_exception
+                                                /iwbep/cx_mgw_tech_exception
+                                                cx_sadl_contract_violation
+                                                cx_sadl_static.
+    METHODS _store_params_for_expand IMPORTING it_parameters TYPE if_sadl_query_engine_types=>tt_entity_parameters.
+    METHODS _init_cache IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entityset
+                        RAISING   /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception.
+    METHODS get_cached_entityset IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entityset
+                                 EXPORTING et_data                 TYPE data
+                                           es_response_context     TYPE /iwbep/if_mgw_appl_srv_runtime=>ty_s_mgw_response_context
+                                 RAISING   /iwbep/cx_mgw_busi_exception
+                                           /iwbep/cx_mgw_tech_exception
+                                           cx_sadl_contract_violation
+                                           cx_sadl_static.
+    METHODS _get_mdp RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider
+                     RAISING   cx_sadl_contract_violation
+                               cx_sadl_static .
+    METHODS _init_dbi IMPORTING io_tech_request TYPE REF TO object
+                      RAISING   /iwbep/cx_mgw_tech_exception.
+    METHODS _fill_extended_result CHANGING cs_response TYPE /iwbep/if_mgw_appl_srv_runtime=>ty_s_mgw_response_context.
+    METHODS _get_entityset IMPORTING io_tech_request_context TYPE REF TO /iwbep/if_mgw_req_entityset
+                                     io_expand_level         TYPE REF TO cl_sadl_gw_expand_level OPTIONAL
+                           EXPORTING et_data                 TYPE data
+                                     es_response_context     TYPE /iwbep/if_mgw_appl_srv_runtime=>ty_s_mgw_response_context
+                                     eo_query_options        TYPE REF TO cl_sadl_gw_query_options
+                           RAISING   /iwbep/cx_mgw_busi_exception
+                                     /iwbep/cx_mgw_tech_exception .
+    METHODS _postprocess_deep_create IMPORTING io_req_context_c TYPE REF TO /iwbep/if_mgw_req_entity_c
+                                               ir_deep_data     TYPE REF TO data
+                                               ir_key           TYPE REF TO data
+                                               io_expand        TYPE /iwbep/if_mgw_appl_types=>ty_s_changeset_request-expand_node
+                                               io_msg_container TYPE /iwbep/if_mgw_appl_types=>ty_s_changeset_request-msg_container
+                                     CHANGING  ct_sadl_messages TYPE if_sadl_message_handler=>tt_messages
+                                     RAISING   /iwbep/cx_mgw_busi_exception
+                                               /iwbep/cx_mgw_tech_exception
+                                               cx_sadl_contract_violation
+                                               cx_sadl_static .
+    METHODS _postprocess_deep_create_msgs IMPORTING ir_deep_data     TYPE REF TO data
+                                                    io_expand        TYPE /iwbep/if_mgw_appl_types=>ty_s_changeset_request-expand_node
+                                                    io_msg_container TYPE /iwbep/if_mgw_appl_types=>ty_s_changeset_request-msg_container
+                                                    iv_entity_set    TYPE string
+                                                    iv_level         TYPE i OPTIONAL
+                                          CHANGING  ct_sadl_messages TYPE if_sadl_message_handler=>tt_messages
+                                          RAISING   /iwbep/cx_mgw_busi_exception
+                                                    /iwbep/cx_mgw_tech_exception
+                                                    cx_sadl_contract_violation
+                                                    cx_sadl_entity_invalid_data
+                                                    cx_sadl_static .
+    METHODS _convert_temporal_at IMPORTING VALUE(iv_temporal_at_odata) TYPE string
+                                 RETURNING VALUE(rv_temporal_at)       TYPE dats.
+ENDCLASS.
+
+
+
+CLASS CL_SADL_GW_GENERIC_DPC IMPLEMENTATION.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~changeset_begin.
+    if_sadl_gw_dpc~begin_changeset( EXPORTING it_operation_info = it_operation_info
+                                    CHANGING cv_defer_mode      = cv_defer_mode ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~changeset_process.
+    if_sadl_gw_dpc~process_changeset( EXPORTING it_changeset_request  = it_changeset_request
+                                      CHANGING  ct_changeset_response = ct_changeset_response ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~create_deep_entity.
+    FIELD-SYMBOLS <s_data> TYPE data.
+    er_deep_entity = _get_deep_data_line_container( iv_entity_set = io_tech_request_context->get_entity_set_name( )
+                                                    io_expand     = io_expand ).
+    ASSIGN er_deep_entity->* TO <s_data>.
+    if_sadl_gw_dpc~create_deep_entity( EXPORTING io_data_provider        = io_data_provider
+                                                 io_expand               = io_expand
+                                                 io_tech_request_context = io_tech_request_context
+                                       IMPORTING es_data                 = <s_data> ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~create_entity.
+    FIELD-SYMBOLS <s_data> TYPE data.
+    er_entity = _get_data_line_container( io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_entity->* TO <s_data>.
+    if_sadl_gw_dpc~create_entity( EXPORTING io_data_provider        = io_data_provider
+                                            io_tech_request_context = io_tech_request_context
+                                  IMPORTING es_data                 = <s_data> ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~delete_entity.
+    if_sadl_gw_dpc~delete_entity( io_tech_request_context ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~execute_action.
+    if_sadl_gw_dpc~execute_action( EXPORTING io_tech_request_context = io_tech_request_context
+                                   IMPORTING er_data                 = er_data ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~get_entity.
+    FIELD-SYMBOLS <s_data> TYPE data.
+    CLEAR: er_entity, es_response_context.
+    er_entity = _get_data_line_container( iv_entity_set = io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_entity->* TO <s_data>.
+    if_sadl_gw_dpc~get_entity( EXPORTING io_tech_request_context = io_tech_request_context
+                               IMPORTING es_data                 = <s_data> ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~get_entityset.
+    FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+    _init_cache( io_tech_request_context ).
+    er_entityset = _get_data_table_container( iv_entity_set = io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_entityset->* TO <t_data>.
+    if_sadl_gw_dpc~get_entityset( EXPORTING io_tech_request_context = io_tech_request_context
+                                  IMPORTING et_data                 = <t_data>
+                                            es_response_context     = es_response_context ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~get_expanded_entity.
+    get_expanded_entity( EXPORTING io_expand_node               = io_expand
+                                   io_tech_request_context      = io_tech_request_context
+                         IMPORTING er_entity                    = er_entity
+                                   et_expanded_tech_clauses     = et_expanded_tech_clauses
+                                   es_response_context          = es_response_context ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~get_expanded_entityset.
+    get_expanded_entityset( EXPORTING io_expand_node               = io_expand
+                                      io_tech_request_context      = io_tech_request_context
+                            IMPORTING er_entityset                 = er_entityset
+                                      et_expanded_tech_clauses     = et_expanded_tech_clauses
+                                      es_response_context          = es_response_context ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~patch_entity.
+    FIELD-SYMBOLS <s_data> TYPE data.
+    er_entity = _get_data_line_container( iv_entity_set = io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_entity->* TO <s_data>.
+    if_sadl_gw_dpc~patch_entity( EXPORTING io_data_provider        = io_data_provider
+                                           io_tech_request_context = io_tech_request_context
+                                 IMPORTING es_data                 = <s_data> ).
+  ENDMETHOD.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~update_entity.
+    FIELD-SYMBOLS <s_data> TYPE data.
+    er_entity = _get_data_line_container( iv_entity_set = io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_entity->* TO <s_data>.
+    if_sadl_gw_dpc~update_entity( EXPORTING io_data_provider        = io_data_provider
+                                            io_tech_request_context = io_tech_request_context
+                                  IMPORTING es_data                 = <s_data> ).
+  ENDMETHOD.
+
+
+  METHOD check_subscription_authority.
+    RETURN.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    super->constructor( ).
+    mo_context = io_context.
+  ENDMETHOD.
+
+
+  METHOD discard_changes.
+    cl_sadl_transact_manager_fctr=>get_transaction_manager( )->discard_changes( ).
+  ENDMETHOD.
+
+
+  METHOD get_action_data_from_result.
+    FIELD-SYMBOLS <t_ret_data> TYPE STANDARD TABLE.
+    DATA lr_det_data TYPE REF TO data.
+    DATA(ls_function) = VALUE ty_function( target_es_name = is_function-target_es_name
+                                           src_es_name    = is_function-target_es_name
+                                           target_et_name = is_function-target_et_name ).
+    IF iv_is_structure = abap_true.
+      get_action_ret_data_from_input( is_function     = ls_function
+                                      ir_data_in      = ir_data_in
+                                      iv_is_structure = abap_true
+                                      ir_return_data  = ir_data_in ).
+    ELSE.
+      ASSIGN ir_data_in->* TO <t_ret_data>.
+      LOOP AT <t_ret_data> REFERENCE INTO lr_det_data.
+        get_action_ret_data_from_input( is_function     = ls_function
+                                        ir_data_in      = lr_det_data
+                                        iv_is_structure = abap_true
+                                        ir_return_data  = lr_det_data ).
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_action_return_data_type.
+    CLEAR: er_data, ev_is_structure.
+    IF mo_model IS BOUND. " missing in Code Generation Unit tests
+      DATA(lv_multiplicity) = mo_model->get_action_by_tech_name( is_function-function_name )->get_return_multiplicity( ).
+      IF lv_multiplicity = /iwbep/if_mgw_med_odata_types=>gcs_cardinality-cardinality_0_1
+      OR lv_multiplicity = /iwbep/if_mgw_med_odata_types=>gcs_cardinality-cardinality_1_1.
+        ev_is_structure = abap_true.
+      ENDIF.
+    ENDIF.
+
+    IF is_function-target_es_name IS INITIAL.
+      IF is_function-target_data_type IS NOT INITIAL.
+        DATA lr_data TYPE REF TO data.
+        CREATE DATA lr_data TYPE (is_function-target_data_type).
+        IF ev_is_structure = abap_true.
+          er_data = lr_data.
+        ELSE.
+          ASSIGN lr_data->* TO FIELD-SYMBOL(<es_data>).
+          CREATE DATA er_data LIKE STANDARD TABLE OF <es_data>.
+        ENDIF.
+      ENDIF.
+    ELSE.
+      IF ev_is_structure = abap_true.
+        er_data = _get_data_line_container( is_function-target_es_name ).
+      ELSE.
+        er_data = _get_data_table_container( is_function-target_es_name ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_action_ret_data_from_input.
+    " re-read action return data from DB (e.g. for late numbering, denormalized text fields, calculated fields, field control)
+    DATA lr_updated_data TYPE REF TO data.
+    ASSIGN ir_data_in->* TO FIELD-SYMBOL(<data_in>).
+    IF <data_in> IS NOT INITIAL AND is_function-src_es_name = is_function-target_es_name.
+      CREATE DATA lr_updated_data LIKE <data_in>.
+      ASSIGN lr_updated_data->* TO FIELD-SYMBOL(<s_updated_data>).
+      DATA(lt_key_values) = _get_key_values( iv_entity_set = CONV #( is_function-target_es_name )
+                                             is_data_in    = <data_in> ).
+      _read_modified_entity( EXPORTING it_key_values  = lt_key_values
+                                       iv_entity_set  = CONV #( is_function-target_es_name )
+                                       iv_entity_type = is_function-target_et_name
+                             IMPORTING es_data        = <s_updated_data> ).
+
+      IF iv_is_structure = abap_true.
+        ASSIGN ir_return_data->* TO FIELD-SYMBOL(<s_return_data>).
+        <s_return_data> = <s_updated_data>.
+      ELSE.
+        FIELD-SYMBOLS <t_return_table> TYPE INDEX TABLE.
+        ASSIGN ir_return_data->* TO <t_return_table>.
+        APPEND <s_updated_data> TO <t_return_table>.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_action_source.
+    LOOP AT mt_entity_set_type_map INTO DATA(ls_map).
+      TRY.
+          mo_sadl_api->get_entity( CONV #( ls_map-set ) )->get_action( CONV #( iv_function_name ) ). " only one action with this name can exist
+        CATCH cx_sadl_entity cx_sadl_contract_violation cx_sadl_static.
+          CONTINUE.
+      ENDTRY.
+      rv_source_entity_set = ls_map-set.
+      RETURN.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD get_cached_entityset.
+    CLEAR: et_data, es_response_context.
+    DATA(lo_query_options_cache) = cl_sadl_gw_query_options=>create( mo_cache ).
+    lo_query_options_cache->set_placeholder_values( mt_placeholder_values ).
+    IF mo_cache->is_exposure( ) = abap_false.
+      cl_sadl_run_time_util=>start( cl_sadl_run_time_util=>cs_component-app ).
+      if_sadl_gw_query_control~set_query_options( iv_entity_set = io_tech_request_context->get_entity_set_name( ) io_query_options = lo_query_options_cache ).
+      cl_sadl_run_time_util=>stop( cl_sadl_run_time_util=>cs_component-app ).
+    ENDIF.
+    TRY.
+        lo_query_options_cache->if_sadl_gw_query_options~get_filter( IMPORTING et_filter = DATA(lt_filter) ).
+        cl_sadl_gw_dpc_helper=>get_grouped_ranges( EXPORTING it_ranges = lt_filter  IMPORTING et_grpd_ranges = DATA(lt_grpd_ranges) ).
+        mo_cache->set_filter_range( lt_grpd_ranges ).
+      CATCH cx_sadl_gw_filter_condition ##NO_HANDLER.
+    ENDTRY.
+
+    DATA(lo_sql) = cl_sadl_sql_statement=>create( abap_true ).
+    lo_sql->set_cache_handler( mo_cache ).
+    lo_sql->set_placeholder_values( mt_placeholder_values ).
+
+    "get data if required
+    READ TABLE mt_placeholder_values WITH KEY name = if_sadl_sql_cache_handler=>co_limit ASSIGNING FIELD-SYMBOL(<s_top>).
+    IF sy-subrc = 0.
+      DATA(lv_top) = <s_top>-value.
+    ENDIF.
+    IF lv_top IS INITIAL OR lv_top <> 0.
+      lo_sql->execute_client_specified( IMPORTING et_data = et_data ).
+      FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+      ASSIGN et_data TO <t_data>.
+      DATA(lv_data_lines) = |{ lines( <t_data> ) }|.
+    ENDIF.
+
+    "second call for count
+    READ TABLE mt_placeholder_values WITH KEY name = if_sadl_sql_cache_handler=>co_inline_count ASSIGNING FIELD-SYMBOL(<s_inline_count>).
+    IF sy-subrc = 0 AND <s_inline_count>-value = if_sadl_sql_cache_handler=>co_inline_count_req.
+      es_response_context-inlinecount = lv_data_lines.
+      IF lv_data_lines IS INITIAL OR lv_data_lines = lv_top.
+        IF mo_cache->get_count_exactly_one( ) = abap_true.
+          DATA(lv_count) = 1.
+        ELSEIF mo_cache->get_count_data_lines( ) = abap_true.
+          DELETE mt_placeholder_values WHERE name = if_sadl_sql_cache_handler=>co_limit.
+          DELETE mt_placeholder_values WHERE name = if_sadl_sql_cache_handler=>co_offset.
+          lo_sql->set_placeholder_values( mt_placeholder_values ).
+*          FIELD-SYMBOLS <t_count_data> TYPE table.
+*          DATA lr_data TYPE REF TO data.
+*          CREATE DATA lr_data LIKE et_data.
+*          ASSIGN lr_data->* TO <t_count_data>.
+*          lo_sql->execute_client_specified( IMPORTING et_data = <t_count_data> ).
+*          lv_count = lines( <t_count_data> ).
+          lo_sql->execute_client_specified( EXPORTING iv_count_only = abap_true " iv_use_ctes = abap_true
+                                            IMPORTING ev_count = lv_count ).
+        ELSE.
+          lo_sql->execute_client_specified( EXPORTING iv_count_only = abap_true  IMPORTING ev_count = lv_count ).
+        ENDIF.
+        es_response_context-inlinecount = lv_count.
+      ENDIF.
+    ENDIF.
+
+    "analytical_id
+    IF <t_data> IS ASSIGNED.
+      mo_cache->get_dimension_index( IMPORTING es_dimension_index = DATA(ls_index) ).
+      IF ls_index-generated_id_index IS NOT INITIAL.
+        DATA(lv_filter) = cl_sadl_gw_dpc_helper=>get_filter_string_for_anlytics( lo_query_options_cache ).
+        IF lv_filter IS NOT INITIAL AND ls_index-dimension_index IS NOT INITIAL.
+          lv_filter = '._' && lv_filter.
+        ENDIF.
+        LOOP AT <t_data> ASSIGNING FIELD-SYMBOL(<s_data>).
+          ASSIGN COMPONENT ls_index-generated_id_index OF STRUCTURE <s_data> TO FIELD-SYMBOL(<v_id>).
+          <v_id> = cl_sadl_gw_util=>encode_dimensions( EXPORTING it_req_dimension_index = ls_index-dimension_index  is_data = <s_data> ) && lv_filter.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_extension_api.
+    DATA lv_service_version   TYPE /iwbep/med_grp_version.
+    DATA lv_service_name      TYPE /iwbep/med_grp_technical_name.
+
+    IF io_gw_context IS BOUND.
+      io_gw_context->get_parameter( EXPORTING iv_name  = /iwbep/if_mgw_context=>gc_param_isn
+                                    IMPORTING ev_value = lv_service_name ).
+      io_gw_context->get_parameter( EXPORTING iv_name  = /iwbep/if_mgw_context=>gc_param_isv
+                                    IMPORTING ev_value = lv_service_version ).
+      IF lv_service_name IS NOT INITIAL.
+        DATA(lo_metadata_provider) = /iwbep/cl_mgw_med_provider=>get_med_provider( ).
+        lo_metadata_provider->get_service_model_key(  EXPORTING iv_internal_service_name    = lv_service_name
+                                                                iv_internal_service_version = lv_service_version
+                                                      IMPORTING ev_technical_model_name     = DATA(lv_model_name)
+                                                                ev_technical_model_version  = DATA(lv_model_version) ).
+        TRY.
+            ro_extension_api = cl_cfd_odata_factory=>get_sadl_integration_instance( iv_model_name        = lv_model_name
+                                                                                    iv_model_version     = lv_model_version ).
+          CATCH cx_cfd_odata_runtime ##NO_HANDLER.
+            " extension FW not used in current OData service/model
+        ENDTRY.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_model.
+    IF mo_context IS BOUND.  " (not bound in AUTs)
+*      ro_model = CAST /iwbep/if_mgw_dp_int_facade( /iwbep/if_mgw_conv_srv_runtime~get_dp_facade( ) )->get_model( ).
+      DATA(lo_int_facade) = CAST /iwbep/if_mgw_dp_int_facade( /iwbep/if_mgw_conv_srv_runtime~get_dp_facade( ) ).
+      ro_model = lo_int_facade->get_model( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_mp.  " one of get_sadl_metadata or get_mp must be redefined by subclass, otherwise there is an infinite loop!
+    get_sadl_metadata( IMPORTING ev_uuid      = DATA(lv_uuid)
+                                 ev_timestamp = DATA(lv_timestamp) ).
+    get_sadl_xml( IMPORTING ev_sadl_xml = DATA(lv_xml) ).
+    ro_mp = cl_sadl_gw_mp_factory=>create_for_xml(
+              iv_uuid                 = lv_uuid
+              iv_timestamp            = lv_timestamp
+              iv_sadl_xml             = lv_xml
+              io_extension_control    = me
+              io_extension_fw_control = mo_extension_api
+              it_entity_set_type_map  = mt_entity_set_type_map ).
+  ENDMETHOD.
+
+
+  METHOD get_return_data_ref.
+    DATA lv_entity_id TYPE string.
+    IF is_act-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+      DATA(lv_return_sadl_entity) = substring_after( val = is_act-return_entity_id  sub = '~' ).
+      er_ret_data = _get_data_table_container( CONV #( lv_return_sadl_entity ) ).
+    ELSEIF is_act-return_entity_type IS NOT INITIAL.
+      DATA(lo_provider) = cl_sadl_entity_trans_factory=>get_transactional_provider( is_act-return_entity_type ).
+      DATA(lo_runtime) = lo_provider->get_transactional_runtime( iv_id = CONV #( is_act-return_entity_id )  iv_type = is_act-return_entity_type ).
+      er_ret_data = lo_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+    ELSEIF is_act-return_table_type IS NOT INITIAL.
+      CREATE DATA er_ret_data TYPE (is_act-return_table_type).
+    ELSE.
+      CREATE DATA er_ret_data TYPE STANDARD TABLE OF char1.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_sadl_api.
+    _init( ).
+    ro_sadl_api = mo_sadl_api.
+  ENDMETHOD.
+
+
+  METHOD get_sadl_metadata. " one of get_sadl_metadata and get_mp must be redefined by subclass, otherwise there is an infinite loop!
+    DATA(lo_mp) = get_mp( ).
+    ev_timestamp = lo_mp->if_bsa_sadl_mp~get_timestamp( ).
+    ev_uuid      = lo_mp->if_bsa_sadl_mp~get_uuid( ).
+  ENDMETHOD.
+
+
+  METHOD get_sadl_xml.
+    DATA(lo_mp) = get_mp( ).
+    TRY.
+        DATA(lo_mp_xml) = CAST if_bsa_sadl_mp_xml( lo_mp ).
+        ev_sadl_xml = lo_mp_xml->get_sadl_xml( ).
+      CATCH cx_sy_move_cast_error.
+        ev_sadl_xml = cl_bsa_sadl_m2m_transformer=>get_instance( )->abap_structure_to_xml( lo_mp->if_bsa_sadl_mp~get_sadl_definition( ) ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~begin_changeset.
+*    CLEAR ms_changeset_processing.
+*    ms_changeset_processing-active = abap_true.
+    TRY.
+        _init( ).
+        LOOP AT it_operation_info INTO DATA(ls_operation).
+          CASE ls_operation-operation_type.
+            WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-create_entity
+            OR /iwbep/if_mgw_appl_types=>gcs_operation_type-update_entity
+            OR /iwbep/if_mgw_appl_types=>gcs_operation_type-patch_entity
+            OR /iwbep/if_mgw_appl_types=>gcs_operation_type-delete_entity
+            OR /iwbep/if_mgw_appl_types=>gcs_operation_type-create_deep_entity.
+              IF _get_mdp( )->entity_supports_crud( ls_operation-entity_set ) = abap_false.
+                RETURN.
+              ENDIF.
+            WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-execute_action.
+              DATA(lv_action_source) = get_action_source( iv_function_name = CONV #( ls_operation-action_name ) ).
+              IF lv_action_source IS INITIAL.
+                RETURN.
+              ENDIF.
+            WHEN OTHERS.
+              RETURN.
+          ENDCASE.
+        ENDLOOP.
+      CATCH cx_sadl_static cx_sadl_contract_violation /iwbep/cx_mgw_med_exception.
+        RETURN.
+    ENDTRY.
+    cv_defer_mode = abap_true.
+*    ms_changeset_processing-active = abap_false.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~create_deep_entity.
+    DATA lr_data TYPE REF TO data.
+
+    CLEAR es_data.
+    TRY.
+        _init( ).
+        CREATE DATA lr_data LIKE es_data.
+        ASSIGN lr_data->* TO FIELD-SYMBOL(<s_data>).
+        io_data_provider->read_entry_data( IMPORTING es_data = <s_data> ).
+
+        _get_creation_source_info( EXPORTING io_tech_request_context = io_tech_request_context
+                                   IMPORTING ev_source_entity_set    = DATA(lv_source_entity_set)
+                                             ev_navigation_property  = DATA(lv_navigation_property)
+                                             er_source_key           = DATA(lr_source_data_ref) ).
+
+        IF lv_navigation_property IS INITIAL.
+          _create_deep( EXPORTING iv_entity_id = io_tech_request_context->get_entity_set_name( )
+                                  io_expand    = io_expand
+                        CHANGING  cs_data      = <s_data> ).
+        ELSE.
+          ASSIGN lr_source_data_ref->* TO FIELD-SYMBOL(<s_source_key_values>).
+          _create_deep( EXPORTING iv_entity_id         = io_tech_request_context->get_entity_set_name( )
+                                  iv_source_entity_id  = lv_source_entity_set
+                                  is_source_key_values = <s_source_key_values>
+                                  iv_association       = lv_navigation_property
+                                  io_expand            = io_expand
+                        CHANGING  cs_data              = <s_data> ).
+        ENDIF.
+        save( ).
+        _read_data_after_deep_create( EXPORTING io_tech_request_context = io_tech_request_context
+                                                io_expand               = io_expand
+                                      CHANGING  cs_data                 = <s_data> ).
+        es_data = <s_data>.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~create_entity.
+    CLEAR es_data.
+    TRY.
+        _init( ).
+        _prepare_create( EXPORTING io_data_provider        = io_data_provider
+                                   io_tech_request_context = io_tech_request_context
+                         IMPORTING er_sadl_data            = DATA(lr_data_in)
+                                   ev_source_entity_set    = DATA(lv_source_entity_set)
+                                   ev_navigation_property  = DATA(lv_navigation_property)
+                                   er_source_key           = DATA(lr_source_data_ref) ).
+        DATA(lv_entity_set) = CONV string( io_tech_request_context->get_entity_set_name( ) ).
+        ASSIGN lr_data_in->* TO FIELD-SYMBOL(<s_data_in>).
+        IF lv_navigation_property IS INITIAL.
+          DATA(lo_runtime) = _get_transact_runtime( lv_entity_set ).
+          lo_runtime->create_single( IMPORTING ev_failed = DATA(lv_failed)
+                                     CHANGING  cs_entity_data = <s_data_in> ).
+        ELSE.
+          ASSIGN lr_source_data_ref->* TO FIELD-SYMBOL(<s_source_key_values>).
+          lo_runtime = _get_transact_runtime( lv_source_entity_set ).
+          lo_runtime->create_by_association_single( EXPORTING iv_association_name   = lv_navigation_property
+                                                              is_source_key_values  = <s_source_key_values>
+                                                    IMPORTING ev_source_failed      = DATA(lv_source_failed)
+                                                              ev_target_failed      = lv_failed
+                                                    CHANGING  cs_target_entity_data = <s_data_in> ).
+        ENDIF.
+        IF lv_source_failed = abap_true.
+          discard_changes( ).
+          _raise_business_exception( iv_textid               = /iwbep/cx_mgw_busi_exception=>resource_not_found
+                                     iv_entitytype           = io_tech_request_context->get_source_entity_type_name( )
+                                     io_sadl_message_handler = lo_runtime->get_message_handler( ) ).
+        ELSEIF lv_failed = abap_true.
+          discard_changes( ).
+          _raise_business_exception( iv_entitytype           = io_tech_request_context->get_entity_type_name( )
+                                     io_sadl_message_handler = lo_runtime->get_message_handler( ) ).
+        ENDIF.
+        save( ).
+        DATA(lt_key_values) = _get_key_values( iv_entity_set = lv_entity_set
+                                               is_data_in    = <s_data_in> ).
+        _add_messages_to_header( io_message_handler = lo_runtime->get_message_handler( )
+                                 it_key_values      = lt_key_values
+                                 iv_entity_set      = lv_entity_set ).
+        _read_modified_entity( EXPORTING it_key_values  = lt_key_values
+                                         iv_entity_set  = lv_entity_set
+                                         iv_entity_type = io_tech_request_context->get_entity_type_name( )
+                               IMPORTING es_data = es_data ).
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~delete_entity.
+    TRY.
+        _init( ).
+        _prepare_delete( EXPORTING io_tech_request_context = io_tech_request_context
+                         IMPORTING er_sadl_key             = DATA(lr_data_in) ).
+        ASSIGN lr_data_in->* TO FIELD-SYMBOL(<s_data_in>).
+        DATA(lv_entity_set) = CONV string( io_tech_request_context->get_entity_set_name( ) ).
+        DATA(lo_runtime) = _get_transact_runtime( lv_entity_set ).
+        lo_runtime->delete_single( EXPORTING is_key_values = <s_data_in>
+                                   IMPORTING ev_failed     = DATA(lv_failed) ).
+        IF lv_failed = abap_false.
+          save( ).
+          DATA(lt_key_values) = _get_key_values( iv_entity_set = lv_entity_set
+                                                 is_data_in    = <s_data_in> ).
+          _add_messages_to_header( io_message_handler = lo_runtime->get_message_handler( )
+                                   it_key_values      = lt_key_values
+                                   iv_entity_set      = lv_entity_set ).
+        ELSE.
+          discard_changes( ).
+          _raise_business_exception( iv_entitytype           = io_tech_request_context->get_entity_type_name( )
+                                     io_sadl_message_handler = lo_runtime->get_message_handler( ) ).
+        ENDIF.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~end_changeset.
+    RETURN.
+*    IF ms_changeset_processing-active = abap_true.
+*      IF ms_changeset_processing-fail = abap_true.
+*        discard_changes( ).
+*      ELSE.
+*        save( ).
+*      ENDIF.
+*    ENDIF.
+*    CLEAR ms_changeset_processing.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~execute_action.
+    FIELD-SYMBOLS <t_ret_data> TYPE STANDARD TABLE.
+
+    CLEAR er_data.
+    TRY.
+        _init( ).
+        _prepare_execute_action( EXPORTING io_tech_request_context = io_tech_request_context
+                                 IMPORTING es_function             = DATA(ls_function)
+                                           er_source_es_key_data   = DATA(lr_source_key_data)
+                                           er_action_param         = DATA(lr_action_param)
+                                           er_ret_data             = DATA(lr_ret_data) ).
+        ASSIGN lr_ret_data->* TO <t_ret_data>.
+        _execute_action( EXPORTING is_function     = ls_function
+                                   ir_data_in      = lr_source_key_data
+                                   ir_action_param = lr_action_param
+                         IMPORTING ev_failed       = DATA(lv_failed)
+                                   et_ret_data     = <t_ret_data>
+                                   eo_msg_handler  = DATA(lo_msg_handler) ).
+
+        IF lv_failed = abap_false.
+          save( ). " persist data before retrieving data
+          lo_msg_handler->get_messages( IMPORTING et_messages = DATA(lt_sadl_messages) ).
+          lo_msg_handler->clear( ).
+          IF mo_context IS BOUND. " in Unit tests only bound if /iwbep/if_mgw_conv_srv_runtime~init_dp_for_unit_test was called (not possible in Code Generation test
+            DATA(lo_gw_msg_container) = /iwbep/if_mgw_conv_srv_runtime~get_message_container( ).
+          ENDIF.
+          _postprocess_action( EXPORTING is_function             = VALUE #( metadata = ls_function  source_data = lr_source_key_data )
+                                         ir_action_returning_par = REF #( <t_ret_data> )
+                                         io_message_container    = lo_gw_msg_container
+                               IMPORTING er_gw_action_ret_data   = er_data
+                               CHANGING  ct_sadl_messages        = lt_sadl_messages ).
+        ELSE.
+          discard_changes( ).
+          DATA(lv_entity_type) = CAST /iwbep/if_mgw_req_entityset( io_tech_request_context )->get_source_entity_type_name( ).
+          IF lv_entity_type IS INITIAL.
+            lv_entity_type = ls_function-function_name.
+          ENDIF.
+          _raise_business_exception( io_sadl_message_handler = lo_msg_handler
+                                     iv_entitytype           = lv_entity_type
+                                     iv_action_involved      = abap_true ).
+        ENDIF.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~fill_analytical_id.
+    TRY.
+        _init( ).
+*        DATA(lo_query_options) = NEW cl_sadl_gw_query_options( ).
+        DATA(lv_entity_type_name) = io_tech_request_context->get_entity_type_name( ).
+        DATA(lv_entity_name) = io_tech_request_context->get_entity_set_name( ).
+        DATA(lr_entity_load) = mo_mdp->get_entity_load( CONV #( lv_entity_name ) ).
+        DATA(lo_query_options) = cl_sadl_gw_dpc_helper=>get_default_query_options( lr_entity_load ).
+        cl_sadl_gw_dpc_helper=>set_analytical_metadata( EXPORTING iv_entity_type   = lv_entity_type_name
+                                                                  io_query_options = lo_query_options
+                                                                  io_model         = mo_model ).
+        IF lo_query_options->is_analytical_type( ) <> abap_true.
+          RAISE EXCEPTION TYPE cx_sadl_contract_violation.
+        ENDIF.
+        DATA(lo_runtime) = CAST cl_sadl_gw_odata_runtime( mo_common_runtime ).
+
+        lo_query_options->get_dimensions( IMPORTING et_dimension_properties = DATA(lt_dimension_properties) ).
+        lo_query_options->get_business_key_for_analytics( IMPORTING et_elements = DATA(lt_elements) ).
+        IF lt_elements IS INITIAL.
+          LOOP AT lt_dimension_properties ASSIGNING FIELD-SYMBOL(<s_dimension>) WHERE is_dimension = abap_true.
+            APPEND <s_dimension>-dimension TO lt_elements.
+          ENDLOOP.
+        ENDIF.
+        lo_runtime->_calculate_req_dimension_index( EXPORTING is_data = cs_data  it_elements = lt_elements  it_dimension_properties = lt_dimension_properties
+                                                    IMPORTING et_req_dimension_index = DATA(lt_req_dimension_index) ev_generated_id_index = DATA(lv_id_index) ).
+        lo_runtime->_generate_analytical_id(  EXPORTING iv_generated_id_index  = lv_id_index
+                                                        it_req_dimension_index = lt_req_dimension_index
+                                              CHANGING  cs_data                = cs_data ).
+        ASSIGN COMPONENT iv_count_field_name OF STRUCTURE cs_data TO FIELD-SYMBOL(<v_count_field>).
+        IF sy-subrc = 0.
+          <v_count_field> = 1.
+        ENDIF.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~get_entity.
+    CLEAR es_data.
+
+    TRY.
+        _init( ).
+        _get_entity_request_detail( EXPORTING io_tech_request_context     = io_tech_request_context
+                                    IMPORTING es_entity_path              = DATA(ls_entity_path)
+                                              et_requested_with_mandatory = DATA(lt_requested_with_mandatory)
+                                              ev_temporal_context         = DATA(lv_temporal_context) ).
+        DATA(lo_query_options) = _get_query_options_entity( is_entity_path              = ls_entity_path
+                                                            it_requested_with_mandatory = lt_requested_with_mandatory
+                                                            iv_temporal_context         = lv_temporal_context ).
+        _get_entity( EXPORTING io_query_options = lo_query_options
+                     IMPORTING es_data          = es_data ).
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~get_entityset.
+    _get_entityset( EXPORTING io_tech_request_context = io_tech_request_context
+                    IMPORTING et_data                 = et_data
+                              es_response_context     = es_response_context ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~get_expanded_entity.
+    CLEAR es_response_context.
+    CLEAR et_expanded_tech_clauses.
+    ev_entity_mapped_by_sadl = abap_true. " be optimistic
+
+    TRY.
+        _init( ).
+        _get_entity_request_detail( EXPORTING io_tech_request_context     = io_tech_request_context
+                                    IMPORTING es_entity_path              = DATA(ls_entity_path)
+                                              et_requested_with_mandatory = DATA(lt_requested_with_mandatry)
+                                              ev_temporal_context         = DATA(lv_temporal_context) ).
+        ev_entity_mapped_by_sadl = _does_entityset_support_fetch( CONV #( ls_entity_path-set_name ) ).
+        IF ev_entity_mapped_by_sadl <> abap_true.
+          RETURN.
+        ENDIF.
+        ms_entity_params_for_expand-entity_alias = ls_entity_path-set_name. " to set parameters for CDS views with parameters
+        DATA(lr_load) = _get_entity_load( ls_entity_path-set_name ).
+        IF lr_load->is_exposure = abap_true.
+          DATA(lr_entity) = _get_deep_data_line_container( iv_entity_set = CONV #( ls_entity_path-set_name )
+                                                           io_expand     = io_expand_node ).
+        ELSE.  " MDS
+          lr_entity = er_entity. " use structure provided by GW/app
+        ENDIF.
+        _get_expanded_entity( EXPORTING is_entity_path              = ls_entity_path
+                                        it_requested_with_mandatory = lt_requested_with_mandatry
+                                        io_expand_node              = io_expand_node
+                                        ir_entity                   = lr_entity
+                                        iv_temporal_context         = lv_temporal_context
+                              IMPORTING et_expanded_tech_clauses    = et_expanded_tech_clauses ).
+        IF er_entity IS INITIAL.
+          er_entity = lr_entity.
+        ELSEIF lr_entity <> er_entity.
+          ASSIGN lr_entity->* TO FIELD-SYMBOL(<s_fetched_data>).
+          ASSIGN er_entity->* TO FIELD-SYMBOL(<s_entity>).
+          MOVE-CORRESPONDING <s_fetched_data> TO <s_entity> EXPANDING NESTED TABLES.
+        ENDIF.
+        es_response_context-is_sap_data_exists_calculated = abap_true.
+        CLEAR ms_entity_params_for_expand.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~get_expanded_entityset.
+    FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+    FIELD-SYMBOLS <t_entityset> TYPE table.
+
+    CLEAR es_response_context.
+    CLEAR et_expanded_tech_clauses.
+    ev_entity_mapped_by_sadl = abap_true. " be optimistic
+
+    TRY.
+        _init( ).
+        DATA(lv_source_set_name) = io_expand_node->get_tech_entity_set( ).
+        ev_entity_mapped_by_sadl = _does_entityset_support_fetch( lv_source_set_name ).
+        IF ev_entity_mapped_by_sadl <> abap_true.
+          RETURN.
+        ENDIF.
+        ms_entity_params_for_expand-entity_alias = lv_source_set_name. " to set parameters for CDS views with parameters
+
+        DATA(lr_source_load) = _get_entity_load( CONV #( lv_source_set_name ) ).
+        DATA(lo_1st_expand_level) = cl_sadl_gw_expand_level=>get_next_v2(  io_source_node = io_expand_node
+                                                                           io_dpc         = NEW lcl_dpc_for_expand( me )
+                                                                           ir_source_load = lr_source_load
+                                                                           io_mdp         = mo_mdp ).
+        IF lr_source_load->is_exposure = abap_true.
+          DATA(lr_entityset) = _get_deep_data_table_container( iv_entity_set = lv_source_set_name
+                                                               io_expand     = io_expand_node ).
+        ELSE.  " MDS
+          lr_entityset = er_entityset. " use structure provided by GW/app
+        ENDIF.
+        ASSIGN lr_entityset->* TO <t_data>.
+        " read root entity data
+        _get_entityset( EXPORTING io_tech_request_context = io_tech_request_context
+                                  io_expand_level         = lo_1st_expand_level
+                        IMPORTING et_data                 = <t_data>
+                                  es_response_context     = es_response_context
+                                  eo_query_options        = DATA(lo_query_options) ).
+        lo_query_options->get_requested( IMPORTING es_requested = DATA(ls_requested) ).
+        CLEAR CAST cl_sadl_gw_odata_runtime( mo_common_runtime )->mv_analytical_id. "avoid id repetition
+
+        " expand
+        IF <t_data> IS NOT INITIAL.
+          IF lo_1st_expand_level IS BOUND.
+            lo_1st_expand_level->read_data( it_source_data            = <t_data>
+                                            is_entity_params          = ms_entity_params_for_expand
+                                            it_requested_src_elements = ls_requested-elements
+                                            iv_temporal_context       = lo_query_options->get_temporal_context( ) ).
+            lo_1st_expand_level->merge_data_into_result_table( CHANGING ct_result = <t_data> ).
+            lo_1st_expand_level->get_expanded_clauses( IMPORTING et_expanded_clauses = et_expanded_tech_clauses ).
+          ENDIF.
+          IF er_entityset IS INITIAL.
+            er_entityset = lr_entityset.
+          ELSEIF er_entityset <> lr_entityset.
+            ASSIGN er_entityset->* TO <t_entityset>.
+            MOVE-CORRESPONDING <t_data> TO <t_entityset> EXPANDING NESTED TABLES.
+          ENDIF.
+        ENDIF.
+        es_response_context-is_sap_data_exists_calculated = abap_true.
+
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+
+    CLEAR ms_entity_params_for_expand.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~get_keys_from_analytical_id.
+    TRY.
+        _init( ).
+*        DATA(lo_query_options) = NEW cl_sadl_gw_query_options( ).
+*        cl_sadl_gw_dpc_helper=>get_keys( EXPORTING io_tech_request_context = io_tech_request_context
+*                                                   iv_request_type         = 'entity'
+*                                                   io_sadl_api             = mo_sadl_api
+*                                         IMPORTING ev_entity_type          = DATA(lv_entity_type_name)
+*                                                   et_keys                 = et_keys ).
+        " Get entity key and type from:
+        " - source entity, if navigation is used
+        " - entity, without navigation
+        cl_sadl_gw_key_converter=>get_srckey_from_entity_request( EXPORTING io_request   = CAST #( io_tech_request_context )
+                                                                  IMPORTING et_keys      = et_keys ).
+        DATA(lv_entity_type_name) = CAST /iwbep/if_mgw_req_entity( io_tech_request_context )->get_source_entity_type_name( ).
+        DATA(lv_entity_name) = CAST /iwbep/if_mgw_req_entity( io_tech_request_context )->get_source_entity_set_name( ).
+        IF et_keys IS INITIAL. " no navigation
+          lv_entity_type_name = CAST /iwbep/if_mgw_req_entity( io_tech_request_context )->get_entity_type_name( ).
+          lv_entity_name = CAST /iwbep/if_mgw_req_entity( io_tech_request_context )->get_entity_set_name( ).
+          cl_sadl_gw_key_converter=>get_key_from_entity_request( EXPORTING io_request  = CAST #( io_tech_request_context )
+                                                                           io_sadl_api = mo_sadl_api
+                                                                 IMPORTING et_keys     = et_keys ).
+        ENDIF.
+
+        DATA(lr_entity_load) = mo_mdp->get_entity_load( CONV #( lv_entity_name ) ).
+        DATA(lo_query_options) = cl_sadl_gw_dpc_helper=>get_default_query_options( lr_entity_load ).
+        cl_sadl_gw_dpc_helper=>set_analytical_metadata( EXPORTING iv_entity_type   = lv_entity_type_name
+                                                                  io_query_options = lo_query_options
+                                                                  io_model         = mo_model ).
+        CAST cl_sadl_gw_odata_runtime( mo_common_runtime )->_evaluate_analytical_id( EXPORTING io_query_options = lo_query_options  io_mdp = mo_mdp
+                                                                                               iv_entity_set = CONV #( lv_entity_name )
+                                                                                     CHANGING  ct_keys = et_keys ).
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~patch_entity.
+    " GW never calls PATCH but UPDATE instead -> let's do the same here. Our UPDATE implementation handles PATCH as well
+    me->if_sadl_gw_dpc~update_entity( EXPORTING io_data_provider        = io_data_provider
+                                                io_tech_request_context = io_tech_request_context
+                                      IMPORTING es_data                 = es_data ).
+
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~process_changeset.
+    TRY.
+        preprocess_batch( EXPORTING it_changeset_request      = it_changeset_request
+                          IMPORTING et_update                 = DATA(lt_update)
+                                    et_updated_instances_keys = DATA(lt_updated_instances_keys)
+                                    et_create                 = DATA(lt_create)
+                                    et_create_keys            = DATA(lt_create_keys)
+                                    et_deep_create_keys       = DATA(lt_deep_create_keys)
+                                    et_deep_create_data_container = DATA(lt_deep_create_data_container)
+                                    et_delete                 = DATA(lt_delete)
+                                    et_action                 = DATA(lt_action)
+                                    et_functions              = DATA(lt_functions) ).
+
+        DATA(lo_batch) = NEW cl_sadl_batch_runtime( mo_sadl_api ).
+        lo_batch->if_sadl_batch~modify( EXPORTING it_update = lt_update
+                                                  it_delete = lt_delete
+                                                  it_create = lt_create
+                                                  it_action = lt_action
+                                        IMPORTING ev_failed = DATA(lv_failed) ).
+
+        IF lv_failed = abap_true.
+          _raise_business_exception( io_sadl_message_handler = lo_batch->get_message_handler( )
+                                     iv_action_involved      = xsdbool( lines( lt_action ) > 0 ) ).
+        ELSE.
+          postprocess_batch( EXPORTING it_changeset_request      = it_changeset_request
+                                       it_update                 = lt_update
+                                       it_updated_instances_keys = lt_updated_instances_keys
+                                       it_create_keys            = lt_create_keys
+                                       it_deep_create_keys       = lt_deep_create_keys
+                                       it_deep_create_data_container = lt_deep_create_data_container
+                                       it_delete                 = lt_delete
+                                       it_action                 = lt_action
+                                       it_functions              = lt_functions
+                                       io_sadl_message_handler   = lo_batch->get_message_handler( )
+                             CHANGING  ct_changeset_response     = ct_changeset_response ).
+        ENDIF.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_dpc~update_entity.
+    CLEAR es_data.
+
+    TRY.
+        _init( ).
+        _prepare_update( EXPORTING io_data_provider        = io_data_provider
+                                   io_tech_request_context = io_tech_request_context
+                         IMPORTING et_elements             = DATA(lt_elements)
+                                   et_key_values           = DATA(lt_key_values)
+                                   er_sadl_data            = DATA(lr_data) ).
+        ASSIGN lr_data->* TO FIELD-SYMBOL(<s_data_in>).
+
+        IF lt_elements IS NOT INITIAL.
+          DATA(lo_runtime) = _get_transact_runtime( CONV #( io_tech_request_context->get_entity_set_name( ) ) ).
+          lo_runtime->update_single( EXPORTING it_updated_elements = lt_elements
+                                               is_entity_data      = <s_data_in>
+                                     IMPORTING ev_failed           = DATA(lv_failed) ).
+          IF lv_failed = abap_false.
+            save( ).
+            _add_messages_to_header( io_message_handler = lo_runtime->get_message_handler( )
+                                     it_key_values      = lt_key_values
+                                     iv_entity_set      = CONV #( io_tech_request_context->get_entity_set_name( ) ) ).
+          ELSE.
+            discard_changes( ).
+            _raise_business_exception( iv_entitytype           = io_tech_request_context->get_entity_type_name( )
+                                       io_sadl_message_handler = lo_runtime->get_message_handler( ) ).
+          ENDIF.
+        ENDIF.
+        _read_modified_entity( EXPORTING it_key_values  = lt_key_values
+                                         iv_entity_set  = io_tech_request_context->get_entity_set_name( )
+                                         iv_entity_type = io_tech_request_context->get_entity_type_name( )
+                               IMPORTING es_data        = es_data ).
+
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_extension_control~set_extension_mapping ##NEEDED.
+    " intended to be overwritten
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_query_control~set_query_options ##NEEDED.
+    " intended to be overwritten
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_sadl_binding~get_sadl_binding.
+    " This method is called by Extension FW to know, how to extend OData model.
+    " We don't have OData model in this moment yet.
+    CLEAR es_sadl_binding.
+    _init_mp( ).
+    CAST if_sadl_gw_sadl_binding( mo_mp )->get_sadl_binding( IMPORTING es_sadl_binding = es_sadl_binding ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_gw_transact_control~set_transactional_options ##NEEDED.
+    " intended to be overwritten
+  ENDMETHOD.
+
+
+  METHOD map_action_return_data_to_sadl.
+    FIELD-SYMBOLS <t_data> TYPE ANY TABLE.
+    FIELD-SYMBOLS <s_data> TYPE data.
+
+    DATA(lo_sadl_entity) = mo_sadl_api->get_entity( CONV #( iv_source_es_name ) ).
+    DATA(ls_action) = lo_sadl_entity->get_action( CONV #( iv_function_name ) ).
+    IF ls_action-return_entity_type = cl_sadl_entity_factory=>co_type-sadl OR iv_target_es_name IS INITIAL.
+      ASSIGN ir_data->* TO <s_data>.
+      IF iv_is_structure = abap_true.
+        LOOP AT it_ret_data INTO <s_data>.
+          EXIT.
+        ENDLOOP.
+      ELSE.
+        <s_data> = it_ret_data.
+      ENDIF.
+    ELSE.
+      DATA(lo_trans_rt) = CAST cl_sadl_entity_runtime( _get_transact_runtime( CONV #( iv_target_es_name ) ) ).
+      IF iv_is_structure = abap_true.
+        ASSIGN ir_data->* TO <s_data>.
+        lo_trans_rt->map_entity_to_sadl_data_single( EXPORTING it_data             = it_ret_data
+                                                               iv_check_key_mapped = abap_true
+                                                     IMPORTING es_data             = <s_data> ).
+      ELSE.
+        ASSIGN ir_data->* TO <t_data>.
+        lo_trans_rt->map_entity_to_sadl_data( EXPORTING it_data             = it_ret_data
+                                                        iv_check_key_mapped = abap_true
+                                              IMPORTING et_data             = <t_data> ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD postprocess_batch.
+    DATA ls_chs TYPE /iwbep/if_mgw_appl_types=>ty_s_changeset_request.
+    DATA lv_update_index TYPE i.
+    DATA lv_create_index TYPE i.
+    DATA lv_deep_create_index TYPE i.
+    DATA lv_function_index TYPE i.
+    DATA lv_delete_index TYPE i.
+    DATA lr_created_data TYPE REF TO data.
+
+    io_sadl_message_handler->get_messages( IMPORTING et_messages = DATA(lt_sadl_messages) ).
+    io_sadl_message_handler->clear( ).
+
+    LOOP AT it_changeset_request INTO ls_chs.
+      CASE ls_chs-operation_type.
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-update_entity OR /iwbep/if_mgw_appl_types=>gcs_operation_type-patch_entity.
+          ADD 1 TO lv_update_index.
+          DATA(lr_updated_data) = it_update[ lv_update_index ]-rs_entity_data.
+          ASSIGN lr_updated_data->* TO FIELD-SYMBOL(<s_updated_data>).
+          DATA(lo_req_context_u) = CAST /iwbep/if_mgw_req_entity_u( ls_chs-request_context ).
+          _read_modified_entity( EXPORTING it_key_values  = it_updated_instances_keys[ lv_update_index ]
+                                           iv_entity_set  = lo_req_context_u->get_entity_set_name( )
+                                           iv_entity_type = lo_req_context_u->get_entity_type_name( )
+                                 IMPORTING es_data        = <s_updated_data> ).
+          NEW cl_sadl_gw_dpc_messages( me )->add_messages_for_entity( EXPORTING io_gw_message_container = ls_chs-msg_container
+                                                                                it_key_values           = it_updated_instances_keys[ lv_update_index ]
+                                                                                iv_entity_set           = lo_req_context_u->get_entity_set_name( )
+                                                                      CHANGING  ct_sadl_messages        = lt_sadl_messages ).
+          APPEND VALUE #( operation_no = ls_chs-operation_no  headers = ls_chs-request_headers  entity_data = lr_updated_data ) TO ct_changeset_response.
+
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-create_entity.
+          DATA(lo_req_context_c) = CAST /iwbep/if_mgw_req_entity_c( ls_chs-request_context ).
+          ADD 1 TO lv_create_index.
+          DATA(lr_created_key) = it_create_keys[ lv_create_index ].
+          ASSIGN lr_created_key->* TO FIELD-SYMBOL(<s_created_key>).
+          CREATE DATA lr_created_data LIKE <s_created_key>.
+          ASSIGN lr_created_data->* TO FIELD-SYMBOL(<s_created_data>).
+          DATA(lt_key_values) = _get_key_values( iv_entity_set = lo_req_context_c->get_entity_set_name( )  is_data_in = <s_created_key> ).
+          _read_modified_entity( EXPORTING it_key_values  = lt_key_values
+                                           iv_entity_set  = lo_req_context_c->get_entity_set_name( )
+                                           iv_entity_type = lo_req_context_c->get_entity_type_name( )
+                                 IMPORTING es_data        = <s_created_data> ).
+          NEW cl_sadl_gw_dpc_messages( me )->add_messages_for_entity( EXPORTING io_gw_message_container = ls_chs-msg_container
+                                                                                it_key_values           = lt_key_values
+                                                                                iv_entity_set           = lo_req_context_c->get_entity_set_name( )
+                                                                      CHANGING  ct_sadl_messages        = lt_sadl_messages ).
+          APPEND VALUE #( operation_no = ls_chs-operation_no  headers = ls_chs-request_headers  entity_data = lr_created_data ) TO ct_changeset_response.
+
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-create_deep_entity.
+          ADD 1 TO lv_deep_create_index.
+
+          _postprocess_deep_create(
+                EXPORTING
+                  io_req_context_c = CAST /iwbep/if_mgw_req_entity_c( ls_chs-request_context )
+                  ir_deep_data     = it_deep_create_data_container[ lv_deep_create_index ]
+                  ir_key           = it_deep_create_keys[ lv_deep_create_index ]
+                  io_expand        = ls_chs-expand_node
+                  io_msg_container = ls_chs-msg_container
+                CHANGING
+                  ct_sadl_messages = lt_sadl_messages ).
+
+          APPEND VALUE #( operation_no = ls_chs-operation_no
+                          headers      = ls_chs-request_headers
+                          entity_data  = it_deep_create_data_container[ lv_deep_create_index ] ) TO ct_changeset_response.
+
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-delete_entity.
+          ADD 1 TO lv_delete_index.
+          DATA(ls_delete) = it_delete[ lv_delete_index ].
+          IF lt_sadl_messages IS NOT INITIAL.
+            ASSIGN ls_delete-rs_key_values->* TO FIELD-SYMBOL(<s_deleted_key>).
+            lt_key_values = _get_key_values( iv_entity_set = CONV #( ls_delete-entity_id )
+                                             is_data_in    = <s_deleted_key> ).
+            NEW cl_sadl_gw_dpc_messages( me )->add_messages_for_entity( EXPORTING io_gw_message_container = ls_chs-msg_container
+                                                                                  it_key_values           = lt_key_values
+                                                                                  iv_entity_set           = CONV #( ls_delete-entity_id )
+                                                                        CHANGING  ct_sadl_messages        = lt_sadl_messages ).
+          ENDIF.
+          APPEND VALUE #( operation_no = ls_chs-operation_no  headers = ls_chs-request_headers ) TO ct_changeset_response.
+
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-execute_action.
+          ADD 1 TO lv_function_index.
+          _postprocess_action( EXPORTING is_function             = it_functions[ lv_function_index ]
+                                         ir_action_returning_par = it_action[ lv_function_index ]-r_returning_parameters
+                                         io_message_container    = ls_chs-msg_container
+                               IMPORTING er_gw_action_ret_data   = DATA(lr_action_data)
+                               CHANGING  ct_sadl_messages        = lt_sadl_messages ).
+          APPEND VALUE #( operation_no = ls_chs-operation_no  headers = ls_chs-request_headers  entity_data = lr_action_data ) TO ct_changeset_response.
+      ENDCASE.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD preprocess_batch.
+    CLEAR: et_create, et_delete, et_update, et_updated_instances_keys, et_action, et_functions.
+    _init( ).
+    LOOP AT it_changeset_request INTO DATA(ls_chs).
+      CASE ls_chs-operation_type.
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-create_entity.
+          DATA(lo_req_context_c) = CAST /iwbep/if_mgw_req_entity_c( ls_chs-request_context ).
+          _prepare_create( EXPORTING io_data_provider        = ls_chs-entry_provider
+                                     io_tech_request_context = lo_req_context_c
+                           IMPORTING er_sadl_data            = DATA(lr_sadl_data)
+                                     ev_navigation_property  = DATA(lv_nav_prop)
+                                     ev_source_entity_set    = DATA(lv_source_entity_set)
+                                     er_source_key           = DATA(lr_source_key) ).
+          INSERT VALUE #( entity_id = lo_req_context_c->get_entity_set_name( )  rs_entity_data = lr_sadl_data
+                          source-entity_id = lv_source_entity_set  source-association_name = lv_nav_prop  source-rs_key_values = lr_source_key
+                        ) INTO TABLE et_create.
+          APPEND lr_sadl_data TO et_create_keys.
+
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-create_deep_entity.
+          lo_req_context_c = CAST /iwbep/if_mgw_req_entity_c( ls_chs-request_context ).
+          _prepare_deep_create( EXPORTING io_data_provider        = ls_chs-entry_provider
+                                           io_tech_request_context = lo_req_context_c
+                                           io_expand               = ls_chs-expand_node
+                                 IMPORTING et_create               = DATA(lt_create)
+                                           er_root_key             = DATA(lr_deep_create_key)
+                                           er_data_container       = DATA(lr_deep_create_container) ).
+          DATA(lv_lines) = lines( et_create ).
+          LOOP AT lt_create ASSIGNING FIELD-SYMBOL(<s_create>) WHERE source-tabix IS NOT INITIAL.
+            <s_create>-source-tabix = <s_create>-source-tabix + lv_lines.
+          ENDLOOP.
+          APPEND LINES OF lt_create TO et_create.
+          APPEND lr_deep_create_key TO et_deep_create_keys.
+          APPEND lr_deep_create_container TO et_deep_create_data_container.
+
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-update_entity OR /iwbep/if_mgw_appl_types=>gcs_operation_type-patch_entity.
+          DATA(lo_req_context_u) = CAST /iwbep/if_mgw_req_entity_u( ls_chs-request_context ).
+          _prepare_update( EXPORTING io_data_provider        = ls_chs-entry_provider
+                                     io_tech_request_context = lo_req_context_u
+                           IMPORTING et_elements             = DATA(lt_elements)
+                                     er_sadl_data            = lr_sadl_data
+                                     et_key_values           = DATA(lt_keys_one_instance) ).
+
+          INSERT VALUE #( entity_id = lo_req_context_u->get_entity_set_name( )  updated_elements = lt_elements  rs_entity_data = lr_sadl_data
+                        ) INTO TABLE et_update.
+          APPEND lt_keys_one_instance TO et_updated_instances_keys.
+
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-delete_entity.
+          DATA(lo_req_context_d) = CAST /iwbep/if_mgw_req_entity_d( ls_chs-request_context ).
+          _prepare_delete( EXPORTING io_tech_request_context = lo_req_context_d
+                           IMPORTING er_sadl_key             = lr_sadl_data ).
+          INSERT VALUE #( entity_id = lo_req_context_d->get_entity_set_name( )  rs_key_values = lr_sadl_data
+                        ) INTO TABLE et_delete.
+        WHEN /iwbep/if_mgw_appl_types=>gcs_operation_type-execute_action.
+          DATA(lo_req_context_f) = CAST /iwbep/if_mgw_req_func_import( ls_chs-request_context ).
+          _prepare_execute_action( EXPORTING io_tech_request_context = lo_req_context_f
+                                   IMPORTING es_function             = DATA(ls_function)
+                                             er_source_es_key_data   = DATA(lr_source_es_key_data)
+                                             er_action_param         = DATA(lr_action_param)
+                                             er_ret_data             = DATA(lr_ret_data) ).
+
+          ASSIGN lr_source_es_key_data->* TO FIELD-SYMBOL(<s_source_key>).
+          DATA lr_source_key_tab TYPE REF TO data.
+          CREATE DATA lr_source_key_tab LIKE STANDARD TABLE OF <s_source_key>.
+          FIELD-SYMBOLS <t_source_keys> TYPE STANDARD TABLE.
+          ASSIGN lr_source_key_tab->* TO <t_source_keys>.
+          IF <s_source_key> IS NOT INITIAL.
+            APPEND <s_source_key> TO <t_source_keys>.
+          ENDIF.
+          INSERT VALUE #( entity_id               = ls_function-src_es_name
+                          name                    = ls_function-function_name
+                          rs_importing_parameters = lr_action_param
+                          rt_key_values           = lr_source_key_tab
+                          r_returning_parameters  = lr_ret_data
+                        ) INTO TABLE et_action.
+          APPEND VALUE #( metadata = ls_function  source_data = lr_source_es_key_data ) TO et_functions.
+      ENDCASE.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD save.
+    DATA(lo_trans_man) = cl_sadl_transact_manager_fctr=>get_transaction_manager( ).
+    DATA(lv_failed) = lo_trans_man->save( ).
+    IF lv_failed = abap_true.
+      lo_trans_man->discard_changes( ).
+      _raise_business_exception( lo_trans_man->get_message_handler( ) ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _add_messages_to_header.
+    io_message_handler->get_messages( IMPORTING et_messages = DATA(lt_messages) ).
+    io_message_handler->clear( ).
+
+    IF mo_context IS BOUND. " always except in TC_SADL_GW_SB_CODE_GENERATION
+      NEW cl_sadl_gw_dpc_messages( me )->add_messages_for_entity(
+                                EXPORTING io_gw_message_container = /iwbep/if_mgw_conv_srv_runtime~get_message_container( )
+                                          it_key_values           = it_key_values
+                                          iv_entity_set           = iv_entity_set
+                                CHANGING  ct_sadl_messages        = lt_messages ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _convert_sadl_exception_to_mgw.
+    IF ix_sadl_exception IS INSTANCE OF cx_sadl_gw_contract_violation.
+      DATA(lx_gw_contract_violation) = CAST cx_sadl_gw_contract_violation( ix_sadl_exception ).
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+*      RAISE EXCEPTION TYPE /iwbep/cx_mgw_med_exception    <<< HTTP status code is ignored
+        EXPORTING
+          previous         = lx_gw_contract_violation
+          http_status_code = lx_gw_contract_violation->http_status_code.
+    ELSEIF ix_sadl_exception IS INSTANCE OF cx_sadl_contract_violation.
+      DATA(lx_contract_violation) = CAST cx_sadl_contract_violation( ix_sadl_exception ).
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_med_exception
+        EXPORTING
+          previous = lx_contract_violation.
+    ELSE.
+*        remove meaningless 'wrapper exceptions' from stack
+      DATA(lx) = ix_sadl_exception.
+      WHILE lx->textid = cx_root=>cx_root AND lx->previous IS BOUND.
+        lx = lx->previous.
+      ENDWHILE.
+      IF lx IS INSTANCE OF cx_sadl_exit_filter_not_supp.
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_tech_exception
+          EXPORTING
+            previous         = lx
+            http_status_code = /iwbep/cx_mgw_tech_exception=>gcs_http_status_codes-not_implemented.
+      ELSE.
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_tech_exception
+          EXPORTING
+            previous = lx.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _convert_temporal_at.
+    IF iv_temporal_at_odata IS INITIAL.
+      rv_temporal_at = sy-datum. " OData default value
+    ELSE.
+      " convert OData format to internal ABAP format
+      REPLACE ALL OCCURRENCES OF `'` IN iv_temporal_at_odata WITH ``.
+      REPLACE ALL OCCURRENCES OF `-` IN iv_temporal_at_odata WITH ``.
+      rv_temporal_at = iv_temporal_at_odata.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _create_deep.
+    DATA lr_data TYPE REF TO data.
+    DATA lo_runtime TYPE REF TO if_sadl_entity_transactional.
+
+    lo_runtime = _get_transact_runtime( iv_entity_id ).
+    lr_data = lo_runtime->create_entity_structure_ref( ).
+    ASSIGN lr_data->* TO FIELD-SYMBOL(<s_data>).
+    MOVE-CORRESPONDING cs_data TO <s_data>.
+
+    IF iv_association IS INITIAL.
+      lo_runtime->create_single( IMPORTING ev_failed = DATA(lv_failed)
+                                 CHANGING  cs_entity_data = <s_data> ).
+
+    ELSE.
+      lo_runtime = _get_transact_runtime( iv_source_entity_id ).
+      lo_runtime->create_by_association_single( EXPORTING iv_association_name   = iv_association
+                                                          is_source_key_values  = is_source_key_values
+                                                IMPORTING ev_target_failed      = lv_failed
+                                                CHANGING  cs_target_entity_data = <s_data> ).
+    ENDIF.
+
+    IF lv_failed = abap_false.
+      MOVE-CORRESPONDING <s_data> TO cs_data.
+      DATA(lt_key_values) = _get_key_values( iv_entity_set = iv_entity_id
+                                             is_data_in    = <s_data> ).
+      _add_messages_to_header( io_message_handler = lo_runtime->get_message_handler( )
+                               it_key_values      = lt_key_values
+                               iv_entity_set      = iv_entity_id ).
+
+      cl_sadl_gw_dpc_deep_create=>_prepare_recursion( EXPORTING iv_entity_id = iv_entity_id
+                                                                io_expand    = io_expand
+                                                                ir_data      = REF #( cs_data )
+                                                                io_sadl_api  = mo_sadl_api
+                                                      IMPORTING et_recursion = DATA(lt_recursion) ).
+
+      LOOP AT lt_recursion INTO DATA(ls_recursion).
+        ASSIGN ls_recursion-r_data->* TO FIELD-SYMBOL(<s_subnode_data>).
+
+        _create_deep( EXPORTING iv_entity_id         = ls_recursion-entity_id
+                                iv_source_entity_id  = iv_entity_id
+                                iv_association       = ls_recursion-association
+                                is_source_key_values = cs_data
+                                io_expand            = ls_recursion-o_expand
+                      CHANGING  cs_data              = <s_subnode_data> ).
+      ENDLOOP.
+    ELSE.
+      discard_changes( ).
+      _raise_business_exception( lo_runtime->get_message_handler( ) ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _create_map_for_auts.
+    IF mo_model IS INITIAL. " AUT ONLY
+      CLEAR mt_entity_set_type_map.
+      IF lines( is_gw_entity_path-t_navigation ) <= 1.
+        mt_entity_set_type_map = VALUE #( ( set = is_gw_entity_path-set_name  type = is_gw_entity_path-type_name ) ).
+        IF lines( is_gw_entity_path-t_navigation ) = 1.
+          INSERT VALUE #( set = is_gw_entity_path-source_set_name  type = is_gw_entity_path-source_type_name ) INTO TABLE mt_entity_set_type_map.
+        ENDIF.
+      ELSE.
+        RAISE EXCEPTION TYPE lcx_internal_error.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _does_entityset_support_fetch.
+    DATA(lr_load) = _get_entity_load( CONV #( iv_entityset ) ).
+    IF lr_load IS BOUND AND lr_load->db_view_metadata IS NOT INITIAL.
+      rv_supports_fetch = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _evaluate_analytical_id.
+    io_query_options->get_entity_path( IMPORTING es_entity_path = DATA(ls_entity_path) ).
+    IF ls_entity_path-navigation_steps IS NOT INITIAL.
+      ASSIGN ls_entity_path-navigation_steps[ 1 ] TO FIELD-SYMBOL(<s_navigation_step>).
+      IF line_exists( <s_navigation_step>-keys[ name = cl_sadl_gw_odata_runtime=>co_generated_id ] ).
+        " use temporary QueryOption instance for source entity set
+        DATA(lv_source_type_name) = _get_type_name( <s_navigation_step>-set_name ).
+        DATA(lr_load) = _get_entity_load( <s_navigation_step>-set_name ).
+        DATA(lo_query_options) = cl_sadl_gw_dpc_helper=>get_default_query_options( lr_load ).
+        io_query_options->get_entity_parameters( IMPORTING et_parameters = DATA(lt_parameters) ).
+        lo_query_options->set_entity_parameters( lt_parameters ).
+        cl_sadl_gw_dpc_helper=>set_analytical_metadata( iv_entity_type   = lv_source_type_name
+                                                        io_query_options = lo_query_options
+                                                        io_model         = mo_model ).
+        CAST cl_sadl_gw_odata_runtime( mo_common_runtime )->_evaluate_analytical_id( EXPORTING io_query_options = lo_query_options
+                                                                                               io_mdp           = mo_mdp
+                                                                                               iv_entity_set    = <s_navigation_step>-set_name
+                                                                                     CHANGING  ct_keys          = <s_navigation_step>-keys ).
+        CLEAR CAST cl_sadl_gw_odata_runtime( mo_common_runtime )->mv_analytical_id. "avoid id repetition in self assocs
+        lo_query_options->get_entity_parameters( IMPORTING et_parameters = lt_parameters ).
+        io_query_options->set_entity_parameters( lt_parameters ).
+        io_query_options->set_entity_path( ls_entity_path ).
+        lo_query_options->get_filter_source( IMPORTING et_filter = DATA(lt_filter_source) ).
+        io_query_options->set_filter_source( lt_filter_source ).
+      ENDIF.
+    ENDIF.
+    IF line_exists( ls_entity_path-keys[ name = cl_sadl_gw_odata_runtime=>co_generated_id ] ).
+      CAST cl_sadl_gw_odata_runtime( mo_common_runtime )->_evaluate_analytical_id( EXPORTING io_query_options = io_query_options
+                                                                                             io_mdp           = mo_mdp
+                                                                                             iv_entity_set    = ls_entity_path-set_name
+                                                                                   CHANGING  ct_keys          = ls_entity_path-keys ).
+      io_query_options->set_entity_path( ls_entity_path ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _execute_action.
+    CLEAR: ev_failed, et_ret_data, eo_msg_handler.
+    ASSIGN ir_data_in->* TO FIELD-SYMBOL(<s_data_in>).
+    ASSIGN ir_action_param->* TO FIELD-SYMBOL(<s_action_param>).
+
+    DATA(lo_runtime) = _get_transact_runtime( CONV #( is_function-src_es_name ) ).
+
+    IF <s_data_in> IS NOT INITIAL.
+      lo_runtime->execute_single( EXPORTING iv_action_name      = CONV #( is_function-function_name )
+                                            i_action_parameters = <s_action_param>
+                                            is_key_values       = <s_data_in>
+                                  IMPORTING ev_failed           = ev_failed
+                                            et_data             = et_ret_data ).
+    ELSE. " static action
+      lo_runtime->execute( EXPORTING iv_action_name          = CONV #( is_function-function_name )
+                                     i_action_parameters     = <s_action_param>
+                           IMPORTING et_failed               = DATA(lt_failed)
+                                     ev_static_action_failed = DATA(lv_static_action_failed)
+                                     et_data                 = et_ret_data ).
+      IF lv_static_action_failed = abap_true OR lt_failed IS NOT INITIAL.
+        ev_failed = abap_true.
+      ELSE.
+        IF et_ret_data IS INITIAL.
+          CASE mo_model->get_action_by_tech_name( is_function-function_name )->get_return_multiplicity( ).
+            WHEN /iwbep/if_mgw_med_odata_types=>gcs_cardinality-cardinality_1_1
+            OR   /iwbep/if_mgw_med_odata_types=>gcs_cardinality-cardinality_1_n.
+              ev_failed = abap_true. " result expected
+          ENDCASE.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+    eo_msg_handler = lo_runtime->get_message_handler( ).
+  ENDMETHOD.
+
+
+  METHOD _fill_extended_result.
+    IF mo_dbi IS BOUND.
+      DATA(ls_extended_result) = mo_dbi->get_extended_result( ).
+      cs_response-max_age = ls_extended_result-cache_retention_time.
+      cs_response-age = ls_extended_result-data_age.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_count.
+    IF iv_count > iv_skip.
+      rv_count = iv_count - iv_skip.
+      IF iv_top IS NOT INITIAL AND rv_count > CONV i( iv_top ).
+        rv_count = iv_top.
+      ENDIF.
+    ELSE.
+      rv_count = 0.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_creation_source_info.
+    CLEAR: ev_source_entity_set, er_source_key, ev_navigation_property.
+    DATA(lt_navigation_path) = io_tech_request_context->get_navigation_path( ).
+    IF lt_navigation_path IS NOT INITIAL.
+      READ TABLE lt_navigation_path INDEX 1 INTO DATA(ls_navigation_step).
+      ev_navigation_property =  ls_navigation_step-nav_prop.
+      ev_source_entity_set = io_tech_request_context->get_source_entity_set_name( ).
+      er_source_key = _get_data_line_container( CONV #( ev_source_entity_set ) ).
+      ASSIGN er_source_key->* TO FIELD-SYMBOL(<s_source_key>).
+      io_tech_request_context->get_converted_source_keys( IMPORTING es_key_values = <s_source_key> ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_data_line_container.
+    TRY.
+        _init( ).
+        rr_data_line_container = mo_sadl_api->get_runtime( CONV #( iv_entity_set ) )->if_sadl_entity_transactional~create_entity_structure_ref( ).
+*        mv_provider_data_type = abap_true.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD _get_data_table_container.
+*    LOOP AT it_order_by INTO DATA(ls_sort_field) WHERE property_path IS NOT INITIAL.
+*      SPLIT ls_sort_field-property_path AT '-' INTO TABLE DATA(lt).
+*    ENDLOOP.
+    TRY.
+        IF mv_is_crp_cached_request = abap_true.
+          TRY.
+              DATA(lv_entity_id_from_cache) = mo_cache->get_entity_id( ).
+              DATA(lr_load) = cl_sadl_mdp_factory=>get_entity_load_by_id( CONV #( lv_entity_id_from_cache ) ).
+              rr_data_table_container = _get_table_container_from_load( lr_load ).
+            CATCH cx_sadl_load_not_in_cache ##NO_HANDLER. "in unit tests
+          ENDTRY.
+          IF rr_data_table_container IS INITIAL.
+            rr_data_table_container = mo_cache->get_table_container( ).
+          ENDIF.
+
+        ELSE.
+          _init_mp( ).
+          lr_load = _get_entity_load( CONV #( iv_entity_set ) ).
+          rr_data_table_container = _get_table_container_from_load( lr_load ).
+          IF rr_data_table_container IS INITIAL.
+            _init( ).
+            rr_data_table_container = mo_sadl_api->get_runtime( CONV #( iv_entity_set ) )->if_sadl_entity_transactional~create_entity_table_ref( ).
+            IF mv_is_crp_caching_allowed = abap_true.
+              mo_cache->set_table_container( EXPORTING ir_data_table_container = rr_data_table_container ).
+            ENDIF.
+            DATA(lv_sadl_entity_id) = |{ mo_mp->if_bsa_sadl_mp~get_uuid( ) }~{ iv_entity_set }|.
+            _get_mdp( )->add_entity_table_container( iv_entity_id = CONV #( lv_sadl_entity_id )  ir_table_container = rr_data_table_container ).
+          ENDIF.
+        ENDIF.
+*        mv_provider_data_type = abap_true.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD _get_deep_data_line_container.
+    TRY.
+        _init( ).
+        rr_data_line_container = cl_sadl_gw_entity_util=>get_deep_data_line_container( io_sadl_entity = mo_sadl_api->get_entity( CONV #( iv_entity_set ) )
+                                                                                       io_expand      = io_expand
+                                                                                       io_mp          = mo_mp ).
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD _get_deep_data_table_container.
+    TRY.
+        _init( ).
+        rr_data_table_container = cl_sadl_gw_entity_util=>get_deep_table_container( io_sadl_entity = mo_sadl_api->get_entity( CONV #( iv_entity_set ) )
+                                                                                    io_expand      = io_expand
+                                                                                    io_mp          = mo_mp ).
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD _get_entity.
+    io_query_options->get_entity_path( IMPORTING es_entity_path = DATA(ls_entity_path) ).
+    DATA(lo_sadl_runtime) = mo_sadl_api->get_runtime( ls_entity_path-set_name ).
+    mo_common_runtime->get_entity( EXPORTING io_query_options = io_query_options
+                                             io_sadl_rt       = lo_sadl_runtime
+                                             io_mdp           = mo_mdp
+                                   IMPORTING es_data          = es_data
+                                             ev_count         = DATA(lv_count) ).
+    IF lv_count = 0.
+      " check whether this is a navigation: Lv_count = 0 is allowed for associations with target cardinality 0..1
+      " Probably the 100% correct behavior would be to throw an exception if the association has cardinality 'to 1' and not throw
+      " it for cardinality 'to 0..1'. But interpreting the model is pretty complicated (association, navi property, association set,
+      " left or right-end cardinality, ...
+      IF ls_entity_path-navigation_steps IS INITIAL.
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+          EXPORTING
+            textid           = /iwbep/cx_mgw_busi_exception=>resource_not_found
+            entity_type      = _get_type_name( ls_entity_path-set_name )
+            http_status_code = /iwbep/cx_mgw_busi_exception=>gcs_http_status_codes-not_found.
+      ENDIF.
+    ELSEIF lv_count > 1.
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          textid      = /iwbep/cx_mgw_busi_exception=>resource_duplicate
+          entity_type = _get_type_name( ls_entity_path-set_name ).
+    ENDIF.
+    DATA(lt_key_values) = _get_key_values( iv_entity_set = ls_entity_path-set_name
+                                           is_data_in    = es_data ).
+    IF iv_suppress_messages = abap_false.
+      _add_messages_to_header( io_message_handler = lo_sadl_runtime->if_sadl_entity_transactional~get_message_handler( )
+                               it_key_values      = lt_key_values
+                               iv_entity_set      = ls_entity_path-set_name ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_entityset.
+    CLEAR: et_data, es_response_context, eo_query_options.
+    cl_sadl_run_time_util=>start( cl_sadl_run_time_util=>cs_component-sadl ).
+    _init_cache( io_tech_request_context ).
+    _init_dbi( io_tech_request_context ).
+
+    TRY.
+        IF mv_is_crp_cached_request = abap_true.
+          get_cached_entityset( EXPORTING io_tech_request_context = io_tech_request_context
+                                IMPORTING et_data = et_data es_response_context = es_response_context ).
+
+        ELSE. "normal request processing
+          _init( ).
+          IF mv_is_crp_caching_allowed = abap_true.
+            mo_cache->set_entity_id( |{ mo_mp->if_bsa_sadl_mp~get_uuid( ) }~{ io_tech_request_context->get_entity_set_name( ) }| ).
+          ENDIF.
+          _get_entity_set_request_detail( EXPORTING io_tech_request_context     = io_tech_request_context
+                                          IMPORTING es_entity_path              = DATA(ls_entity_path)
+                                                    ev_top                      = DATA(lv_req_top)
+                                                    ev_skip                     = DATA(lv_req_skip)
+                                                    ev_has_count                = DATA(lv_req_has_count)
+                                                    ev_has_inline_count         = DATA(lv_req_has_inline_count)
+                                                    et_order_by                 = DATA(lt_req_order_by)
+                                                    eo_filter                   = DATA(lo_req_filter)
+                                                    eo_filter_tree              = DATA(lo_req_filter_tree)
+                                                    ev_search_string            = DATA(lv_req_search_string)
+                                                    et_requested_with_mandatory = DATA(lt_requested_with_mandatry)
+                                                    ev_temporal_context         = DATA(lv_temporal_context) ).
+
+          DATA(lo_query_options) = _get_query_options_entity_set( is_entity_path              = ls_entity_path
+                                                                  iv_top                      = lv_req_top
+                                                                  iv_skip                     = lv_req_skip
+                                                                  iv_has_count                = lv_req_has_count
+                                                                  iv_has_inline_count         = lv_req_has_inline_count
+                                                                  it_order_by                 = lt_req_order_by
+                                                                  io_filter                   = lo_req_filter
+                                                                  io_filter_tree              = lo_req_filter_tree
+                                                                  iv_search_string            = lv_req_search_string
+                                                                  it_placeholder_values       = mt_placeholder_values
+                                                                  it_requested_with_mandatory = lt_requested_with_mandatry
+                                                                  iv_temporal_context         = lv_temporal_context ).
+          IF io_expand_level IS BOUND.
+            io_expand_level->add_foreign_keys_to_reqested( lo_query_options ).
+          ENDIF.
+          DATA(lo_sadl_runtime) = mo_sadl_api->get_runtime( ls_entity_path-set_name ).
+          mo_common_runtime->get_entity_set( EXPORTING io_query_options = lo_query_options
+                                                       io_sadl_rt       = lo_sadl_runtime
+                                                       io_mdp           = mo_mdp
+                                                       io_cache         = mo_cache
+                                                       io_dbi           = mo_dbi
+                                             IMPORTING et_data          = et_data
+                                                       ev_count         = DATA(lv_count) ).
+          eo_query_options = lo_query_options. " store QueryOptions instance for expand
+          _add_messages_to_header( io_message_handler = lo_sadl_runtime->if_sadl_entity_transactional~get_message_handler( )
+                                   iv_entity_set      = ls_entity_path-set_name ).
+          IF mv_is_crp_caching_allowed = abap_true AND mo_cache->is_request_caching_possible( ) = abap_true.
+            mo_cache->get_cache_data( IMPORTING et_cache_data = DATA(lt_cache_data) ).
+            MOVE-CORRESPONDING lt_cache_data TO es_response_context-crp_provider_request.
+          ENDIF.
+          IF lv_req_has_inline_count = abap_true.
+            es_response_context-inlinecount = lv_count.
+          ENDIF.
+          IF lv_req_has_count = abap_true.
+            es_response_context-count = _get_count( iv_count = lv_count
+                                                    iv_top   = lv_req_top
+                                                    iv_skip  = lv_req_skip ).
+          ENDIF.
+          _fill_extended_result( CHANGING cs_response = es_response_context ).
+        ENDIF.
+      CATCH cx_sadl_static cx_sadl_contract_violation INTO DATA(lx_sadl).
+        _convert_sadl_exception_to_mgw( lx_sadl ).
+    ENDTRY.
+
+    cl_sadl_run_time_util=>stop( cl_sadl_run_time_util=>cs_component-sadl ).
+    cl_sadl_run_time_util=>get_times( IMPORTING ev_app = DATA(lv_app) ev_auth = DATA(lv_auth) ev_db = DATA(lv_db) ev_sadl = DATA(lv_sadl) ).
+    cl_sadl_run_time_util=>reset( ).
+    /iwbep/cl_sutil_runtime=>get_instance( )->set_app_time_breakdown( iv_gwappfw_time = lv_sadl  iv_gwappdb_time = lv_db  iv_gwappext_time = lv_auth ).
+  ENDMETHOD.
+
+
+  METHOD _get_entity_elements.
+    mo_sadl_api->get_entity( iv_entity_set )->get_elements( IMPORTING et_elements = et_elements ).
+  ENDMETHOD.
+
+
+  METHOD _get_entity_load.
+    rr_load = _get_mdp( )->get_entity_load( iv_entity_set ).
+  ENDMETHOD.
+
+
+  METHOD _get_entity_request_detail.
+    cl_sadl_gw_key_converter=>get_srckey_from_entity_request( " available, if navigation is requested
+        EXPORTING io_request     = io_tech_request_context
+        IMPORTING et_keys        = es_entity_path-t_source_key
+                  eo_converter   = es_entity_path-source_key_converter ).
+    cl_sadl_gw_key_converter=>get_key_from_entity_request(  " available, if no navigation is requested
+        EXPORTING io_request     = io_tech_request_context
+                  io_sadl_api    = mo_sadl_api
+        IMPORTING et_keys        = es_entity_path-t_key ).
+    es_entity_path-set_name         = io_tech_request_context->get_entity_set_name( ).
+    es_entity_path-type_name        = io_tech_request_context->get_entity_type_name( ).
+    es_entity_path-source_set_name  = io_tech_request_context->get_source_entity_set_name( ).
+    es_entity_path-source_type_name = io_tech_request_context->get_source_entity_type_name( ).
+    es_entity_path-t_navigation     = io_tech_request_context->get_navigation_path( ).
+    et_requested_with_mandatory     = io_tech_request_context->get_select_entity_properties( ).
+
+*    io_tech_request_context->get_at( IMPORTING ev_at = DATA(lv_temporal_at_unconverted) ).
+*    ev_temporal_context = VALUE #( at_date = _convert_temporal_at( lv_temporal_at_unconverted ) ).
+  ENDMETHOD.
+
+
+  METHOD _get_entity_set_request_detail.
+    cl_sadl_gw_key_converter=>get_srckey_from_entset_request(
+        EXPORTING io_request     = io_tech_request_context
+        IMPORTING et_keys        = es_entity_path-t_source_key
+                  eo_converter   = es_entity_path-source_key_converter ).
+    es_entity_path-source_set_name  = io_tech_request_context->get_source_entity_set_name( ).
+    es_entity_path-source_type_name = io_tech_request_context->get_source_entity_type_name( ).
+    es_entity_path-t_navigation     = io_tech_request_context->get_navigation_path( ).
+    es_entity_path-set_name         = io_tech_request_context->get_entity_set_name( ).
+    es_entity_path-type_name        = io_tech_request_context->get_entity_type_name( ).
+    ev_top = io_tech_request_context->get_top( ).
+    IF ev_top > cl_abap_math=>max_int4.
+      RAISE EXCEPTION TYPE cx_sadl_gw_contract_violation EXPORTING textid = cx_sadl_gw_contract_violation=>top_exceeds_boundaries.
+    ENDIF.
+    ev_skip = io_tech_request_context->get_skip( ).
+    IF ev_skip >= cl_abap_math=>max_int4.
+      RAISE EXCEPTION TYPE cx_sadl_gw_contract_violation EXPORTING textid = cx_sadl_gw_contract_violation=>skip_exceeds_boundaries.
+    ENDIF.
+    ev_has_count                = io_tech_request_context->has_count( ).
+    ev_has_inline_count         = io_tech_request_context->has_inlinecount( ).
+    et_order_by                 = io_tech_request_context->get_orderby( ).
+    eo_filter                   = io_tech_request_context->get_filter( ).
+    eo_filter_tree              = io_tech_request_context->get_filter_expression_tree( ).
+    ev_search_string            = io_tech_request_context->get_search_string( ).
+    et_requested_with_mandatory = io_tech_request_context->get_select_entity_properties( ).
+*    io_tech_request_context->get_at( IMPORTING ev_at = DATA(lv_temporal_at_unconverted) ).
+*    ev_temporal_context = VALUE #( at_date = _convert_temporal_at( lv_temporal_at_unconverted ) ).
+  ENDMETHOD.
+
+
+  METHOD _get_expanded_entity.
+    DATA lr_table TYPE REF TO data.
+    FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+    ASSIGN ir_entity->* TO FIELD-SYMBOL(<s_data>).
+    DATA(lo_query_options) = _get_query_options_entity( is_entity_path              = is_entity_path
+                                                        it_requested_with_mandatory = it_requested_with_mandatory
+                                                        iv_temporal_context         = iv_temporal_context ).
+    DATA(lr_source_load) = _get_entity_load( is_entity_path-set_name ).
+    DATA(lo_1st_expand_level) = cl_sadl_gw_expand_level=>get_next_v2( io_source_node = io_expand_node
+                                                                   io_dpc         = NEW lcl_dpc_for_expand( me )
+                                                                   ir_source_load = lr_source_load
+                                                                   io_mdp = mo_mdp ).
+    IF lo_1st_expand_level IS BOUND.
+      lo_1st_expand_level->add_foreign_keys_to_reqested( lo_query_options ).
+    ENDIF.
+    _get_entity( EXPORTING io_query_options     = lo_query_options
+                           iv_suppress_messages = iv_suppress_messages
+                 IMPORTING es_data              = <s_data> ).
+    CLEAR CAST cl_sadl_gw_odata_runtime( mo_common_runtime )->mv_analytical_id. "avoid id repetition
+
+    " expand
+    IF lo_1st_expand_level IS BOUND.
+      CREATE DATA lr_table LIKE TABLE OF <s_data>.
+      ASSIGN lr_table->* TO <t_data>.
+      APPEND <s_data> TO <t_data>.
+      lo_query_options->get_requested_elements( IMPORTING et_elements = DATA(lt_src_elements) ).
+      lo_1st_expand_level->read_data( it_source_data            = <t_data>
+                                      is_entity_params          = ms_entity_params_for_expand
+                                      it_requested_src_elements = lt_src_elements
+                                      iv_temporal_context       = iv_temporal_context ).
+      lo_1st_expand_level->merge_data_into_result_record( CHANGING cs_result = <s_data> ).
+      lo_1st_expand_level->get_expanded_clauses( IMPORTING et_expanded_clauses = et_expanded_tech_clauses ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_key_values.
+    mo_sadl_api->get_entity( iv_entity_set )->get_primary_key_elements( IMPORTING et_primary_key_elements = DATA(lt_key_elements) ).
+    LOOP AT lt_key_elements ASSIGNING FIELD-SYMBOL(<v_key_element>).
+      ASSIGN COMPONENT <v_key_element> OF STRUCTURE is_data_in TO FIELD-SYMBOL(<v_key_value>).
+      IF sy-subrc = 0.
+        APPEND VALUE #( name = <v_key_element> value = <v_key_value> ) TO rt_key_values.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _get_mdp.
+    IF mo_mdp IS NOT BOUND.
+      mo_mdp = cl_sadl_mdp_factory=>get_mdp_for_mp( mo_mp ).
+    ENDIF.
+    ro_mdp = mo_mdp.
+  ENDMETHOD.
+
+
+  METHOD _get_non_key_elements.
+    CLEAR et_elements.
+    _get_entity_elements( EXPORTING iv_entity_set = iv_entity_set
+                          IMPORTING et_elements   = DATA(lt_elements) ).
+    mo_sadl_api->get_entity( iv_entity_set )->get_primary_key_elements( IMPORTING et_primary_key_elements = DATA(lt_key_elems) ).
+    LOOP AT lt_elements ASSIGNING FIELD-SYMBOL(<s_element>).
+      READ TABLE lt_key_elems WITH KEY table_line = <s_element>-name TRANSPORTING NO FIELDS. "#EC CI_STDSEQ
+      IF sy-subrc <> 0.
+        INSERT <s_element>-name INTO TABLE et_elements.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _get_query_options_entity.
+    " process navigation information
+    _create_map_for_auts( is_entity_path ).
+    cl_sadl_gw_navigation_util=>convert_gw_path_to_sadl( EXPORTING is_gw_entity_path      = is_entity_path
+                                                                   it_entity_set_type_map = mt_entity_set_type_map
+                                                         IMPORTING es_entity_path         = DATA(ls_entity_path) ).
+    cl_sadl_gw_navigation_util=>convert_path_and_extract_param( EXPORTING io_sadl_api          = mo_sadl_api
+                                                                          iv_use_placeholders  = mv_is_crp_caching_allowed
+                                                                IMPORTING et_entity_parameters = DATA(lt_parameters)
+                                                                CHANGING  xs_entity_path       = ls_entity_path ).
+    DATA(lv_entity_type_name) = _get_type_name( ls_entity_path-set_name ).
+
+    " prepare query options
+    DATA(lo_sadl_entity) = mo_sadl_api->get_entity( ls_entity_path-set_name ).
+    ro_query_options = cl_sadl_gw_dpc_helper=>get_query_options_entity( io_sadl_entity              = lo_sadl_entity
+                                                                        iv_entity_set_name          = ls_entity_path-set_name
+                                                                        iv_entity_type_name         = lv_entity_type_name
+                                                                        it_requested_with_mandatory = it_requested_with_mandatory
+                                                                        io_model                    = mo_model
+                                                                        io_sadl_mp                  = mo_mp
+                                                                        iv_temporal_context         = iv_temporal_context ).
+    IF lt_parameters IS NOT INITIAL.
+      ro_query_options->set_entity_parameters( lt_parameters ).
+      _store_params_for_expand( lt_parameters ).
+    ENDIF.
+    cl_sadl_gw_dpc_helper=>set_analytical_metadata( iv_entity_type   = lv_entity_type_name
+                                                    io_query_options = ro_query_options
+                                                    io_model         = mo_model ).
+    ro_query_options->set_entity_path( ls_entity_path ).
+
+    " application: set query options
+    IF ro_query_options->is_exposure_type( ) <> abap_true. " In exposure case, query options shall not be set
+      cl_sadl_run_time_util=>start( cl_sadl_run_time_util=>cs_component-app ).
+      if_sadl_gw_query_control~set_query_options( iv_entity_set    = ls_entity_path-set_name
+                                                  io_query_options = ro_query_options ).
+      IF mo_extension_api IS BOUND.
+        TRY.
+            mo_extension_api->add_query_options(  iv_entity_name   = lv_entity_type_name
+                                                  io_query_options = ro_query_options ).
+          CATCH cx_cfd_odata_runtime INTO DATA(lx).
+            RAISE EXCEPTION TYPE lcx_internal_error EXPORTING previous = lx.
+        ENDTRY.
+      ENDIF.
+      cl_sadl_run_time_util=>stop( cl_sadl_run_time_util=>cs_component-app ).
+    ENDIF.
+
+    _evaluate_analytical_id( ro_query_options ).
+    cl_sadl_gw_dpc_helper=>check_query_options( io_sadl_entity   = lo_sadl_entity
+                                                io_query_options = ro_query_options ).
+  ENDMETHOD.
+
+
+  METHOD _get_query_options_entity_set.
+    " process navigation information
+    _create_map_for_auts( is_entity_path ).
+    cl_sadl_gw_navigation_util=>convert_gw_path_to_sadl( EXPORTING is_gw_entity_path      = is_entity_path
+                                                                   it_entity_set_type_map = mt_entity_set_type_map
+                                                         IMPORTING es_entity_path         = DATA(ls_entity_path) ).
+    cl_sadl_gw_navigation_util=>convert_path_and_extract_param( EXPORTING io_sadl_api          = mo_sadl_api
+                                                                          iv_use_placeholders  = mv_is_crp_caching_allowed
+                                                                IMPORTING et_entity_parameters = DATA(lt_parameters)
+                                                                CHANGING  xs_entity_path       = ls_entity_path ).
+    DATA(lv_entity_type_name) = _get_type_name( ls_entity_path-set_name ).
+
+    " prepare query options
+    IF iv_top IS INITIAL.
+      DATA(lv_top_int) = -1.
+    ELSE.
+      lv_top_int = CONV i( iv_top ).
+    ENDIF.
+    DATA(lo_sadl_entity) = mo_sadl_api->get_entity( ls_entity_path-set_name ).
+    ro_query_options = cl_sadl_gw_dpc_helper=>get_query_options_entity_set( io_sadl_entity              = lo_sadl_entity
+                                                                            iv_entity_set_name          = ls_entity_path-set_name
+                                                                            iv_entity_type_name         = lv_entity_type_name
+                                                                            iv_top                      = lv_top_int
+                                                                            iv_skip                     = iv_skip
+                                                                            iv_has_count                = iv_has_count
+                                                                            iv_has_inline_count         = iv_has_inline_count
+                                                                            it_order_by                 = it_order_by
+                                                                            io_filter                   = io_filter
+                                                                            io_filter_tree              = io_filter_tree
+                                                                            iv_search_string            = iv_search_string
+                                                                            it_requested_with_mandatory = it_requested_with_mandatory
+                                                                            it_request_placeholders     = it_placeholder_values
+                                                                            iv_temporal_context         = iv_temporal_context
+                                                                            io_cache                    = mo_cache
+                                                                            io_model                    = mo_model
+                                                                            io_sadl_mp                  = mo_mp ).
+    IF lt_parameters IS NOT INITIAL.
+      ro_query_options->set_entity_parameters( lt_parameters ).
+      _store_params_for_expand( lt_parameters ).
+    ENDIF.
+    cl_sadl_gw_dpc_helper=>set_analytical_metadata( iv_entity_type   = lv_entity_type_name
+                                                    io_query_options = ro_query_options
+                                                    io_model         = mo_model ).
+    ro_query_options->set_entity_path( ls_entity_path ).
+
+    " application: set query options
+    IF ro_query_options->is_exposure_type( ) <> abap_true. " In exposure case, query options shall not be set
+      cl_sadl_run_time_util=>start( cl_sadl_run_time_util=>cs_component-app ).
+      if_sadl_gw_query_control~set_query_options( iv_entity_set    = ls_entity_path-set_name
+                                                  io_query_options = ro_query_options ).
+      IF mo_extension_api IS BOUND.
+        TRY.
+            mo_extension_api->add_query_options( iv_entity_name   = lv_entity_type_name
+                                                 io_query_options = ro_query_options ).
+          CATCH cx_cfd_odata_runtime INTO DATA(lx).
+            RAISE EXCEPTION TYPE lcx_internal_error EXPORTING previous = lx.
+        ENDTRY.
+      ENDIF.
+      cl_sadl_run_time_util=>stop( cl_sadl_run_time_util=>cs_component-app ).
+    ENDIF.
+
+    _evaluate_analytical_id( ro_query_options ).
+    cl_sadl_gw_dpc_helper=>check_query_options( io_sadl_entity   = lo_sadl_entity
+                                                io_query_options = ro_query_options ).
+  ENDMETHOD.
+
+
+  METHOD _get_table_container_from_load.
+    IF ir_entity_load IS NOT INITIAL.
+      ASSIGN ir_entity_load->table_container->* TO FIELD-SYMBOL(<table>).
+      IF sy-subrc = 0.
+        CREATE DATA rr_table_container LIKE <table>.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_transact_runtime.
+    ro_runtime = mo_sadl_api->get_runtime( iv_entity_set ).
+  ENDMETHOD.
+
+
+  METHOD _get_type_name .
+    IF mt_entity_set_type_map IS NOT INITIAL. " (except AUTs)
+      rv_type_name = mt_entity_set_type_map[ set = CONV #( iv_entity_set ) ]-type.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _init.
+    _init_mp( ).
+    _get_mdp( ).
+    IF mo_sadl_api IS NOT BOUND.
+      mo_common_runtime = NEW cl_sadl_gw_odata_runtime( ).
+      mo_sadl_api = cl_sadl_entity_int_api_factory=>create( mo_mdp ).
+    ENDIF.
+    IF mo_context IS BOUND AND mo_model IS NOT BOUND.
+      mo_model = get_model( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _init_cache.
+    CLEAR mt_placeholder_values.
+    mv_is_crp_cached_request = io_tech_request_context->is_crp_cached_request( ).
+    IF mv_is_crp_cached_request = abap_true.
+      io_tech_request_context->get_crp_provider_request( IMPORTING et_provider_request = DATA(lt_gw_cache_content) ).
+      mo_cache = NEW cl_sadl_sql_cache_handler( iv_cached_request = abap_true it_cache_data = CONV #( lt_gw_cache_content ) ).
+      IF mo_cache->is_version_valid( ) = abap_false.
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_cr_deprecated EXPORTING textid = /iwbep/cx_mgw_cr_deprecated=>request_cache_deprecated.
+      ENDIF.
+    ELSE.
+      mv_is_crp_caching_allowed = io_tech_request_context->is_crp_request_caching_allowed( ).
+      IF mv_is_crp_caching_allowed = abap_true.
+        mo_cache = NEW cl_sadl_sql_cache_handler( iv_request_caching_allowed = abap_true
+                                                  it_cache_data = VALUE #( ( name = if_sadl_sql_cache_handler=>co_version value = if_sadl_sql_cache_handler=>co_version_value ) ) ).
+      ENDIF.
+    ENDIF.
+    IF mv_is_crp_cached_request = abap_true OR mv_is_crp_caching_allowed = abap_true.
+      io_tech_request_context->get_crp_placeholder_valuation( IMPORTING et_valuation = DATA(lt_valuation) ).
+      LOOP AT lt_valuation ASSIGNING FIELD-SYMBOL(<s_valuation>).
+        INSERT VALUE #( name = <s_valuation>-placeholder  value = <s_valuation>-pattern_value ) INTO TABLE mt_placeholder_values.
+      ENDLOOP.
+      cl_sadl_entity_util=>get_system_placeholder_values( IMPORTING et_values = DATA(lt_system_placeholder_values) ).
+      INSERT LINES OF lt_system_placeholder_values INTO TABLE mt_placeholder_values.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _init_dbi.
+    TRY.
+        NEW lcl_request( ir_request_details = VALUE #( )
+                         it_headers         = VALUE #( ) )->get_header( EXPORTING io_request = CAST #( io_tech_request )
+                                                                        IMPORTING et_headers = DATA(lt_headers) ).
+        mo_dbi = cl_sadl_dbi=>create( lt_headers ).
+      CATCH cx_sy_move_cast_error.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD _init_mp.
+    IF mo_mp IS NOT BOUND.
+      IF mo_model IS INITIAL.
+        TRY.
+            mo_model = get_model( ).
+          CATCH /iwbep/cx_mgw_tech_exception INTO DATA(lx).
+            RAISE EXCEPTION TYPE cx_sadl_static EXPORTING previous = lx.
+        ENDTRY.
+      ENDIF.
+      IF mo_extension_api IS INITIAL. " (bound in AUTs)
+        mo_extension_api = get_extension_api( mo_context ).
+      ENDIF.
+      cl_sadl_gw_dpc_helper=>get_entity_set_type_map( EXPORTING io_model               = mo_model
+                                                      IMPORTING et_entity_set_type_map = mt_entity_set_type_map ).
+      mo_mp = get_mp( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _postprocess_action.
+    get_action_return_data_type( EXPORTING is_function     = is_function-metadata
+                                 IMPORTING er_data         = er_gw_action_ret_data
+                                           ev_is_structure = DATA(lv_is_structure) ).
+    IF ir_action_returning_par IS BOUND.
+      FIELD-SYMBOLS <t_ret_data> TYPE STANDARD TABLE.
+      ASSIGN ir_action_returning_par->* TO <t_ret_data>.
+      IF <t_ret_data> IS NOT INITIAL.
+        map_action_return_data_to_sadl( iv_target_es_name = is_function-metadata-target_es_name
+                                        iv_source_es_name = is_function-metadata-src_es_name
+                                        iv_function_name  = is_function-metadata-function_name
+                                        it_ret_data       = <t_ret_data>
+                                        iv_is_structure   = lv_is_structure
+                                        ir_data           = er_gw_action_ret_data ).
+        IF is_function-metadata-target_es_name IS NOT INITIAL.
+          " re-read the data with the keys from the BO action's return data. Needed
+          " - in order to get current data after Save
+          " - in order to fill de-normalized text fields, field control helper fields, calculated fields...
+          get_action_data_from_result( iv_is_structure = lv_is_structure
+                                       is_function     = is_function-metadata
+                                       ir_data_in      = er_gw_action_ret_data ).
+        ENDIF.
+      ELSE.
+        get_action_ret_data_from_input( is_function     = is_function-metadata
+                                        ir_data_in      = is_function-source_data
+                                        iv_is_structure = lv_is_structure
+                                        ir_return_data  = er_gw_action_ret_data ).
+      ENDIF.
+      IF ct_sadl_messages IS NOT INITIAL.
+        IF is_function-metadata-target_es_name IS INITIAL.
+          " message target relative to action source (see https://wiki.wdf.sap.corp/wiki//x/p_QxY)
+          ASSIGN is_function-source_data->* TO FIELD-SYMBOL(<s_action_source>).
+          DATA(lt_action_key_values) = _get_key_values( iv_entity_set = CONV #( is_function-metadata-src_es_name )
+                                                        is_data_in    = <s_action_source> ).
+          NEW cl_sadl_gw_dpc_messages( me )->add_messages_for_entity( EXPORTING io_gw_message_container = io_message_container
+                                                                                it_key_values           = lt_action_key_values
+                                                                                iv_entity_set           = CONV #( is_function-metadata-src_es_name )
+                                                                                iv_action_involved      = abap_true
+                                                                      CHANGING  ct_sadl_messages        = ct_sadl_messages ).
+        ELSE.
+          " message target relative to action target
+          IF lv_is_structure = abap_true.
+            ASSIGN er_gw_action_ret_data->* TO FIELD-SYMBOL(<s_action_result>).
+            lt_action_key_values = _get_key_values( iv_entity_set = CONV #( is_function-metadata-target_es_name )
+                                                    is_data_in    = <s_action_result> ).
+          ENDIF.
+          NEW cl_sadl_gw_dpc_messages( me )->add_messages_for_entity( EXPORTING io_gw_message_container = io_message_container
+                                                                                it_key_values           = lt_action_key_values
+                                                                                iv_entity_set           = CONV #( is_function-metadata-target_es_name )
+                                                                                iv_action_involved      = abap_true
+                                                                      CHANGING  ct_sadl_messages        = ct_sadl_messages ).
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _postprocess_deep_create.
+    ASSIGN ir_deep_data->* TO FIELD-SYMBOL(<s_deep_data>).
+    ASSIGN ir_key->* TO FIELD-SYMBOL(<s_deep_create_key>).
+    MOVE-CORRESPONDING <s_deep_create_key> TO <s_deep_data>.
+    DATA(lv_entity_set) = CONV string( io_req_context_c->get_entity_set_name( ) ).
+
+    _read_data_after_deep_create( EXPORTING io_tech_request_context = io_req_context_c
+                                            io_expand               = io_expand
+                                  CHANGING  cs_data                 = <s_deep_data> ).
+    _postprocess_deep_create_msgs( EXPORTING ir_deep_data     = ir_deep_data
+                                             io_expand        = io_expand
+                                             io_msg_container = io_msg_container
+                                             iv_entity_set    = lv_entity_set
+                                    CHANGING ct_sadl_messages = ct_sadl_messages ).
+  ENDMETHOD.
+
+
+  METHOD _postprocess_deep_create_msgs.
+    ASSIGN ir_deep_data->* TO FIELD-SYMBOL(<s_key>).
+    DATA(lt_key_values) = _get_key_values( iv_entity_set = iv_entity_set
+                                           is_data_in    = <s_key> ).
+    NEW cl_sadl_gw_dpc_messages( me )->add_messages_for_entity( EXPORTING io_gw_message_container = io_msg_container
+                                                                          it_key_values           = lt_key_values
+                                                                          iv_entity_set           = iv_entity_set
+                                                                          iv_absolute_target      = boolc( iv_level > 0 )
+                                                                CHANGING  ct_sadl_messages        = ct_sadl_messages ).
+
+    " map messages of sub-nodes
+    cl_sadl_gw_dpc_deep_create=>_prepare_recursion( EXPORTING iv_entity_id = iv_entity_set
+                                                              io_expand    = io_expand
+                                                              ir_data      = ir_deep_data
+                                                              io_sadl_api  = mo_sadl_api
+                                                    IMPORTING et_recursion = DATA(lt_recursion) ).
+    LOOP AT lt_recursion INTO DATA(ls_recursion).
+      _postprocess_deep_create_msgs( EXPORTING ir_deep_data     = ls_recursion-r_data
+                                               io_expand        = ls_recursion-o_expand
+                                               io_msg_container = io_msg_container
+                                               iv_entity_set    = ls_recursion-entity_id
+                                               iv_level         = iv_level + 1
+                                      CHANGING ct_sadl_messages = ct_sadl_messages ).
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD _prepare_create.
+    CLEAR: ev_source_entity_set, er_source_key, er_sadl_data, ev_navigation_property.
+    er_sadl_data = _get_data_line_container( io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_sadl_data->* TO FIELD-SYMBOL(<s_sadl_data>).
+    io_data_provider->read_entry_data( IMPORTING es_data = <s_sadl_data> ).
+
+    _get_creation_source_info( EXPORTING io_tech_request_context = io_tech_request_context
+                               IMPORTING ev_source_entity_set    = ev_source_entity_set
+                                         ev_navigation_property  = ev_navigation_property
+                                         er_source_key           = er_source_key ).
+  ENDMETHOD.
+
+
+  METHOD _prepare_deep_create.
+    CLEAR: et_create, er_root_key.
+    er_data_container = _get_deep_data_line_container( iv_entity_set = io_tech_request_context->get_entity_set_name( )
+                                                       io_expand     = io_expand ).
+    ASSIGN er_data_container->* TO FIELD-SYMBOL(<s_deep_data>).
+    io_data_provider->read_entry_data( IMPORTING es_data = <s_deep_data> ).
+
+    _get_creation_source_info( EXPORTING io_tech_request_context = io_tech_request_context
+                               IMPORTING ev_source_entity_set    = DATA(lv_source_entity_set)
+                                         ev_navigation_property  = DATA(lv_navigation_property)
+                                         er_source_key           = DATA(lr_source_data_ref) ).
+
+    cl_sadl_gw_dpc_deep_create=>_prepare_batch( EXPORTING iv_entity_id         = io_tech_request_context->get_entity_set_name( )
+                                                          iv_source_entity_id  = lv_source_entity_set
+                                                          ir_source_key_values = lr_source_data_ref
+                                                          iv_association       = lv_navigation_property
+                                                          io_expand            = io_expand
+                                                          is_data              = <s_deep_data>
+                                                          io_sadl_api          = mo_sadl_api
+                                                CHANGING  ct_create            = et_create ).
+    IF et_create IS NOT INITIAL.
+      er_root_key = et_create[ 1 ]-rs_entity_data.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _prepare_delete.
+    er_sadl_key = _get_data_line_container( io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_sadl_key->* TO FIELD-SYMBOL(<s_data_in>).
+    io_tech_request_context->get_converted_keys( IMPORTING es_key_values = <s_data_in> ).
+  ENDMETHOD.
+
+
+  METHOD _prepare_execute_action.
+    CLEAR: es_function, er_action_param, er_source_es_key_data, er_ret_data.
+    es_function-function_name = io_tech_request_context->get_function_import_name( ).
+    es_function-target_es_name = CAST /iwbep/if_mgw_req_entityset( io_tech_request_context )->get_entity_set_name( ).
+    es_function-src_es_name = get_action_source( iv_function_name = es_function-function_name ). " also used in changeset_begin where no tech request is available
+    DATA(lv_target_et_name) = CAST /iwbep/if_mgw_req_entityset( io_tech_request_context )->get_entity_type_name( ).
+    IF lv_target_et_name IS NOT INITIAL.
+      es_function-target_et_name = io_tech_request_context->get_function_return_type( ).
+    ELSE. " Real data type and no entity type
+      DATA(lv_ret_type) = io_tech_request_context->get_function_return_type( ).
+      IF mo_model IS BOUND.
+        DATA(lo_complex_type) = mo_model->get_complex_type( lv_ret_type ).
+        IF lo_complex_type IS BOUND.
+          es_function-target_data_type = lo_complex_type->get_structure( ).
+        ENDIF.
+      ELSE. " Unit tests only
+        es_function-target_data_type = lv_ret_type.
+      ENDIF.
+    ENDIF.
+
+    DATA(lo_sadl_entity) = mo_sadl_api->get_entity( CONV #( es_function-src_es_name ) ).
+    DATA(ls_action) = lo_sadl_entity->get_action( CONV #( es_function-function_name ) ).
+    er_source_es_key_data = _get_data_line_container( es_function-src_es_name ).
+
+    cl_sadl_gw_dpc_actions=>map_function_parameters( EXPORTING io_sadl_entity     = lo_sadl_entity
+                                                               is_action          = ls_action
+                                                               it_function_params = io_tech_request_context->get_parameters( )
+                                                               ir_out_key         = er_source_es_key_data
+                                                               io_model           = mo_model
+                                                               iv_function_name   = es_function-function_name
+                                                     IMPORTING er_parameters      = er_action_param ).
+
+
+    get_return_data_ref( EXPORTING is_act      = ls_action
+                                   iv_src_es   = es_function-src_es_name
+                         IMPORTING er_ret_data = er_ret_data ).
+  ENDMETHOD.
+
+
+  METHOD _prepare_update.
+    CLEAR: et_elements, et_key_values, er_sadl_data.
+
+    er_sadl_data = _get_data_line_container( io_tech_request_context->get_entity_set_name( ) ).
+    ASSIGN er_sadl_data->* TO FIELD-SYMBOL(<s_sadl_data>).
+    io_data_provider->read_entry_data( IMPORTING es_data = <s_sadl_data> ).
+    cl_sadl_gw_key_converter=>get_key_from_update_request(
+        EXPORTING io_request     = io_tech_request_context
+                  io_sadl_api    = mo_sadl_api
+                  is_structure   = <s_sadl_data>
+        IMPORTING et_keys        = et_key_values ).
+    cl_sadl_gw_dpc_helper=>add_keys( EXPORTING it_key_values = et_key_values
+                                     CHANGING  cs_data       = <s_sadl_data> ).
+
+    " if we are in PATCH, add updated elements
+    TRY.
+        DATA(lo_tech_req_patch) = CAST /iwbep/if_mgw_req_entity_p( io_tech_request_context ).
+        LOOP AT lo_tech_req_patch->get_components( ) INTO DATA(ls_comp).
+          INSERT CONV #( ls_comp-property ) INTO TABLE et_elements.
+        ENDLOOP.
+      CATCH cx_sy_move_cast_error. " UPDATE case
+        CLEAR et_elements.
+    ENDTRY.
+    IF et_elements IS INITIAL. " UPDATE case
+      _get_non_key_elements( EXPORTING iv_entity_set = io_tech_request_context->get_entity_set_name( )
+                             IMPORTING et_elements   = et_elements ).
+    ENDIF.
+
+    " remove read-only fields and keys
+    IF mo_model IS BOUND.
+      DATA(lt_entity_types) = mo_model->get_entity_types( ).
+      READ TABLE lt_entity_types ASSIGNING FIELD-SYMBOL(<s_entity_type>) WITH KEY name = io_tech_request_context->get_entity_type_name( ).
+      IF sy-subrc = 0.
+        LOOP AT et_elements INTO DATA(lv_element).
+          READ TABLE <s_entity_type>-properties ASSIGNING FIELD-SYMBOL(<s_property>) WITH KEY name = CONV #( lv_element ).
+          IF sy-subrc <> 0 OR sy-subrc = 0 AND ( <s_property>-is_read_only = abap_true OR <s_property>-is_key = abap_true ).
+            DELETE et_elements.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _raise_business_exception.
+    NEW cl_sadl_gw_dpc_messages( me )->add_messages_to_exception( EXPORTING io_message_handler   = io_sadl_message_handler
+                                                                            iv_action_involved   = iv_action_involved
+                                                                  IMPORTING eo_message_container = DATA(lo_message_container)
+                                                                            ev_http_status_code  = DATA(lv_http_status_code) ).
+    RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+      EXPORTING
+        textid            = iv_textid
+        entity_type       = CONV #( iv_entitytype )
+        message_container = lo_message_container
+        http_status_code  = lv_http_status_code.
+  ENDMETHOD.
+
+
+  METHOD _read_data_after_deep_create.
+    DATA(lv_entity_set) = io_tech_request_context->get_entity_set_name( ).
+    IF _does_entityset_support_fetch( lv_entity_set ) = abap_true.
+      DATA(lt_key_values) = _get_key_values( iv_entity_set = CONV #( lv_entity_set )
+                                             is_data_in    = cs_data ).
+      CLEAR cs_data.
+      GET REFERENCE OF cs_data INTO DATA(lr_data).
+      _get_expanded_entity( EXPORTING is_entity_path              = VALUE #( set_name  = lv_entity_set
+                                                                             type_name = io_tech_request_context->get_entity_type_name( )
+                                                                             t_key     = lt_key_values )
+                                      it_requested_with_mandatory = VALUE #( )
+                                      io_expand_node              = io_expand
+                                      iv_suppress_messages        = abap_true
+                                      ir_entity                   = lr_data ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _read_modified_entity.
+    CLEAR es_data.
+    DATA(lo_query_options) = _get_query_options_entity( is_entity_path              = VALUE #( set_name  = iv_entity_set
+                                                                                               type_name = iv_entity_type
+                                                                                               t_key     = it_key_values )
+                                                        it_requested_with_mandatory = VALUE #( ) ).
+*    IF sy-uname = 'GSCHNITZE'.
+*      DATA lr_data TYPE REF TO data.
+*      FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+*      CREATE DATA lr_data LIKE STANDARD TABLE OF es_data.
+*      ASSIGN lr_data->* TO <t_data>.
+*      lo_query_options->if_sadl_gw_query_options~get_requested_elements( IMPORTING et_elements = DATA(lt_elements) ).
+*      lo_query_options->set_requested( VALUE #( fill_number_all_hits = abap_true
+*                                                fill_data            = abap_true
+*                                                elements             = lt_elements ) ).
+*      CAST cl_sadl_gw_odata_runtime( mo_common_runtime )->_get_entityset_via_read(
+*        EXPORTING io_sadl_rt       = mo_sadl_api->get_runtime( iv_entity_set )
+*                  io_mdp           = mo_mdp
+*                  io_query_options = lo_query_options
+*        IMPORTING et_data          = <t_data> ).
+*      READ TABLE <t_data> INDEX 1 INTO es_data.
+*    ELSE.
+    mo_common_runtime->get_entity( EXPORTING io_query_options = lo_query_options
+                                             io_sadl_rt       = mo_sadl_api->get_runtime( iv_entity_set )
+                                             io_mdp           = mo_mdp
+                                   IMPORTING es_data          = es_data ).
+*    ENDIF.
+    mo_sadl_api->get_runtime( iv_entity_set )->if_sadl_entity_transactional~get_message_handler( )->clear( ). "reading post creation should not generate new messages
+  ENDMETHOD.
+
+
+  METHOD _store_params_for_expand.
+    IF ms_entity_params_for_expand-entity_alias IS NOT INITIAL.
+      ASSIGN it_parameters[ entity_alias = ms_entity_params_for_expand-entity_alias ] TO FIELD-SYMBOL(<s_params>).
+      IF sy-subrc = 0.
+        ms_entity_params_for_expand-parameters = <s_params>-parameters.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

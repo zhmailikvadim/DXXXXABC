@@ -1,0 +1,366 @@
+FUNCTION K_DOCUMENT_UPDATE
+  IMPORTING
+    VALUE(I_TOTALS_UPDATE) LIKE SY-BATCH DEFAULT 'X'
+    VALUE(I_RCL_UPDATE) LIKE SY-BATCH DEFAULT 'X'
+    VALUE(I_ITEMS_INSERT) LIKE SY-BATCH DEFAULT 'X'
+    VALUE(I_SAVE_DIRECTLY) LIKE SY-BATCH DEFAULT ' '
+    VALUE(I_MAX_PERIOD) LIKE COEPR-PERIO DEFAULT '999'
+    VALUE(I_LATE_COEP_INS) LIKE SY-BATCH DEFAULT ' '
+  TABLES
+    T_COBK LIKE COBK OPTIONAL
+    T_COEP LIKE COEP OPTIONAL
+    T_COEPB LIKE COEPB OPTIONAL
+    T_COEPL LIKE COEPL OPTIONAL
+    T_COEPR LIKE COEPR OPTIONAL
+    T_COEPT LIKE COEPT OPTIONAL
+    T_COEJA LIKE COEJA OPTIONAL
+    T_COEJLA LIKE COEJLA OPTIONAL
+    T_COEJRA LIKE COEJRA OPTIONAL
+    T_COEJTA LIKE COEJTA OPTIONAL.
+
+
+
+
+
+* Änderungshistorie
+*-----------------------------------------------------------------------
+  DATA: LB_SKIP LIKE SY-BATCH.
+
+*.....Initialisierung..................................................*
+  REFRESH IT_COEP.
+  CLEAR: GD_PARKED_DOCUMENT.
+  GB_LATE_COEP_INS = I_LATE_COEP_INS.
+
+*.....aktuellen Timestamp ermitteln....................................*
+  IF GD_TIMESTMP IS INITIAL.
+    PERFORM GET_TIMESTAMP CHANGING GD_TIMESTMP.
+  ENDIF.
+
+*.....Logisches System des Mandanten ermitteln.........................*
+  IF T000-MANDT NE SY-MANDT.
+    SELECT SINGLE * FROM T000 WHERE MANDT = SY-MANDT.
+  ENDIF.
+
+*......Daten in globales Memory uebertragen............................*
+
+  IF I_ITEMS_INSERT = ON.
+    LOOP AT T_COBK.
+      T_COBK-MANDT = SY-MANDT.
+*     BELNR <> initial
+      PERFORM CHECK_DOCNR USING T_COBK-BELNR.
+*     ggf. LOGSYSTEM des Belegs auf initial setzen
+      IF T_COBK-LOGSYSTEM = T000-LOGSYS.
+        T_COBK-LOGSYSTEM = SPACE.
+      ENDIF.
+      IF T_COBK-AWSYS = T000-LOGSYS.
+        T_COBK-AWSYS = SPACE.
+      ENDIF.
+*     COBK_INS sortiert aufbauen wegen BINARY SEARCH
+      READ TABLE COBK_INS WITH KEY KOKRS = T_COBK-KOKRS
+                                   BELNR = T_COBK-BELNR
+                                   BINARY SEARCH
+                                   TRANSPORTING NO FIELDS.
+      IF SY-SUBRC = 0.
+        MESSAGE X208(00) WITH 'DUPLICATE_COBK'.
+      ELSE.
+        INSERT T_COBK INTO COBK_INS INDEX SY-TABIX.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  LOOP AT T_COEP.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEP-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   ggf. LOGSYSO setzen
+    IF T000-LOGSYS NE SPACE.
+      CALL FUNCTION 'K_LOGSYSTEM_GET'
+        EXPORTING
+          I_KOKRS       = T_COEP-KOKRS
+          I_OBJNR       = T_COEP-OBJNR
+          I_OBJ_LOGSYS  = T_COEP-LOGSYSO
+        IMPORTING
+          E_LOGSYS      = T_COEP-LOGSYSO
+        EXCEPTIONS
+          ERROR_MESSAGE = 1
+          OTHERS        = 2.
+      IF SY-SUBRC <> 0.
+        MESSAGE ID SY-MSGID TYPE 'X' NUMBER SY-MSGNO
+                WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+      ENDIF.
+      IF T_COEP-LOGSYSO = T000-LOGSYS.
+        CLEAR T_COEP-LOGSYSO.
+      ENDIF.
+      IF T_COEP-AWSYS = T000-LOGSYS.      "sFIN
+        T_COEP-AWSYS = SPACE.             "sFIN
+      ENDIF.                              "sFIN
+    ENDIF.
+*   ggf. LOGSYSP setzen
+    IF T_COEP-PAROB1 NE SPACE AND T000-LOGSYS NE SPACE.
+      CALL FUNCTION 'K_LOGSYSTEM_GET'
+        EXPORTING
+          I_KOKRS       = T_COEP-KOKRS
+          I_OBJNR       = T_COEP-PAROB1
+          I_OBJ_LOGSYS  = T_COEP-LOGSYSP
+        IMPORTING
+          E_LOGSYS      = T_COEP-LOGSYSP
+        EXCEPTIONS
+          ERROR_MESSAGE = 1
+          OTHERS        = 2.
+      IF SY-SUBRC <> 0.
+        MESSAGE ID SY-MSGID TYPE 'X' NUMBER SY-MSGNO
+                WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+      ENDIF.
+      IF T_COEP-LOGSYSP = T000-LOGSYS.
+        CLEAR T_COEP-LOGSYSP.
+      ENDIF.
+    ENDIF.
+*   skip parked document line items in decentral systems
+    PERFORM CHECK_PARKED_DOCUMENT_ITEM USING    T_COEP-WRTTP
+                                                T_COEP-LOGSYSO
+                                       CHANGING LB_SKIP.
+    IF LB_SKIP = 'X'.
+      CONTINUE.
+    ENDIF.
+*   Einzelposten merken
+    PERFORM COLLECT_COEP USING T_COEP
+                               I_ITEMS_INSERT
+                               I_TOTALS_UPDATE
+                               I_RCL_UPDATE.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEP-KOKRS
+                           T_COEP-BELNR
+                           T_COEP-LOGSYSO
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  LOOP AT T_COEPB.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEPB-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   Einzelposten merken
+    COEPB_INS = T_COEPB.
+    COEPB_INS-MANDT         = SY-MANDT.
+    COEPB_INS-TOTALS_UPDATE = I_TOTALS_UPDATE.
+    COEPB_INS-ITEMS_INSERT  = I_ITEMS_INSERT.
+    APPEND COEPB_INS.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEPB-KOKRS
+                           T_COEPB-BELNR
+                           T000-LOGSYS
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  LOOP AT T_COEPL.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEPL-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   ggf. LOGSYSTEM setzen
+    IF T000-LOGSYS NE SPACE.
+      CALL FUNCTION 'K_LOGSYSTEM_GET'
+        EXPORTING
+          I_KOKRS       = T_COEPL-KOKRS
+          I_OBJNR       = T_COEPL-OBJNR
+          I_OBJ_LOGSYS  = T_COEPL-LOGSYSO
+        IMPORTING
+          E_LOGSYS      = T_COEPL-LOGSYSO
+        EXCEPTIONS
+          ERROR_MESSAGE = 1
+          OTHERS        = 2.
+      IF SY-SUBRC <> 0.
+        MESSAGE ID SY-MSGID TYPE 'X' NUMBER SY-MSGNO
+                WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+      ENDIF.
+      IF T_COEPL-LOGSYSO = T000-LOGSYS.
+        CLEAR T_COEPL-LOGSYSO.
+      ENDIF.
+    ENDIF.
+*   skip parked document line items in decentral systems
+    PERFORM CHECK_PARKED_DOCUMENT_ITEM USING    T_COEPL-WRTTP
+                                                T_COEPL-LOGSYSO
+                                       CHANGING LB_SKIP.
+    IF LB_SKIP = 'X'.
+      CONTINUE.
+    ENDIF.
+*   Einzelposten merken
+    PERFORM COLLECT_COEPL USING T_COEPL
+                                I_ITEMS_INSERT
+                                I_TOTALS_UPDATE.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEPL-KOKRS
+                           T_COEPL-BELNR
+                           T_COEPL-LOGSYSO
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  LOOP AT T_COEPR.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEPR-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   Einzelposten merken
+    COEPR_INS = T_COEPR.
+    COEPR_INS-MANDT         = SY-MANDT.
+    COEPR_INS-TOTALS_UPDATE = I_TOTALS_UPDATE.
+    COEPR_INS-ITEMS_INSERT  = I_ITEMS_INSERT.
+    COEPR_INS-MAX_PERIOD    = I_MAX_PERIOD.
+    APPEND COEPR_INS.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEPR-KOKRS
+                           T_COEPR-BELNR
+                           T000-LOGSYS
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  LOOP AT T_COEPT.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEPT-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   Einzelposten merken
+    COEPT_INS = T_COEPT.
+    COEPT_INS-MANDT         = SY-MANDT.
+    COEPT_INS-TOTALS_UPDATE = I_TOTALS_UPDATE.
+    COEPT_INS-ITEMS_INSERT  = I_ITEMS_INSERT.
+    APPEND COEPT_INS.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEPT-KOKRS
+                           T_COEPT-BELNR
+                           T000-LOGSYS
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  EPTAB = 'COEJ'.
+  LOOP AT T_COEJA.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEJA-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   Einzelposten merken
+    PERFORM GET_SUMTAB USING T_COEJA-VRGNG EPTAB SUMTB.
+    CASE SUMTB.
+      WHEN 'COSP'.
+        MOVE-CORRESPONDING T_COEJA TO COEJ_INS_P.
+        COEJ_INS_P-MANDT         = SY-MANDT.
+        COEJ_INS_P-PERBL         = PERCL.
+        COEJ_INS_P-TIMESTMP      = GD_TIMESTMP.             "525207
+        COEJ_INS_P-TOTALS_UPDATE = I_TOTALS_UPDATE.
+        COEJ_INS_P-ITEMS_INSERT  = I_ITEMS_INSERT.
+        APPEND COEJ_INS_P.
+      WHEN 'COSS'.
+        MOVE-CORRESPONDING T_COEJA TO COEJ_INS_S.
+        COEJ_INS_S-MANDT         = SY-MANDT.
+        COEJ_INS_S-PERBL         = PERCL.
+        COEJ_INS_S-TIMESTMP      = GD_TIMESTMP.             "525207
+        COEJ_INS_S-TOTALS_UPDATE = I_TOTALS_UPDATE.
+        COEJ_INS_S-ITEMS_INSERT  = I_ITEMS_INSERT.
+        APPEND COEJ_INS_S.
+    ENDCASE.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEJA-KOKRS
+                           T_COEJA-BELNR
+                           T000-LOGSYS
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  LOOP AT T_COEJLA.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEJLA-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   Einzelposten merken
+    MOVE-CORRESPONDING T_COEJLA TO COEJL_INS.
+    COEJL_INS-MANDT         = SY-MANDT.
+    COEJL_INS-PERBL         = PERCL.
+    COEJL_INS-TOTALS_UPDATE = I_TOTALS_UPDATE.
+    COEJL_INS-ITEMS_INSERT  = I_ITEMS_INSERT.
+    APPEND COEJL_INS.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEJLA-KOKRS
+                           T_COEJLA-BELNR
+                           T000-LOGSYS
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  LOOP AT T_COEJRA.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEJRA-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   Einzelposten merken
+    MOVE-CORRESPONDING T_COEJRA TO COEJR_INS.
+    COEJR_INS-MANDT         = SY-MANDT.
+    COEJR_INS-PERBL         = PERCL.
+    COEJR_INS-TOTALS_UPDATE = I_TOTALS_UPDATE.
+    COEJR_INS-ITEMS_INSERT  = I_ITEMS_INSERT.
+    APPEND COEJR_INS.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEJRA-KOKRS
+                           T_COEJRA-BELNR
+                           T000-LOGSYS
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+  LOOP AT T_COEJTA.
+*   temporäre Objektnummern nicht verarbeiten
+    IF T_COEJTA-OBJNR(2) = OBJEKTART_TM.
+      MESSAGE X208(00) WITH 'TEMPORARY_OBJECT_NUMBER'.
+    ENDIF.
+*   Einzelposten merken
+    MOVE-CORRESPONDING T_COEJTA TO COEJT_INS.
+    COEJT_INS-MANDT         = SY-MANDT.
+    COEJT_INS-PERBL         = PERCL.
+    COEJT_INS-TOTALS_UPDATE = I_TOTALS_UPDATE.
+    COEJT_INS-ITEMS_INSERT  = I_ITEMS_INSERT.
+    APPEND COEJT_INS.
+*   Einzelposten zaehlen
+    PERFORM COUNT_EP USING T_COEJTA-KOKRS
+                           T_COEJTA-BELNR
+                           T000-LOGSYS
+                           I_ITEMS_INSERT.
+  ENDLOOP.
+
+*......Verbuchung (ON COMMIT) anstossen................................*
+
+  IF NOT IT_COEP[] IS INITIAL.
+*   Kostenartenledger fortschreiben
+    SORT T_COBK BY KOKRS BELNR.
+    READ TABLE IT_COEP INDEX 1 TRANSPORTING LEDNR.
+    IF IT_COEP-LEDNR = '00'.   "nur für Originaldaten, kein Rollup
+      CALL FUNCTION 'K_RCL_COEP_UPDATE'
+        TABLES
+          T_COBK        = T_COBK
+          T_COEP        = IT_COEP
+        EXCEPTIONS
+          ERROR_MESSAGE = 1
+          OTHERS        = 2.
+      IF SY-SUBRC <> 0.
+        MESSAGE ID SY-MSGID TYPE 'X' NUMBER SY-MSGNO
+                WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+      ENDIF.
+    ENDIF.
+    REFRESH IT_COEP.
+  ENDIF.
+
+  IF SY-ONCOM = 'P' OR I_SAVE_DIRECTLY = 'X'.
+    PERFORM INSERT_TABLES.
+    PERFORM UPDATE_TABLES.
+  ELSE.
+    PERFORM INSERT_TABLES ON COMMIT.
+    PERFORM UPDATE_TABLES ON COMMIT LEVEL LEVEL_CO_TOTALS.
+  ENDIF.
+
+*{   INSERT         DHVK900309                                        1
+  CALL FUNCTION 'ZFI_ADDITIONAL_DOC'
+    EXPORTING
+      iv_nocheck = abap_true
+    TABLES
+      i_cobk        = T_COBK
+      i_coep        = T_COEP
+            .
+
+*}   INSERT
+ENDFUNCTION.

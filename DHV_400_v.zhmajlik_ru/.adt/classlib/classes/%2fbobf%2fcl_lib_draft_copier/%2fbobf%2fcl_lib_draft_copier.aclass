@@ -1,0 +1,497 @@
+CLASS /bobf/cl_lib_draft_copier DEFINITION PUBLIC FINAL
+CREATE PRIVATE.
+
+  PUBLIC SECTION.
+    "! Get the Draft copy helper instance
+    "! @parameter iv_bo_key | BO Key of the Business Object that is to be copied.
+    "! @parameter ro_instance | Instance of the Draft Copier class.
+    CLASS-METHODS create IMPORTING iv_bo_key          TYPE /bobf/obm_bo_key
+                         RETURNING VALUE(ro_instance) TYPE REF TO /bobf/cl_lib_draft_copier
+                         RAISING   /bobf/cx_frw.
+
+    "! Copy Active Instance to Draft persistence
+    "! @parameter io_read | BOPF access object for read access.
+    "! @parameter io_modify | BOPF access object for modifications.
+    "! @parameter iv_active_key | Key of the active document to be locked.
+    "! @parameter iv_draft_key | Key to be used for draft creation.
+    "! @parameter it_exclude_subnodes | Nodes that should not be copied to draft persistence. <br/> Please provide the starting node key of a branch to skip the whole branch.
+    "! <br/> Note: Do not pass the root node key since it will negate the whole point of draft copier, in this case a short dump will be created.
+    "! @parameter eo_message | Error message when draft creation failed.
+    "! @parameter rv_success | True, if the draft creation was successful.
+    METHODS copy_active_to_draft IMPORTING
+                                   io_read             TYPE REF TO /bobf/if_frw_read
+                                   io_modify           TYPE REF TO /bobf/if_frw_modify
+                                   iv_active_key       TYPE /bobf/conf_key
+                                   iv_draft_key        TYPE /bobf/conf_key
+                                   it_exclude_subnodes TYPE /bobf/t_frw_key OPTIONAL
+                                 EXPORTING
+                                   eo_message          TYPE REF TO /bobf/if_frw_message
+                                 RETURNING
+                                   VALUE(rv_success)   TYPE abap_bool.
+    "! Copy Draft Instances to Active Persistence
+    "! @parameter io_read | BOPF access object for read access.
+    "! @parameter io_modify | BOPF access object for modifications.
+    "! @parameter iv_draft_key | Key of the draft to be copied
+    "! @parameter it_exclude_subnodes | Nodes that should not be copied to active persistence. <br/> Please provide the starting node key of a branch to skip the whole branch.
+    "! <br/> Note: Do not pass the root node key since it will negate the whole point of draft copier, in this case a short dump will be created.
+    "! @parameter eo_message | Error message when copying to the active persistence failed
+    "! @parameter ev_active_key | Key of the active document created or updated
+    "! @parameter rv_success | True, if copying to active persistence was successful
+    METHODS copy_draft_to_active IMPORTING io_read             TYPE REF TO /bobf/if_frw_read
+                                           io_modify           TYPE REF TO /bobf/if_frw_modify
+                                           iv_draft_key        TYPE /bobf/conf_key
+                                           it_exclude_subnodes TYPE /bobf/t_frw_key OPTIONAL
+                                 EXPORTING eo_message          TYPE REF TO /bobf/if_frw_message
+                                           ev_active_key       TYPE /bobf/conf_key
+                                 RETURNING VALUE(rv_success)   TYPE abap_bool.
+  PRIVATE SECTION.
+
+    TYPES : BEGIN OF ty_node_mapping,
+              node_key   TYPE /bobf/conf_key,
+              active_key TYPE /bobf/conf_key,
+              draft_key  TYPE /bobf/conf_key,
+            END OF ty_node_mapping.
+
+    DATA mo_read              TYPE REF TO /bobf/if_frw_read.
+    DATA mv_root_node_key     TYPE /bobf/obm_node_key.
+    DATA mv_root_draft_key    TYPE /bobf/conf_key.
+    DATA mv_root_active_key   TYPE /bobf/conf_key.
+    DATA mt_node              TYPE /bobf/t_confro_node.
+    DATA mt_compositions      TYPE /bobf/t_confro_assoc2.
+    DATA mt_node_mapping      TYPE SORTED TABLE OF ty_node_mapping WITH UNIQUE KEY node_key active_key
+                                                                   WITH UNIQUE SORTED KEY seckey COMPONENTS node_key draft_key.
+    DATA mt_modification      TYPE /bobf/t_frw_modification.
+    DATA mt_exclude_subnodes  TYPE /bobf/t_frw_key.
+    DATA ms_altkey            TYPE /bobf/s_confro_altkey.
+    DATA mo_conf              TYPE REF TO /bobf/if_frw_configuration.
+
+    METHODS constructor IMPORTING iv_bo_key TYPE /bobf/obm_bo_key
+                        RAISING   /bobf/cx_frw.
+    METHODS copy_active_to_draft_root     IMPORTING iv_active_key      TYPE /bobf/conf_key.
+    METHODS copy_active_to_draft_children IMPORTING iv_parent_node_key TYPE /bobf/conf_key.
+    METHODS copy_draft_to_active_root     IMPORTING iv_draft_key      TYPE /bobf/conf_key
+                                          EXPORTING ev_active_key     TYPE /bobf/conf_key
+                                          RETURNING VALUE(rv_success) TYPE abap_bool.
+    METHODS copy_draft_to_active_children IMPORTING iv_parent_node_key TYPE /bobf/conf_key.
+
+    METHODS get_and_clear_active_uuid     IMPORTING iv_node_key           TYPE /bobf/obm_node_key
+                                          CHANGING  cs_data               TYPE data
+                                          RETURNING VALUE(rv_active_uuid) TYPE /bobf/conf_key.
+
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_LIB_DRAFT_COPIER IMPLEMENTATION.
+
+
+  METHOD constructor.
+
+    mo_conf = /bobf/cl_frw_factory=>get_configuration( iv_bo_key = iv_bo_key ).
+    mv_root_node_key = mo_conf->ms_obj-root_node_key.
+    mo_conf->get_node_tab( IMPORTING et_node = mt_node  ).
+    mo_conf->get_assoc_tab( IMPORTING et_comp = mt_compositions ).
+    DELETE mt_node WHERE node_type NE /bobf/if_conf_c=>sc_node_type_normal.
+
+  ENDMETHOD.
+
+
+  METHOD copy_active_to_draft.
+
+    mo_read             = io_read.
+    mv_root_draft_key   = iv_draft_key.
+    mt_exclude_subnodes = it_exclude_subnodes.
+
+    copy_active_to_draft_root( iv_active_key ).
+
+    copy_active_to_draft_children( iv_parent_node_key = mv_root_node_key ).
+
+    io_modify->do_modify( mt_modification ).
+    io_modify->end_modify( IMPORTING eo_change  = DATA(lo_change)
+                                     eo_message = eo_message ).
+
+    " Check for any failures during modification and set the appropriate success flag
+    rv_success = boolc( NOT lo_change->has_changes( iv_change_mode = /bobf/if_frw_c=>sc_modify_create
+                                                    iv_selection   = /bobf/if_frw_c=>sc_change_failed_only ) ).
+
+  ENDMETHOD.
+
+
+  METHOD copy_active_to_draft_children.
+
+    DATA lrs_child_table_type TYPE REF TO data.
+    DATA lt_parent_key        TYPE /bobf/t_frw_key.
+    FIELD-SYMBOLS <lt_active_child_data> TYPE ANY TABLE.
+
+    LOOP AT mt_node ASSIGNING FIELD-SYMBOL(<ls_child_node>) WHERE parent_node_key = iv_parent_node_key.
+
+      " Exclude the nodes that should not be copied
+      IF NOT line_exists( mt_exclude_subnodes[ KEY key_sort COMPONENTS key = <ls_child_node>-node_key ] ).
+
+        " Assign the PARENT_KEY for other children using the source node value from the mapping table
+        lt_parent_key = VALUE #( FOR ls_node_mapping IN mt_node_mapping WHERE ( node_key = <ls_child_node>-parent_node_key )
+                                 ( key = ls_node_mapping-active_key ) ).
+
+        DATA(lv_association_key) = mt_compositions[ source_node_key = <ls_child_node>-parent_node_key
+                                                    target_node_key = <ls_child_node>-node_key ]-assoc_key.
+
+        CREATE DATA lrs_child_table_type TYPE (<ls_child_node>-data_table_type).
+        ASSIGN lrs_child_table_type->* TO <lt_active_child_data>.
+
+        mo_read->retrieve_by_association( EXPORTING
+                                            iv_node        = <ls_child_node>-parent_node_key
+                                            it_key         = lt_parent_key
+                                            iv_association = lv_association_key
+                                            iv_fill_data   = abap_true
+                                          IMPORTING
+                                            et_data        = <lt_active_child_data> ).
+
+        DATA(lo_active_key_factory) = /bobf/cl_frw_act_ent_k_factory=>get_factory( mo_conf->ms_obj-bo_key
+                                                                   )->for_node( <ls_child_node>-node_key ).
+
+        LOOP AT <lt_active_child_data> ASSIGNING FIELD-SYMBOL(<ls_active_child_data>).
+
+          ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-has_active_entity OF STRUCTURE <ls_active_child_data> TO FIELD-SYMBOL(<lv_has_active_entity>).
+          <lv_has_active_entity> = abap_true.
+
+          " Set field ISACTIVEENTITYKEY to false if it exists
+          ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE <ls_active_child_data> TO FIELD-SYMBOL(<lv_is_active_entity>).
+          IF <lv_is_active_entity> IS ASSIGNED.
+            <lv_is_active_entity> = abap_false.
+          ENDIF.
+
+          " Assign the current node's parent key to fetch the source key from the mapping table
+          ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_parent_key OF STRUCTURE <ls_active_child_data> TO FIELD-SYMBOL(<lv_parent_active_key>).
+          DATA(lv_parent_draft_key) = mt_node_mapping[ node_key = <ls_child_node>-parent_node_key  active_key = <lv_parent_active_key> ]-draft_key.
+
+          DATA(lv_new_draft_key) = /bobf/cl_frw_factory=>get_new_key(  ).
+
+          " Assign the current node's key as the next child node's parent key in the mapping table
+          ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_key OF STRUCTURE <ls_active_child_data> TO FIELD-SYMBOL(<lv_active_child_key>).
+          INSERT VALUE #( node_key   = <ls_child_node>-node_key
+                          active_key = <lv_active_child_key>
+                          draft_key  = lv_new_draft_key
+                          ) INTO TABLE mt_node_mapping.
+
+          IF NOT lo_active_key_factory->is_legacy( ) OR mt_node[ node_key = <ls_child_node>-node_key ]-object_model_data_category = /bobf/if_conf_c=>sc_object_model-data_category-text.
+
+            " Set the ACTIVEUUID field of the draft instance with the active instance key
+            lo_active_key_factory->create_from_bopf_key( <lv_active_child_key>
+                                )->write_to_data_structure( CHANGING cs_data = <ls_active_child_data> ).
+          ENDIF.
+
+          APPEND VALUE #( node        = <ls_child_node>-node_key
+                          key         = lv_new_draft_key
+                          data        = REF #( <ls_active_child_data> )
+                          change_mode = /bobf/if_frw_c=>sc_modify_create
+                          association = lv_association_key
+                          source_node = <ls_child_node>-parent_node_key
+                          source_key  = lv_parent_draft_key
+                          root_key    = mv_root_draft_key
+                          ) TO mt_modification.
+        ENDLOOP.
+
+        " Recursively call the same method to traverse to all the subnodes of the BO
+        copy_active_to_draft_children( iv_parent_node_key = <ls_child_node>-node_key ).
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD copy_active_to_draft_root.
+
+    DATA lrt_active_root_table_type TYPE REF TO data.
+    FIELD-SYMBOLS <lt_root_data> TYPE ANY TABLE.
+
+    CLEAR mt_node_mapping.
+    CLEAR mt_modification.
+
+    READ TABLE mt_node ASSIGNING FIELD-SYMBOL(<ls_root_node>) WITH KEY node_key = mv_root_node_key.
+    IF line_exists( mt_exclude_subnodes[ KEY key_sort COMPONENTS key = <ls_root_node>-node_key ] ).
+      ASSERT 1 = 2.  " The root node should not be excluded from the copy
+    ENDIF.
+
+    CREATE DATA lrt_active_root_table_type TYPE (<ls_root_node>-data_table_type).
+    ASSIGN lrt_active_root_table_type->* TO <lt_root_data>.
+
+    mo_read->retrieve( EXPORTING
+                        iv_node = <ls_root_node>-node_key
+                        it_key  = VALUE #( ( key = iv_active_key ) )
+                       IMPORTING
+                        et_data = <lt_root_data> ).
+
+    DATA(lo_active_key_factory) = /bobf/cl_frw_act_ent_k_factory=>get_factory( mo_conf->ms_obj-bo_key )->for_node( <ls_root_node>-node_key ).
+
+    LOOP AT <lt_root_data> ASSIGNING FIELD-SYMBOL(<ls_root_data>).
+
+      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-has_active_entity OF STRUCTURE <ls_root_data> TO FIELD-SYMBOL(<lv_has_active_entity>).
+      <lv_has_active_entity> = abap_true.
+
+      " Set field ISACTIVEENTITYKEY to false if it exists
+      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE <ls_root_data> TO FIELD-SYMBOL(<lv_is_active_entity>).
+      IF <lv_is_active_entity> IS ASSIGNED.
+        <lv_is_active_entity> = abap_false.
+      ENDIF.
+
+
+      " Populate the mapping table with ROOT node details
+      ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_key OF STRUCTURE <ls_root_data> TO FIELD-SYMBOL(<lv_root_active_key>).
+      INSERT VALUE #( node_key   = <ls_root_node>-node_key
+                      active_key = <lv_root_active_key>
+                      draft_key  = mv_root_draft_key
+                    ) INTO TABLE mt_node_mapping.
+
+      IF NOT lo_active_key_factory->is_legacy( ).
+        " Set the ACTIVEUUID field of the draft root instance with the active root instance key
+        lo_active_key_factory->create_from_bopf_key( <lv_root_active_key>
+                            )->write_to_data_structure( CHANGING cs_data = <ls_root_data> ).
+      ENDIF.
+
+      " Populate the modification table with ROOT node details
+      APPEND VALUE #( node        = <ls_root_node>-node_key
+                      key         = mv_root_draft_key
+                      change_mode = /bobf/if_frw_c=>sc_modify_create
+                      data        = REF #( <ls_root_data> )
+                    ) TO mt_modification.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD copy_draft_to_active.
+    CLEAR mt_modification.
+
+    mo_read             = io_read.
+    mv_root_draft_key   = iv_draft_key.
+    mt_exclude_subnodes = it_exclude_subnodes.
+
+    rv_success = copy_draft_to_active_root( EXPORTING iv_draft_key  = iv_draft_key
+                                            IMPORTING ev_active_key = ev_active_key ).
+    CHECK rv_success = abap_true.
+
+    copy_draft_to_active_children( iv_parent_node_key = mv_root_node_key ).
+
+    io_modify->do_modify( mt_modification ).
+    io_modify->end_modify( IMPORTING eo_change  = DATA(lo_change)
+                                     eo_message = eo_message ).
+
+    " Check for any failures during modification and set the appropriate success flag
+    rv_success = boolc( NOT lo_change->has_changes( iv_change_mode = /bobf/if_frw_c=>sc_modify_create
+                                                    iv_selection   = /bobf/if_frw_c=>sc_change_failed_only ) ).
+  ENDMETHOD.
+
+
+  METHOD copy_draft_to_active_children.
+    DATA lrt_child_table_type     TYPE REF TO data.
+    DATA lt_draft_parent_key      TYPE /bobf/t_frw_key.
+    DATA lt_active_parent_key     TYPE /bobf/t_frw_key.
+    DATA lt_active_key_from_draft TYPE /bobf/t_frw_key.
+    DATA ls_modification          TYPE /bobf/s_frw_modification.
+    FIELD-SYMBOLS <lt_child_data> TYPE ANY TABLE.
+
+    LOOP AT mt_node ASSIGNING FIELD-SYMBOL(<ls_child_node>) WHERE parent_node_key = iv_parent_node_key.
+
+      " If we dont clear the tables we will have duplicates in lt_active_parent_key if the BO has sibling nodes as they share the same
+      " parent
+      CLEAR: lt_active_parent_key, lt_draft_parent_key.
+
+      " Exclude the nodes that should not be copied
+      IF NOT line_exists( mt_exclude_subnodes[ KEY key_sort COMPONENTS key = <ls_child_node>-node_key ] ).
+
+        ASSERT <ls_child_node>-mapper_class <> /bobf/if_conf_def_classes_c=>gc_cl_dac_legacy_table. " Sofar, only DAC table is supported. If the application has nodes
+        " with semantic keys (legacy table), those nodes need to be excluded (by using the parameter 'it_exclude_subnodes')
+
+        " Assign the PARENT_KEY for other children using the source node value from the mapping table
+        LOOP AT mt_node_mapping INTO DATA(ls_node_mapping) WHERE node_key = iv_parent_node_key.
+          APPEND VALUE #( key = ls_node_mapping-active_key ) TO lt_active_parent_key.
+          APPEND VALUE #( key = ls_node_mapping-draft_key ) TO lt_draft_parent_key.
+        ENDLOOP.
+
+        ls_modification-node = <ls_child_node>-node_key.
+        ls_modification-association = mt_compositions[ source_node_key = <ls_child_node>-parent_node_key
+                                                       target_node_key = <ls_child_node>-node_key ]-assoc_key.
+
+        CREATE DATA lrt_child_table_type TYPE (<ls_child_node>-data_table_type).
+        ASSIGN lrt_child_table_type->* TO <lt_child_data>.
+
+        mo_read->retrieve_by_association( EXPORTING iv_node        = <ls_child_node>-parent_node_key
+                                                    it_key         = lt_draft_parent_key
+                                                    iv_association = ls_modification-association
+                                                    iv_fill_data   = abap_true
+                                          IMPORTING et_data        = <lt_child_data> ).
+        LOOP AT <lt_child_data> ASSIGNING FIELD-SYMBOL(<ls_child_data>).
+          ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-has_active_entity OF STRUCTURE <ls_child_data> TO FIELD-SYMBOL(<lv_has_active_entity>).
+
+          IF <lv_has_active_entity> IS INITIAL. " Meaning this is a new draft without any active instance yet => Create active instance
+            ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+            ls_modification-key         = /bobf/cl_frw_factory=>get_new_key( ).
+
+          ELSE.
+            ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_update.
+            ls_modification-key         = get_and_clear_active_uuid( EXPORTING iv_node_key = ls_modification-node
+                                                                     CHANGING  cs_data     = <ls_child_data> ).
+            APPEND VALUE #( key = ls_modification-key ) TO lt_active_key_from_draft.
+          ENDIF.
+
+          ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_key OF STRUCTURE <ls_child_data> TO FIELD-SYMBOL(<lv_draft_child_key>).
+          INSERT VALUE #( node_key   = ls_modification-node
+                          active_key = ls_modification-key
+                          draft_key  = <lv_draft_child_key> ) INTO TABLE mt_node_mapping.
+
+          " Set field ISACTIVEENTITYKEY to true if it exists
+          ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE <ls_child_data> TO FIELD-SYMBOL(<lv_is_active_entity>).
+          IF <lv_is_active_entity> IS ASSIGNED.
+            <lv_is_active_entity> = abap_true.
+          ENDIF.
+
+          " Assign the current node's parent key to fetch the source key from the mapping table
+          ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_parent_key OF STRUCTURE <ls_child_data> TO FIELD-SYMBOL(<lv_parent_draft_key>).
+          ls_modification-source_key = mt_node_mapping[ KEY seckey COMPONENTS node_key  = <ls_child_node>-parent_node_key
+                                                                              draft_key = <lv_parent_draft_key>           ]-active_key.
+
+          ls_modification-source_node = <ls_child_node>-parent_node_key.
+          ls_modification-root_key    = mv_root_active_key.
+          ls_modification-data        = REF #( <ls_child_data> ).
+
+          APPEND ls_modification TO mt_modification.
+        ENDLOOP.
+
+        mo_read->retrieve_by_association( EXPORTING iv_node        = iv_parent_node_key
+                                                    it_key         = lt_active_parent_key
+                                                    iv_association = ls_modification-association
+                                          IMPORTING et_target_key  = DATA(lt_active_key) ).
+
+        CLEAR ls_modification.
+        ls_modification-node = <ls_child_node>-node_key.
+        ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+
+        LOOP AT lt_active_key INTO DATA(ls_active_key).
+          READ TABLE lt_active_key_from_draft WITH KEY key_sort COMPONENTS key = ls_active_key-key TRANSPORTING NO FIELDS.
+          IF sy-subrc <> 0.
+            ls_modification-key = ls_active_key-key.
+            APPEND ls_modification TO mt_modification.
+          ENDIF.
+        ENDLOOP.
+        " Recursively call the same method to traverse to all the subnodes of the BO
+        copy_draft_to_active_children( iv_parent_node_key = <ls_child_node>-node_key ).
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD copy_draft_to_active_root.
+    CLEAR ev_active_key.
+    rv_success = abap_true.
+
+    DATA lrt_draft_root_table_type TYPE REF TO data.
+    DATA ls_modification           TYPE /bobf/s_frw_modification.
+    FIELD-SYMBOLS <lt_root_data>   TYPE INDEX TABLE.
+
+    ls_modification-node = mv_root_node_key.
+
+    READ TABLE mt_node ASSIGNING FIELD-SYMBOL(<ls_root_node>) WITH KEY node_key = mv_root_node_key.
+
+    ASSERT <ls_root_node>-mapper_class <> /bobf/if_conf_def_classes_c=>gc_cl_dac_legacy_table. " Sofar, only DAC table is supported. If the application has nodes
+    " with semantic keys (legacy table), those nodes need to be excluded (by using the parameter 'it_exclude_subnodes')
+
+    IF line_exists( mt_exclude_subnodes[ KEY key_sort COMPONENTS key = <ls_root_node>-node_key ] ).
+      ASSERT 1 = 2.  " The root node should not be excluded from the copy
+    ENDIF.
+
+    CREATE DATA lrt_draft_root_table_type TYPE STANDARD TABLE OF (<ls_root_node>-data_type).
+    ASSIGN lrt_draft_root_table_type->* TO <lt_root_data>.
+
+    mo_read->retrieve( EXPORTING iv_node = <ls_root_node>-node_key
+                                 it_key  = VALUE #( ( key = iv_draft_key ) )
+                       IMPORTING et_data = <lt_root_data> ).
+
+    IF lines( <lt_root_data> ) <> 1.
+      rv_success = abap_false.
+      RETURN.
+    ENDIF.
+
+    READ TABLE <lt_root_data> ASSIGNING FIELD-SYMBOL(<ls_root_data>) INDEX 1.
+
+    " Set field ISACTIVEENTITY to true
+    ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE <ls_root_data> TO FIELD-SYMBOL(<lv_is_active_entity>).
+    <lv_is_active_entity> = abap_true.
+
+    ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-has_active_entity OF STRUCTURE <ls_root_data> TO FIELD-SYMBOL(<lv_has_active_entity>).
+
+    IF <lv_has_active_entity> IS INITIAL. " Meaning this is a new draft without any active instance yet => Create active instance
+      ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+      ls_modification-key         = /bobf/cl_frw_factory=>get_new_key( ).
+
+    ELSE. " Meaning there is already an active instance => Update
+      <lv_has_active_entity> = abap_false.
+      ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_update.
+      ls_modification-key         = get_and_clear_active_uuid( EXPORTING iv_node_key = mv_root_node_key
+                                                               CHANGING  cs_data     = <ls_root_data> ).
+    ENDIF.
+
+    " Clear field for draft consistency status
+    ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-draft_consistency_status OF STRUCTURE <ls_root_data> TO FIELD-SYMBOL(<lv_consistency_status>).
+    IF sy-subrc IS INITIAL.
+      CLEAR <lv_consistency_status>.
+    ENDIF.
+
+    mv_root_active_key  = ls_modification-key.
+
+    ls_modification-data = REF #( <ls_root_data> ).
+    INSERT VALUE #( node_key   = mv_root_node_key
+                    active_key = mv_root_active_key
+                    draft_key  = iv_draft_key       ) INTO TABLE mt_node_mapping.
+
+    " Populate the modification table with ROOT node details
+    APPEND ls_modification TO mt_modification.
+    ev_active_key = ls_modification-key.
+
+  ENDMETHOD.
+
+
+  METHOD create.
+
+    ro_instance = NEW /bobf/cl_lib_draft_copier( iv_bo_key ).
+
+  ENDMETHOD.
+
+
+  METHOD get_and_clear_active_uuid.
+    FIELD-SYMBOLS <lv_active_uuid_field> TYPE data.
+
+    mo_conf->get_node( EXPORTING iv_node_key = iv_node_key
+                       IMPORTING es_node     = DATA(ls_node_conf) ).
+
+    mo_conf->get_altkey( EXPORTING iv_node_key    = iv_node_key
+                                   iv_altkey_name = /bobf/if_conf_cds_link_c=>gc_alternative_key_name-draft-active_entity_key
+                         IMPORTING es_altkey      = DATA(ls_altkey_active_uuid) ).
+    IF ls_node_conf-object_model_data_category = /bobf/if_conf_c=>sc_object_model-data_category-text.
+      " TODO: Merge this branch with the code in the ELSE condition
+
+      DATA lr_active_entity_key TYPE REF TO data.
+      CREATE DATA lr_active_entity_key TYPE (ls_altkey_active_uuid-data_type).
+      ASSIGN lr_active_entity_key->* TO FIELD-SYMBOL(<ls_active_entity_key>).
+      MOVE-CORRESPONDING cs_data TO <ls_active_entity_key>.
+
+      DATA(lo_active_key_factory) = /bobf/cl_frw_act_ent_k_factory=>get_factory( mo_conf->ms_obj-bo_key )->for_node( iv_node_key ).
+      rv_active_uuid = lo_active_key_factory->create_from_legacy_key( <ls_active_entity_key> )->get_bopf_key( ).
+
+      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-active_uuid OF STRUCTURE cs_data TO <lv_active_uuid_field>.
+      CLEAR <lv_active_uuid_field>.
+    ELSE.
+
+    LOOP AT ls_altkey_active_uuid-field_names->* INTO DATA(lv_altkey_name).
+      ASSERT sy-tabix = 1. " Currently only single GUID case is supported. If this line dumps, the application should exclude those nodes which are
+      " based on semantic keys (by using the parameter 'it_exclude_subnodes')
+        ASSIGN COMPONENT lv_altkey_name OF STRUCTURE cs_data TO <lv_active_uuid_field>.
+      " Todo: If altkey active_entity_key can have several fields, implementation here should be changed
+      rv_active_uuid = <lv_active_uuid_field>. " Sofar, only one field is the altkey active_entity_key field.
+      CLEAR <lv_active_uuid_field>.
+    ENDLOOP.
+
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

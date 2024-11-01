@@ -1,0 +1,461 @@
+*&---------------------------------------------------------------------*
+*& Include          ZFI_REGISTR_ACC_OP_C02
+*&---------------------------------------------------------------------*
+
+
+CLASS lcl_detail IMPLEMENTATION.
+  "расшифровка сумм переоценки
+  METHOD show_currev.
+    " выборка документов переоценки к позиции
+    SELECT z~bukrs,
+           z~belnr,
+           z~budat,
+           bkpf~bktxt,
+           z~sgtxt,
+           bseg~hkont,
+           z~dmbtr,
+           z~waers
+      FROM zfi_curr_val(  ) AS z
+        JOIN bkpf ON bkpf~bukrs = z~bukrs
+                  AND bkpf~belnr = z~belnr
+                  AND bkpf~gjahr = z~gjahr
+        JOIN bseg ON bseg~bukrs = z~bukrs
+                  AND bseg~belnr = z~belnr
+                  AND bseg~gjahr = z~gjahr
+                  AND bseg~buzei = z~buzei
+      WHERE z~bukrs = @is_doc-bukrs
+        AND z~sbelnr = @is_doc-belnr
+        AND z~sgjahr = @is_doc-gjahr
+        AND z~sbuzei = @is_doc-p_buzei
+        AND bkpf~budat < @gv_sld_date
+        AND revty <> '#'                "8000001328, ZFI_REGBY_K-РасшифровкаПереоценки /*Исключ переоц 4-го типа*/
+      INTO TABLE @DATA(lt_docs)
+      .
+    IF p_hidept = abap_true.  " в режиме частичной оплаты выводить ссылки на фактуру
+      SELECT belnr, gjahr, buzei
+        FROM bseg
+        INTO TABLE @DATA(lt_ref)
+        WHERE bukrs = @is_doc-bukrs
+          AND rebzg = @is_doc-belnr
+          AND rebzz = @is_doc-p_buzei
+          AND rebzj = @is_doc-gjahr
+          AND h_budat < @gv_sld_date
+          AND ( augdt >=  @gv_sld_date  OR augdt < '19000101' )
+          AND NOT ( h_bstat IN ( 'S' ) )
+        ORDER BY belnr, gjahr, buzei.
+      IF sy-subrc = 0.
+        SELECT z~bukrs,
+              z~belnr,
+              z~budat,
+              bkpf~bktxt,
+              z~sgtxt,
+              bseg~hkont,
+              z~dmbtr,
+              z~waers
+         FROM zfi_curr_val(  ) AS z
+           JOIN bkpf ON bkpf~bukrs = z~bukrs
+                     AND bkpf~belnr = z~belnr
+                     AND bkpf~gjahr = z~gjahr
+           JOIN bseg ON bseg~bukrs = z~bukrs
+                     AND bseg~belnr = z~belnr
+                     AND bseg~gjahr = z~gjahr
+                     AND bseg~buzei = z~buzei
+         FOR ALL ENTRIES IN @lt_ref
+         WHERE z~bukrs = @is_doc-bukrs
+           AND z~sbelnr = @lt_ref-belnr
+           AND z~sgjahr = @lt_ref-gjahr
+           AND z~sbuzei = @lt_ref-buzei
+           AND bkpf~budat < @gv_sld_date
+           AND revty <> '#'                "8000001328, ZFI_REGBY_K-РасшифровкаПереоценки /*Исключ переоц 4-го типа*/
+        INTO TABLE @DATA(lt_docs2).
+        LOOP AT lt_docs2 ASSIGNING FIELD-SYMBOL(<ls_doc>).
+          <ls_doc>-dmbtr = - <ls_doc>-dmbtr.
+        ENDLOOP.
+        APPEND LINES OF lt_docs2 TO lt_docs.
+        FREE lt_docs2.
+
+      ENDIF.
+    ENDIF.
+    IF lt_docs IS INITIAL.
+      RETURN.
+    ENDIF.
+    TRY.
+        cl_salv_table=>factory(
+          IMPORTING
+            r_salv_table = DATA(lo_alv)
+          CHANGING
+            t_table      = lt_docs ).
+
+      CATCH cx_salv_msg.
+        ASSERT 1 = 2.
+    ENDTRY.
+    GET REFERENCE OF lt_docs INTO gr_docs.
+    DATA: lr_functions TYPE REF TO cl_salv_functions_list.
+
+    lr_functions = lo_alv->get_functions( ).
+    lr_functions->set_all( 'X' ).
+    DATA(lr_cols) = lo_alv->get_columns( ).
+    lr_cols->set_optimize( abap_true ).
+    TRY .
+        CAST cl_salv_column_table( lr_cols->get_column( 'BKTXT' ) )->set_optimized( 'X' ).
+        CAST cl_salv_column_table( lr_cols->get_column( 'BELNR' ) )->set_cell_type( if_salv_c_cell_type=>hotspot ).
+
+        DATA(lr_aggr)  = lo_alv->get_aggregations( ).
+        lr_aggr->add_aggregation( columnname = 'DMBTR' ).
+
+
+        DATA(lr_events)    = lo_alv->get_event( ).
+        SET HANDLER on_single_click_doc FOR lr_events.
+        DATA(lr_layout) = lo_alv->get_layout( ).
+        lr_layout->set_key( VALUE #( report = sy-repid ) ).
+        lr_layout->set_save_restriction( cl_salv_layout=>restrict_none ).
+      CATCH cx_salv_not_found.
+        ASSERT 1 = 2.
+      CATCH cx_salv_existing.
+        ASSERT 1 = 2.
+    ENDTRY.
+    IF lo_alv IS BOUND.
+      lo_alv->set_screen_popup(
+        start_column = 5
+        end_column  = 100
+        start_line  = 5
+        end_line    = 25 ).
+
+      lo_alv->display( ).
+      FREE lo_alv.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD close.
+    on_close( gr_dcontr ).
+  ENDMETHOD.
+  METHOD on_close.
+    IF sender IS NOT INITIAL.
+      sender->free( ).
+    ENDIF.
+    FREE:  gr_alv.
+  ENDMETHOD.
+  METHOD on_single_click_doc.
+    DATA:
+      BEGIN OF ls_key,
+        belnr TYPE bkpf-belnr,
+        bukrs TYPE bkpf-bukrs,
+        budat TYPE bkpf-budat,
+      END OF ls_key.
+    FIELD-SYMBOLS:
+      <lt_data> TYPE STANDARD TABLE.
+    ASSIGN gr_docs->* TO <lt_data>.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    READ TABLE <lt_data> ASSIGNING FIELD-SYMBOL(<ls_det>) INDEX row.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+    MOVE-CORRESPONDING <ls_det> TO ls_key.
+    CASE column.
+      WHEN 'BELNR'.
+        SET PARAMETER ID 'BUK' FIELD ls_key-bukrs.
+        SET PARAMETER ID 'BLN' FIELD ls_key-belnr.
+        SET PARAMETER ID 'GJR' FIELD ls_key-budat(4).
+        CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD on_single_click.
+
+    READ TABLE lcl_report=>gt_detail ASSIGNING FIELD-SYMBOL(<ls_det>) INDEX e_row_id-index.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+    CASE e_column_id-fieldname.
+      WHEN 'CURREV'.
+        show_currev( <ls_det> ).
+      WHEN 'BELNR'.
+        SET PARAMETER ID 'BUK' FIELD <ls_det>-bukrs.
+        SET PARAMETER ID 'BLN' FIELD <ls_det>-belnr.
+        SET PARAMETER ID 'GJR' FIELD <ls_det>-gjahr.
+        CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+      WHEN 'SRC_BELNR'.
+        IF <ls_det>-src_belnr <> ''.
+          SET PARAMETER ID 'BUK' FIELD <ls_det>-bukrs.
+          SET PARAMETER ID 'BLN' FIELD <ls_det>-src_belnr.
+          SET PARAMETER ID 'GJR' FIELD <ls_det>-src_gjahr(4).
+          CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+        ENDIF.
+      WHEN 'P_EBELN'.
+        IF <ls_det>-p_ebeln IS NOT INITIAL.
+          SET PARAMETER ID 'BES' FIELD <ls_det>-p_ebeln.
+          CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+        ENDIF.
+      WHEN 'C_EBELN'.
+        IF <ls_det>-c_ebeln IS NOT INITIAL.
+          SET PARAMETER ID 'BES' FIELD <ls_det>-c_ebeln.
+          CALL TRANSACTION 'ME23N' AND SKIP FIRST SCREEN.
+        ENDIF.
+      WHEN 'P_LBLNI'.
+        IF <ls_det>-p_lblni IS NOT INITIAL.
+          SET PARAMETER ID 'LBL' FIELD <ls_det>-p_lblni.
+          CALL TRANSACTION 'ML81N' AND SKIP FIRST SCREEN.
+        ENDIF.
+      WHEN 'C_LBLNI'.
+        IF <ls_det>-c_lblni IS NOT INITIAL.
+          SET PARAMETER ID 'LBL' FIELD <ls_det>-c_lblni.
+          CALL TRANSACTION 'ML81N' AND SKIP FIRST SCREEN.
+        ENDIF.
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD toolbar.
+    APPEND VALUE stb_button( function = 'EXCEL' icon = icon_xls text = 'Excel'(t68) )
+    TO e_object->mt_toolbar[].
+  ENDMETHOD.
+  METHOD user_command.
+    CASE e_ucomm.
+      WHEN 'EXCEL'.
+        out_excel_simple( ).
+    ENDCASE.
+  ENDMETHOD.
+  METHOD out_excel_simple.
+    DATA:
+      ls_psetup TYPE ole2_object,
+      ls_rows   TYPE ole2_object,
+      ls_sheet  TYPE ole2_object,
+      lr_data   TYPE REF TO data,
+      lv_sdate  TYPE char10,
+      lv_edate  TYPE sy-datum,
+      lv_period TYPE char40.
+
+    "ФИО исполнителя
+    zcl_names=>get_fio_dolz( EXPORTING iv_uname = sy-uname
+                             IMPORTING et_fio   = DATA(lt_fio) ).
+
+    " Вывод периода отчета
+    WRITE s_date-low TO lv_sdate.
+    lv_edate = COND #( WHEN s_date-high IS INITIAL THEN s_date-low ELSE s_date-high ).
+    WRITE lv_edate TO lv_period.
+    CONCATENATE TEXT-t42 lv_sdate TEXT-t43 lv_period
+      INTO lv_period SEPARATED BY space.
+
+    DATA(lr_excel) = NEW zcl_excel_simple( ).
+    gr_alv->check_changed_data( IMPORTING e_valid = DATA(lv_valid) ).
+    GET REFERENCE OF lcl_report=>gt_detail[] INTO lr_data.
+    lr_excel->create_from_alv(
+      EXPORTING  ir_grid = gr_alv
+                ir_data = lr_data
+                iv_formname =  p_templ
+                iv_keyid = 'FI'
+                it_params = VALUE #( param_type = zcl_excel_inject=>c_param_type-placeholder
+                 ( param_name = 'fio'    value = COND #( WHEN lt_fio IS NOT INITIAL THEN lt_fio[ 1 ]-fio ) )
+                 ( param_name = TEXT-ex6 value = COND #( WHEN sy-tcode = 'ZFI_REGBY_S' THEN TEXT-001 " 'Регистр бухгалтерского учета по основным счетам'    title
+                                                         WHEN sy-tcode = 'ZFI_REGBY_K' THEN TEXT-002 " 'Регистр бухгалтерского учета по счетам контрагентов'
+                                                        ) )
+                 ( param_name = TEXT-ex7 value = lv_period )                                         " period
+                 ( param_name = TEXT-ex8 value = TEXT-t01 && `: ` && lcl_report=>gv_prod_name )      " name_pod
+                 ( param_name = TEXT-ex9 value = sy-datum+6(2) && '.' && sy-datum+4(2) && '.' && sy-datum(4) && ',' && sy-uzeit(2) && ':' && sy-uzeit+2(2) && ':' && sy-uzeit+4(2)  ) " date
+                 )
+      IMPORTING  et_msg  = DATA(lt_msg) ).
+
+    "Выводим в нижний колонтитул дату, время и страницы
+    CALL METHOD OF lr_excel->gr_workbook 'Worksheets' = ls_sheet
+        EXPORTING
+        #1 = 1.
+    CALL METHOD OF ls_sheet 'PageSetup' = ls_psetup.
+    SET PROPERTY OF ls_psetup 'LeftFooter' = '&D &T'.
+    SET PROPERTY OF ls_psetup 'RightFooter' = TEXT-000. "&P из &N
+    IF strlen( lcl_report=>gv_prod_name ) > 55.
+      CALL METHOD OF ls_sheet 'Rows' = ls_rows
+        EXPORTING
+         #1 = 3. " строка
+      SET PROPERTY OF ls_rows 'RowHeight' = '25'.
+    ENDIF.
+
+    FREE OBJECT ls_psetup.
+    FREE OBJECT ls_sheet.
+
+  ENDMETHOD.
+
+  METHOD show.
+    FIELD-SYMBOLS:
+     <ls_fcat> TYPE lvc_s_fcat.
+    DATA:
+      lt_exist TYPE STANDARD TABLE OF lvc_s_fcat-fieldname,
+      lt_fcat  TYPE lvc_t_fcat.
+
+    gv_sld_date = iv_date.
+
+    lt_fcat[] = CORRESPONDING #( cl_salv_data_descr=>read_structdescr(
+       CAST cl_abap_structdescr( CAST cl_abap_tabledescr( cl_abap_tabledescr=>describe_by_data( lcl_report=>gt_detail ) )->get_table_line_type( ) ) ) ).
+    " заполнение ссылок на валюту
+    LOOP AT lt_fcat ASSIGNING <ls_fcat>.
+      <ls_fcat>-cfieldname = SWITCH #( <ls_fcat>-fieldname
+                                         WHEN 'WRBTR' THEN 'WAERS_DOC'
+                                         WHEN 'DMBTR' THEN 'WAERS_BUK'
+                                         WHEN 'SUMM'  THEN 'WAERS'
+                                         ELSE <ls_fcat>-qfieldname ).
+
+
+    ENDLOOP.
+    "   Определяются колонки с непустыми значениями
+
+    LOOP AT lcl_report=>gt_detail ASSIGNING FIELD-SYMBOL(<ls_det>).
+      LOOP AT lt_fcat ASSIGNING <ls_fcat>.
+        ASSIGN COMPONENT <ls_fcat>-fieldname OF STRUCTURE <ls_det> TO FIELD-SYMBOL(<lv_field>).
+        IF sy-subrc = 0 AND <lv_field> IS NOT INITIAL.
+          READ TABLE lt_exist WITH KEY table_line = <ls_fcat>-fieldname
+            TRANSPORTING NO FIELDS
+            BINARY SEARCH.
+          IF sy-subrc <> 0.
+            INSERT <ls_fcat>-fieldname INTO lt_exist INDEX sy-tabix.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+
+    IF gr_alv IS BOUND.
+      lcl_detail=>close( ).
+    ENDIF.
+    CREATE OBJECT gr_dcontr
+      EXPORTING
+        width                       = 1200
+        height                      = 150
+        top                         = 80
+        left                        = 60
+      EXCEPTIONS
+        cntl_error                  = 1
+        cntl_system_error           = 2
+        create_error                = 3
+        lifetime_error              = 4
+        lifetime_dynpro_dynpro_link = 5
+        event_already_registered    = 6
+        error_regist_event          = 7
+        OTHERS                      = 8.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                 WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+    gr_alv = NEW #( i_parent = gr_dcontr i_appl_events = 'X' ).
+    LOOP AT lt_fcat ASSIGNING <ls_fcat>.
+      CASE <ls_fcat>-fieldname.
+        WHEN 'DMBTR' OR 'WRBTR' OR 'SUMM' .
+          <ls_fcat>-do_sum = abap_true .
+          <ls_fcat>-cfieldname = SWITCH #( <ls_fcat>-fieldname WHEN 'DMBTR' THEN 'WAERS_BUK'
+                                                               WHEN 'WRBTR' THEN 'WAERS_DOC'
+                                                               WHEN 'SUMM'  THEN 'WAERS' ).
+
+        WHEN 'CURREV'.   " скрыть колонки для валютной переоценки
+          IF p_crval = abap_false OR iv_det_fname NP 'SLD*'.
+            <ls_fcat>-tech = abap_true.
+          ELSE.
+            <ls_fcat>-hotspot = abap_true .
+            <ls_fcat>-do_sum = abap_true .
+          ENDIF.
+        WHEN 'SRC_BELNR' OR 'SRC_BUZEI' OR 'SRC_GJAHR'.
+          IF NOT  p_crval = abap_true.
+            <ls_fcat>-tech =  abap_true .
+          ENDIF.
+          IF  <ls_fcat>-fieldname =  'SRC_BELNR'.
+            <ls_fcat>-hotspot = abap_true.
+          ENDIF.
+        WHEN 'BELNR' OR 'P_EBELN' OR 'P_LBLNI' OR 'C_EBELN' OR 'C_LBLNI'.
+          <ls_fcat>-hotspot = abap_true.
+        WHEN 'WAERS' OR 'SHKZG' OR  'WAERS_BUK' .
+          <ls_fcat>-no_out = abap_true.
+        WHEN 'MULT'.
+          <ls_fcat>-tech   =  abap_true .
+      ENDCASE.
+
+      <ls_fcat>-coltext   =
+      <ls_fcat>-seltext   =
+      <ls_fcat>-reptext   =
+      SWITCH #( <ls_fcat>-fieldname
+           WHEN  'WAERS_ACC' THEN 'ВалCч'(t23)
+           WHEN  'WAERS'     THEN 'ВалОтч'(t22)
+           WHEN  'SUMM'      THEN 'СумОтч'(t20)
+           WHEN  'WAERS_DOC' THEN 'ВалДок'(t21)
+           WHEN  'DMBTR'     THEN 'СуммВВ'(t40)
+           WHEN  'WRBTR'     THEN 'СуммДок'(t41)
+           WHEN  'WAERS_BUK' THEN 'ВалБЕ'(t64)
+           WHEN  'SRC_BELNR' THEN 'ИсхДок№'(t46)
+           WHEN  'SRC_BUZEI' THEN 'ИсхДокПоз'(t47)
+           WHEN  'SRC_GJAHR' THEN 'ИсхДокГод'(t48)
+           WHEN  'CURREV'    THEN 'ВалПереоц'(t51)
+           WHEN  'P_FISTL_TEXT' THEN 'НаимПФМ'(t65)
+           WHEN  'P_FIPOS_TEXT' THEN 'НаимФП'(t67)
+           WHEN  'P_SGTXT'      THEN 'ТестПозиции'(t66)
+           WHEN  'P_PRZNR_TEXT' THEN 'НаимБизнПроц'(t70)
+           WHEN  'C_PRZNR_TEXT' THEN 'НаимБизнПроц'(t70)
+           WHEN  'P_KUNNR_NAME' THEN 'НаимДебитора'(t72)
+           WHEN  'C_KUNNR_NAME' THEN 'НаимДебитора'(t72)
+           WHEN  'P_LIFNR_NAME' THEN 'НаимПоставщика'(t71)
+           WHEN  'C_LIFNR_NAME' THEN 'НаимПоставщика'(t71)
+           WHEN  'OVERVALUED'   THEN 'ПереоцС'(t75)
+           WHEN  'RESIDUAL'     THEN 'РазнОцен'(t76)
+            ).
+
+      " скрыть колонки без значений
+      IF <ls_fcat>-fieldname <> 'SUMM' AND
+        <ls_fcat>-fieldname <> 'DMBTR' AND
+        <ls_fcat>-fieldname <> 'WRBTR' AND
+        <ls_fcat>-fieldname <> 'CURREV' AND
+* --> AK_BUTVILOVS #8000001074, Проверка корректности КурсовыхПереоценок
+        ( ( sy-tcode = lcl_report=>gv_scode OR
+            p_crval = abap_false ) AND
+          ( <ls_fcat>-fieldname = 'OVERVALUED' OR
+            <ls_fcat>-fieldname = 'RESIDUAL' ) ).
+* <-- AK_BUTVILOVS #8000001074
+        READ TABLE lt_exist
+          TRANSPORTING NO FIELDS
+          WITH KEY table_line = <ls_fcat>-fieldname
+          BINARY SEARCH.
+        IF sy-subrc <> 0.
+          <ls_fcat>-tech = abap_true.
+          CONTINUE.
+        ENDIF.
+      ELSE.
+        <ls_fcat>-do_sum = 'X'.
+      ENDIF.
+      "сформировать наименования для полей корпозиции
+      IF <ls_fcat>-fieldname CP 'C_*'.
+        IF iv_det_fname CP 'SLD*'.
+          <ls_fcat>-tech = abap_true.
+        ELSE.
+          READ TABLE  lt_fcat ASSIGNING FIELD-SYMBOL(<ls_orig>)
+            WITH KEY fieldname = 'P_' && <ls_fcat>-fieldname+2.
+          IF sy-subrc = 0.
+            IF <ls_orig>-coltext IS NOT INITIAL.
+              <ls_fcat>-coltext   = 'K_' && <ls_orig>-coltext .
+            ENDIF.
+            IF <ls_orig>-seltext IS NOT INITIAL.
+              <ls_fcat>-seltext   = 'K_' && <ls_orig>-seltext .
+            ENDIF.
+            IF <ls_orig>-reptext IS NOT INITIAL.
+              <ls_fcat>-reptext   = 'K_' && <ls_orig>-reptext .
+            ENDIF.
+            <ls_fcat>-scrtext_m   = 'K_' && <ls_orig>-scrtext_m .
+            <ls_fcat>-scrtext_l   = 'K_' && <ls_orig>-scrtext_l .
+            <ls_fcat>-scrtext_s   = 'K_' && <ls_orig>-scrtext_s .
+
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    gr_alv->set_table_for_first_display(
+        EXPORTING is_layout        = VALUE #( cwidth_opt = abap_true )
+                  i_save           = 'A'
+                  is_variant       = VALUE #( report = sy-repid handle = '2'  )
+        CHANGING  it_outtab        = lcl_report=>gt_detail[]
+                  it_fieldcatalog  = lt_fcat ).
+
+    SET HANDLER: on_single_click
+                 toolbar
+                 user_command FOR gr_alv.
+    SET HANDLER on_close FOR gr_dcontr.
+    gr_alv->set_toolbar_interactive( ).
+    cl_gui_dialogbox_container=>set_focus( gr_dcontr ).
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,115 @@
+class /BOBF/CL_TRA_NON_CACHE_REG definition
+  public
+  create public .
+
+public section.
+
+  interfaces /BOBF/IF_TRA_NON_CACHE_REG .
+
+  methods DISABLE_READ_CACHE_FOR_NODES
+    importing
+      !IT_NODE_KEY type /BOBF/T_FRW_KEY .
+  methods DISABLE_READ_CACHE_ALL_NODES .
+  methods ENABLE_READ_CACHE_FOR_NODES
+    importing
+      !IT_NODE_KEY type /BOBF/T_FRW_KEY .
+  methods TRANSACTION_IS_DIRTY .
+protected section.
+private section.
+
+  data MV_ALL_NODES type BOOLE_D .
+  data MV_TRANSACTION_IS_DIRTY type BOOLE_D .
+  data MT_NODE_DISABLED type /BOBF/T_FRW_KEY .
+  data MT_NODE_ENABLED type /BOBF/T_FRW_KEY .
+
+  methods CHECK_TRANSACTION_DIRTY .
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_TRA_NON_CACHE_REG IMPLEMENTATION.
+
+
+  METHOD /bobf/if_tra_non_cache_reg~filter_by_cached_nodes.
+
+    "1. no non cached-nodes
+    IF mt_node_disabled IS INITIAL AND mv_all_nodes = abap_false.
+      RETURN.
+    ENDIF.
+
+    "2. all nodes non-cached
+    IF mv_all_nodes = abap_true AND mt_node_enabled IS INITIAL.
+      CLEAR ct_node.
+      RETURN.
+    ENDIF.
+
+    "3. like 2, but some nodes excepted
+    DATA lt_node_key_delete TYPE /bobf/t_frw_key.
+    IF mv_all_nodes = abap_true AND mt_node_enabled IS NOT INITIAL.
+      LOOP AT ct_node ASSIGNING FIELD-SYMBOL(<ls_node_group>) GROUP BY ( node = <ls_node_group>-node ).
+        IF NOT line_exists( mt_node_enabled[ KEY key_sort COMPONENTS key = <ls_node_group>-node ] ).
+          INSERT VALUE #( key = <ls_node_group>-node ) INTO TABLE lt_node_key_delete.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    "4. some nodes non-cached
+    IF mt_node_disabled IS NOT INITIAL AND mv_all_nodes = abap_false.
+      lt_node_key_delete = mt_node_disabled.
+    ENDIF.
+
+    "delete entries with specific node key
+    LOOP AT lt_node_key_delete ASSIGNING FIELD-SYMBOL(<ls_node_key_delete>).
+      DELETE ct_node WHERE node = <ls_node_key_delete>-key.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_non_cache_reg~has_non_cached_nodes.
+    rv_has_non_cached_nodes = boolc( mv_all_nodes = abap_true OR mt_node_disabled IS NOT INITIAL ).
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_non_cache_reg~is_read_cache_disabled.
+    rv_disabled = COND #(
+       WHEN mv_all_nodes = abap_false AND mt_node_disabled IS INITIAL THEN abap_false
+       WHEN mv_all_nodes = abap_true THEN boolc( NOT line_exists( mt_node_enabled[ KEY key_sort COMPONENTS key = iv_node_key ] ) )
+       ELSE boolc( line_exists( mt_node_disabled[ KEY key_sort COMPONENTS key = iv_node_key ] ) ) ).
+  ENDMETHOD.
+
+
+  METHOD check_transaction_dirty.
+*   Registration of non-caching entities is only allowed before any service has been executed via the service manager.
+    ASSERT mv_transaction_is_dirty = abap_false.
+  ENDMETHOD.
+
+
+  METHOD disable_read_cache_all_nodes.
+    check_transaction_dirty( ).
+    mv_all_nodes = abap_true.
+  ENDMETHOD.
+
+
+  METHOD disable_read_cache_for_nodes.
+    check_transaction_dirty( ).
+    INSERT LINES OF it_node_key INTO TABLE mt_node_disabled.
+  ENDMETHOD.
+
+
+  METHOD enable_read_cache_for_nodes.
+    IF /bobf/if_tra_non_cache_reg~has_non_cached_nodes( ).
+      LOOP AT it_node_key ASSIGNING FIELD-SYMBOL(<ls_node_key>).
+        IF mv_all_nodes = abap_true AND NOT line_exists( mt_node_enabled[ KEY key_sort COMPONENTS key = <ls_node_key>-key ] ).
+          INSERT <ls_node_key> INTO TABLE mt_node_enabled.
+        ENDIF.
+        DELETE mt_node_disabled WHERE key = <ls_node_key>-key.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD transaction_is_dirty.
+    mv_transaction_is_dirty = abap_true.
+  ENDMETHOD.
+ENDCLASS.

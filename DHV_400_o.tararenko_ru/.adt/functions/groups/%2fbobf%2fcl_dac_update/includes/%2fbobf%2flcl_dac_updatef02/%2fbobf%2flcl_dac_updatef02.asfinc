@@ -1,0 +1,468 @@
+CLASS lcl_error_handler IMPLEMENTATION.
+
+  METHOD generate_text_for_message.
+    DATA lo_error_handler TYPE REF TO lcl_error_handler.
+    DATA lx_dac_previous TYPE REF TO /bobf/cx_dac.
+
+    CREATE OBJECT lo_error_handler
+      EXPORTING
+        iv_bo_key = iv_bo_key
+        iv_db_tab = ''.
+
+    lx_dac_previous = lo_error_handler->create_previous_message( is_message_key = is_message_key ).
+    rv_text = lo_error_handler->generate_text_generic( ix_dac_previous = lx_dac_previous ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    mv_bo_key = iv_bo_key.
+    mv_db_tab = iv_db_tab.
+    TRY.
+        mo_conf = /bobf/cl_frw_factory=>get_configuration( iv_bo_key ).
+      CATCH /bobf/cx_frw ##no_handler.
+    ENDTRY.
+    IF mo_conf IS BOUND.
+      mv_bo_name = mo_conf->ms_obj-bo_name.
+    ELSE.
+      mv_bo_name = `<UNKNOWN>`.
+    ENDIF.
+    IF mv_db_tab IS NOT INITIAL.
+      derive_node_info_from_db_tab( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD generate_text_for_modify_error.
+    DATA lx_dac_previous                TYPE REF TO /bobf/cx_dac.
+    DATA lx_dac_details                 TYPE REF TO /bobf/cx_dac.
+    DATA lv_node_instance_key_as_string TYPE string.
+
+    create_detail_message( EXPORTING it_data      = it_data
+                                     iv_modi_sign = iv_modi_sign
+                           IMPORTING ex_dac_details                 = lx_dac_details
+                                     ev_node_instance_key_as_string = lv_node_instance_key_as_string ).
+    CASE iv_modi_sign.
+      WHEN gcs_modi_sign-delete.
+        lx_dac_previous = create_previous_message( /bobf/cx_dac=>/bobf/cx_dac_delete_failed ).
+      WHEN gcs_modi_sign-insert.
+        lx_dac_previous = create_previous_message( /bobf/cx_dac=>/bobf/cx_dac_insert_failed ).
+      WHEN gcs_modi_sign-update.
+        lx_dac_previous = create_previous_message( /bobf/cx_dac=>/bobf/cx_dac_update_failed ).
+    ENDCASE.
+
+    rv_text = generate_text_generic( ix_dac_previous                = lx_dac_previous
+                                     ix_dac_details                 = lx_dac_details
+                                     iv_node_instance_key_as_string = lv_node_instance_key_as_string ).
+  ENDMETHOD.
+
+
+  METHOD generate_text_generic.
+    rv_text = ix_dac_previous->get_longtext( ).
+    IF ix_dac_details IS BOUND.
+      rv_text = rv_text && ` ` && ix_dac_details->get_longtext( ).
+    ENDIF.
+    rv_text = rv_text &&
+              ` BO: ` && mv_bo_name &&
+              `|Appl. Comp.: ` && /bobf/cl_conf_toolbox=>get_component( iv_bo_key = mv_bo_key ) ##no_text.
+    IF ms_node IS NOT INITIAL.
+      rv_text = rv_text &&
+                `|Node: ` && ms_node-node_name ##no_text.
+    ENDIF.
+    IF iv_node_instance_key_as_string IS NOT INITIAL.
+      rv_text = rv_text &&
+                `|Key: ` && iv_node_instance_key_as_string ##no_text.
+    ENDIF.
+    IF mv_db_tab IS NOT INITIAL.
+      rv_text = rv_text &&
+                `|Table: ` && mv_db_tab ##no_text.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD create_previous_message.
+    DATA lv_tabname16 TYPE tabname16.
+
+    lv_tabname16 = mv_db_tab.
+    CREATE OBJECT rx_dac_previous
+      EXPORTING
+        textid        = is_message_key
+        mv_node       = ms_node-node_key
+        mv_node_name  = ms_node-node_name
+        mv_bo_name    = mv_bo_name
+        mv_table_name = lv_tabname16
+        mv_bo_key     = mv_bo_key.
+  ENDMETHOD.
+
+
+  METHOD create_detail_message.
+    DATA lv_dbtab_invalid TYPE abap_bool.
+    DATA lo_dbtab TYPE REF TO cl_abap_structdescr.
+    DATA ls_detail_message_key TYPE scx_t100key.
+    DATA lv_duplicate_index_name TYPE string.
+    DATA lv_duplicate_value_as_string TYPE string.
+    DATA lv_tabname16 TYPE tabname16.
+
+    CLEAR ev_node_instance_key_as_string.
+    CLEAR ex_dac_details.
+
+    check_dbtab_valid( IMPORTING ev_is_invalid = lv_dbtab_invalid
+                                 eo_dbtab = lo_dbtab ).
+    IF lv_dbtab_invalid = abap_true.
+      ls_detail_message_key = /bobf/cx_dac=>/bobf/cx_dac_invalid_db_tab.
+    ELSE.
+      CASE iv_modi_sign.
+        WHEN gcs_modi_sign-insert.
+          analyze_insert_error( EXPORTING it_data  = it_data
+                                          io_dbtab = lo_dbtab
+                                IMPORTING ev_duplicate_index_name        = lv_duplicate_index_name
+                                          ev_duplicate_value_as_string   = lv_duplicate_value_as_string
+                                          ev_node_instance_key_as_string = ev_node_instance_key_as_string
+                                          es_message_t100key             = ls_detail_message_key ).
+        WHEN gcs_modi_sign-update.
+          analyze_update_error( EXPORTING it_data  = it_data
+                                          io_dbtab = lo_dbtab
+                                IMPORTING ev_duplicate_index_name        = lv_duplicate_index_name
+                                          ev_duplicate_value_as_string   = lv_duplicate_value_as_string
+                                          ev_node_instance_key_as_string = ev_node_instance_key_as_string
+                                          es_message_t100key             = ls_detail_message_key ).
+        WHEN gcs_modi_sign-delete.
+          analyze_delete_error( EXPORTING it_data  = it_data
+                                IMPORTING ev_duplicate_index_name        = lv_duplicate_index_name
+                                          ev_duplicate_value_as_string   = lv_duplicate_value_as_string
+                                          ev_node_instance_key_as_string = ev_node_instance_key_as_string
+                                          es_message_t100key             = ls_detail_message_key ).
+      ENDCASE.
+    ENDIF.
+    IF ls_detail_message_key IS NOT INITIAL.
+      "build application message object:
+      lv_tabname16 = mv_db_tab.
+      CREATE OBJECT ex_dac_details
+        EXPORTING
+          textid              = ls_detail_message_key
+          mv_node             = ms_node-node_key
+          mv_node_name        = ms_node-node_name
+          mv_bo_name          = mv_bo_name
+          mv_table_name       = lv_tabname16
+          mv_index            = lv_duplicate_index_name
+          mv_index_key_values = lv_duplicate_value_as_string.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD analyze_update_error.
+    FIELD-SYMBOLS <ls_data> TYPE any.
+
+    CLEAR ev_duplicate_index_name.
+    CLEAR ev_duplicate_value_as_string.
+    CLEAR ev_node_instance_key_as_string.
+    CLEAR es_message_t100key.
+
+    "At this point, some updates have already been made. However,
+    "it does not hurt to do them again to see which one fails.
+    LOOP AT it_data ASSIGNING <ls_data>.
+      UPDATE (mv_db_tab) FROM <ls_data>.            "#EC CI_IMUD_NESTED
+      IF sy-subrc <> 0.
+        "check if updated record exists:
+        check_for_duplicate_value( EXPORTING iv_check_primary_key = abap_true
+                                             iv_check_secondary_keys = abap_false "FALSE!
+                                             is_data = <ls_data>
+                                             io_dbtab = io_dbtab
+                                   IMPORTING ev_duplicate_index_name = ev_duplicate_index_name
+                                             ev_duplicate_value = ev_duplicate_value_as_string ).
+        IF ev_duplicate_index_name IS INITIAL. "value not found -> no update possible
+          es_message_t100key = /bobf/cx_dac=>/bobf/cx_dac_key_not_found.
+        ELSE.
+          "check if a unique key is violated:
+          check_for_duplicate_value( EXPORTING iv_check_primary_key = abap_false "FALSE!
+                                               iv_check_secondary_keys = abap_true
+                                               is_data = <ls_data>
+                                               io_dbtab = io_dbtab
+                                     IMPORTING ev_duplicate_index_name = ev_duplicate_index_name
+                                               ev_duplicate_value = ev_duplicate_value_as_string ).
+          IF ev_duplicate_index_name IS NOT INITIAL.
+            es_message_t100key = /bobf/cx_dac=>/bobf/cx_dac_duplicate_key.
+          ENDIF.
+        ENDIF.
+        ev_node_instance_key_as_string = convert_key_values_to_string( <ls_data> ).
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD analyze_insert_error.
+    DATA lv_data_tabix TYPE sytabix.
+    FIELD-SYMBOLS <ls_data> TYPE any.
+
+    CLEAR ev_duplicate_index_name.
+    CLEAR ev_duplicate_value_as_string.
+    CLEAR ev_node_instance_key_as_string.
+    CLEAR es_message_t100key.
+
+    "At this point, some instances - up to the error instance - already have been inserted
+    "Trying to re-insert these instances would fail. Therefore, we try to insert the
+    "instances in reverse order, assuming that the first failure is not caused by a
+    "previously successful INSERT.
+    lv_data_tabix = lines( it_data ).
+    WHILE lv_data_tabix > 0.
+      READ TABLE it_data ASSIGNING <ls_data> INDEX lv_data_tabix.
+      INSERT (mv_db_tab) FROM <ls_data>.            "#EC CI_IMUD_NESTED
+      IF sy-subrc <> 0.
+        "check if a unique key is violated:
+        check_for_duplicate_value( EXPORTING iv_check_primary_key = abap_true
+                                             iv_check_secondary_keys = abap_true
+                                             is_data = <ls_data>
+                                             io_dbtab = io_dbtab
+                                   IMPORTING ev_duplicate_index_name = ev_duplicate_index_name
+                                             ev_duplicate_value = ev_duplicate_value_as_string ).
+        IF ev_duplicate_index_name IS NOT INITIAL.
+          es_message_t100key = /bobf/cx_dac=>/bobf/cx_dac_duplicate_key.
+        ENDIF.
+        ev_node_instance_key_as_string = convert_key_values_to_string( <ls_data> ).
+        EXIT.
+      ENDIF.
+
+      SUBTRACT 1 FROM lv_data_tabix.
+    ENDWHILE.
+  ENDMETHOD.
+
+
+  METHOD analyze_delete_error.
+    FIELD-SYMBOLS <ls_data> TYPE any.
+
+    CLEAR ev_duplicate_index_name.
+    CLEAR ev_duplicate_value_as_string.
+    CLEAR ev_node_instance_key_as_string.
+    CLEAR es_message_t100key.
+
+    IF lines( it_data ) = 1.
+      READ TABLE it_data ASSIGNING <ls_data> INDEX 1.
+      ev_node_instance_key_as_string = convert_key_values_to_string( <ls_data> ).
+    ELSE. "note that it_data cannot be initial at this point
+      "at this point, all instances in IT_DATA have already been deleted from DB (if they existed at all).
+      "Therefore, it is not possible to find out which instance did NOT exist before.
+      es_message_t100key = /bobf/cx_dac=>/bobf/cx_dac_keys_not_found.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD derive_node_info_from_db_tab.
+    DATA lt_node TYPE /bobf/t_confro_node.
+
+    ms_node-node_name = '<UNKNOWN>'.
+    IF mo_conf IS BOUND.
+      mo_conf->get_node_tab( IMPORTING et_node = lt_node ).
+      READ TABLE lt_node INTO ms_node WITH KEY database_table = mv_db_tab. "#EC CI_SORTSEQ
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD convert_key_values_to_string.
+    append_component_val_to_string( EXPORTING is_data = is_data
+                                              iv_component = 'DB_KEY'
+                                    CHANGING  cv_string = rv_key_fields ).
+    append_component_val_to_string( EXPORTING is_data = is_data
+                                              iv_component = 'PARENT_KEY'
+                                    CHANGING  cv_string = rv_key_fields ).
+    append_component_val_to_string( EXPORTING is_data = is_data
+                                              iv_component = 'ROOT_KEY'
+                                    CHANGING  cv_string = rv_key_fields ).
+  ENDMETHOD.
+
+
+  METHOD check_for_duplicate_value.
+    CONSTANTS lc_primary_index TYPE string VALUE 'PRIMARY'.
+    DATA lt_ddfield            TYPE ddfields.
+    DATA lt_fn_primary_key     TYPE gty_t_string.
+    DATA lt_fn_secondary_key   TYPE gty_t_string.
+    DATA lv_client_fieldname   TYPE fieldname.
+    DATA lv_failed             TYPE abap_bool.
+    DATA lt_dd17v              TYPE STANDARD TABLE OF dd17v.
+    DATA lt_dd12v              TYPE STANDARD TABLE OF dd12v.
+    FIELD-SYMBOLS <ls_dd12v>   TYPE dd12v.
+    FIELD-SYMBOLS <ls_dd17v>   TYPE dd17v.
+    FIELD-SYMBOLS <ls_ddfield> TYPE dfies.
+
+    CLEAR ev_duplicate_index_name.
+    CLEAR ev_duplicate_value.
+
+    lt_ddfield = io_dbtab->get_ddic_field_list( ).
+    lv_client_fieldname = get_clientfield_of_dbtab( io_dbtab ).
+    LOOP AT lt_ddfield ASSIGNING <ls_ddfield> WHERE keyflag = abap_true. "#EC CI_STDSEQ
+      APPEND <ls_ddfield>-fieldname TO lt_fn_primary_key.
+    ENDLOOP.
+    DELETE lt_fn_primary_key WHERE table_line = lv_client_fieldname. "#EC CI_STDSEQ
+
+    IF iv_check_primary_key = abap_true.
+      check_for_duplicate_in_index( EXPORTING it_fn_primary_key  = lt_fn_primary_key
+                                              is_data            = is_data
+                                    IMPORTING ev_found_duplicate = lv_failed
+                                              ev_duplicate_value = ev_duplicate_value ).
+      IF lv_failed = abap_true.
+        ev_duplicate_index_name = lc_primary_index.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    IF iv_check_secondary_keys = abap_false.
+      RETURN.
+    ENDIF.
+
+    " check: secondary index violated
+    CALL FUNCTION 'DDIF_TABL_GET'
+      EXPORTING
+        name      = mv_db_tab
+        state     = 'A'
+      TABLES
+        dd12v_tab = lt_dd12v
+        dd17v_tab = lt_dd17v.
+    SORT lt_dd17v BY indexname position.
+    LOOP AT lt_dd12v ASSIGNING <ls_dd12v> WHERE uniqueflag = abap_true. "#EC CI_STDSEQ
+      LOOP AT lt_dd17v ASSIGNING <ls_dd17v> WHERE indexname = <ls_dd12v>-indexname. "#EC CI_STDSEQ
+        APPEND <ls_dd17v>-fieldname TO lt_fn_secondary_key.
+      ENDLOOP.
+      DELETE lt_fn_secondary_key WHERE table_line = lv_client_fieldname. "#EC CI_STDSEQ
+      check_for_duplicate_in_index( EXPORTING it_fn_primary_key   = lt_fn_primary_key
+                                              it_fn_secondary_key = lt_fn_secondary_key
+                                              is_data             = is_data
+                                    IMPORTING ev_found_duplicate  = lv_failed
+                                              ev_duplicate_value  = ev_duplicate_value ).
+      IF lv_failed = abap_true.
+        ev_duplicate_index_name = <ls_dd12v>-indexname.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD check_for_duplicate_in_index.
+    DATA lv_wherecond TYPE string.
+    DATA lr_duprec TYPE REF TO data.
+    DATA lv_value_as_string TYPE string.
+    FIELD-SYMBOLS <lt_select_field> TYPE gty_t_string.
+    FIELD-SYMBOLS <lv_exclude_field> TYPE string.
+    FIELD-SYMBOLS <lv_select_field> TYPE string.
+    FIELD-SYMBOLS <lv_value> TYPE any.
+    FIELD-SYMBOLS <ls_duprec> TYPE any.
+
+    CLEAR ev_found_duplicate.
+    CLEAR ev_duplicate_value.
+
+    "create work area for duplicate record
+    CREATE DATA lr_duprec LIKE is_data.
+    ASSIGN lr_duprec->* TO <ls_duprec>.
+
+    TRY.
+        IF it_fn_secondary_key IS NOT INITIAL.
+          "create a condition EXCLUDING the primary key of IS_DATA:
+          LOOP AT it_fn_primary_key ASSIGNING <lv_exclude_field>.
+            ASSIGN COMPONENT <lv_exclude_field> OF STRUCTURE is_data TO <lv_value>.
+            lv_value_as_string = <lv_value>.
+            IF lv_wherecond IS NOT INITIAL.
+              lv_wherecond = lv_wherecond && ` OR `.
+            ENDIF.
+            lv_wherecond = lv_wherecond && cl_abap_dyn_prg=>check_column_name( <lv_exclude_field> ) && ` <> ` && cl_abap_dyn_prg=>quote( lv_value_as_string ).
+          ENDLOOP.
+          IF lines( it_fn_primary_key ) > 1.
+            lv_wherecond = `( ` && lv_wherecond && ` )`.
+          ENDIF.
+
+          ASSIGN it_fn_secondary_key TO <lt_select_field>.
+        ELSE.
+          ASSIGN it_fn_primary_key TO <lt_select_field>.
+        ENDIF.
+
+        "create a condition selecting the values of the key fields of the index to be checked:
+        LOOP AT <lt_select_field> ASSIGNING <lv_select_field>.
+          append_component_val_to_string( EXPORTING is_data = is_data
+                                                    iv_component = <lv_select_field>
+                                          CHANGING  cv_string = ev_duplicate_value ).
+
+          ASSIGN COMPONENT <lv_select_field> OF STRUCTURE is_data TO <lv_value>.
+          lv_value_as_string = <lv_value>.
+          IF lv_wherecond IS NOT INITIAL.
+            lv_wherecond = lv_wherecond && ` AND `.
+          ENDIF.
+          lv_wherecond = lv_wherecond && cl_abap_dyn_prg=>check_column_name( <lv_select_field> ) && ` = ` && cl_abap_dyn_prg=>quote( lv_value_as_string ).
+        ENDLOOP.
+
+        IF lv_wherecond IS NOT INITIAL.
+          SELECT SINGLE * FROM (mv_db_tab) INTO <ls_duprec> WHERE (lv_wherecond).
+          IF sy-subrc = 0.
+            ev_found_duplicate = abap_true.
+          ENDIF.
+        ENDIF.
+      CATCH cx_abap_invalid_name ##no_handler. "can (only theoretically) be raised by cl_abap_dyn_prg=>check_column_name
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD check_dbtab_valid.
+    DATA ls_ddic_header TYPE x030l.
+    DATA lo_typedescr TYPE REF TO cl_abap_typedescr.
+
+    ev_is_invalid = abap_false.
+    CLEAR eo_dbtab.
+    "check dbtable is active in DDIC
+    cl_abap_structdescr=>describe_by_name( EXPORTING p_name = mv_db_tab
+                                           RECEIVING p_descr_ref = lo_typedescr
+                                           EXCEPTIONS OTHERS = 1 ).
+    IF sy-subrc IS NOT INITIAL.
+      ev_is_invalid = abap_true.
+      RETURN.
+    ENDIF.
+    TRY.
+        eo_dbtab ?= lo_typedescr.
+      CATCH cx_sy_move_cast_error.
+        ev_is_invalid = abap_true.
+        RETURN.
+    ENDTRY.
+    eo_dbtab->get_ddic_header( RECEIVING p_header = ls_ddic_header
+                               EXCEPTIONS OTHERS = 1 ).
+    IF sy-subrc IS NOT INITIAL.
+      ev_is_invalid = abap_true.
+      RETURN.
+    ENDIF.
+    IF ls_ddic_header-tabtype <> 'T'.
+      ev_is_invalid = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD raise_x_message.
+    "this is encapsulated in a method so it can be re-defined by test doubles
+    MESSAGE iv_text TYPE 'X' RAISING error.
+  ENDMETHOD.
+
+
+  METHOD get_clientfield_of_dbtab.
+    DATA ls_table_header TYPE x030l.
+    DATA lt_table_comp TYPE dd_x031l_table.
+    DATA ls_table_comp TYPE x031l.
+    DATA lv_pos TYPE i.
+
+    ls_table_header = io_dbtab->get_ddic_header( ).
+    lt_table_comp = io_dbtab->get_ddic_object( ).
+    lv_pos = ls_table_header-clpos.
+    READ TABLE lt_table_comp INTO ls_table_comp WITH KEY position = lv_pos. "#EC CI_STDSEQ
+    IF sy-subrc = 0.
+      rv_client_field = ls_table_comp-fieldname.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD append_component_val_to_string.
+    DATA lv_value_as_string TYPE string.
+    FIELD-SYMBOLS <lv_value> TYPE data.
+
+    ASSIGN COMPONENT iv_component OF STRUCTURE is_data TO <lv_value>.
+    IF sy-subrc = 0.
+      lv_value_as_string = <lv_value>.
+      IF cv_string IS NOT INITIAL.
+        cv_string = cv_string && ','.
+      ENDIF.
+      cv_string = cv_string && iv_component && '=' && lv_value_as_string.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.

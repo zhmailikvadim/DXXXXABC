@@ -1,0 +1,607 @@
+*&---------------------------------------------------------------------*
+*& Include          ZAA_ACT_MOD_OBJ_OC_C01
+*&---------------------------------------------------------------------*
+CLASS cl_excel DEFINITION FINAL.
+  PUBLIC SECTION.
+    CLASS-DATA:
+      gr_handle            TYPE REF TO i_oi_spreadsheet,
+      gr_proxy             TYPE REF TO i_oi_document_proxy,
+      gr_container_control TYPE REF TO i_oi_container_control,
+      gr_container         TYPE REF TO cl_gui_docking_container.
+
+    CLASS-METHODS:
+      create_excel,
+      destroy_excel,
+      on_close_document
+        FOR EVENT on_close_document OF i_oi_document_proxy.
+ENDCLASS.
+
+CLASS cl_excel IMPLEMENTATION.
+  METHOD create_excel.
+    IF gr_proxy IS BOUND.
+      cl_excel=>destroy_excel( ).
+    ENDIF.
+  ENDMETHOD.                    "cl_excel
+
+  METHOD destroy_excel.
+    DATA:
+      ls_closed TYPE i.
+
+    IF NOT gr_proxy IS BOUND.
+      RETURN.
+    ENDIF.
+    cl_excel=>gr_proxy->is_destroyed( IMPORTING ret_value = ls_closed ).
+    IF ls_closed IS INITIAL.
+      cl_excel=>gr_proxy->close_document( ).
+    ENDIF.
+
+    cl_excel=>gr_proxy->release_document( ).
+    IF cl_excel=>gr_proxy IS BOUND.
+      FREE: cl_excel=>gr_proxy.
+    ENDIF.
+    IF cl_excel=>gr_container_control IS BOUND.
+      cl_excel=>gr_container_control->destroy_control( ).
+      FREE cl_excel=>gr_container_control.
+    ENDIF.
+    IF cl_excel=>gr_container IS BOUND.
+      cl_excel=>gr_container->free( ).
+      FREE cl_excel=>gr_container.
+    ENDIF.
+  ENDMETHOD.                    "destroy_excel
+
+  METHOD on_close_document.
+    cl_excel=>destroy_excel( ).
+    LEAVE TO SCREEN 0.
+  ENDMETHOD.                    "on_close_document
+ENDCLASS.
+
+CLASS lcl_report DEFINITION FINAL.
+  PUBLIC SECTION.
+    TYPES:
+      BEGIN OF gty_s_numcol,
+        col TYPE numc10,
+      END OF gty_s_numcol,
+      gty_t_numcol TYPE STANDARD TABLE OF gty_s_numcol.
+    CLASS-METHODS:
+      fill_com,
+      get_data,
+      pbo_100,
+      print_data.
+
+  PRIVATE SECTION.
+    CLASS-DATA:
+     gs_data TYPE zcl_aa_act_mod_obj_oc_amdp=>gty_s_data.
+
+    CLASS-METHODS:
+      out_to_excel,
+      init_excel CHANGING cv_subrc TYPE sy-subrc,
+      set_cell_value IMPORTING iv_range TYPE char128
+                               iv_value TYPE char300,
+      set_data_table IMPORTING iv_range   TYPE char128
+                               it_tab     TYPE table
+                               it_emptcol TYPE gty_t_numcol OPTIONAL..
+ENDCLASS.
+
+CLASS lcl_report IMPLEMENTATION.
+  METHOD fill_com.
+    IF gt_param IS INITIAL.
+      gt_param = VALUE #( value = ''       ( key = TEXT-s01 type = 'd' )
+                                           ( key = TEXT-s02 type = 'd' )
+                                           ( key = TEXT-s03 type = 'd' )
+                                           ( key = TEXT-s18 type = 'd' )
+                                           ( key = TEXT-s04 type = 'char' )
+*                          value = p_bukrs  ( key = TEXT-s05 type = 'char' )
+*                          value = p_anln1  ( key = TEXT-s06 type = 'char' )
+*                          value = p_anln2  ( key = TEXT-s07 type = 'char' )
+
+                                           ( key = TEXT-s09 type = 'char' )
+                                           ( key = TEXT-s10 type = 'd' )
+                                           ( key = TEXT-s11 type = 'd' )
+                                           ( key = TEXT-s13 type = 'd' )
+                                           ( key = TEXT-s12 type = 'd' )
+                                           ( key = TEXT-s14 type = 'd' )
+                          value = ''       ( key = TEXT-s08 type = 'cbp' )  " Исполнитель работ
+                                           ( key = TEXT-s15 type = 'char' )
+                                           ( key = TEXT-s16 type = 'char' )
+                                           ( key = TEXT-s17 type = 'char' )
+                        ).
+    ENDIF.
+    gt_comdata[] = VALUE #(
+        ( data_key = 'ALV_RESPONSIBLE' is_alv = abap_true  data_ref = REF #( gt_responsible[] ) )
+        ( data_key = 'ALV_DEPGR'       is_alv = abap_true  data_ref = REF #( gt_param[] ) )
+        ( data_key = 'ALV_BUKRS'       is_alv = abap_false data_ref = REF #( p_bukrs ) )
+    ).
+
+    if gs_comis is NOT INITIAL .
+      zfi_cl_comiss=>gs_comis = gs_comis .
+    ENDIF.
+
+    gs_comis = zfi_cl_comiss=>show_comiss(
+      EXPORTING im_comis = gs_comis-comis_num im_dynnr = '0651'
+      CHANGING ct_comisdata = gt_comdata[] ).
+
+  ENDMETHOD.
+
+  METHOD get_data.
+    DATA: lv_budat   TYPE d, " дата составления акта
+          lt_data    TYPE zcl_aa_act_mod_obj_oc_amdp=>gty_t_data,
+          lv_partner TYPE bu_partner,
+          lv_string  TYPE string,
+          ls_vals    TYPE zaa_v2_stock.
+
+    FIELD-SYMBOLS: <lt_data> TYPE lty_param.
+    CLEAR: gt_range, gt_soi_data.
+
+    ASSIGN gt_comdata[ data_key = 'ALV_DEPGR' ] TO FIELD-SYMBOL(<ls_alv>).
+    IF sy-subrc = 0.
+      ASSIGN <ls_alv>-data_ref->* TO <lt_data>.
+      IF sy-subrc = 0.
+        LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_key>).
+          CASE <ls_key>-key.
+            WHEN TEXT-s01. "Дата утверждения акта
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-date_utv = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+              ENDIF.
+            WHEN TEXT-s02. "Дата составления акта
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                lv_budat = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+                gs_excel-budat = lv_budat.
+              ENDIF.
+            WHEN TEXT-s03. " Дата модернизации c
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-datemodern_beg = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+              ENDIF.
+            WHEN TEXT-s18. " Дата модернизации по
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-datemodern_end = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+              ENDIF.
+            WHEN TEXT-s12. " Дата фактическая по
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-datefact_beg = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+              ENDIF.
+            WHEN TEXT-s14. " Дата фактическая по
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-datefact_end = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+              ENDIF.
+*            WHEN TEXT-s11. " Период ремонта по договору c
+*              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+*                gs_excel-datefact_beg = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+*              ENDIF.
+*            WHEN TEXT-s13. " Период ремонта по договору по
+*              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+*                gs_excel-datefact_beg = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+*              ENDIF.
+            WHEN TEXT-s15. " Заключение комиссии
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-zakl_com = <ls_key>-value.
+              ENDIF.
+            WHEN TEXT-s17. " По окончании работ
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-work_end = <ls_key>-value.
+              ENDIF.
+            WHEN TEXT-s16. " Предусмотренные работы договором (заказом) выполнены
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-worked = <ls_key>-value.
+              ENDIF.
+            WHEN TEXT-s08. "Исполнитель работ
+              lv_partner = <ls_key>-value.
+              CALL METHOD zcl_get_partner=>get_partner_name
+                EXPORTING
+                  im_partner = lv_partner
+                IMPORTING
+                  ex_name    = lv_string.
+              gs_excel-partner = lv_string.
+            WHEN TEXT-s04. "Номер акта
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-nomact = <ls_key>-value.
+              ENDIF.
+            WHEN TEXT-s09. "Номер договора
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-nomdoc = <ls_key>-value.
+              ENDIF.
+            WHEN TEXT-s10. "Дата договора
+              IF <ls_key>-value IS ASSIGNED AND <ls_key>-value IS NOT INITIAL.
+                gs_excel-datedoc = <ls_key>-value+6(4) && <ls_key>-value+3(2) && <ls_key>-value(2).
+              ENDIF.
+          ENDCASE.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+    TRY.
+        zcl_aa_act_mod_obj_oc_amdp=>get_data(
+          EXPORTING
+            iv_anln1 = p_anln1
+            iv_anln2 = p_anln2
+            iv_bukrs = p_bukrs
+            iv_budat = lv_budat
+            iv_afabe = '01'
+            iv_years = CONV #( TEXT-001 )
+            iv_month = CONV #( TEXT-002 )
+          IMPORTING
+            et_data  = lt_data ).
+
+        READ TABLE lt_data INTO gs_data INDEX 1.
+        IF sy-subrc <> 0.
+          MESSAGE s999(zaa) DISPLAY LIKE 'E' WITH TEXT-m04.
+          LEAVE LIST-PROCESSING.
+        ENDIF.
+
+        " первоночальная стоимость
+        CALL FUNCTION 'ZAA_GET_STOCK'
+          EXPORTING
+            iv_bukrs = p_bukrs
+            iv_anln1 = p_anln1
+            iv_anln2 = p_anln2
+            iv_date  = COND #( WHEN lv_budat IS INITIAL THEN sy-datum ELSE lv_budat - 1 )
+            iv_afabe = '01'
+          IMPORTING
+            es_vals  = ls_vals.
+        " стоимость без учета модернизации
+        gs_data-kansw = ls_vals-kansw.
+
+      CATCH cx_root INTO DATA(lr_error).
+        MESSAGE i999(zaa) WITH 'Ошибка вызова метода ZCL_ACT_MOD_OBJ_OC_AMDP=>GET_DATA'(t01).
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD print_data.
+    "{chg 27/09/2024 G.Domanikova Jiraf #14 588
+    TYPES:
+      BEGIN OF lty_s_memb,
+        memb_pos TYPE p33_posit,  "CHAR 200
+        memb_fio TYPE emnam,      "CHAR 40
+      END OF lty_s_memb,
+      BEGIN OF lty_s_memb_ind,
+        index    TYPE i,
+        memb_pos TYPE p33_posit,  "CHAR 200
+        memb_fio TYPE emnam,      "CHAR 40
+      END OF lty_s_memb_ind.
+
+    DATA: lt_memb_ind   TYPE STANDARD TABLE OF lty_s_memb_ind,
+          lt_result_tab TYPE match_result_tab,
+          lt_memb       TYPE STANDARD TABLE OF lty_s_memb,
+          lt_emptcol    TYPE gty_t_numcol,
+          lv_str        TYPE string,
+          lv_revmd      TYPE i VALUE 0,
+          lv_counter    TYPE numc10 VALUE 2,
+          lv_index      TYPE i,
+          lv_l_fio      TYPE i. "counter of while
+
+    FIELD-SYMBOLS: <lt_data> TYPE lty_param, "gty_value,
+                   <lt_resp> TYPE gty_resp.
+
+    " ЗАКАЗЧИК: НАИМЕНОВАНИЕ ОРГАНИЗАЦИИ
+    IF gs_data-dlvr_org_name IS NOT INITIAL.
+      CONDENSE gs_data-dlvr_org_name.
+      set_cell_value( EXPORTING iv_range = 'DLVR_ORG_NAME' iv_value = CONV #( | { TEXT-004 } { gs_data-dlvr_org_name }| ) ).
+    ENDIF.
+
+    set_cell_value( EXPORTING iv_range = 'DLVR_DEPT_NAME' iv_value = CONV #( gs_data-dlvr_dept_name ) ).
+    set_cell_value( EXPORTING iv_range = 'PARTNER'        iv_value = CONV #( gs_excel-partner ) ).                                      " исполнитель работ
+    set_cell_value( EXPORTING iv_range = 'ZAKL_COM'       iv_value = CONV #( gs_excel-zakl_com ) ).                                     " заключение комиссии
+    set_cell_value( EXPORTING iv_range = 'WORKED'         iv_value = CONV #( gs_excel-worked ) ).                                       " предусмотренные работы договором (заказом) выполнены
+    set_cell_value( EXPORTING iv_range = 'WORK_END'       iv_value = CONV #( gs_excel-work_end ) ).                                     " по окончании работ
+
+    set_cell_value( EXPORTING iv_range = 'NOMACT'         iv_value = CONV #( gs_excel-nomact ) ).                                       " номер акта
+    set_cell_value( EXPORTING iv_range = 'BUDAT'          iv_value = CONV #( |{ gs_excel-budat DATE = ENVIRONMENT }| ) ).               " дата составления акта
+
+    set_cell_value( EXPORTING iv_range = 'NOMDOC'         iv_value = CONV #( gs_excel-nomdoc ) ).                                       " номер договора
+    set_cell_value( EXPORTING iv_range = 'DATADOC'        iv_value = CONV #( |{ gs_excel-datedoc DATE = ENVIRONMENT }| ) ).             " дата договора
+
+    IF gs_excel-datemodern_beg IS NOT INITIAL.
+      set_cell_value( EXPORTING iv_range = 'DATEMOD_BEG'    iv_value = CONV #( |с { gs_excel-datemodern_beg DATE = ENVIRONMENT }| ) ).  " дата модернизации
+      set_cell_value( EXPORTING iv_range = 'DATEMOD_END'    iv_value = CONV #( |по { gs_excel-datemodern_end DATE = ENVIRONMENT }| ) ). " дата модернизации
+    ENDIF.
+    IF gs_excel-datefact_beg IS NOT INITIAL.
+      set_cell_value( EXPORTING iv_range = 'DATEFACT_BEG'   iv_value = CONV #( |c { gs_excel-datefact_beg DATE = ENVIRONMENT }| ) ).    " дата фактическая
+      set_cell_value( EXPORTING iv_range = 'DATEFACT_END'   iv_value = CONV #( |по { gs_excel-datefact_end DATE = ENVIRONMENT }| ) ).   " дата фактическая
+    ENDIF.
+
+    if gs_excel-date_utv IS NOT INITIAL.
+      set_cell_value( EXPORTING iv_range = 'DD'             iv_value = CONV #( |«{ gs_excel-date_utv+6(2) }»| ) ).                      " дата утверждения
+
+      DATA lv_month TYPE p33_regno.
+      CALL FUNCTION 'HR_RU_MONTH_NAME_IN_GENITIVE'
+        EXPORTING
+          month = gs_excel-date_utv+4(2)
+        IMPORTING
+          name  = lv_month.
+
+      set_cell_value( EXPORTING iv_range = 'MM'             iv_value = CONV #( |{ lv_month }| ) ).                  " месяц
+      set_cell_value( EXPORTING iv_range = 'YY'             iv_value = CONV #( |{ gs_excel-date_utv(4) }г| ) ).     " год
+    ENDIF.
+
+    cl_excel=>gr_handle->set_ranges_data( EXPORTING ranges = gt_range[] contents = gt_soi_data[] ).
+
+    CLEAR: gt_range[], gt_soi_data[].
+
+    " табл1 - Сведения о состоянии объектов основных средств на момент передачи в ремонт, на реконструкцию, модернизацию
+    set_cell_value( EXPORTING iv_range = 'NAME_OC'   iv_value = CONV #( gs_data-name_oc ) ).   " Объект основных средств
+    set_cell_value( EXPORTING iv_range = 'INVNR'     iv_value = CONV #( gs_data-invnr ) ).     " Инвентарный номер
+    set_cell_value( EXPORTING iv_range = 'PASPORT'   iv_value = CONV #( gs_data-pasport ) ).   " Паспорт
+    set_cell_value( EXPORTING iv_range = 'PLANTNR'   iv_value = CONV #( gs_data-plantnr ) ).   " Заводской номер
+    set_cell_value( EXPORTING iv_range = 'PLANTNR'   iv_value = CONV #( gs_data-plantnr ) ).   " Заводской номер
+    set_cell_value( EXPORTING iv_range = 'DATE_FACT' iv_value = CONV #( gs_data-date_fact ) ). " Фактический срок эксплуатации
+    DATA(lv_kansw) = condense( CONV char15( gs_data-kansw ) ).
+    DATA(lv_perst) = condense( CONV char15( gs_data-perst ) ).
+    TRANSLATE lv_kansw USING '.,'.
+    TRANSLATE lv_perst USING '.,'.
+    set_cell_value( EXPORTING iv_range = 'KANSW'      iv_value = CONV #( lv_kansw ) ).          " Первоночальная стоимость
+
+    " nf,k2 - Сведения о затратах, связанных с ремонтом, реконструкцией, модернизацией объектов ОС
+    set_cell_value( EXPORTING iv_range = 'NAME_OC2'   iv_value = CONV #( gs_data-name_oc ) ).   " Объект основных средств
+    set_cell_value( EXPORTING iv_range = 'PERST'      iv_value = CONV #( lv_perst ) ).          " сумма реконструкции
+
+    DATA(lv_itog) = condense( CONV char15( gs_data-kansw + gs_data-perst ) ).
+    TRANSLATE lv_itog USING '.,'.
+    set_cell_value( EXPORTING iv_range = 'ITOG'       iv_value = CONV #( lv_itog ) ).           " Стоимость объекта ОС после реконструкции, модернизации
+
+*   Председатель комиссии
+    lv_l_fio = strlen( gs_comis-chairman_fio ) - 4.
+    set_cell_value( EXPORTING iv_range = 'P_CHM_N'  iv_value = CONV #( |{ gs_comis-chairman_fio+lv_l_fio(4) } { gs_comis-chairman_fio(lv_l_fio) }| ) ).
+    set_cell_value( EXPORTING iv_range = 'P_CHM_P'  iv_value = CONV #( gs_comis-chairman_pos ) ).
+
+
+    SELECT SINGLE head_position, head_s_fio,    " руководитель БЕ
+                  acc_position, acc_s_fio       " главный бухгалтер БЕ
+      FROM zmm_chief_data
+      INTO (@DATA(lv_head_dolg), @DATA(lv_head_fio),
+            @DATA(lv_acc_dolg),  @DATA(lv_acc_s_fio))
+     WHERE bukrs = @p_bukrs.
+
+    IF sy-subrc <> 0.
+*     MESSAGE i015(zaa) DISPLAY LIKE 'E'.
+    ENDIF.
+
+    TRY.
+        "Подписи
+        ASSIGN gt_comdata[ data_key = 'ALV_RESPONSIBLE' ] TO FIELD-SYMBOL(<ls_resp>).
+        IF sy-subrc = 0.
+          ASSIGN <ls_resp>-data_ref->* TO <lt_resp> .
+          IF sy-subrc = 0.
+            lv_revmd = 0.
+            LOOP AT <lt_resp> ASSIGNING FIELD-SYMBOL(<ls_val>).
+              CLEAR lv_l_fio.
+              lv_l_fio = strlen( <ls_val>-memb_fio ) - 4.
+              CASE <ls_val>-type_add.
+                WHEN '00'.
+                  FIND ALL OCCURRENCES OF REGEX '[0-9]+' IN <ls_val>-descr RESULTS lt_result_tab.
+                  LOOP AT lt_result_tab INTO DATA(ls_tab).
+                    lv_str = <ls_val>-descr+ls_tab-offset(ls_tab-length).
+                    APPEND VALUE #( index = lv_str memb_pos = <ls_val>-memb_pos
+                                    memb_fio = CONV #( |{ <ls_val>-memb_fio+lv_l_fio(4) } { <ls_val>-memb_fio(lv_l_fio) }| ) " ФИО
+                    ) TO lt_memb_ind.
+                  ENDLOOP.
+                WHEN '02'."бухгалтер
+                  IF lv_acc_s_fio IS NOT INITIAL.
+                    <ls_val>-memb_fio = COND #( WHEN lv_acc_s_fio IS NOT INITIAL THEN lv_acc_s_fio ELSE <ls_val>-memb_fio ).
+                    lv_l_fio = strlen( <ls_val>-memb_fio ) - 4.
+                  ENDIF.
+                  set_cell_value( EXPORTING iv_range = 'GLAV_BUH' iv_value = CONV #( |{ <ls_val>-memb_fio+lv_l_fio(4) } { <ls_val>-memb_fio(lv_l_fio) }| ) ). " ФИО
+                WHEN '03'."Сдал
+                  set_cell_value( EXPORTING iv_range = 'P_DLVR_N' iv_value = CONV #( |{ <ls_val>-memb_fio+lv_l_fio(4) } { <ls_val>-memb_fio(lv_l_fio) }| ) ). " ФИО                     " Сдал ФИО
+                  set_cell_value( EXPORTING iv_range = 'P_DLVR_P' iv_value = CONV #( <ls_val>-memb_pos ) ). " Должность
+                WHEN '04'."Принял
+                  set_cell_value( EXPORTING iv_range = 'P_RECV_N' iv_value = CONV #( |{ <ls_val>-memb_fio+lv_l_fio(4) } { <ls_val>-memb_fio(lv_l_fio) }| ) ). " ФИО
+                  set_cell_value( EXPORTING iv_range = 'P_RECV_P' iv_value = CONV #( <ls_val>-memb_pos ) ).
+                WHEN '07'. " Утверждающий руководитель
+                  IF lv_head_fio IS NOT INITIAL.
+                    <ls_val>-memb_pos = lv_head_dolg.
+                    <ls_val>-memb_fio = lv_head_fio.
+                  ENDIF.
+                  set_cell_value( EXPORTING iv_range = 'DOLG_UTV' iv_value = CONV #( <ls_val>-memb_pos ) ). " должность
+                  set_cell_value( EXPORTING iv_range = 'FIO_UTV'  iv_value = CONV #( |{ <ls_val>-memb_fio+lv_l_fio(4) } { <ls_val>-memb_fio(lv_l_fio) }| ) ). " ФИО
+              ENDCASE.
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+
+        SORT lt_memb_ind BY index ASCENDING.
+
+        LOOP AT lt_memb_ind INTO DATA(ls_memb).
+          lv_revmd = lv_revmd + 1.
+          CLEAR lv_l_fio.
+          lv_l_fio = strlen( ls_memb-memb_fio ) - 4.
+          IF lv_revmd <= 1.
+            set_cell_value( EXPORTING iv_range = 'P_PSB' && lv_revmd && 'N' iv_value = CONV #( |{ ls_memb-memb_fio+lv_l_fio(4) } { ls_memb-memb_fio(lv_l_fio) }| ) ).
+            set_cell_value( EXPORTING iv_range = 'P_PSB' && lv_revmd && 'P' iv_value = CONV #( ls_memb-memb_pos ) ).
+          ELSE.
+            ls_memb-memb_fio = CONV #( |{ ls_memb-memb_fio+lv_l_fio(4) } { ls_memb-memb_fio(lv_l_fio) }| ).
+            APPEND VALUE #( memb_pos = ls_memb-memb_pos memb_fio = ls_memb-memb_fio ) TO lt_memb.
+          ENDIF.
+        ENDLOOP.
+      CATCH cx_sy_range_out_of_bounds.
+        EXIT.
+    ENDTRY.
+
+    IF lt_memb[] IS NOT INITIAL.
+      CLEAR lt_emptcol.
+      WHILE lv_counter <= 6.
+        CASE lv_counter.
+          WHEN 6.
+          WHEN OTHERS.
+            APPEND VALUE #( col = lv_counter ) TO lt_emptcol[].
+        ENDCASE.
+        lv_counter = lv_counter + 1.
+      ENDWHILE.
+
+      set_data_table( EXPORTING iv_range = 'MEMB_TAB' it_tab = lt_memb it_emptcol = lt_emptcol[] ).
+    ENDIF.
+
+    cl_excel=>gr_handle->set_ranges_data( EXPORTING ranges = gt_range[] contents = gt_soi_data[] ).
+
+    cl_excel=>gr_proxy->execute_macro( EXPORTING macro_string = 'Module1.AutoFit'(q08) param_count  = 0 ).
+    cl_excel=>gr_proxy->execute_macro( EXPORTING macro_string = 'Module1.ins_podpis'(000) param_count = 1 param1 = lines( lt_memb )  ).
+
+   "}chg 27/09/2024 G.Domanikova Jiraf #14 588
+  ENDMETHOD.
+
+
+  METHOD set_data_table.
+    DATA:
+      lt_ftab TYPE soi_fields_table.
+
+    TRY .
+        DATA(lv_rows) =  lines( it_tab ).
+
+        IF lv_rows > 1.
+          cl_excel=>gr_proxy->execute_macro(
+            EXPORTING
+              macro_string = 'Module1.add_rows'(t44)
+              param_count  = 2
+              param1 = iv_range
+              param2 = lv_rows ).
+        ENDIF.
+
+        CALL FUNCTION 'DP_GET_FIELDS_FROM_TABLE'
+          TABLES
+            data   = it_tab[]
+            fields = lt_ftab[].
+
+        LOOP AT it_emptcol ASSIGNING FIELD-SYMBOL(<ls_emptcol>).
+          INSERT VALUE #( tabname   = abap_true
+                          fieldname = abap_true
+                          position  = <ls_emptcol>
+                          offset    = 0 intlength = 0 decimals = 0 exid = 'C' ) INTO lt_ftab INDEX <ls_emptcol>-col.
+        ENDLOOP.
+
+        cl_excel=>gr_handle->insert_one_table(
+          EXPORTING
+            data_table   = it_tab[]
+            fields_table = lt_ftab[]
+            wholetable   = 'X'
+            rangename    = iv_range ).
+      CATCH cx_root.
+        RETURN.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD pbo_100.
+    out_to_excel( ).
+  ENDMETHOD.
+
+  METHOD out_to_excel.
+    DATA: lv_subrc TYPE sy-subrc.
+
+    init_excel( CHANGING cv_subrc = lv_subrc ).
+    IF lv_subrc = 0.
+      print_data( ).
+    ENDIF.
+    cl_gui_cfw=>flush( ).
+  ENDMETHOD.
+
+  METHOD set_cell_value.                       " Вывод данных в именованные области
+
+    APPEND VALUE #( name = iv_range rows = 1 columns = 1 ) TO gt_range.
+    APPEND VALUE #( value = iv_value row = 1 column = 1 ) TO gt_soi_data.
+
+  ENDMETHOD.
+  METHOD init_excel.
+    CONSTANTS: lc_file_name TYPE string VALUE 'ZAA_ACT_OS_MODERNIZATION.xls'.
+*    CONSTANTS: lc_file_name TYPE string VALUE 'ZAA_ACT_OS_MODERNIZATION.xlsm'.
+    DATA:
+      lr_error TYPE REF TO i_oi_error,
+      lt_uri   TYPE STANDARD TABLE OF bapiuri,
+      lt_comp  TYPE STANDARD TABLE OF bapicompon.
+
+    cl_excel=>destroy_excel( ).
+    cl_excel=>create_excel( ).
+
+    cl_bds_document_set=>get_with_url(
+        EXPORTING
+          classname       = 'ZIBA_DOCS'
+          classtype       = 'OT'
+          object_key      = 'AA'
+        CHANGING
+          uris            = lt_uri
+          components      = lt_comp
+        EXCEPTIONS
+          OTHERS          = 1 ).
+    IF sy-subrc <> 0.
+      MESSAGE i411(oa) DISPLAY LIKE 'E'.
+    ENDIF.
+
+    ASSIGN lt_comp[ comp_id = lc_file_name  ] TO FIELD-SYMBOL(<ls_comp>).
+    IF sy-subrc <> 0.
+      cv_subrc = 4.
+      MESSAGE s411(oa) DISPLAY LIKE 'E'.
+      LEAVE TO SCREEN 0.
+    ENDIF.
+
+    ASSIGN lt_uri[ doc_count = <ls_comp>-doc_count ] TO FIELD-SYMBOL(<ls_uri>).
+    IF sy-subrc <> 0.
+      cv_subrc = 4.
+      MESSAGE i411(oa) DISPLAY LIKE 'E'.
+      LEAVE TO SCREEN 0.
+    ENDIF.
+
+    c_oi_container_control_creator=>get_container_control(
+     IMPORTING
+       control = cl_excel=>gr_container_control
+       error   = lr_error ).
+
+    CREATE OBJECT cl_excel=>gr_container
+      EXPORTING
+        side      = cl_gui_docking_container=>dock_at_top
+        extension = 1000
+      EXCEPTIONS
+        OTHERS    = 1.
+    IF sy-subrc <> 0.
+      cv_subrc = 4.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    cl_excel=>gr_container_control->init_control(
+       EXPORTING
+         r3_application_name       = TEXT-t02
+         inplace_enabled           = 'X'
+         inplace_scroll_documents  = 'X'
+         register_on_close_event   = 'X'
+         no_flush                  = 'X'
+         parent                    =  cl_excel=>gr_container ).
+
+    cl_excel=>gr_container_control->get_document_proxy(
+      EXPORTING
+        document_type      = soi_doctype_excel_sheet
+        register_container = 'X'
+      IMPORTING
+        document_proxy     = cl_excel=>gr_proxy
+        error              = lr_error ).
+
+    SET HANDLER cl_excel=>on_close_document FOR cl_excel=>gr_proxy.
+
+    cl_excel=>gr_proxy->open_document(
+        EXPORTING
+          document_url = <ls_uri>-uri
+        IMPORTING
+          error        = lr_error ).
+
+    IF lr_error IS NOT INITIAL AND lr_error->error_code <> c_oi_errors=>ret_ok.
+      c_oi_errors=>show_message( type = 'I' ).
+      cl_excel=>destroy_excel( ).
+      cv_subrc = 1.
+      RETURN.
+    ENDIF.
+
+    cl_gui_cfw=>flush( ).
+
+    cl_excel=>gr_proxy->update_document_links( IMPORTING error = lr_error ).
+
+    cl_excel=>gr_proxy->get_spreadsheet_interface(
+      IMPORTING
+        sheet_interface = cl_excel=>gr_handle
+        error           = lr_error ).
+    IF lr_error->error_code NE c_oi_errors=>ret_ok.
+      cv_subrc = 1.
+      RETURN.
+    ENDIF.
+
+    cl_gui_cfw=>flush( ).
+  ENDMETHOD.
+
+ENDCLASS.

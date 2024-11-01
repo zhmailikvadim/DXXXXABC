@@ -1,0 +1,415 @@
+CLASS lcl_data_mapper DEFINITION.
+
+  PUBLIC SECTION.
+
+    METHODS constructor IMPORTING iv_entity_type TYPE sadl_entity_type
+                                  iv_entity_id   TYPE sadl_entity_id
+                        RAISING   cx_sadl_static.
+
+    "! @parameter irs_entity_data | reference to the structure of the entity data
+    "! @parameter rrt_bopf_data | reference to a newly created table containing a single row in BOPF format
+    METHODS get_bopf_table_for_entity_ref IMPORTING irs_entity_data      TYPE data
+                                          RETURNING VALUE(rrt_bopf_data) TYPE REF TO data.
+
+    METHODS map_back_to_sadl.
+
+    METHODS prepare_bopf_data.
+
+    METHODS add_entity_ref IMPORTING irs_entity_data      TYPE REF TO data
+                                     iv_requested_alt_key TYPE if_sadl_entity=>ty_key_name.
+
+  PRIVATE SECTION.
+    TYPES: ty_sadl_reference TYPE REF TO data.
+
+    DATA: mo_rt_access           TYPE REF TO /bobf/cl_sadl_entity_rt_access,
+          mrt_bopf_data          TYPE REF TO data,
+          mrt_sadl_data          TYPE REF TO data,
+          mt_sadl_references     TYPE SORTED TABLE OF ty_sadl_reference WITH NON-UNIQUE KEY table_line,
+          mts_requested_alt_keys TYPE SORTED TABLE OF if_sadl_entity=>ty_key_name WITH UNIQUE KEY table_line.
+
+    METHODS: create_sadl_data_table RETURNING VALUE(rrt_sadl_data) TYPE REF TO data,
+
+      collect_requested_key_elements
+        EXPORTING
+          et_elements_to_fill TYPE stringtab
+        RAISING
+          cx_sadl_contract_violation,
+
+      fill_additional_elements
+        IMPORTING
+          it_elements_to_fill TYPE stringtab.
+
+ENDCLASS.
+
+**********************************************************************
+
+CLASS lcl_data_mapper IMPLEMENTATION.
+
+  METHOD constructor.
+    mo_rt_access = /bobf/cl_sadl_entity_rt_access=>get( iv_type = iv_entity_type
+                                                        iv_id   = iv_entity_id ).
+  ENDMETHOD.
+
+
+  METHOD get_bopf_table_for_entity_ref.
+    FIELD-SYMBOLS: <rt_bopf_data> TYPE STANDARD TABLE,
+                   <mt_bopf_data> TYPE STANDARD TABLE.
+
+    ASSIGN mrt_bopf_data->* TO <mt_bopf_data>.
+
+    "create the returning table:
+    CREATE DATA rrt_bopf_data LIKE <mt_bopf_data>.
+    ASSIGN rrt_bopf_data->* TO <rt_bopf_data>.
+
+    "find the index (sy-tabix) of the given SADL data reference:
+    READ TABLE mt_sadl_references TRANSPORTING NO FIELDS WITH KEY table_line = irs_entity_data.
+    ASSERT sy-tabix <> 0. "failing here indicates a programming error in the global class.
+
+    "copy the corresponding BOPF structure into the returning table
+    INSERT LINES OF <mt_bopf_data> FROM sy-tabix TO sy-tabix INTO TABLE <rt_bopf_data>.
+  ENDMETHOD.
+
+
+  METHOD map_back_to_sadl.
+    DATA: lt_elements_to_fill TYPE stringtab.
+    FIELD-SYMBOLS: <mt_sadl_data> TYPE STANDARD TABLE.
+
+    CHECK mt_sadl_references IS NOT INITIAL.
+
+    collect_requested_key_elements( IMPORTING et_elements_to_fill = lt_elements_to_fill ).
+    fill_additional_elements( lt_elements_to_fill ).
+
+    ASSIGN mrt_sadl_data->* TO <mt_sadl_data>.
+    mo_rt_access->mapper( )->convert_bopf_data_to_entity( EXPORTING irt_bopf_data  = mrt_bopf_data
+                                                          CHANGING  ct_entity_data = <mt_sadl_data> ).
+
+    "write SADL data back to the originals:
+    LOOP AT mt_sadl_references INTO DATA(lrs_sadl_data).
+      ASSIGN lrs_sadl_data->* TO FIELD-SYMBOL(<ls_sadl_data>).
+      <ls_sadl_data> = <mt_sadl_data>[ sy-tabix ].
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD prepare_bopf_data.
+    DATA: lrs_sadl_data TYPE REF TO data.
+
+    FIELD-SYMBOLS: <ls_sadl_data> TYPE data,
+                   <mt_sadl_data> TYPE STANDARD TABLE,
+                   <mt_bopf_data> TYPE STANDARD TABLE.
+
+    CHECK mt_sadl_references IS NOT INITIAL.
+
+    "this is a good time to (only once) verify the correctness of the data type passed by the caller:
+    mo_rt_access->verify_entity_data_type( ir_data = mt_sadl_references[ 1 ] ).
+
+    "create SADL data table:
+    mrt_sadl_data = create_sadl_data_table( ).
+    ASSIGN mrt_sadl_data->* TO <mt_sadl_data>.
+
+    "collect SADL data from all references into <mt_sadl_data>
+    LOOP AT mt_sadl_references INTO lrs_sadl_data.
+      ASSIGN lrs_sadl_data->* TO <ls_sadl_data>.
+      APPEND <ls_sadl_data> TO <mt_sadl_data>.
+    ENDLOOP.
+
+    mrt_bopf_data = mo_rt_access->mapper( )->convert_entity_data_to_bopf( CHANGING ct_entity_data = <mt_sadl_data> ).
+
+    " Fill BOPF KEY fields. This is required to
+    " 1.) know the keys of created instances
+    " 2.) register transient keys for the Union DAC before creating active document instances
+    " Note that this modifies the KEY field even for FAILED creates. The SADL contract does not forbid this.
+
+    "Although a call to io_sadl_entity_transact->prepare_create in /BOBF/CL_SADL_TRANSACTION_MNGR->CREATE_BOPF_MODIFICATION
+    "will do the same thing later, we have to do this now or else the keys are not available in MAP_BACK_TO_SADL.
+    ASSIGN mrt_bopf_data->* TO <mt_bopf_data>.
+    mo_rt_access->mapper( )->fill_bopf_keys_for_create( CHANGING ct_bopf_data = <mt_bopf_data> ).
+
+  ENDMETHOD.
+
+
+  METHOD add_entity_ref.
+    INSERT irs_entity_data INTO TABLE mt_sadl_references.
+    IF iv_requested_alt_key IS NOT INITIAL.
+      "we don't bother to track requested alt. keys per instance
+      INSERT iv_requested_alt_key INTO TABLE mts_requested_alt_keys.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD create_sadl_data_table.
+    DATA(lrs_sadl_data) = mt_sadl_references[ 1 ].
+    ASSIGN lrs_sadl_data->* TO FIELD-SYMBOL(<ls_sadl_data>).
+    CREATE DATA rrt_sadl_data LIKE STANDARD TABLE OF <ls_sadl_data>.
+  ENDMETHOD.
+
+
+  METHOD collect_requested_key_elements.
+
+    "collect non-standard PRIMARY key fields:
+    mo_rt_access->get_non_standard_key_fields( IMPORTING et_bopf_element_names = et_elements_to_fill ).
+
+    "collect fields of requested alternative keys:
+    LOOP AT mts_requested_alt_keys INTO DATA(lv_requested_alt_key).
+      "we don't bother to track requested alt. keys per instance
+      mo_rt_access->get_non_standard_key_fields( EXPORTING iv_alternative_key_name = lv_requested_alt_key
+                                                 IMPORTING et_bopf_element_names   = DATA(lt_alt_key_fields) ).
+      INSERT LINES OF lt_alt_key_fields INTO TABLE et_elements_to_fill.
+    ENDLOOP.
+
+    "make list unique:
+    IF et_elements_to_fill IS NOT INITIAL.
+      SORT et_elements_to_fill.
+      DELETE ADJACENT DUPLICATES FROM et_elements_to_fill.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD fill_additional_elements.
+    DATA lt_bopf_keys TYPE /bobf/t_frw_key.
+
+    CHECK it_elements_to_fill IS NOT INITIAL.
+    ASSIGN mrt_bopf_data->* TO FIELD-SYMBOL(<mt_bopf_data>).
+    MOVE-CORRESPONDING <mt_bopf_data> TO lt_bopf_keys.
+    mo_rt_access->fill_additional_elements( EXPORTING it_fill_elements = it_elements_to_fill
+                                                      it_bopf_keys     = lt_bopf_keys
+                                            CHANGING  ct_bopf_data     = <mt_bopf_data> ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+**********************************************************************
+**********************************************************************
+**********************************************************************
+
+CLASS lcl_modification_merger DEFINITION.
+
+  PUBLIC SECTION.
+    METHODS constructor IMPORTING iv_entity_type TYPE sadl_entity_type
+                                  iv_entity_id   TYPE sadl_entity_id.
+    METHODS merge_bopf_modification IMPORTING is_bopf_modification         TYPE /bobf/s_frw_modification
+                                    CHANGING  ct_bopf_modifications_for_bo TYPE /bobf/t_frw_modification
+                                    RAISING   cx_sadl_static.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF ty_key_index_association,
+             key   TYPE /bobf/conf_key,
+             tabix TYPE sytabix,
+           END OF ty_key_index_association.
+
+    TYPES tts_key_index_dictionary TYPE SORTED TABLE OF ty_key_index_association WITH UNIQUE KEY key.
+
+    DATA: mv_entity_type TYPE sadl_entity_type,
+          mv_entity_id   TYPE sadl_entity_id,
+          mt_key_index   TYPE tts_key_index_dictionary,
+          mo_rt_access   TYPE REF TO /bobf/cl_sadl_entity_rt_access.
+
+    METHODS combine IMPORTING is_new_modification      TYPE /bobf/s_frw_modification
+                    CHANGING  cs_existing_modification TYPE /bobf/s_frw_modification
+                    RAISING   cx_sadl_static.
+
+    METHODS error IMPORTING iv_key TYPE /bobf/s_frw_modification-key
+                  RAISING   cx_sadl_static.
+
+    METHODS combine_update_update IMPORTING is_update TYPE /bobf/s_frw_modification
+                                  CHANGING  cs_update TYPE /bobf/s_frw_modification
+                                  RAISING   cx_sadl_static.
+
+    METHODS combine_update_delete IMPORTING is_update TYPE /bobf/s_frw_modification ##needed "for symmetry only
+                                            is_delete TYPE /bobf/s_frw_modification
+                                  EXPORTING es_result TYPE /bobf/s_frw_modification.
+
+    METHODS combine_create_update IMPORTING is_create        TYPE /bobf/s_frw_modification
+                                            is_update        TYPE /bobf/s_frw_modification
+                                  EXPORTING VALUE(es_result) TYPE /bobf/s_frw_modification
+                                  RAISING   cx_sadl_static.
+ENDCLASS.
+
+**********************************************************************
+
+CLASS lcl_modification_merger IMPLEMENTATION.
+
+  METHOD constructor.
+    mv_entity_type = iv_entity_type.
+    mv_entity_id   = iv_entity_id.
+  ENDMETHOD.
+
+
+  METHOD merge_bopf_modification.
+    READ TABLE mt_key_index INTO DATA(ls_key_index) WITH KEY key = is_bopf_modification-key.
+    IF sy-subrc = 0.
+      "modification for this key already exists. Get it and combine:
+      ASSIGN ct_bopf_modifications_for_bo[ ls_key_index-tabix ] TO FIELD-SYMBOL(<ls_existing_modification>).
+      combine( EXPORTING is_new_modification      = is_bopf_modification
+               CHANGING  cs_existing_modification = <ls_existing_modification> ).
+    ELSE.
+      "modification for this key does not exist, yet
+      APPEND is_bopf_modification TO ct_bopf_modifications_for_bo.
+      INSERT VALUE #( key   = is_bopf_modification-key
+                      tabix = lines( ct_bopf_modifications_for_bo ) ) INTO TABLE mt_key_index.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD combine.
+    """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+    " NOTE that we CANNOT rely on the correct sequence of modifications.
+    " Since Creates, Updates, and Deletes are passed to IF_SADL_BATCH~MODIFY
+    " in separate tables, there is no way of finding out whether, for example,
+    " a CREATE was before or after a DELETE of the same key.
+    "
+    " We simply assume a sequence like CREATE->UPDATE->DELETE and we
+    " exclude the possibility to first DELETE and then (re-)CREATE an
+    " instance with the same key.
+    """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+    CASE cs_existing_modification-change_mode.
+
+      WHEN /bobf/if_frw_c=>sc_modify_create. "** CREATE
+
+        CASE is_new_modification-change_mode.
+          WHEN /bobf/if_frw_c=>sc_modify_create.
+            error( cs_existing_modification-key ).
+
+          WHEN /bobf/if_frw_c=>sc_modify_update.
+            combine_create_update( EXPORTING is_create = cs_existing_modification
+                                             is_update = is_new_modification
+                                   IMPORTING es_result = cs_existing_modification ).
+            RETURN.
+
+          WHEN /bobf/if_frw_c=>sc_modify_delete.
+            "CREATE with DELETE does not make much sense.
+            "It is also not clear in which sequence the CREATE/DELETE should be executed
+            error( cs_existing_modification-key ).
+            RETURN.
+
+        ENDCASE.
+
+      WHEN /bobf/if_frw_c=>sc_modify_update. "** UPDATE
+
+        CASE is_new_modification-change_mode.
+          WHEN /bobf/if_frw_c=>sc_modify_create.
+            combine_create_update( EXPORTING is_create = is_new_modification
+                                             is_update = cs_existing_modification
+                                   IMPORTING es_result = cs_existing_modification ).
+            RETURN.
+
+          WHEN /bobf/if_frw_c=>sc_modify_update.
+            combine_update_update( EXPORTING is_update = is_new_modification
+                                   CHANGING  cs_update = cs_existing_modification ).
+            RETURN.
+
+          WHEN /bobf/if_frw_c=>sc_modify_delete.
+            combine_update_delete( EXPORTING is_update = cs_existing_modification
+                                             is_delete = is_new_modification
+                                   IMPORTING es_result = cs_existing_modification ).
+            RETURN.
+
+        ENDCASE.
+
+      WHEN /bobf/if_frw_c=>sc_modify_delete. "** DELETE
+
+        CASE is_new_modification-change_mode.
+          WHEN /bobf/if_frw_c=>sc_modify_create.
+            "CREATE with DELETE does not make much sense.
+            "It is also not clear in which sequence the CREATE/DELETE should be executed
+            error( cs_existing_modification-key ).
+            RETURN.
+
+          WHEN /bobf/if_frw_c=>sc_modify_update.
+            combine_update_delete( EXPORTING is_update = is_new_modification
+                                             is_delete = cs_existing_modification
+                                   IMPORTING es_result = cs_existing_modification ).
+            RETURN.
+
+          WHEN /bobf/if_frw_c=>sc_modify_delete.
+            error( cs_existing_modification-key ).
+
+        ENDCASE.
+
+    ENDCASE.
+
+    ASSERT 1 = 0. "should have RETURNed or raised an exception before
+  ENDMETHOD.
+
+
+  METHOD error.
+    DATA lv_key_as_string TYPE string.
+
+    lv_key_as_string = iv_key.
+    RAISE EXCEPTION TYPE /bobf/cx_sadl_entity
+      EXPORTING
+        textid     = /bobf/cx_sadl_entity=>/bobf/invalid_changeset_operat
+        entity_key = lv_key_as_string.
+  ENDMETHOD.
+
+
+  METHOD combine_update_update.
+    DATA: lv_new_changed_field TYPE LINE OF /bobf/t_frw_name.
+
+    "check for conflicting changed fields (they must not overlap):
+    IF cs_update-changed_fields IS INITIAL
+    OR is_update-changed_fields IS INITIAL.
+      error( cs_update-key ).
+    ENDIF.
+    SORT cs_update-changed_fields.
+    LOOP AT is_update-changed_fields INTO lv_new_changed_field.
+      READ TABLE cs_update-changed_fields TRANSPORTING NO FIELDS WITH KEY table_line = lv_new_changed_field BINARY SEARCH.
+      IF sy-subrc = 0.
+        "same field changed twice
+        error( cs_update-key ).
+      ENDIF.
+    ENDLOOP.
+
+    "combine changed fields:
+    INSERT LINES OF is_update-changed_fields INTO TABLE cs_update-changed_fields.
+    "merge changed values:
+    ASSIGN is_update-data->* TO FIELD-SYMBOL(<is_update_data>).
+    ASSIGN cs_update-data->* TO FIELD-SYMBOL(<cs_update_data>).
+    LOOP AT is_update-changed_fields INTO lv_new_changed_field.
+      ASSIGN COMPONENT lv_new_changed_field OF STRUCTURE <is_update_data> TO FIELD-SYMBOL(<iv_update_changed_value>).
+      ASSIGN COMPONENT lv_new_changed_field OF STRUCTURE <cs_update_data> TO FIELD-SYMBOL(<cv_update_changed_value>).
+      <cv_update_changed_value> = <iv_update_changed_value>.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD combine_update_delete.
+    es_result = is_delete.
+  ENDMETHOD.
+
+
+  METHOD combine_create_update.
+    FIELD-SYMBOLS <lt_changed_fields> TYPE /bobf/t_frw_name.
+
+    es_result = is_create. "this requires ES_RESULT to be passed by value
+    ASSIGN is_update-data->* TO FIELD-SYMBOL(<is_update_data>).
+    ASSIGN es_result-data->* TO FIELD-SYMBOL(<es_result_data>).
+
+    "determine changed fields:
+    IF is_update-changed_fields IS INITIAL.
+      IF mo_rt_access IS NOT BOUND.
+        mo_rt_access = /bobf/cl_sadl_entity_rt_access=>get( iv_type = mv_entity_type  iv_id = mv_entity_id ).
+      ENDIF.
+      mo_rt_access->get_bopf_attribute_names( IMPORTING et_names = DATA(lt_all_fields) ).
+      ASSIGN lt_all_fields TO <lt_changed_fields>.
+    ELSE.
+      ASSIGN is_update-changed_fields TO <lt_changed_fields>.
+    ENDIF.
+
+    LOOP AT <lt_changed_fields> INTO DATA(lv_changed_field).
+      ASSIGN COMPONENT lv_changed_field OF STRUCTURE <is_update_data> TO FIELD-SYMBOL(<iv_update_changed_value>).
+      ASSIGN COMPONENT lv_changed_field OF STRUCTURE <es_result_data> TO FIELD-SYMBOL(<ev_result_changed_value>).
+      IF  <ev_result_changed_value> IS NOT INITIAL
+      AND <ev_result_changed_value> <> <iv_update_changed_value>.
+        "must not overwrite non-initial value.
+        error( es_result-key ).
+      ELSE.
+        <ev_result_changed_value> = <iv_update_changed_value>.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD. "#EC CI_VALPAR - exporting parameter contains table but is passed by value
+
+ENDCLASS.

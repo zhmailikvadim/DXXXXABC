@@ -1,0 +1,444 @@
+CLASS /bobf/cl_lib_a_activation DEFINITION INHERITING FROM /bobf/cl_lib_a_draft_super
+  PUBLIC
+  FINAL
+  CREATE PUBLIC
+  GLOBAL FRIENDS /bobf/cl_lib_draft. "Needs to be able to set the draft class
+
+
+  PUBLIC SECTION.
+
+    METHODS:
+      /bobf/if_frw_action~execute REDEFINITION.
+
+
+  PROTECTED SECTION.
+
+    METHODS:
+      initialize REDEFINITION.
+
+
+  PRIVATE SECTION.
+
+    DATA:
+      mo_lock_manager              TYPE REF TO /bobf/cl_lib_durable_lock_mngr,
+      mo_draft_class               TYPE REF TO /bobf/if_lib_draft_class,
+      mv_status_handling_supported TYPE abap_bool.
+
+    METHODS:
+      activate_draft IMPORTING is_ctx        TYPE /bobf/s_frw_ctx_act
+                               it_key        TYPE /bobf/t_frw_key
+                               io_read       TYPE REF TO /bobf/if_frw_read
+                               io_modify     TYPE REF TO /bobf/if_frw_modify
+                               io_message    TYPE REF TO /bobf/if_frw_message
+                     EXPORTING et_failed_key TYPE /bobf/t_frw_key
+                               et_data       TYPE INDEX TABLE
+                     RAISING   /bobf/cx_frw,
+
+      validate_draft IMPORTING is_ctx  TYPE /bobf/s_frw_ctx_act
+                               it_key  TYPE /bobf/t_frw_key
+                     EXPORTING et_data TYPE /bobf/t_lib_a_draft_validate
+                     RAISING   /bobf/cx_frw,
+
+      exec_copy_draft_to_active_doc IMPORTING is_draft_context       TYPE /bobf/s_frw_ctx_draft
+                                              iv_draft_key           TYPE /bobf/conf_key
+                                              io_read                TYPE REF TO /bobf/if_frw_read
+                                              io_modify              TYPE REF TO /bobf/if_frw_modify
+                                    EXPORTING eo_message             TYPE REF TO /bobf/if_frw_message
+                                              eo_active_document_key TYPE REF TO /bobf/cl_frw_active_entity_key
+                                    RETURNING VALUE(rv_success)      TYPE abap_bool,
+
+      draft_class RETURNING VALUE(ro_draft_class) TYPE REF TO /bobf/if_lib_draft_class,
+
+      "! checks if the attribute IS_ACTIVE_ENTITY is set for a given ROOT KEY and all
+      "! its children.
+      is_active_entity IMPORTING iv_root_key                TYPE /bobf/conf_key
+                                 is_ctx                     TYPE /bobf/s_frw_ctx_act
+                       RETURNING VALUE(rv_is_active_entity) TYPE abap_bool,
+
+      derive_active_data_from_draft IMPORTING is_draft_data          TYPE data
+                                              io_active_document_key TYPE REF TO /bobf/cl_frw_active_entity_key
+                                    EXPORTING et_data                TYPE INDEX TABLE,
+
+      check_draft_consistency IMPORTING is_ctx            TYPE /bobf/s_frw_ctx_act
+                                        iv_draft_root_key TYPE /bobf/conf_key
+                                        io_read           TYPE REF TO /bobf/if_frw_read
+                              EXPORTING et_failed_key     TYPE /bobf/t_frw_key
+                              RAISING   /bobf/cx_frw.
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_LIB_A_ACTIVATION IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_action~execute.
+    CLEAR eo_message.
+    CLEAR et_failed_key.
+    CLEAR et_data.
+    CLEAR ev_static_action_failed.
+
+    initialize( iv_bo_key = is_ctx-bo_key iv_node_key = is_ctx-node_key iv_content_key = is_ctx-act_key ).
+    " Check correct usage of this class
+    ASSERT ms_action_conf-act_name = /bobf/if_conf_cds_link_c=>gc_action_name-draft-activation.
+
+    eo_message = /bobf/cl_frw_message_factory=>create_container( ).
+
+    check_executed_for_draft_inst( EXPORTING is_ctx = is_ctx
+                                             it_key                  = it_key
+                                             io_message              = eo_message
+                                   IMPORTING et_active_key           = DATA(lt_active_key)
+                                             et_draft_key            = DATA(lt_draft_key) ).
+
+    IF lt_active_key IS NOT INITIAL.
+      et_failed_key = lt_active_key.
+    ENDIF.
+
+    IF lt_draft_key IS NOT INITIAL.
+      activate_draft( EXPORTING is_ctx        = is_ctx
+                                it_key        = lt_draft_key
+                                io_read       = io_read
+                                io_modify     = io_modify
+                                io_message    = eo_message
+                      IMPORTING et_failed_key = DATA(lt_failed_draft_key)
+                                et_data       = et_data ).
+      INSERT LINES OF lt_failed_draft_key INTO TABLE et_failed_key.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD activate_draft.
+
+    DATA:
+      lt_validation_result          TYPE /bobf/t_lib_a_draft_validate,
+      lo_msg_from_copy_draft2actdoc TYPE REF TO /bobf/if_frw_message,
+      lv_detach_after_copy          TYPE abap_bool VALUE abap_false,
+      lv_copy_successful            TYPE abap_bool,
+      lv_lock_successful            TYPE abap_bool,
+      lv_scenario                   TYPE /bobf/conf_scenario.
+
+    CLEAR et_data.
+    CLEAR et_failed_key.
+
+    " --------------------------------------------------------------------------------------
+    " Checks and prepare
+    " --------------------------------------------------------------------------------------
+    " Ensure that this library action is configured to ROOT. It's not allowed to have it on subnodes
+    ASSERT is_ctx-node_key = is_ctx-root_node_key.
+    " Ensure that this action is executed on exactly one single instance
+    ASSERT lines( it_key ) = 1.
+    DATA(lv_draft_root_key) = it_key[ 1 ]-key.
+
+    lv_scenario = mo_configuration->identify_scenario( ).
+
+    " --------------------------------------------------------------------------------------
+    " Check consistency
+    " --------------------------------------------------------------------------------------
+    IF  mv_status_handling_supported = abap_true.
+
+      check_draft_consistency( EXPORTING is_ctx                = is_ctx
+                                         iv_draft_root_key     = lv_draft_root_key
+                                         io_read               = io_read
+                               IMPORTING et_failed_key         = et_failed_key ).
+
+      IF et_failed_key IS NOT INITIAL.
+        DATA(lo_msg) = NEW /bobf/cm_lib( textid             = /bobf/cm_lib=>draft_not_consistent
+                                         severity           = /bobf/cm_lib=>co_severity_error
+                                         lifetime           = /bobf/cm_lib=>co_lifetime_transition
+                                         ms_origin_location = VALUE #( bo_key   = is_ctx-bo_key
+                                                                       node_key = is_ctx-root_node_key
+                                                                       key      = lv_draft_root_key ) ).
+        io_message->add_cm( lo_msg ).
+        RETURN.
+      ENDIF.
+    ELSE.
+      validate_draft( EXPORTING is_ctx  = VALUE #( bo_key = is_ctx-bo_key root_node_key = is_ctx-root_node_key node_key = is_ctx-node_key )
+                                it_key  = it_key
+                      IMPORTING et_data = lt_validation_result ).
+      ASSERT lines( lt_validation_result ) = 1.
+      IF lt_validation_result[ 1 ]-isvalid = abap_false.
+        et_failed_key = it_key.
+        " messages are collected by the service manager, nothing to do here
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    " --------------------------------------------------------------------------------------
+    " Read draft. This is needed to fill ET_DATA
+    " --------------------------------------------------------------------------------------
+    mo_draft_helper->read_draft( EXPORTING iv_node_key       = is_ctx-node_key
+                                           iv_key            = lv_draft_root_key
+                                           io_read           = io_read
+                                 IMPORTING er_draft_data     = DATA(lr_draft_data)
+                                           eo_active_doc_key = DATA(lo_active_doc_key_from_draft) ).
+    ASSIGN lr_draft_data->* TO FIELD-SYMBOL(<ls_draft_data>).
+
+    " --------------------------------------------------------------------------------------
+    " Copy draft to active document. Conditionally surround this callback with
+    " attach/detach of durable lock context, so that application is able to lock additional
+    " or same resources again (e.g. when legacy function module locks implicitly each time).
+    " Attach/detach surrounding condition:
+    "   - BO is below feature level 'refactored lib draft' and draft instance is created by EDIT
+    "   - BO has feature level 'refactored lib draft', regardless if draft instance is created by CREATE or EDIT
+    "   - BO has feature level 'draft 2.0' => no automatic attach/detach, application has to utilize new attach/detach API!
+    " --------------------------------------------------------------------------------------
+
+    IF lv_scenario = /bobf/if_conf_c=>sc_scenario-new_app_w_draft AND
+       mo_draft_helper->is_edit_draft( <ls_draft_data> ).
+      " BOPF will attempt to lock the active document when modifying it.  This would fail if not attached.
+      " Therefore, we acquire the lock beforehand.
+      IF NOT mo_lock_manager->is_key_in_lock_buffer( iv_node_key = is_ctx-node_key
+                                                     iv_key      = lo_active_doc_key_from_draft->get_bopf_key( )
+                                                     io_read     = io_read ).
+        DATA(lv_attach_for_pre_lock) = abap_true.
+      ENDIF.
+    ELSEIF mo_configuration->supports_feature( /bobf/if_conf_c=>sc_feature-draft_refactored_lib ) = abap_false AND
+           mo_draft_helper->is_edit_draft( <ls_draft_data> )
+        OR
+           mo_configuration->supports_feature( /bobf/if_conf_c=>sc_feature-draft_refactored_lib ) = abap_true AND
+           mo_configuration->supports_feature( /bobf/if_conf_c=>sc_feature-draft_2_0 )            = abap_false.
+      DATA(lv_attach_for_copy) = abap_true.
+    ENDIF.
+
+    IF lv_attach_for_copy = abap_true OR lv_attach_for_pre_lock = abap_true.
+      cl_draft_admin_access=>select_single( EXPORTING is_key        = VALUE #( draft_entity = mo_configuration->ms_obj-bo_name
+                                                                               draft_key    = lv_draft_root_key )
+                                            IMPORTING es_admin_data = DATA(ls_admin_data) ).
+      " If the draft has been created in the same LUW, the enqueue_context has not yet been written to the
+      " draft admin table. It will appear to be initial:
+      IF ls_admin_data-enqueue_context IS NOT INITIAL.
+        " Durable lock was already checked/reacquired by action validation => this attach has to succeed...
+        ASSERT mo_lock_manager->attach_enqueue_context( ls_admin_data-enqueue_context ) = abap_true.
+        IF lv_attach_for_pre_lock = abap_false.
+          lv_detach_after_copy = abap_true.
+        ELSE. " we have attached for pre-locking
+          lv_lock_successful = mo_lock_manager->lock_by_lock_action( iv_node_key = is_ctx-node_key
+                                                                     iv_key      = lo_active_doc_key_from_draft->get_bopf_key( )
+                                                                     io_read     = io_read
+                                                                     io_message  = io_message ).
+          mo_lock_manager->detach_enqueue_context( iv_enqueue_context_id = ls_admin_data-enqueue_context
+                                                   iv_keep               = abap_true
+                                                   iv_draft_key          = lv_draft_root_key ).
+          IF lv_lock_successful = abap_false.
+            et_failed_key = it_key.
+            RETURN.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+    exec_copy_draft_to_active_doc( EXPORTING is_draft_context       = VALUE #( bo_key = is_ctx-bo_key node_key = is_ctx-node_key )
+                                             iv_draft_key           = lv_draft_root_key
+                                             io_read                = io_read
+                                             io_modify              = io_modify
+                                   IMPORTING eo_message             = lo_msg_from_copy_draft2actdoc
+                                             eo_active_document_key = DATA(lo_active_doc_key)
+                                   RECEIVING rv_success             = lv_copy_successful ).
+    IF lv_detach_after_copy = abap_true.
+      " Detach with KEEP = true. subsequently triggered DURABLE_LOCK_CLEANUP_DELETE will detach with KEEP = false...
+      mo_lock_manager->detach_enqueue_context( iv_enqueue_context_id = ls_admin_data-enqueue_context
+                                               iv_keep               = abap_true
+                                               iv_draft_key          = lv_draft_root_key ).
+    ENDIF.
+
+    IF lv_copy_successful = abap_false.
+      mo_draft_helper->add_messages( io_message_source = lo_msg_from_copy_draft2actdoc io_message_target = io_message ).
+      et_failed_key = it_key.
+      RETURN.
+    ENDIF.
+
+    " --------------------------------------------------------------------------------------
+    " When BOPF manages both active and draft instances, we should check that
+    " the active document key indeed refers to an active entity
+    " --------------------------------------------------------------------------------------
+    IF lv_scenario = /bobf/if_conf_c=>sc_scenario-new_app_w_draft.
+      ASSERT is_active_entity( iv_root_key = lo_active_doc_key->get_bopf_key( )
+                               is_ctx      = is_ctx ).
+      " Dump here? What happened?
+      " The implementation of COPY_DRAFT_TO_ACTIVE_ENTITY returns the key of an instance which is not
+      " recognized as an _active_ instance.
+      " Please check:
+      " - Is the attribute IS_ACTIVE_ENTITY true for the ROOT node and all sub nodes of the entity?
+      " - Has the attribute IS_ACTIVE_ENTITY been set by a determination which ran after SEPARATE_KEYS
+      "   has been called?
+    ENDIF.
+
+    " --------------------------------------------------------------------------------------
+    " Delete the draft instance (also triggers deletion of admin data entry)
+    " --------------------------------------------------------------------------------------
+    io_modify->delete( iv_node = is_ctx-node_key it_key  = it_key ).
+    " After the deletion of the draft instance, the origin location of the message is not valid anymore.
+    " Therefore we relocate the origin location to the active document
+    " TODO: This workaround can be removed once we know that all BOs are migrated to the Union DAC.
+    "       With the Union DAC in place, that application will be able to create a valid origin location
+    "       by the use of the GET_BOPF_KEY method
+    mo_draft_helper->add_messages( io_message_source      = lo_msg_from_copy_draft2actdoc
+                                   io_active_document_key = lo_active_doc_key
+                                   io_message_target      = io_message ).
+
+    " --------------------------------------------------------------------------------------
+    " Fill ET_DATA
+    " --------------------------------------------------------------------------------------
+
+    IF lv_scenario = /bobf/if_conf_c=>sc_scenario-new_app_w_draft.
+      " For the scenario 'New app with draft', we can read the active data from the buffer
+      " since they have already been modified in the exec_copy_draft_to_active_doc method
+      io_read->retrieve( EXPORTING iv_node       = is_ctx-node_key
+                                   it_key        = VALUE #( ( key = lo_active_doc_key->get_bopf_key( ) ) )
+                         IMPORTING eo_message    = DATA(lo_message)
+                                   et_data       = et_data
+                                   et_failed_key = et_failed_key ).
+      io_message->add( lo_message ).
+    ELSE.
+      derive_active_data_from_draft( EXPORTING is_draft_data          = <ls_draft_data>
+                                               io_active_document_key = lo_active_doc_key
+                                     IMPORTING et_data                = et_data ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD check_draft_consistency.
+    DATA lr_node_table_type   TYPE REF TO data.
+    FIELD-SYMBOLS <lt_data> TYPE ANY TABLE.
+
+    CLEAR et_failed_key.
+
+    mo_configuration->get_node(
+      EXPORTING
+        iv_node_key = is_ctx-node_key
+      IMPORTING
+        es_node     = DATA(ls_node) ).
+
+    CREATE DATA lr_node_table_type TYPE (ls_node-data_table_type).
+    ASSIGN lr_node_table_type->* TO <lt_data>.
+
+    io_read->retrieve(
+      EXPORTING
+        iv_node                 = is_ctx-node_key
+        it_key                  = VALUE #( ( key = iv_draft_root_key ) )
+      IMPORTING
+        et_data                 = <lt_data> ).
+
+    LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_data>).
+      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-draft_consistency_status OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_consistency_status>).
+
+      IF sy-subrc <> 0.
+        " You reached here since the consistency field in the draft persistency is missing. Please open the BO in transaction BOBX and do a "Check & Correct"
+        ASSERT 1 = 2.
+      ENDIF.
+
+      DATA ls_key TYPE /bobf/s_frw_key.
+      ls_key-key = iv_draft_root_key.
+
+      IF <lv_consistency_status> <> /bobf/if_frw_c=>sc_status_consistent.
+        APPEND ls_key TO et_failed_key.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD derive_active_data_from_draft.
+
+    INSERT INITIAL LINE INTO TABLE et_data ASSIGNING FIELD-SYMBOL(<ls_active_data>).
+    <ls_active_data> = is_draft_data.
+
+    IF io_active_document_key->is_legacy( ).
+      io_active_document_key->write_to_data_structure( CHANGING cs_data = <ls_active_data> ).
+    ELSE.
+      io_active_document_key->clear_in_data_structure( CHANGING cs_data = <ls_active_data> ).
+    ENDIF.
+
+    ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_key OF STRUCTURE <ls_active_data> TO FIELD-SYMBOL(<lv_key>).
+    IF mo_configuration->ms_obj-union_dac = 'X'.
+      ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_root_key OF STRUCTURE <ls_active_data> TO FIELD-SYMBOL(<lv_root_key>).
+      <lv_key> = <lv_root_key> = io_active_document_key->get_bopf_key( ).
+    ELSE.
+      CLEAR <lv_key>.
+    ENDIF.
+
+    ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE <ls_active_data> TO FIELD-SYMBOL(<lv_is_active_entity>).
+    IF sy-subrc = 0.
+      " setting IS_ACTIVE_ENTITY is needed for Draft 2.0 because this is a KEY field for SADL:
+      <lv_is_active_entity> = abap_true.
+    ENDIF.
+    ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-has_active_entity OF STRUCTURE <ls_active_data> TO FIELD-SYMBOL(<lv_has_active_entity>).
+    <lv_has_active_entity> = abap_false.
+
+    ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-draft_consistency_status OF STRUCTURE <ls_active_data> TO FIELD-SYMBOL(<lv_consistency_status>).
+    IF sy-subrc = 0.
+      CLEAR <lv_consistency_status>.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD draft_class.
+    IF mo_draft_class IS NOT BOUND.
+      mo_draft_class = /bobf/cl_lib_drft_cls_mediator=>get_instance( iv_bo_key   = ms_draft_context-bo_key
+                                                                     iv_node_key = ms_draft_context-node_key ).
+    ENDIF.
+    ro_draft_class = mo_draft_class.
+  ENDMETHOD.
+
+
+  METHOD exec_copy_draft_to_active_doc.
+
+    rv_success = draft_class( )->copy_draft_to_active_entity( EXPORTING is_ctx               = is_draft_context
+                                                                        iv_draft_key         = iv_draft_key
+                                                                        io_read              = io_read
+                                                                        io_modify            = io_modify
+                                                              IMPORTING eo_message           = eo_message
+                                                                        eo_active_entity_key = eo_active_document_key ).
+    " For compatibility with the existing code
+    IF eo_message IS NOT BOUND.
+      eo_message = /bobf/cl_frw_factory=>get_message( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD initialize.
+    super->initialize( iv_bo_key = iv_bo_key iv_node_key = iv_node_key iv_content_key = iv_content_key ).
+    IF mo_lock_manager IS NOT BOUND.
+      mo_lock_manager = /bobf/cl_lib_durable_lock_mngr=>get_instance( mo_configuration ).
+    ENDIF.
+
+    mo_configuration->get_bo( IMPORTING es_obj = DATA(ls_bo_conf) ).
+    mv_status_handling_supported = boolc( ls_bo_conf-status_class = /bobf/if_conf_def_classes_c=>gc_cl_draft_status_adapter ).
+  ENDMETHOD.
+
+
+  METHOD is_active_entity.
+
+    mo_draft_active->separate_keys( EXPORTING iv_node_key   = is_ctx-node_key
+                                              it_key        = VALUE #( ( key = iv_root_key ) )
+                                    IMPORTING et_active_key = DATA(lt_active_key) ).
+
+    rv_is_active_entity = boolc( lines( lt_active_key ) = 1 ).
+
+  ENDMETHOD.
+
+
+  METHOD validate_draft.
+    DATA ls_return_value TYPE /bobf/s_lib_a_draft_validate.
+
+    CLEAR et_data.
+
+    /bobf/cl_tra_serv_mgr_factory=>get_service_manager( is_ctx-bo_key )->check_consistency(
+      EXPORTING
+        iv_node_key    = is_ctx-node_key
+        it_key         = it_key
+        iv_check_scope = /bobf/if_frw_c=>sc_scope_substructure
+      IMPORTING
+        eo_message     = DATA(lo_message) ).
+    " Fill returning parameter
+    IF lo_message IS BOUND.
+      DATA(lv_errors_exist) = lo_message->check( ).
+      ls_return_value-isvalid = boolc( lv_errors_exist = abap_false ).
+      " DO NOT add messages as they are collected by the service manager
+*      io_message->add( lo_message ).
+    ELSE.
+      ls_return_value-isvalid = abap_true.
+    ENDIF.
+    INSERT ls_return_value INTO TABLE et_data.
+  ENDMETHOD.
+ENDCLASS.

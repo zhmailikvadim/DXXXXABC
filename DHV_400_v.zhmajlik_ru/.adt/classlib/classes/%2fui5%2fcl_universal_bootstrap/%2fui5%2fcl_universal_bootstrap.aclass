@@ -1,0 +1,265 @@
+class /UI5/CL_UNIVERSAL_BOOTSTRAP definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_BADI_INTERFACE .
+  interfaces /UI5/IF_UNIVERSAL_BOOTSTRAP .
+
+  constants:
+    gc_local_url(1024) type c value '/sap/public/bc/ui5_ui5/' ##NO_TEXT.
+
+  class-methods GET_VERSION
+    returning
+      value(RV_VERSION) type /UI5/IF_BOOTSTRAP=>TY_UI5_VERSION .
+  class-methods GET_CACHEBUSTER_TOKEN
+    returning
+      value(RV_CACHEBUSTER_TOKEN) type /UI5/IF_BOOTSTRAP=>TY_CACHEBUSTER_TOKEN .
+  class-methods GET_EXTERNAL_URL
+    returning
+      value(RV_EXTERNAL_URL) type STRING .
+  class-methods GET_SYSTEM_CACHEBUSTER_TOKEN
+    returning
+      value(RV_SYSTEM_CACHEBUSTER_TOKEN) type /UI5/IF_BOOTSTRAP=>TY_CACHEBUSTER_TOKEN .
+protected section.
+private section.
+
+  data MT_URL_PARAMETERS type TIHTTPNVP .
+
+  methods GET_CLOUD_IDENTIFIER
+    returning
+      value(ES_CLOUD_IDENTIFIER) type IHTTPNVP .
+ENDCLASS.
+
+
+
+CLASS /UI5/CL_UNIVERSAL_BOOTSTRAP IMPLEMENTATION.
+
+
+method /ui5/if_universal_bootstrap~change_is_local.
+  "No default implementation
+endmethod.
+
+
+method /ui5/if_universal_bootstrap~get_info.
+
+  data lv_nc_external_url  type string. "Non-cloud external URL.
+
+  clear es_info.
+
+  es_info-system_ui5_version = get_version( ).
+  es_info-system_ui5_cachebuster_token = get_cachebuster_token( ).
+  es_info-url_parameters = me->mt_url_parameters.
+  es_info-is_local = iv_is_local.
+
+  if iv_is_local = abap_true.
+    es_info-url = |{ me->gc_local_url }{ iv_resources_path }/{ es_info-system_ui5_cachebuster_token }/|.
+    return.
+  endif.
+  "Validate if system is cloud and add appropriate cloud identifier in the URL
+  if /ui5/cl_ui5_s4cloud_api_calls=>get_instance( )->is_s4h_cloud( ) = abap_true.
+    es_info-cloud_identifier = me->get_cloud_identifier( ).
+    es_info-url = |{ /ui5/cl_universal_bootstrap=>get_external_url( ) }/{ es_info-system_ui5_version }/{ iv_resources_path }/|.
+    return.
+  endif.
+  "If system not cloud URL doesn't contain cloud identifier and external URL is souced from /UI5/RESOURCES.
+  select single external_url from /ui5/resources into lv_nc_external_url.
+  if sy-subrc is initial.
+    if lv_nc_external_url cp '*/'.
+      es_info-url = |{ lv_nc_external_url }{ iv_resources_path }/|.
+      return.
+    endif.
+    es_info-url = |{ lv_nc_external_url }/{ iv_resources_path }/|.
+  endif.
+
+endmethod.
+
+
+method /ui5/if_universal_bootstrap~set_url_parameters.
+  me->mt_url_parameters = it_url_parameters.
+endmethod.
+
+
+method get_cachebuster_token.
+
+  field-symbols <lv_cachebuster_token> type /ui5/if_bootstrap=>ty_cachebuster_token.
+
+  constants: lc_source_op(63) type c value '/UI5/IF_BOOTSTRAP_C=>GC_SYSTEM_CACHEBUSTER_TOKEN'. "Maximum length possible 63; On Premise
+  constants: lc_source_ce(63) type c value 'IF_UI5_BOOTSTRAP_CE_C=>GC_SYSTEM_CACHEBUSTER_TOKEN'. "Maximum length possible 63; Cloud Edition
+
+  if /ui5/cl_ui5_s4cloud_api_calls=>get_instance( )->is_s4h_cloud( ) = abap_true.
+    assign (lc_source_ce) to <lv_cachebuster_token>.
+  else.
+    rv_cachebuster_token = get_system_cachebuster_token( ).
+  endif.
+
+  if <lv_cachebuster_token> is assigned.
+    rv_cachebuster_token = <lv_cachebuster_token>.
+  endif.
+
+endmethod.
+
+
+  method get_cloud_identifier.
+    constants lc_cloud_id_name(10) type c value 'cloud_id'.
+
+    data lo_cloud_id      type ref to /ui5/if_cloud_identifier.
+    data lv_cloud_id_val  type string.
+    data lv_hash_val      type string.
+
+    create object lo_cloud_id type /ui5/cl_cloud_identifier.
+    lv_cloud_id_val = lo_cloud_id->get_cloud_indentifier( ).
+
+    if lv_cloud_id_val is not initial.
+      try.
+        call method cl_abap_message_digest=>calculate_hash_for_char
+          exporting
+            if_algorithm  = 'CRC32'
+            if_data       = lv_cloud_id_val
+          importing
+            ef_hashstring = lv_hash_val.
+      catch CX_ABAP_MESSAGE_DIGEST.
+        clear:  es_cloud_identifier-name, es_cloud_identifier-value.
+        return.
+      endtry.
+
+      es_cloud_identifier-name = lc_cloud_id_name.
+      es_cloud_identifier-value = lv_hash_val.
+    endif.
+  endmethod.
+
+
+method get_external_url.
+
+  field-symbols <lv_external_url> type csequence.
+
+  constants: lc_source_op(63) type c value '/UI5/IF_BOOTSTRAP_C=>GC_EXTERNAL_URL'. "Maximum length possible 63; On Premise
+  constants: lc_source_ce(63) type c value 'IF_UI5_BOOTSTRAP_CE_C=>GC_EXTERNAL_URL'. "Maximum length possible 63; Cloud Edition
+
+  if /ui5/cl_ui5_s4cloud_api_calls=>get_instance( )->is_s4h_cloud( ) = abap_true.
+    assign (lc_source_ce) to <lv_external_url>.
+  else.
+    assign (lc_source_op) to <lv_external_url>.
+  endif.
+
+  if <lv_external_url> is assigned.
+    rv_external_url = <lv_external_url>.
+  endif.
+
+endmethod.
+
+
+  method GET_SYSTEM_CACHEBUSTER_TOKEN.
+      types:
+    begin of ty_s_manifest,
+      name  type string,
+      value type string,
+    end of ty_s_manifest,
+    ty_t_manifests type table of ty_s_manifest.
+
+  constants: lc_bundle_build_timestamp type string value 'x-sap-ui5-BuildTimestamp'.
+
+  data: lo_mime_repo        type ref to if_mr_api,
+        lr_s_loio           type ref to skwf_io,
+        lr_url              type ref to string,
+        lt_loios            type skwf_ios,
+        lt_split_path       type string_table,
+        ls_dir_name         type string,
+        lt_ui5_versions     type string_table,
+        ls_last_version     type string,
+        lv_manifest         type xstring,
+        lv_manifest_content type string,
+        lt_manifests        type ty_t_manifests,
+        lt_rows             type table of string,
+        lr_row              type ref to string,
+        ls_manifest         type ty_s_manifest.
+
+  constants lc_ui5_root type string value '/SAP/PUBLIC/BC/UI5/LIBRARIES/VER/'.
+
+  create data: lr_s_loio, lr_url.
+
+  lo_mime_repo = cl_mime_repository_api=>get_api( ).
+
+  lo_mime_repo->get_io_for_url(
+    exporting   i_url         = lc_ui5_root
+    importing   e_loio        = lr_s_loio->* ).
+
+  cl_skwf_folder_util=>ios_attach_get(
+    exporting folder    = lr_s_loio->*
+              iotypeacc = skwfc_obtype_folder
+    importing ios       = lt_loios ).
+
+  loop at lt_loios reference into lr_s_loio.
+
+    lo_mime_repo->get_url_for_io(
+      exporting   i_loio  = lr_s_loio->objid
+      importing   e_url   = lr_url->* ).
+
+    "Get UI5 Library folder name
+    split lr_url->* at '/' into table lt_split_path.
+    ls_dir_name = lt_split_path[ lines( lt_split_path ) ].
+
+    "Filter out only relevant library folders
+    find regex '[1-9]\.[1-9]{2}' in ls_dir_name.
+
+    if sy-subrc <> 0.
+      continue.
+    endif.
+
+    append ls_dir_name to lt_ui5_versions.
+  endloop.
+
+  "Logic to get the latest version of SAPUI5
+  sort lt_ui5_versions descending.
+  ls_last_version = lt_ui5_versions[ 1 ].
+
+  lo_mime_repo->get(
+    exporting
+      i_url                  = |/SAP/PUBLIC/BC/UI5/LIBRARIES/VER/{ ls_last_version }/MANIFEST.MF|
+      i_check_authority      = abap_false    " X Check Authorization, '' No Authorization Check
+    importing
+      e_content              =  lv_manifest ).    " Object Contents
+
+  "Parse manifest
+  lv_manifest_content = cl_abap_codepage=>convert_from( source = lv_manifest ).
+
+  split lv_manifest_content at cl_abap_char_utilities=>cr_lf into table lt_rows.
+
+  loop at lt_rows reference into lr_row.
+    split lr_row->* at ':' into ls_manifest-name ls_manifest-value.
+    append ls_manifest to lt_manifests.
+  endloop.
+
+  "Read timestamp
+  clear ls_manifest.
+  read table lt_manifests into ls_manifest with key name = lc_bundle_build_timestamp.
+  condense ls_manifest-value.
+
+  rv_system_cachebuster_token = |~{ ls_manifest-value }~|.
+
+   "Problems with modification assistant
+*  rv_local_cachebuster_token = /ui5/if_bootstrap=>gc_local_cachebuster_token.
+  endmethod.
+
+
+method get_version.
+
+  field-symbols <lv_version> type /ui5/if_bootstrap=>ty_ui5_version.
+
+  constants: lc_source_op(63) type c value '/UI5/IF_BOOTSTRAP_C=>GC_SYSTEM_UI5_VERSION'. "Maximum length possible 63; On Premise
+  constants: lc_source_ce(63) type c value 'IF_UI5_BOOTSTRAP_CE_C=>GC_SYSTEM_UI5_VERSION'. "Maximum length possible 63; Cloud Edition
+
+  if /ui5/cl_ui5_s4cloud_api_calls=>get_instance( )->is_s4h_cloud( ) = abap_true.
+    assign (lc_source_ce) to <lv_version>.
+  else.
+    assign (lc_source_op) to <lv_version>.
+  endif.
+
+  if <lv_version> is assigned.
+    rv_version = <lv_version>.
+  endif.
+
+endmethod.
+ENDCLASS.

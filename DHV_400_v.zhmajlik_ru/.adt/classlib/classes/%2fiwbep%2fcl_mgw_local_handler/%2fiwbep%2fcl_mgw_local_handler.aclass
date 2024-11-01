@@ -1,0 +1,3884 @@
+class /IWBEP/CL_MGW_LOCAL_HANDLER definition
+  public
+  final
+  create public .
+
+public section.
+  class /IWBEP/CL_MGW_REMOTE_HANDLER definition load .
+  interface /IWBEP/IF_MGW_CORE_SRV_RUNTIME load .
+  interface /IWBEP/IF_MGW_CORE_TYPES load .
+
+  types:
+    BEGIN OF ty_s_metadata,
+        model    TYPE /iwbep/if_mgw_med_odata_types=>ty_s_med_model,
+        outdated TYPE abap_bool,
+      END OF ty_s_metadata .
+  types:
+    BEGIN OF ty_s_vocan_metadata,
+        model    TYPE /iwbep/if_mgw_med_odata_types=>ty_s_vocan_model,
+        outdated TYPE abap_bool,
+      END OF ty_s_vocan_metadata .
+  types:
+    BEGIN OF ty_s_batch_response,
+        packet_no                  TYPE i,
+        operation_no               TYPE i,
+        changeset                  TYPE char1,
+        function_code              TYPE string,
+        operation_state            TYPE char1,       " See /IWBEP/CL_MGW_REMOTE_HANDLER=>MCS_OPERATION_STATE
+        er_data                    TYPE REF TO data,
+        er_deleted_data            TYPE REF TO data,
+        es_response_context        TYPE /iwbep/if_mgw_core_types=>ty_s_mgw_response_context,
+        es_response_context_entity TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_response_entity_cntxt,
+        es_message_container       TYPE /iwbep/cl_mgw_remote_handler=>ty_s_mgw_msg_canister,
+        et_custom_header           TYPE tihttpnvp,
+        et_expand_skiptoken        TYPE string_table,
+        et_inline_info             TYPE /iwbep/if_mgw_core_srv_runtime=>ty_t_inline_info,
+        et_response_header         TYPE tihttpnvp,
+        et_performance_trace       TYPE /iwbep/sutil_hub_perf_data_t,
+        ev_serialized_data         TYPE xstring,
+      END OF ty_s_batch_response .
+  types:
+    ty_t_batch_response TYPE STANDARD TABLE OF ty_s_batch_response WITH DEFAULT KEY .
+  types TY_PERF_COMPONENT_TYPE type CHAR1 .                        " Performance Trace Component Type
+  types:
+    BEGIN OF ty_s_batch_deferred_perf,
+      operation_id     TYPE string,
+      performance_data TYPE /iwbep/sutil_hub_perf_data_t,
+    END OF ty_s_batch_deferred_perf .
+  types:
+    ty_t_batch_deferred_perf type SORTED TABLE OF ty_s_batch_deferred_perf with unique key operation_id .
+
+  constants:
+    BEGIN OF gcs_component_type,                                 " See also /IWBEP/CL_V4_V2_SUPPORT_FACADE=>GCS_COMPONENT_TYPE
+        http_request     TYPE ty_perf_component_type VALUE 'T',  " HTTP Request
+        framework        TYPE ty_perf_component_type VALUE 'F',  " Framework
+        framework_op     TYPE ty_perf_component_type VALUE 'G',  " Pure Framework Operation such as Load Metadata, Text, ...
+        framework_by_app TYPE ty_perf_component_type VALUE 'H',  " Call Framework by Application (i.e. Conversion)
+        initial_app_call TYPE ty_perf_component_type VALUE 'A',  " Initial Call to Application
+        application      TYPE ty_perf_component_type VALUE 'B',  " Application
+        non_gateway      TYPE ty_perf_component_type VALUE 'N',  " NON-Gateway components used by framework
+        dispatcher       TYPE ty_perf_component_type VALUE 'D',  " Dispatcher for MOC/Batch Parallelization
+        parallel_call    TYPE ty_perf_component_type VALUE 'P',  " MOC/Batch Parallelization Call
+        rfc_caller       TYPE ty_perf_component_type VALUE 'R',  " RFC Caller
+        rfc_function     TYPE ty_perf_component_type VALUE 'S',  " RFC Function
+        shortcut         TYPE ty_perf_component_type VALUE 'U',  " Shortcut (RFC Bypass)
+      END OF gcs_component_type .
+  class-data MS_BACKEND_VERSION type /IWBEP/CL_MGW_UTIL_VERSIONS=>TY_S_MGW_BUILD_VERSION read-only .
+
+  class-methods CLASS_CONSTRUCTOR .
+  methods BATCH_BEGIN .
+  methods BATCH_END .
+  methods CHANGESET_BEGIN
+    importing
+      !IV_CHANGESET_OP_TOTAL type I
+      !IT_CHANGESET_OP_INFO type /IWBEP/T_MGW_OPERATION_INFO .
+  methods CHANGESET_DEACTIVATE_WATCHDOG .
+  methods CHANGESET_END
+    importing
+      !IV_OPERATION_ERROR type ABAP_BOOL .
+  methods CHANGESET_GET_DEFER_DATA
+    exporting
+      !ET_CHANGESET_DEFER_DATA type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_CHANGESET_DATA .
+  methods CHANGESET_SET_OP_INFO
+    importing
+      !IV_CHANGESET_OP_NUM type I .
+  methods CONSTRUCTOR
+    importing
+      !IV_IS_SHORTCUT type ABAP_BOOL default ABAP_FALSE
+      !IV_IS_CO_DEPLOYMENT type ABAP_BOOL default ABAP_FALSE
+      !IV_GENERATE_SAP_ORIGIN type ABAP_BOOL default ABAP_FALSE
+      !IO_REMOTE_HANDLER type ref to /IWBEP/CL_MGW_REMOTE_HANDLER optional .
+  methods CREATE_ENTITY_TYPE
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+      !IV_ENTITY_DATA type XSTRING
+      !IT_CHANGESET_INPUT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST optional
+    exporting
+      !ER_ENTITY type ref to DATA
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_CUSTOM_HEADER type TIHTTPNVP
+      !ET_INLINE_INFO type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_INLINE_INFO
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T
+      !ES_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_TYPES=>TY_S_MGW_RESPONSE_CONTEXT_COMM
+      !EV_SERIALIZED_DATA type XSTRING .
+  methods DELETE_ENTITY_TYPE
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+      !IT_CHANGESET_INPUT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST optional
+    exporting
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_CUSTOM_HEADER type TIHTTPNVP
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ES_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_TYPES=>TY_S_MGW_RESPONSE_CONTEXT
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T
+      !EV_SERIALIZED_DATA type XSTRING .
+  methods EXECUTE_OPERATION
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+      !IT_CHANGESET_INPUT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST optional
+      !IV_DO_CHECK_AUTHORITY type ABAP_BOOL default ABAP_TRUE
+    exporting
+      !ER_DATA type ref to DATA
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_CUSTOM_HEADER type TIHTTPNVP
+      !ET_INLINE_INFO type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_INLINE_INFO
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T
+      !ES_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_TYPES=>TY_S_MGW_RESPONSE_CONTEXT_COMM
+      !EV_SERIALIZED_DATA type XSTRING .
+  methods GET_ENTITY_SET
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+      !IV_DO_CHECK_AUTHORITY type ABAP_BOOL default ABAP_TRUE
+      !IT_OPERATION_INFO type /IWBEP/T_MGW_OPERATION_INFO optional
+    exporting
+      !ER_ENTITYSET type ref to DATA
+      !ER_DELETED_ENTITYSET type ref to DATA
+      !ES_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_TYPES=>TY_S_MGW_RESPONSE_CONTEXT
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_CUSTOM_HEADER type TIHTTPNVP
+      !ET_INLINE_INFO type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_INLINE_INFO
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T
+      !EV_RESPONSE_BODY type XSTRING .
+  methods GET_ENTITY_TYPE
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+      !IV_DO_CHECK_AUTHORITY type ABAP_BOOL default ABAP_TRUE
+      !IT_OPERATION_INFO type /IWBEP/T_MGW_OPERATION_INFO optional
+    exporting
+      !ER_ENTITY type ref to DATA
+      !ES_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_RESPONSE_ENTITY_CNTXT
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_CUSTOM_HEADER type TIHTTPNVP
+      !ET_EXPAND_SKIPTOKEN type STRING_TABLE
+      !ET_INLINE_INFO type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_INLINE_INFO
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods GET_META_DATA
+    importing
+      !IV_MODEL_ID type /IWBEP/MED_MODEL_IDENTIFIER
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+    exporting
+      !EV_MODEL_SEND type ABAP_BOOL
+      !ES_METADATA type /IWBEP/CL_MGW_LOCAL_HANDLER=>TY_S_METADATA
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods GET_STREAM
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+      !IV_DO_CHECK_AUTHORITY type ABAP_BOOL default ABAP_TRUE
+    exporting
+      !ER_STREAM type ref to DATA
+      !ES_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_RESPONSE_ENTITY_CNTXT
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_CUSTOM_HEADER type TIHTTPNVP
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods GET_TEXT
+    importing
+      !IV_MODEL_ID type /IWBEP/MED_MODEL_IDENTIFIER
+      !IV_LANGUAGE type SYLANGU
+      !IT_TEXT_KEY type /IWBEP/IF_MGW_MED_ODATA_TYPES=>TY_T_MED_TEXTS
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+    exporting
+      !ET_OBJECT_TEXT type /IWBEP/IF_MGW_MED_ODATA_TYPES=>TY_T_MED_OBJ_TEXTS
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods GET_VOCAB_DETAIL
+    importing
+      !IV_VOCAB_ID type /IWBEP/MED_VOCAB_ID
+      !IV_VERSION type /IWBEP/MED_VOCAB_VERSION
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+    exporting
+      !ES_VOCAB_DETAIL type /IWBEP/CL_MGW_MED_REG_API=>TY_S_VOCAB
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods GET_VOCAN_MODEL
+    importing
+      !IV_VOCAB_ID type /IWBEP/MED_VOCAB_ID
+      !IV_VERSION type /IWBEP/MED_VOCAB_VERSION
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+    exporting
+      !ES_VOCAN_METADATA type /IWBEP/CL_MGW_LOCAL_HANDLER=>TY_S_VOCAN_METADATA
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods GET_VOCAN_TEXT
+    importing
+      !IV_MODEL_ID type /IWBEP/MED_MODEL_IDENTIFIER optional
+      !IV_VOCAN_TECHNICAL_NAME type /IWBEP/MED_VOCAB_ID optional
+      !IV_VOCAN_VERSION type /IWBEP/MED_VOCAB_VERSION optional
+      !IV_LANGUAGE type SYLANGU
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+    exporting
+      !ET_OBJ_VOCAN_TEXT type /IWBEP/IF_MGW_MED_ODATA_TYPES=>TY_T_MED_OBJ_VOCAN_TEXTS
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods PROCESS_BATCH
+    importing
+      !IV_BATCH_URI type STRING
+      !IT_BATCH_REQUEST type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST
+      !IT_REQUEST_HEADER type TIHTTPNVP
+    exporting
+      !ET_BATCH_RESPONSE type /IWBEP/CL_MGW_LOCAL_HANDLER=>TY_T_BATCH_RESPONSE
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods SESSION_IS_TERMINATED
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP .
+  methods UPDATE_ENTITY_TYPE
+    importing
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_REQUEST_HEADER type TIHTTPNVP
+      !IV_ENTITY_DATA type XSTRING
+      !IT_CHANGESET_INPUT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST optional
+    exporting
+      !ER_ENTITY type ref to DATA
+      !ES_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !ET_CUSTOM_HEADER type TIHTTPNVP
+      !ET_RESPONSE_HEADER type TIHTTPNVP
+      !ET_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T
+      !ES_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_TYPES=>TY_S_MGW_RESPONSE_CONTEXT_COMM
+      !EV_SERIALIZED_DATA type XSTRING .
+  methods GET_HANDLES_DEFERRED_RESPONSE
+    returning
+      value(RV_HANDLES_DEFERRED_RESPONSE) type ABAP_BOOL .
+  methods GET_DEFERRED_RESPONSE
+    exporting
+      !ET_BATCH_RESPONSE type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_RESPONSE .
+  methods RAL_LOG_DEFERRED_RESPONSE
+    changing
+      !CS_BATCH_RESPONSE type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_BATCH_RESPONSE .
+  methods CHECK_AND_RAISE_ET_NO_CONTENT
+    importing
+      !IR_ENTITY type ref to DATA
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+    changing
+      !CS_RESPONSE_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_RESPONSE_ENTITY_CNTXT
+    raising
+      /IWBEP/CX_MGW_BUSI_EXCEPTION .
+  PROTECTED SECTION.
+private section.
+
+  types:
+    BEGIN OF ty_s_batch_packet,
+      packet_no        TYPE i,
+      packet_type      TYPE char1,      " See /IWBEP/CL_MGW_REMOTE_HANDLER=>MCS_PACKET_TYPE
+      batch_operations TYPE /iwbep/if_mgw_core_srv_runtime=>ty_t_batch_request,
+    END OF ty_s_batch_packet .
+  types:
+    ty_t_batch_packet TYPE STANDARD TABLE OF ty_s_batch_packet WITH DEFAULT KEY .
+  types:
+    BEGIN OF ty_s_batch_deferred_ral,
+      operation_id TYPE string,
+      ral_facade   TYPE REF TO /iwbep/if_ral_rt_facade_v2,
+    END OF ty_s_batch_deferred_ral .
+  types:
+    ty_t_batch_deferred_ral TYPE SORTED TABLE OF ty_s_batch_deferred_ral WITH UNIQUE KEY operation_id .
+
+  constants CO_AGENT type CHAR40 value 'REMOTE_SERVER' ##NO_TEXT.
+  constants CO_CLASS_NAME type SEOCLNAME value '/IWBEP/CL_MGW_LOCAL_HANDLER' ##NO_TEXT.
+  class-data MO_SUTIL_RUNTIME type ref to /IWBEP/CL_SUTIL_RUNTIME .
+  data MO_CHANGESET_HELPER type ref to /IWBEP/CL_MGW_CHANGESET_HELPER .
+  data MO_MGW_CONTEXT type ref to /IWBEP/IF_MGW_CONTEXT .
+  data MO_MGW_RUNTIME type ref to /IWBEP/BD_MGW_SRV_RUNTIME .
+  data MO_RAL_RT_FACADE type ref to /IWBEP/IF_RAL_RT_FACADE_V2 .       "available if RAL is present (>=7.50) and enabled in client
+  data MO_REMOTE_HANDLER type ref to /IWBEP/CL_MGW_REMOTE_HANDLER .
+  data MO_TRANSACTION_HANDLER type ref to /IWBEP/CL_TRANSACTION_HANDLER .
+  data MS_MSG_CONTAINER_REJECT type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER .
+  data MS_MSG_CONTAINER_ROLLBACK type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER .
+  data MT_BATCH_PACKET type TY_T_BATCH_PACKET .
+  data MT_CHANGESET_DEFER_DATA type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_CHANGESET_DATA .
+  data MT_CHANGESET_OP_INFO type /IWBEP/T_MGW_OPERATION_INFO .
+  data MV_BATCH_PROCESSING type ABAP_BOOL .
+  data MV_CHANGESET_DEFER_MODE type ABAP_BOOL .
+  data MV_CHANGESET_OP_FIRST type ABAP_BOOL .
+  data MV_CHANGESET_OP_LAST type ABAP_BOOL .
+  data MV_CHANGESET_OP_TOTAL type I .
+  data MV_CHANGESET_PROCESSING type ABAP_BOOL .
+  data MV_IS_SHORTCUT type ABAP_BOOL .
+  data MV_SOFT_STATE_ACTIVE type ABAP_BOOL .
+  data MV_BATCH_DEFERRED_RESP_CREA type ABAP_BOOL .
+  data MT_BATCH_DEFERRED_RESPONSE type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_RESPONSE .
+  data MT_BATCH_DEFERRED_RAL type TY_T_BATCH_DEFERRED_RAL .
+  data MT_BATCH_DEFERRED_PERF type TY_T_BATCH_DEFERRED_PERF .
+
+  methods ADD_CHANGESET_RESPONSE
+    importing
+      !IT_CHANGESET type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST
+      !IT_CHANGESET_DEFER_DATA type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_CHANGESET_DATA
+    changing
+      !CT_BATCH_RESPONSE type TY_T_BATCH_RESPONSE .
+  methods ADD_DEFER_PERFORMANCE_DATA
+    importing
+      !IV_TIME_START type I
+      !IV_METHOD_NAME type SEOMTDNAME .
+  methods CREATE_MESSAGE_CONTAINER
+    importing
+      !IV_ERROR_TEXT type STRING
+      !IV_TECHNICAL_ERROR type XSDBOOLEAN default ABAP_FALSE
+    returning
+      value(RS_MESSAGE_CONTAINER) type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER .
+  methods DETERMINE_OPERATION_TYPE
+    importing
+      !IS_BATCH_REQUEST type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_BATCH_REQUEST
+    changing
+      !CS_OPERATION_INFO type /IWBEP/S_MGW_OPERATION_INFO .
+  methods FINALIZE_REQUEST
+    importing
+      !IV_TIME_START type I optional
+      !IV_METHOD_NAME type SEOMTDNAME optional
+      !IV_FUNCTION_CODE type STRING
+      !IV_OPERATION_ERROR type ABAP_BOOL
+    changing
+      !CT_RESPONSE_HEADER type TIHTTPNVP
+      !CT_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods GET_BATCH_PERFORMANCE_DATA
+    importing
+      !IV_TIME_START type I optional
+      !IV_METHOD_NAME type SEOMTDNAME optional
+    returning
+      value(RT_HUB_PERF_DATA) type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods HANDLE_CHANGESET_ERROR
+    importing
+      !IV_CHANGESET_OP_NUM type I
+      !IS_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !IT_CHANGESET type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST
+    changing
+      !CT_BATCH_RESPONSE type TY_T_BATCH_RESPONSE .
+  methods IDP_INIT
+    importing
+      !IV_TIME_START type I
+      !IV_SOURCE_METHOD type CSEQUENCE
+      !IT_HTTP_HEADER type /IWBEP/T_MGW_NAME_VALUE_PAIR
+    exporting
+      !EO_IDP_UTIL type ref to /IWBEP/CL_IDP_UTIL
+      !EV_IDP_DATA type XSTRING
+    raising
+      /IWBEP/CX_IDP_UTIL .
+  methods IDP_STORE
+    importing
+      !IO_IDP_UTIL type ref to /IWBEP/CL_IDP_UTIL
+      !IS_DATA type ANY optional
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+      !IT_INLINE_INFO type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_INLINE_INFO optional
+      !IT_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T
+    changing
+      !CS_MESSAGE_CONTAINER type /IWBEP/CL_MGW_REMOTE_HANDLER=>TY_S_MGW_MSG_CANISTER
+      !CT_CUSTOM_HEADER type TIHTTPNVP .
+  methods INIT_REQUEST
+    importing
+      !IV_METHOD_NAME type CSEQUENCE
+      !IV_DO_CREATE_RUNTIME type ABAP_BOOL default ABAP_TRUE
+      !IV_DO_CHECK_AUTHORITY type ABAP_BOOL default ABAP_TRUE
+      !IT_REQUEST_HEADER type TIHTTPNVP
+    exporting
+      !EV_TIME_START type I
+    changing
+      !CS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT
+    raising
+      /IWBEP/CX_MGW_TECH_EXCEPTION
+      /IWBEP/CX_MGW_BUSI_EXCEPTION .
+  methods PROCESS_CHANGESET
+    importing
+      !IT_CHANGESET type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST
+    changing
+      !CT_BATCH_RESPONSE type TY_T_BATCH_RESPONSE
+      !CT_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods PROCESS_MULTIPLE_BATCH_QUERY
+    importing
+      !IV_BATCH_TASK_MAX type I
+      !IT_BATCH_REQUEST type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_T_BATCH_REQUEST
+      !IS_HUB_VERSION type /IWBEP/CL_MGW_UTIL_VERSIONS=>TY_S_MGW_HUB_VERSION
+    exporting
+      !EV_APP_TIME type I
+      !EV_APP_SUM type I
+      !EV_WAIT_TOTAL type I
+      !EV_NON_GW_TIME type I
+      !EV_APPFW_TIME type I
+      !EV_APPDB_TIME type I
+      !EV_APPEXT_TIME type I
+    changing
+      !CT_BATCH_RESPONSE type TY_T_BATCH_RESPONSE
+      !CT_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods PROCESS_SINGLE_BATCH_QUERY
+    importing
+      !IS_BATCH_REQUEST type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_BATCH_REQUEST
+      !IT_OPERATION_INFO type /IWBEP/T_MGW_OPERATION_INFO optional
+    exporting
+      !EV_BATCH_ERROR type ABAP_BOOL
+    changing
+      !CT_BATCH_RESPONSE type TY_T_BATCH_RESPONSE
+      !CT_PERFORMANCE_TRACE type /IWBEP/SUTIL_HUB_PERF_DATA_T .
+  methods SET_SERVICE_ATTRIBUTES
+    importing
+      !IV_METHOD_NAME type CSEQUENCE
+      !IS_REQUEST_CONTEXT type /IWBEP/IF_MGW_CORE_SRV_RUNTIME=>TY_S_MGW_REQUEST_CONTEXT .
+  methods SET_UNSUPPORTED_DEFER .
+ENDCLASS.
+
+
+
+CLASS /IWBEP/CL_MGW_LOCAL_HANDLER IMPLEMENTATION.
+
+
+  METHOD add_changeset_response.
+
+    DATA: ls_batch_request     TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_batch_request,
+          ls_batch_response    TYPE ty_s_batch_response,
+          ls_message_container TYPE /iwbep/cl_mgw_remote_handler=>ty_s_mgw_msg_canister,
+          ls_changeset_data    TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_changeset_data,
+          lo_msg_container     TYPE REF TO /iwbep/cl_mgw_msg_container.
+
+
+    LOOP AT it_changeset_defer_data INTO ls_changeset_data.
+
+      READ TABLE it_changeset INTO ls_batch_request INDEX ls_changeset_data-operation_no.
+      CLEAR: ls_batch_response.
+
+      " Batch Performance Data
+      ls_batch_response-et_performance_trace = get_batch_performance_data( ).
+
+      " Get SAP message
+      CLEAR: ls_message_container.
+      lo_msg_container ?= ls_changeset_data-msg_container.
+      /iwbep/cl_mgw_handler_util=>fill_inner_error(
+        EXPORTING
+          iv_system_alias  = ls_batch_request-request_context-system_alias_info-system_alias
+          io_msg_container = lo_msg_container
+        CHANGING
+          cs_msg_canister  = ls_message_container
+      ).
+      lo_msg_container->reset( ).
+
+      ls_batch_response-er_data              = ls_changeset_data-entity_data.
+      ls_batch_response-es_message_container = ls_message_container.
+      ls_batch_response-et_custom_header     = ls_changeset_data-headers.
+      ls_batch_response-et_inline_info       = ls_changeset_data-inline_infos.
+
+
+      " Prepare Batch Response
+      ls_batch_response-packet_no     = ls_batch_request-packet_no.
+      ls_batch_response-operation_no  = ls_batch_request-operation_no.
+      ls_batch_response-changeset     = ls_batch_request-changeset.
+      ls_batch_response-function_code = ls_batch_request-function_code.
+
+      ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-ok.
+
+      INSERT ls_batch_response INTO TABLE ct_batch_response.
+
+      CLEAR ls_changeset_data-msg_container.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD add_defer_performance_data.
+
+    DATA: ls_hub_perf_data    TYPE /iwbep/sutil_hub_perf_data.
+
+
+    GET RUN TIME FIELD ls_hub_perf_data-time_stop.
+
+    ls_hub_perf_data-time_start    = iv_time_start.
+    ls_hub_perf_data-source_method = iv_method_name.
+    ls_hub_perf_data-source_class  = co_class_name.
+    ls_hub_perf_data-agent         = co_agent.
+    ls_hub_perf_data-ncalls        = 1.
+    ls_hub_perf_data-levelno       = 3.
+
+    mo_sutil_runtime->hub_perf_add_call_fw( ls_hub_perf_data ).
+
+  ENDMETHOD.
+
+
+  METHOD batch_begin.
+
+    mv_batch_processing = abap_true.
+
+    mo_sutil_runtime->set_batch_processing( abap_true ).
+
+    CLEAR mt_batch_deferred_response.
+    CLEAR mt_batch_deferred_ral.
+    CLEAR mt_batch_deferred_perf.
+
+  ENDMETHOD.
+
+
+  METHOD batch_end.
+
+    CLEAR: mv_batch_processing,
+           mt_batch_packet,
+           mt_batch_deferred_response,
+           mt_batch_deferred_ral,
+           mt_batch_deferred_perf.
+
+    mo_sutil_runtime->set_batch_processing( abap_false ).
+
+  ENDMETHOD.
+
+
+  METHOD changeset_begin.
+
+    mv_batch_processing = abap_true.
+
+    mv_changeset_op_total = iv_changeset_op_total.
+
+    mt_changeset_op_info = it_changeset_op_info.
+
+    " Register Watchdog for Commit/Rollback
+    CALL FUNCTION '/IWBEP/FM_MGW_CMRB_WATCHDOG'.
+
+    " Set Changeset Info for
+    CALL FUNCTION '/IWBEP/FM_MGW_SET_CS_INFO'
+      EXPORTING
+        iv_op_total = mv_changeset_op_total.
+
+  ENDMETHOD.
+
+
+  METHOD changeset_deactivate_watchdog.
+
+    " Deactivate COMMIT/ROLLBACK Watchdog!
+    CALL FUNCTION '/IWBEP/FM_MGW_SET_CS_INFO'
+      EXPORTING
+        iv_is_end_processing = abap_true.
+
+  ENDMETHOD.
+
+
+  METHOD changeset_end.
+
+    CLEAR: mt_changeset_op_info,
+           mv_changeset_op_first,
+           mv_changeset_op_last,
+           mv_changeset_op_total,
+           mv_changeset_processing,
+           mv_changeset_defer_mode,
+           mt_changeset_defer_data.
+
+
+    " Finish current Changeset
+    IF mo_changeset_helper IS NOT BOUND.
+      mo_changeset_helper = /iwbep/cl_mgw_changeset_helper=>get_instance( ).
+    ENDIF.
+    mo_changeset_helper->finalize( ).
+
+    " Deactivate COMMIT/ROLLBACK Watchdog!
+    CALL FUNCTION '/IWBEP/FM_MGW_SET_CS_INFO'
+      EXPORTING
+        iv_is_changeset = abap_false.
+
+    " COMMIT or ROLLBACK WORK at CHANGESET_END
+    IF iv_operation_error = abap_true.
+      ROLLBACK WORK.                                   "#EC CI_ROLLBACK
+    ELSE.
+      COMMIT WORK.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD changeset_get_defer_data.
+
+    et_changeset_defer_data = mt_changeset_defer_data.
+
+  ENDMETHOD.
+
+
+  METHOD changeset_set_op_info.
+
+
+    " First Operation
+    IF iv_changeset_op_num = 1.
+      mv_changeset_op_first = abap_true.
+    ELSE.
+      mv_changeset_op_first = abap_false.
+    ENDIF.
+
+    " Last Operation
+    IF iv_changeset_op_num = mv_changeset_op_total.
+      mv_changeset_op_last = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD check_and_raise_et_no_content.
+
+    DATA:
+      lv_lines           TYPE sytabix,
+      ls_navigation_path TYPE /iwbep/s_mgw_navigation_path.
+
+    lv_lines = lines( is_request_context-navigation_path ).
+    READ TABLE is_request_context-navigation_path INTO ls_navigation_path INDEX lv_lines.
+
+    IF  ir_entity IS NOT BOUND.
+      " Navigation multiplicity is 0..1 and no content is provided
+      IF ls_navigation_path-multiplicity EQ /iwbep/if_mgw_core_srv_runtime=>gcs_multiplicity-zero_one.
+        cs_response_context-no_content = abap_true.
+
+        " Raise an exception if no data found (except if is_not_modified is set to TRUE)
+      ELSEIF cs_response_context-is_not_modified NE /iwbep/if_mgw_core_types=>gcs_modification_status-is_not_modified.
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+          EXPORTING
+            textid           = /iwbep/cx_mgw_busi_exception=>resource_not_found
+            entity_type      = is_request_context-target_entity
+            http_status_code = /iwbep/cx_mgw_busi_exception=>gcs_http_status_codes-not_found.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD class_constructor.
+
+    ms_backend_version = /iwbep/cl_mgw_util_versions=>get_backend_version( ).
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    mv_is_shortcut = iv_is_shortcut.
+
+    IF mv_is_shortcut IS NOT INITIAL.
+      /iwbep/cl_cos_logger=>init_logger( iv_userid = sy-uname ).
+    ENDIF.
+
+    mo_remote_handler = io_remote_handler.
+
+* processing of an odata-service has been started in BEP
+* provider functionality is reading this flag through the
+* /IWBEP/CL_DIAGNOSTICS_FACADE in order to decide if the
+* provider functionality is running in the context of an odata-service.
+    /iwbep/cl_sutil_runtime=>set_is_gateway_service( ).
+
+    mo_sutil_runtime = /iwbep/cl_sutil_runtime=>get_instance( ).
+
+    mo_transaction_handler = /iwbep/cl_transaction_handler=>get_instance( ).
+
+  ENDMETHOD.
+
+
+  METHOD create_entity_type.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'CREATE_ENTITY_TYPE'.
+
+    DATA: lv_time_start      TYPE i,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error TYPE abap_bool,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: lo_idp_util       TYPE REF TO /iwbep/cl_idp_util,
+          lo_entry_provider TYPE REF TO /iwbep/if_mgw_entry_provider.
+
+    FIELD-SYMBOLS:
+          <fd_data>             TYPE any.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name     = co_method_name
+            it_request_header  = it_request_header
+          IMPORTING
+            ev_time_start      = lv_time_start
+          CHANGING
+            cs_request_context = ls_request_context
+        ).
+
+        " IDP Handling
+        idp_init(
+          EXPORTING
+            iv_time_start    = lv_time_start
+            iv_source_method = co_method_name
+            it_http_header   = ls_request_context-parameters
+          IMPORTING
+            eo_idp_util      = lo_idp_util
+            ev_idp_data      = ev_serialized_data
+        ).
+
+        IF ev_serialized_data IS NOT INITIAL.
+
+          " No Changeset deferred processing for IDP
+          set_unsupported_defer( ).
+
+          RETURN. "Done, the result has been retrieved from the IDP framework
+        ENDIF.
+
+
+        " Begin Changeset if first operation
+        IF mv_changeset_op_first = abap_true.
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_begin
+            EXPORTING
+              it_operation_info  = mt_changeset_op_info
+              it_changeset_input = it_changeset_input
+            CHANGING
+              cv_defer_mode      = mv_changeset_defer_mode.
+
+          " No Watchdog for Defer Mode
+          IF mv_changeset_defer_mode = abap_true.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " Inform Remote Handler about Defer Mode
+          IF mo_remote_handler IS BOUND.
+            mo_remote_handler->set_changeset_defer_mode( mv_changeset_defer_mode ).
+          ENDIF.
+        ENDIF.
+
+        " Create Data provider
+        CREATE OBJECT lo_entry_provider
+          TYPE
+          /iwbep/cl_mgw_entry_raw_prv
+          EXPORTING
+            iv_raw_data = iv_entity_data.
+
+        " Process Create Entity
+        CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~create_entity
+          EXPORTING
+            iv_entity_name      = ls_request_context-target_entity
+            iv_source_name      = ls_request_context-source_entity
+            io_data_provider    = lo_entry_provider
+            is_request_details  = ls_request_context
+          CHANGING
+            ct_headers          = et_custom_header
+            cr_entity           = er_entity
+            cs_response_context = es_response_context
+            ct_inline_info      = et_inline_info.
+
+        " Last operation
+        IF mv_changeset_op_last = abap_true.
+
+          " Deferred Processing: Process now!
+          IF mv_changeset_defer_mode = abap_true.
+            CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_process
+              CHANGING
+                ct_changeset_data = mt_changeset_defer_data.
+          ELSE.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " End Changeset
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_end.
+        ENDIF.
+
+        " Deferred processing
+        IF mv_changeset_defer_mode = abap_true.
+          IF mv_is_shortcut = abap_true.
+            add_defer_performance_data(
+              EXPORTING
+                iv_time_start  = lv_time_start
+                iv_method_name = co_method_name
+            ).
+          ENDIF.
+          RETURN.
+        ENDIF.
+
+        " Raise an exception with HTTP Status 500 if no business data returned
+        IF er_entity IS NOT BOUND.
+          RAISE EXCEPTION TYPE /iwbep/cx_mgw_tech_exception
+            EXPORTING
+              textid           = /iwbep/cx_mgw_tech_exception=>no_business_data_returned
+              http_status_code = /iwbep/cx_mgw_tech_exception=>gcs_http_status_codes-internal_server_error.
+        ENDIF.
+
+        IF er_entity IS BOUND.
+          IF mo_ral_rt_facade IS BOUND.
+            mo_ral_rt_facade->log_read_access( er_entity ).
+          ENDIF.
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>fill_inner_error_for_header(
+          EXPORTING
+            iv_system_alias = ls_request_context-system_alias_info-system_alias
+          CHANGING
+            cs_msg_canister = es_message_container
+        ).
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception INTO lx_exception.
+
+        lv_operation_error = abap_true.
+
+        "no exception logging for RAL - there has been no explicit read request
+        "that has been terminated with an exception
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+            ct_http_header     = et_custom_header
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " IDP Store result if no error and required
+    IF er_entity IS BOUND AND lv_operation_error = abap_false.
+      ASSIGN er_entity->* TO <fd_data>.
+      idp_store(
+        EXPORTING
+          io_idp_util          = lo_idp_util
+          is_data              = <fd_data>
+          is_request_context   = ls_request_context
+          it_inline_info       = et_inline_info
+          it_performance_trace = et_performance_trace
+        CHANGING
+          cs_message_container = es_message_container
+          ct_custom_header     = et_custom_header
+      ).
+    ENDIF.
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_create_entity
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD create_message_container.
+
+    DATA: ls_message_detail  TYPE /iwbep/s_mgw_odata_inner_error.
+
+
+* Create message header & details
+    CALL FUNCTION 'TH_GET_CLIENT_ID'
+      IMPORTING
+        transid = rs_message_container-message_header-transaction_id.
+
+    IF iv_technical_error = abap_false.
+      rs_message_container-message_header-exception_category = 'BUSI'.
+      ls_message_detail-code = '/IWBEP/CX_MGW_BUSI_EXCEPTION'.
+    ELSE.
+      rs_message_container-message_header-exception_category = 'TECH'.
+      ls_message_detail-code = '/IWBEP/CX_MGW_TECH_EXCEPTION'.
+    ENDIF.
+    rs_message_container-message_header-exception_txt = rs_message_container-message_header-exception_ltxt = iv_error_text.
+    rs_message_container-message_header-http_code = '400'.
+
+    ls_message_detail-message_text = iv_error_text.
+    ls_message_detail-severity = 'error'.
+    APPEND ls_message_detail TO rs_message_container-message_details.
+
+  ENDMETHOD.
+
+
+  METHOD delete_entity_type.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'DELETE_ENTITY_TYPE'.
+
+    DATA: lv_time_start           TYPE i,
+          ls_request_context      TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error      TYPE abap_bool,
+          lx_exception            TYPE REF TO /iwbep/cx_mgw_base_exception,
+          ls_response_context_com TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_response_context_com,
+          lo_idp_util             TYPE REF TO /iwbep/cl_idp_util.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name     = co_method_name
+            it_request_header  = it_request_header
+          IMPORTING
+            ev_time_start      = lv_time_start
+         CHANGING
+            cs_request_context = ls_request_context
+        ).
+
+        " IDP Handling
+        idp_init(
+          EXPORTING
+            iv_time_start    = lv_time_start
+            iv_source_method = co_method_name
+            it_http_header   = ls_request_context-parameters
+          IMPORTING
+            eo_idp_util      = lo_idp_util
+            ev_idp_data      = ev_serialized_data
+        ).
+
+        IF ev_serialized_data IS NOT INITIAL.
+
+          " No Changeset deferred processing for IDP
+          set_unsupported_defer( ).
+
+          RETURN. "Done, the result has been retrieved from the IDP framework
+        ENDIF.
+
+        " Begin Changeset if first operation
+        IF mv_changeset_op_first = abap_true.
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_begin
+            EXPORTING
+              it_operation_info  = mt_changeset_op_info
+              it_changeset_input = it_changeset_input
+            CHANGING
+              cv_defer_mode      = mv_changeset_defer_mode.
+
+          " No Watchdog for Defer Mode
+          IF mv_changeset_defer_mode = abap_true.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " Inform Remote Handler about Defer Mode
+          IF mo_remote_handler IS BOUND.
+            mo_remote_handler->set_changeset_defer_mode( mv_changeset_defer_mode ).
+          ENDIF.
+        ENDIF.
+
+        " Process Delete Entity
+        CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~delete_entity
+          EXPORTING
+            iv_entity_name      = ls_request_context-target_entity
+            iv_source_name      = ls_request_context-source_entity
+            is_request_details  = ls_request_context
+          CHANGING
+            ct_headers          = et_custom_header
+            cs_response_context = ls_response_context_com.
+
+        MOVE-CORRESPONDING ls_response_context_com TO es_response_context.
+
+        " Last operation
+        IF mv_changeset_op_last = abap_true.
+
+          " Deferred Processing: Process now!
+          IF mv_changeset_defer_mode = abap_true.
+            CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_process
+              CHANGING
+                ct_changeset_data = mt_changeset_defer_data.
+          ELSE.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " End Changeset
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_end.
+        ENDIF.
+
+        " Deferred processing
+        IF mv_changeset_defer_mode = abap_true.
+          IF mv_is_shortcut = abap_true.
+            add_defer_performance_data(
+              EXPORTING
+                iv_time_start  = lv_time_start
+                iv_method_name = co_method_name
+            ).
+          ENDIF.
+          RETURN.
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>fill_inner_error_for_header(
+          EXPORTING
+            iv_system_alias = ls_request_context-system_alias_info-system_alias
+          CHANGING
+            cs_msg_canister = es_message_container
+        ).
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception INTO lx_exception.
+
+        lv_operation_error = abap_true.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+            ct_http_header     = et_custom_header
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " IDP Store result if no error and required
+    IF lv_operation_error = abap_false.
+      idp_store(
+        EXPORTING
+          io_idp_util          = lo_idp_util
+          is_request_context   = ls_request_context
+          it_performance_trace = et_performance_trace
+        CHANGING
+          cs_message_container = es_message_container
+          ct_custom_header     = et_custom_header
+      ).
+    ENDIF.
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_delete_entity
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD determine_operation_type.
+
+    DATA:
+      ls_parameter     TYPE /iwbep/s_mgw_name_value_pair,
+      lv_expand_string TYPE string,
+      lv_delta_token   TYPE string.
+
+    CASE is_batch_request-function_code.
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_create_entity.
+        READ TABLE is_batch_request-request_context-parameters
+           WITH KEY name = '$expand'
+           INTO ls_parameter.
+        lv_expand_string = ls_parameter-value.
+
+        IF lv_expand_string IS NOT INITIAL.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-create_deep_entity.
+        ELSEIF is_batch_request-request_context-type EQ 'stream'.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-create_stream.
+        ELSE.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-create_entity.
+        ENDIF.
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_update_entity.
+        IF is_batch_request-request_context-type EQ 'stream'.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-create_stream.
+        ELSE.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-update_entity.
+        ENDIF.
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_delete_entity.
+        IF is_batch_request-request_context-type EQ 'stream'.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-delete_stream.
+        ELSE.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-delete_entity.
+        ENDIF.
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_execute_operation.
+        cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-execute_action.
+
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_get_entity.
+
+        READ TABLE is_batch_request-request_context-parameters
+            WITH KEY name = '$expand'
+            INTO ls_parameter.
+        lv_expand_string = ls_parameter-value.
+
+        IF NOT lv_expand_string IS INITIAL.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-expand_entity.
+        ELSE.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-get_entity.
+        ENDIF.
+
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_get_entity_set.
+
+        READ TABLE is_batch_request-request_context-parameters
+          WITH KEY name = '$expand'
+          INTO ls_parameter.
+        lv_expand_string = ls_parameter-value.
+
+        READ TABLE is_batch_request-request_context-parameters
+          WITH KEY name = '$deltatoken'
+          INTO ls_parameter.
+        lv_delta_token = ls_parameter-value.
+
+        IF NOT lv_expand_string IS INITIAL.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-expand_entityset.
+        ELSEIF NOT lv_delta_token IS INITIAL.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-get_entityset_delta.
+        ELSE.
+          cs_operation_info-operation_type = /iwbep/if_mgw_appl_types=>gcs_operation_type-get_entityset.
+        ENDIF.
+
+      WHEN OTHERS.
+        cs_operation_info-operation_type = is_batch_request-function_code.
+    ENDCASE.
+
+    "Set the Content ID and Content ID Reference
+    cs_operation_info-content_id     = is_batch_request-request_context-technical_request-batch_info-content_id.
+    cs_operation_info-content_id_ref = is_batch_request-request_context-technical_request-batch_info-content_id_ref.
+
+  ENDMETHOD.
+
+
+  METHOD execute_operation.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'EXECUTE_OPERATION'.
+
+    DATA: lv_time_start      TYPE i,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error TYPE abap_bool,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: lv_action_name       TYPE string,
+          lv_multiplicity      TYPE char1,
+          lv_is_change_request TYPE abap_bool,
+          lo_idp_util          TYPE REF TO /iwbep/cl_idp_util.
+
+    FIELD-SYMBOLS:
+          <fd_data>             TYPE any.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name     = co_method_name
+            it_request_header  = it_request_header
+            iv_do_check_authority = iv_do_check_authority
+          IMPORTING
+            ev_time_start      = lv_time_start
+          CHANGING
+            cs_request_context = ls_request_context
+        ).
+
+        " IDP Handling only for change request
+        IF ls_request_context-http_method = /iwbep/if_mgw_med_odata_types=>gcs_med_http_methods-post  OR
+           ls_request_context-http_method = /iwbep/if_mgw_med_odata_types=>gcs_med_http_methods-put   OR
+           ls_request_context-http_method = /iwbep/if_mgw_med_odata_types=>gcs_med_http_methods-merge OR
+           ls_request_context-http_method = /iwbep/if_mgw_med_odata_types=>gcs_med_http_methods-delete.
+
+          lv_is_change_request = abap_true.
+
+          " IDP Handling
+          idp_init(
+            EXPORTING
+              iv_time_start    = lv_time_start
+              iv_source_method = co_method_name
+              it_http_header   = ls_request_context-parameters
+            IMPORTING
+              eo_idp_util      = lo_idp_util
+              ev_idp_data      = ev_serialized_data
+          ).
+
+          IF ev_serialized_data IS NOT INITIAL.
+
+            " No Changeset deferred processing for IDP
+            set_unsupported_defer( ).
+
+            RETURN. "Done, the result has been retrieved from the IDP framework
+          ENDIF.
+        ENDIF.
+
+        " Begin Changeset if first operation
+        IF mv_changeset_op_first = abap_true.
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_begin
+            EXPORTING
+              it_operation_info  = mt_changeset_op_info
+              it_changeset_input = it_changeset_input
+            CHANGING
+              cv_defer_mode      = mv_changeset_defer_mode.
+
+          " No Watchdog for Defer Mode
+          IF mv_changeset_defer_mode = abap_true.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " Inform Remote Handler about Defer Mode
+          IF mo_remote_handler IS BOUND.
+            mo_remote_handler->set_changeset_defer_mode( mv_changeset_defer_mode ).
+          ENDIF.
+        ENDIF.
+
+        "Action name is under request context-function, but older hubs may only fill the technical name
+        IF ls_request_context-function-name IS NOT INITIAL.
+          lv_action_name = ls_request_context-function-name.
+        ELSE.
+          lv_action_name = ls_request_context-technical_request-action_name.
+        ENDIF.
+
+        " Process Execute Action
+        CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~exec_service_operation
+          EXPORTING
+            iv_action_name      = lv_action_name
+            iv_return_type      = ls_request_context-target_entity
+            iv_multiplicity     = lv_multiplicity    "will be determined in /IWBEP/CL_MGW_ABS_DATA
+            is_request_details  = ls_request_context
+          CHANGING
+            ct_headers          = et_custom_header
+            cr_data             = er_data
+            cs_response_context = es_response_context
+            ct_inline_info      = et_inline_info.
+
+        " Last operation
+        IF mv_changeset_op_last = abap_true.
+
+          " Deferred Processing: Process now!
+          IF mv_changeset_defer_mode = abap_true.
+            CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_process
+              CHANGING
+                ct_changeset_data = mt_changeset_defer_data.
+          ELSE.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " End Changeset
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_end.
+        ENDIF.
+
+        " Deferred processing
+        IF mv_changeset_defer_mode = abap_true.
+          IF mv_is_shortcut = abap_true.
+            add_defer_performance_data(
+              EXPORTING
+                iv_time_start  = lv_time_start
+                iv_method_name = co_method_name
+            ).
+          ENDIF.
+          RETURN.
+        ENDIF.
+
+        IF mo_ral_rt_facade IS BOUND AND er_data IS BOUND.
+          mo_ral_rt_facade->log_read_access( er_data ).
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>fill_inner_error_for_header(
+          EXPORTING
+            iv_system_alias = ls_request_context-system_alias_info-system_alias
+          CHANGING
+            cs_msg_canister = es_message_container
+        ).
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception INTO lx_exception.
+
+        lv_operation_error = abap_true.
+
+        IF mo_ral_rt_facade IS BOUND.
+          mo_ral_rt_facade->log_exception( lx_exception ).
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+            ct_http_header     = et_custom_header
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " IDP Store result for change request if no error and required
+    IF er_data IS BOUND                AND
+       lv_operation_error = abap_false AND
+       lv_is_change_request = abap_true.
+      ASSIGN er_data->* TO <fd_data>.
+      idp_store(
+        EXPORTING
+          io_idp_util          = lo_idp_util
+          is_data              = <fd_data>
+          is_request_context   = ls_request_context
+          it_inline_info       = et_inline_info
+          it_performance_trace = et_performance_trace
+        CHANGING
+          cs_message_container = es_message_container
+          ct_custom_header     = et_custom_header
+      ).
+    ENDIF.
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_execute_operation
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD finalize_request.
+
+    DATA: ls_response_header         TYPE ihttpnvp,
+          ls_soft_state_session_info TYPE /iwbep/if_mgw_core_types=>ty_s_soft_state_session_info,
+          lo_msg_container           TYPE REF TO /iwbep/cl_mgw_msg_container,
+          lo_logger                  TYPE REF TO /iwbep/cl_cos_logger.
+
+
+    " Reset Message Container if not in changeset deferred processing mode
+    IF mv_changeset_defer_mode = abap_false.
+      lo_msg_container ?= /iwbep/cl_mgw_msg_container=>get_mgw_msg_container( ).
+      lo_msg_container->reset( ).
+    ENDIF.
+
+    IF mv_batch_processing = abap_false.
+
+      " Soft State Session Flags
+      mo_transaction_handler->get_soft_state_session_info(
+        IMPORTING
+          ev_session_start = ls_soft_state_session_info-session_start
+          ev_session_end   = ls_soft_state_session_info-session_end
+      ).
+      ls_response_header-name  = /iwbep/cl_mgw_remote_handler=>co_header_soft_state.
+      ls_response_header-value = ls_soft_state_session_info.
+      INSERT ls_response_header INTO TABLE ct_response_header.
+
+      " Cleanup Runtime with destroying provider instance
+      IF mo_mgw_runtime IS BOUND.
+        TRY.
+            CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~cleanup.
+          CATCH /iwbep/cx_mgw_tech_exception.           "#EC NO_HANDLER
+        ENDTRY.
+      ENDIF.
+
+      " Commit for change if successful and not in batch
+      IF iv_operation_error IS INITIAL AND
+         ( iv_function_code = /iwbep/cl_mgw_remote_handler=>co_fcode_create_entity OR
+           iv_function_code = /iwbep/cl_mgw_remote_handler=>co_fcode_update_entity OR
+           iv_function_code = /iwbep/cl_mgw_remote_handler=>co_fcode_delete_entity OR
+           iv_function_code = /iwbep/cl_mgw_remote_handler=>co_fcode_execute_operation
+         ).
+        COMMIT WORK.
+      ENDIF.
+
+    ELSE.
+      mo_sutil_runtime->set_new_operation( ).
+    ENDIF.
+
+    " Add an Error flag in error case
+    IF iv_operation_error IS NOT INITIAL.
+      ls_response_header-name  = /iwbep/cl_mgw_remote_handler=>co_header_error.
+      ls_response_header-value = abap_true.
+      INSERT ls_response_header INTO TABLE ct_response_header.
+    ENDIF.
+
+    " Nothing more to do if request is from Remote Handler
+    IF mv_is_shortcut <> abap_true. RETURN. ENDIF.
+
+
+    " Add performance header for Hub
+    mo_sutil_runtime->create_performance_header(
+      EXPORTING
+        iv_header_name     = /iwbep/cl_mgw_remote_handler=>co_header_bep_perf_app
+        iv_component_type  = gcs_component_type-shortcut
+      CHANGING
+        ct_response_header = ct_response_header ).
+
+    " Get Performance Data if necessary
+    IF iv_time_start IS SUPPLIED.
+      mo_sutil_runtime->performance_stop( iv_time_start ).
+      /iwbep/cl_mgw_handler_util=>get_performance_data(
+        EXPORTING
+          iv_time_start    = iv_time_start
+          iv_class_name    = co_class_name
+          iv_method_name   = iv_method_name
+          iv_agent         = co_agent
+          iv_is_batch      = mv_batch_processing
+        CHANGING
+          ct_hub_perf_data = ct_performance_trace
+      ).
+    ENDIF.
+
+    " Finalize Traces after each shortcut call and not in batch
+    IF mv_batch_processing = abap_false.
+      mo_sutil_runtime->finalize_traces( ).
+      lo_logger = /iwbep/cl_cos_logger=>get_logger( ).
+      lo_logger->close_logger( ).
+    ENDIF.
+
+* processing of an odata-service has been finished in BEP
+* provider functionality is reading this flag through the
+* /IWBEP/CL_DIAGNOSTICS_FACADE D  in order to decide if this functionality is
+* running in the context of an odata-service.
+    /iwbep/cl_sutil_runtime=>remove_is_gateway_service( ).
+
+
+  ENDMETHOD.
+
+
+  METHOD get_batch_performance_data.
+
+    DATA: ls_hub_perf_data    TYPE /iwbep/sutil_hub_perf_data.
+
+    FIELD-SYMBOLS:
+          <ls_hub_perf_data>  TYPE /iwbep/sutil_hub_perf_data.
+
+    CLEAR rt_hub_perf_data.
+
+    IF iv_time_start IS SUPPLIED.
+      GET RUN TIME FIELD ls_hub_perf_data-time_stop.
+      ls_hub_perf_data-time_start    = iv_time_start.
+      ls_hub_perf_data-source_method = iv_method_name.
+      ls_hub_perf_data-source_class  = co_class_name.
+      ls_hub_perf_data-agent         = co_agent.
+      ls_hub_perf_data-ncalls        = 1.
+      IF iv_method_name <> 'PROCESS_BATCH'.
+        ls_hub_perf_data-levelno = 3.
+      ELSE.
+        ls_hub_perf_data-levelno = 2.
+      ENDIF.
+      mo_sutil_runtime->hub_perf_add_call_fw( ls_hub_perf_data ).
+    ENDIF.
+
+    rt_hub_perf_data = mo_sutil_runtime->hub_perf_get_data( ).
+
+    LOOP AT rt_hub_perf_data ASSIGNING <ls_hub_perf_data>.
+      IF <ls_hub_perf_data>-levelno IS INITIAL AND
+         <ls_hub_perf_data>-source_class <> '/IWBEP/CL_MGW_LOCAL_HANDLER'.
+        <ls_hub_perf_data>-levelno = 4.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get_deferred_response.
+    et_batch_response  = mt_batch_deferred_response.
+  ENDMETHOD.
+
+
+  METHOD get_entity_set.
+
+    CONSTANTS:
+      co_method_name   TYPE seomtdname VALUE 'GET_ENTITY_SET'.
+
+    DATA:
+      lv_time_start          TYPE i,
+      lv_operation_error     TYPE abap_bool,
+      ls_paging              TYPE /iwbep/s_mgw_paging,
+      ls_request_context     TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+      ls_deferred_ral        TYPE ty_s_batch_deferred_ral,
+      ls_batch_deferred_perf TYPE ty_s_batch_deferred_perf,
+      lx_exception           TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name        = co_method_name
+            it_request_header     = it_request_header
+            iv_do_check_authority = iv_do_check_authority
+          IMPORTING
+            ev_time_start         = lv_time_start
+          CHANGING
+            cs_request_context    = ls_request_context ).
+
+        " Some Attributes
+        MOVE-CORRESPONDING ls_request_context-paging TO ls_paging.
+
+        IF ls_request_context-technical_request-batch_info-first_operation EQ abap_true AND
+           " it_operation_info is not filled if deferred response creation is not used
+           NOT it_operation_info IS INITIAL.
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~batch_begin
+            EXPORTING
+              it_operation_info             = it_operation_info
+            CHANGING
+              cv_deferred_response_creation = mv_batch_deferred_resp_crea.
+        ENDIF.
+
+        " Process Read Entity Set
+        CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~read_entityset
+          EXPORTING
+            iv_entity_name           = ls_request_context-target_entity
+            iv_source_name           = ls_request_context-source_entity
+            is_paging                = ls_paging
+            it_order                 = ls_request_context-order
+            it_filter_select_options = ls_request_context-filter_select_options
+            is_request_details       = ls_request_context
+          CHANGING
+            ct_headers               = et_custom_header
+            cr_entityset             = er_entityset
+            cr_deleted_entityset     = er_deleted_entityset
+            cs_response_context      = es_response_context
+            ct_inline_info           = et_inline_info
+            cv_response_body         = ev_response_body.
+
+        IF mv_batch_deferred_resp_crea EQ abap_false.
+
+          IF mo_ral_rt_facade IS BOUND.
+            mo_ral_rt_facade->log_read_access( er_entityset ).
+          ENDIF.
+
+          es_response_context-is_cache_hit     = mo_sutil_runtime->is_cache_hit( ).
+          es_response_context-is_cache_hit_shm = mo_sutil_runtime->is_cache_hit_shm( ).
+
+          /iwbep/cl_mgw_handler_util=>fill_inner_error_for_header(
+            EXPORTING
+              iv_system_alias = ls_request_context-system_alias_info-system_alias
+            CHANGING
+              cs_msg_canister = es_message_container ).
+
+        ELSE.
+
+          ls_deferred_ral-operation_id = ls_request_context-technical_request-batch_info-operation_id.
+          ls_deferred_ral-ral_facade   = mo_ral_rt_facade.
+          INSERT ls_deferred_ral INTO TABLE mt_batch_deferred_ral.
+
+        ENDIF.
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception /iwbep/cx_mgw_btc_exception INTO lx_exception.
+
+        IF mo_ral_rt_facade IS BOUND.
+          mo_ral_rt_facade->log_exception( lx_exception ).
+        ENDIF.
+
+        lv_operation_error = abap_true.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+            ct_http_header     = et_custom_header ).
+
+    ENDTRY.
+
+    IF mv_batch_deferred_resp_crea EQ abap_true AND
+       ls_request_context-technical_request-batch_info-last_operation EQ abap_true.
+
+      TRY.
+      CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~batch_end
+        CHANGING
+          ct_batch_response = mt_batch_deferred_response.
+        CATCH /iwbep/cx_mgw_btc_exception INTO lx_exception.
+
+          lv_operation_error = abap_true.
+
+          /iwbep/cl_mgw_handler_util=>handle_exception(
+            EXPORTING
+              ix_exception       = lx_exception
+              is_request_context = ls_request_context
+              io_context         = mo_mgw_context
+            CHANGING
+              cs_msg_canister    = es_message_container
+              ct_http_header     = et_custom_header ).
+      ENDTRY.
+
+    ENDIF.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_entity_set
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace ).
+
+    " store performance trace data in case of deferred response creation if no error
+    " occured (otherwise et_performance_trace will be used)
+    IF mv_batch_deferred_resp_crea EQ abap_true AND lv_operation_error EQ abap_false.
+      ls_batch_deferred_perf-operation_id     = ls_request_context-technical_request-batch_info-operation_id.
+      ls_batch_deferred_perf-performance_data = et_performance_trace.
+      INSERT ls_batch_deferred_perf INTO TABLE mt_batch_deferred_perf.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_entity_type.
+
+    CONSTANTS:
+      co_method_name   TYPE seomtdname VALUE 'GET_ENTITY_TYPE'.
+
+    DATA:
+      lv_time_start          TYPE i,
+      ls_request_context     TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+      lv_operation_error     TYPE abap_bool,
+      lx_exception           TYPE REF TO /iwbep/cx_mgw_base_exception,
+      lv_lines               TYPE i,
+      ls_deferred_ral        TYPE ty_s_batch_deferred_ral,
+      ls_batch_deferred_perf TYPE ty_s_batch_deferred_perf,
+      ls_navigation_path     TYPE /iwbep/s_mgw_navigation_path.
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name        = co_method_name
+            it_request_header     = it_request_header
+            iv_do_check_authority = iv_do_check_authority
+          IMPORTING
+            ev_time_start         = lv_time_start
+          CHANGING
+            cs_request_context    = ls_request_context ).
+
+        IF mt_batch_packet IS NOT INITIAL. RETURN. ENDIF.
+
+        IF ls_request_context-technical_request-batch_info-first_operation EQ abap_true AND
+           " it_operation_info is not filled if deferred response creation is not used
+           NOT it_operation_info IS INITIAL.
+
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~batch_begin
+            EXPORTING
+              it_operation_info             = it_operation_info
+            CHANGING
+              cv_deferred_response_creation = mv_batch_deferred_resp_crea.
+        ENDIF.
+
+        " Process Read Entity
+        CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~read_entity
+          EXPORTING
+            iv_entity_name      = ls_request_context-target_entity
+            iv_source_name      = ls_request_context-source_entity
+            is_request_details  = ls_request_context
+          CHANGING
+            ct_headers          = et_custom_header
+            cr_entity           = er_entity
+            cs_response_context = es_response_context
+            ct_expand_skiptoken = et_expand_skiptoken
+            ct_inline_info      = et_inline_info.
+
+        IF mv_batch_deferred_resp_crea EQ abap_false.
+
+          check_and_raise_et_no_content(
+            EXPORTING
+              ir_entity                    = er_entity
+              is_request_context           = ls_request_context
+            CHANGING
+              cs_response_context          = es_response_context ).
+
+          IF es_response_context-is_not_modified NE /iwbep/if_mgw_core_types=>gcs_modification_status-is_not_modified.
+            IF mo_ral_rt_facade IS BOUND.
+              mo_ral_rt_facade->log_read_access( er_entity ).
+            ENDIF.
+          ENDIF.
+
+          /iwbep/cl_mgw_handler_util=>fill_inner_error_for_header(
+            EXPORTING
+              iv_system_alias = ls_request_context-system_alias_info-system_alias
+            CHANGING
+              cs_msg_canister = es_message_container ).
+
+        ELSE.
+
+          ls_deferred_ral-operation_id = ls_request_context-technical_request-batch_info-operation_id.
+          ls_deferred_ral-ral_facade   = mo_ral_rt_facade.
+          INSERT ls_deferred_ral INTO TABLE mt_batch_deferred_ral.
+
+        ENDIF.
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception /iwbep/cx_mgw_btc_exception INTO lx_exception.
+
+        lv_operation_error = abap_true.
+
+        IF mo_ral_rt_facade IS BOUND.
+          mo_ral_rt_facade->log_exception( lx_exception ).
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+            ct_http_header     = et_custom_header ).
+    ENDTRY.
+
+    IF mv_batch_deferred_resp_crea EQ abap_true AND
+       ls_request_context-technical_request-batch_info-last_operation EQ abap_true.
+
+      TRY.
+      CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~batch_end
+        CHANGING
+          ct_batch_response = mt_batch_deferred_response.
+        CATCH /iwbep/cx_mgw_btc_exception INTO lx_exception.
+
+          lv_operation_error = abap_true.
+
+          /iwbep/cl_mgw_handler_util=>handle_exception(
+            EXPORTING
+              ix_exception       = lx_exception
+              is_request_context = ls_request_context
+              io_context         = mo_mgw_context
+            CHANGING
+              cs_msg_canister    = es_message_container
+              ct_http_header     = et_custom_header ).
+      ENDTRY.
+
+    ENDIF.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_entity
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace ).
+
+    " store performance trace data in case of deferred response creation if no error
+    " occured (otherwise et_performance_trace will be used)
+    IF mv_batch_deferred_resp_crea EQ abap_true AND lv_operation_error EQ abap_false.
+      ls_batch_deferred_perf-operation_id     = ls_request_context-technical_request-batch_info-operation_id.
+      ls_batch_deferred_perf-performance_data = et_performance_trace.
+      INSERT ls_batch_deferred_perf INTO TABLE mt_batch_deferred_perf.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_handles_deferred_response.
+    rv_handles_deferred_response = mv_batch_deferred_resp_crea.
+  ENDMETHOD.
+
+
+  METHOD get_meta_data.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'GET_META_DATA'.
+
+    DATA: lv_time_start      TYPE i,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error TYPE abap_bool,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: lv_last_modified     TYPE timestamp,
+          lv_model_name        TYPE /iwbep/med_mdl_technical_name,
+          lv_model_version     TYPE /iwbep/med_mdl_version,
+          ls_service_info      TYPE /iwbep/if_mgw_med_provider=>ty_s_service_info,
+          lo_model             TYPE REF TO /iwbep/cl_mgw_odata_model,
+          lo_metadata_provider TYPE REF TO /iwbep/if_mgw_med_provider.
+    DATA: ls_extended_model    TYPE /iwbep/if_mgw_med_odata_types=>ty_s_med_extended_model.
+    DATA: lv_last_modified_ext TYPE timestamp.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name       = co_method_name
+            iv_do_create_runtime = abap_false
+            it_request_header    = it_request_header
+          IMPORTING
+            ev_time_start        = lv_time_start
+          CHANGING
+            cs_request_context   = ls_request_context
+        ).
+
+        lo_metadata_provider = /iwbep/cl_mgw_med_provider=>get_med_provider( ).
+        lo_metadata_provider->initialize( is_default_system_alias_info = ls_request_context-system_alias_info ).
+        " Get Model Name and Version
+        ls_service_info = lo_metadata_provider->get_service_info(
+                                   iv_external_name          = ls_request_context-service_doc_name
+                                   iv_namespace              = ls_request_context-namespace
+                                   iv_version                = ls_request_context-version
+                                   iv_do_check_for_extension = abap_true ).
+
+        lo_metadata_provider->get_service_model_key(
+          EXPORTING
+            iv_internal_service_name    = ls_service_info-technical_name
+            iv_internal_service_version = ls_service_info-version
+          IMPORTING
+            ev_technical_model_name     = lv_model_name
+            ev_technical_model_version  = lv_model_version ).
+
+
+        " Check Cache Timestamp (from SP05 onward only)
+        IF ls_request_context-cache_timestamp IS NOT INITIAL.
+          "Get last modified
+          lv_last_modified = lo_metadata_provider->get_last_modified(
+            iv_external_service_name  = ls_request_context-service_doc_name
+            iv_service_namespace      = ls_request_context-namespace
+            iv_service_version        = ls_request_context-version
+            iv_model_version          = lv_model_version
+            iv_model_technical_name   = lv_model_name
+            iv_do_check_for_extension = abap_true
+          ).
+        ENDIF.
+
+        " If cache timestamp from hub is initial the cache is either deactivated or it is a hub < SP 06
+        " model in hub cache is up to date - no need to trigger a cache refresh
+        IF  ( lv_last_modified IS NOT INITIAL )
+        AND ( lv_last_modified = ls_request_context-cache_timestamp ).
+          ev_model_send = abap_false.
+          " Model in hub cache is outdated - send new metadata with flag to trigger refresh
+
+        ELSE.
+          " Load Metadata
+          lo_model ?= lo_metadata_provider->get_service_model(
+                        iv_svc_ext_name           = ls_request_context-service_doc_name
+                        iv_svc_namespace          = ls_request_context-namespace
+                        iv_svc_version            = ls_request_context-version
+                        iv_mdl_tech_name          = lv_model_name
+                        iv_mdl_version            = lv_model_version
+                        iv_do_check_for_extension = abap_true
+                      ).
+          es_metadata-model-header              = lo_model->ms_header.
+
+          IF ( lv_last_modified < ls_request_context-cache_timestamp ).
+*         The hub cache is newer than the last modified. The most likely explanation is that we have
+*         model composition (model->extend_model) and the included model is newer than the including
+*         model. In this case the last modified derrived here is older than the last modified of the
+*         complete model. So let us check that before we really send the model back.
+            LOOP AT es_metadata-model-header-extendend_models INTO ls_extended_model.
+              lv_last_modified_ext = lo_metadata_provider->get_last_modified(
+                iv_model_version          = ls_extended_model-model_version
+                iv_model_technical_name   = ls_extended_model-model_name
+              ).
+              IF ( lv_last_modified_ext > lv_last_modified ).
+                lv_last_modified = lv_last_modified_ext.
+              ENDIF.
+            ENDLOOP.
+*         Let us compare again now
+            IF ( lv_last_modified <> ls_request_context-cache_timestamp ).
+              ev_model_send = abap_true.
+            ENDIF.
+
+          ELSE.
+            ev_model_send = abap_true.
+          ENDIF.
+
+          IF ( ev_model_send = abap_true ).
+            es_metadata-model-entities            = lo_model->mt_entities.
+            es_metadata-model-references          = lo_model->mt_references.
+            es_metadata-model-operations          = lo_model->mt_operations.
+            es_metadata-model-text_keys           = lo_model->mt_text_keys.
+            es_metadata-model-private_annotations = lo_model->mt_private_annotations.
+            es_metadata-model-public_annotations  = lo_model->mt_public_annotations.
+            es_metadata-model-mapping             = lo_model->mt_mapping.
+            es_metadata-model-model_usages        = lo_model->mt_mdl_usage.
+            es_metadata-model-documentation       = lo_model->mt_documentation.
+            es_metadata-model-tags                = lo_model->mt_tags.
+            es_metadata-model-vocan_model         = lo_model->ms_vocan_model.
+          ENDIF.
+        ENDIF.
+
+
+        IF ev_model_send EQ abap_true AND ls_request_context-cache_timestamp IS NOT INITIAL.
+          es_metadata-outdated = abap_true.
+        ENDIF.
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_med_exception /iwbep/cx_mgw_tech_exception INTO lx_exception .
+
+        lv_operation_error = 1.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_metadata
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD get_stream.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'GET_STREAM'.
+
+    DATA: lv_time_start      TYPE i,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error TYPE abap_bool,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: lx_busi_exception  TYPE REF TO /iwbep/cx_mgw_busi_exception.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name     = co_method_name
+            it_request_header  = it_request_header
+            iv_do_check_authority = iv_do_check_authority
+          IMPORTING
+            ev_time_start      = lv_time_start
+          CHANGING
+            cs_request_context = ls_request_context
+        ).
+
+        " Process Read Stream
+        CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~read_stream
+          EXPORTING
+            iv_entity_name      = ls_request_context-target_entity
+            iv_source_name      = ls_request_context-source_entity
+            is_request_details  = ls_request_context
+          CHANGING
+            ct_headers          = et_custom_header
+            cr_stream           = er_stream
+            cs_response_context = es_response_context.
+
+        " Raise an exception if no data found (except if is_not_modified is set to TRUE)
+        IF er_stream IS NOT BOUND AND es_response_context-is_not_modified NE /iwbep/if_mgw_core_types=>gcs_modification_status-is_not_modified.
+          CREATE OBJECT lx_busi_exception
+            TYPE
+            /iwbep/cx_mgw_busi_exception
+            EXPORTING
+              textid           = /iwbep/cx_mgw_busi_exception=>resource_not_found
+              entity_type      = ls_request_context-target_entity
+              http_status_code = /iwbep/cx_mgw_busi_exception=>gcs_http_status_codes-not_found.
+
+          RAISE EXCEPTION lx_busi_exception.
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>fill_inner_error_for_header(
+          EXPORTING
+            iv_system_alias = ls_request_context-system_alias_info-system_alias
+          CHANGING
+            cs_msg_canister = es_message_container
+        ).
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception INTO lx_exception.
+
+        lv_operation_error = abap_true.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+            ct_http_header     = et_custom_header
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_stream
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD get_text.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'GET_TEXT'.
+
+    DATA: lv_time_start      TYPE i,
+          lv_operation_error TYPE abap_bool,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: lv_model_name        TYPE /iwbep/med_mdl_technical_name,
+          lv_model_version     TYPE /iwbep/med_mdl_version,
+          ls_text_key          TYPE /iwbep/if_mgw_med_odata_types=>ty_s_med_text,
+          ls_service_info      TYPE /iwbep/if_mgw_med_provider=>ty_s_service_info,
+          lv_text_object       TYPE /iwbep/if_mgw_med_odata_types=>ty_e_med_text_obj_type,
+          lt_filtered_text_key TYPE /iwbep/if_mgw_med_odata_types=>ty_t_med_texts,
+          lo_metadata_provider TYPE REF TO /iwbep/if_mgw_med_provider,
+          lo_badi              TYPE REF TO /iwbep/bd_mgw_med_text_load.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name       = co_method_name
+            iv_do_create_runtime = abap_false
+            it_request_header    = it_request_header
+          IMPORTING
+            ev_time_start        = lv_time_start
+          CHANGING
+            cs_request_context   = ls_request_context
+        ).
+
+        lo_metadata_provider = /iwbep/cl_mgw_med_provider=>get_med_provider( ).
+        ls_service_info = lo_metadata_provider->get_service_info(
+                            iv_external_name          = ls_request_context-service_doc_name
+                            iv_namespace              = ls_request_context-namespace
+                            iv_version                = ls_request_context-version
+                            iv_do_check_for_extension = abap_true
+                          ).
+
+        lo_metadata_provider->get_service_model_key(
+          EXPORTING
+            iv_internal_service_name    = ls_service_info-technical_name
+            iv_internal_service_version = ls_service_info-version
+          IMPORTING
+            ev_technical_model_name     = lv_model_name
+            ev_technical_model_version  = lv_model_version
+        ).
+
+        LOOP AT it_text_key INTO ls_text_key.
+          IF lv_text_object NE ls_text_key-txt_object_type.
+            IF lv_text_object IS NOT INITIAL.
+              GET BADI lo_badi
+                FILTERS
+                  model_name    = lv_model_name
+                  model_version = lv_model_version
+                  text_id       = lv_text_object.
+
+*           initialization step in case of a remote text loading
+*           only implemented in the abstract class /IWBEP/CL_MGW_ABS_REM_TX_LOAD
+              CALL BADI lo_badi->init
+                EXPORTING
+                  is_system_alias_info = ls_request_context-system_alias_info
+                  iv_service_ext_name  = ls_request_context-service_doc_name
+                  iv_namespace         = ls_request_context-namespace
+                  iv_version           = ls_request_context-version.
+
+              CALL BADI lo_badi->get_texts
+                EXPORTING
+                  iv_model_name       = lv_model_name
+                  iv_model_version    = lv_model_version
+                  it_text_keys        = lt_filtered_text_key
+                  iv_language         = iv_language
+                  iv_verbose_metadata = ls_request_context-technical_request-verbose_metadata
+                CHANGING
+                  ct_object_texts     = et_object_text.
+            ENDIF.
+            lv_text_object = ls_text_key-txt_object_type.
+            CLEAR lt_filtered_text_key.
+          ENDIF.
+          APPEND ls_text_key TO lt_filtered_text_key.
+        ENDLOOP.
+
+        IF lt_filtered_text_key IS NOT INITIAL.
+          GET BADI lo_badi
+            FILTERS
+              model_name    = lv_model_name
+              model_version = lv_model_version
+              text_id       = lv_text_object.
+
+*       initialization step in case of a remote text loading
+*       only implemented in the abstract class /IWBEP/CL_MGW_ABS_REM_TX_LOAD
+          CALL BADI lo_badi->init
+            EXPORTING
+              is_system_alias_info = ls_request_context-system_alias_info
+              iv_service_ext_name  = ls_request_context-service_doc_name
+              iv_namespace         = ls_request_context-namespace
+              iv_version           = ls_request_context-version.
+
+
+          CALL BADI lo_badi->get_texts
+            EXPORTING
+              iv_model_name       = lv_model_name
+              iv_model_version    = lv_model_version
+              it_text_keys        = lt_filtered_text_key
+              iv_language         = iv_language
+              iv_verbose_metadata = ls_request_context-technical_request-verbose_metadata
+            CHANGING
+              ct_object_texts     = et_object_text.
+        ENDIF.
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_med_exception /iwbep/cx_mgw_tech_exception INTO lx_exception .
+
+        lv_operation_error = abap_true.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_text
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD get_vocab_detail.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'GET_VOCAB_DETAIL'.
+
+    DATA: lv_time_start      TYPE i,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error TYPE abap_bool,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: ls_bep_vocab_detail   TYPE /iwbep/cl_mgw_med_reg_api=>ty_s_vocab_detail.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name        = co_method_name
+            iv_do_create_runtime  = abap_false
+            iv_do_check_authority = abap_false
+            it_request_header     = it_request_header
+          IMPORTING
+            ev_time_start         = lv_time_start
+          CHANGING
+            cs_request_context = ls_request_context
+        ).
+
+        " Check Existence
+        /iwbep/cl_mgw_med_reg_api=>vocab_check_exists(
+          EXPORTING
+            iv_vocab_id      = iv_vocab_id
+            iv_vocab_version = iv_version
+        ).
+
+        " Retrieve details from vocabulary repository
+        /iwbep/cl_mgw_med_reg_api=>vocab_get_detail(
+          EXPORTING
+            iv_vocab_id      = iv_vocab_id
+            iv_vocab_version = iv_version
+          IMPORTING
+            es_vocab_detail  = ls_bep_vocab_detail
+        ).
+
+        MOVE-CORRESPONDING ls_bep_vocab_detail TO es_vocab_detail.
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_med_exception /iwbep/cx_mgw_tech_exception INTO lx_exception .
+
+        lv_operation_error = 1.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_vocab_detail
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD get_vocan_model.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'GET_VOCAN_MODEL'.
+
+    DATA: lv_time_start      TYPE i,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error TYPE abap_bool,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: lo_metadata_provider TYPE REF TO /iwbep/if_mgw_med_provider,
+          lo_model             TYPE REF TO /iwbep/cl_mgw_odata_model,
+          lo_framework_model   TYPE REF TO /iwbep/if_mgw_odata_fw_model.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name        = co_method_name
+            iv_do_create_runtime  = abap_false
+            iv_do_check_authority = abap_false
+            it_request_header     = it_request_header
+          IMPORTING
+            ev_time_start         = lv_time_start
+          CHANGING
+            cs_request_context    = ls_request_context
+        ).
+
+        " Get Vocan Model via Metadata Provider
+        lo_metadata_provider = /iwbep/cl_mgw_med_provider=>get_med_provider( ).
+        lo_metadata_provider->initialize( is_default_system_alias_info = ls_request_context-system_alias_info ).
+
+        lo_metadata_provider->get_vocan_model(
+          EXPORTING
+            iv_technical_name = iv_vocab_id
+            iv_version        = iv_version
+            iv_cache_timestamp = ls_request_context-cache_timestamp
+          IMPORTING
+            eo_model          = lo_framework_model
+            ev_model_outdated = es_vocan_metadata-outdated
+         ).
+
+        lo_model ?= lo_framework_model.
+
+        es_vocan_metadata-model = lo_model->ms_vocan_model.
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_med_exception /iwbep/cx_mgw_tech_exception INTO lx_exception .
+
+        lv_operation_error = 1.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_vocan_model
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD get_vocan_text.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'GET_VOCAN_TEXT'.
+
+    DATA: lv_time_start        TYPE i,
+          ls_request_context   TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error   TYPE abap_bool,
+          lx_exception         TYPE REF TO /iwbep/cx_mgw_base_exception,
+          lv_model_name        TYPE /iwbep/med_mdl_technical_name,
+          lv_model_version     TYPE /iwbep/med_mdl_version,
+          lo_model             TYPE REF TO /iwbep/cl_mgw_odata_model,
+          lo_metadata_provider TYPE REF TO /iwbep/if_mgw_med_provider,
+          lo_med_provider      TYPE REF TO /iwbep/if_mgw_med_dba_access,
+          lo_vocan_provider    TYPE REF TO /iwbep/if_mgw_med_load,
+          lo_framework_model   TYPE REF TO /iwbep/if_mgw_odata_fw_model,
+          lt_vocan_text_keys   TYPE /iwbep/if_mgw_med_odata_types=>ty_t_med_vocan_texts,
+          ls_object_model      TYPE /iwbep/if_mgw_med_dba_access=>ty_s_object_model,
+          lx_create_obj_error  TYPE REF TO cx_sy_create_object_error,
+          lv_technical_name    TYPE /iwbep/med_mdl_technical_name,
+          lv_version           TYPE /iwbep/med_mdl_version,
+          ls_service_info      TYPE /iwbep/if_mgw_med_provider=>ty_s_service_info.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        "Annotation File
+        IF iv_vocan_technical_name IS NOT INITIAL AND
+           iv_vocan_version IS NOT INITIAL.
+          init_request(
+            EXPORTING
+              iv_method_name        = co_method_name
+              iv_do_create_runtime  = abap_false
+              iv_do_check_authority = abap_false
+              it_request_header     = it_request_header
+            IMPORTING
+              ev_time_start         = lv_time_start
+            CHANGING
+              cs_request_context    = ls_request_context ).
+          "Annotations within a service
+        ELSE.
+          init_request(
+            EXPORTING
+              iv_method_name       = co_method_name
+              iv_do_create_runtime = abap_false
+              it_request_header    = it_request_header
+            IMPORTING
+              ev_time_start        = lv_time_start
+            CHANGING
+              cs_request_context   = ls_request_context ).
+        ENDIF.
+
+        lo_metadata_provider = /iwbep/cl_mgw_med_provider=>get_med_provider( ).
+        lo_metadata_provider->initialize( is_default_system_alias_info = ls_request_context-system_alias_info ).
+        lo_med_provider = /iwbep/cl_mgw_med_dba_factory=>get_med_provider( ).
+
+        "Annotation File
+        IF iv_vocan_technical_name IS NOT INITIAL AND
+           iv_vocan_version IS NOT INITIAL.
+          lo_metadata_provider->get_vocan_model(
+                 EXPORTING
+                   iv_technical_name = iv_vocan_technical_name
+                   iv_version        = iv_vocan_version
+                 IMPORTING
+                   eo_model          = lo_framework_model ).
+
+          "Get the text keys for vocabulary texts
+          lo_model ?= lo_framework_model.
+          lt_vocan_text_keys = lo_model->ms_vocan_model-vocan_text_keys.
+
+          lo_med_provider->get_anno_provider_info(
+             EXPORTING
+               iv_technical_name = iv_vocan_technical_name
+               iv_version        = iv_vocan_version
+             IMPORTING
+               ev_provider_class  = ls_object_model-class_name ).
+
+          "Annotations within a service
+        ELSE.
+          " Get Model Name and Version
+          ls_service_info = lo_metadata_provider->get_service_info(
+                                       iv_external_name          = ls_request_context-service_doc_name
+                                       iv_namespace              = ls_request_context-namespace
+                                       iv_version                = ls_request_context-version
+                                       iv_do_check_for_extension = abap_true ).
+
+          lo_metadata_provider->get_service_model_key(
+                  EXPORTING
+                    iv_internal_service_name    = ls_service_info-technical_name
+                    iv_internal_service_version = ls_service_info-version
+                  IMPORTING
+                    ev_technical_model_name     = lv_model_name
+                    ev_technical_model_version  = lv_model_version ).
+
+          " Load Metadata
+          lo_model ?= lo_metadata_provider->get_service_model(
+                        iv_svc_ext_name           = ls_request_context-service_doc_name
+                        iv_svc_namespace          = ls_request_context-namespace
+                        iv_svc_version            = ls_request_context-version
+                        iv_mdl_tech_name          = lv_model_name
+                        iv_mdl_version            = lv_model_version
+                        iv_do_check_for_extension = abap_true ).
+
+          "Get the text keys for vocabulary texts
+          lt_vocan_text_keys = lo_model->ms_vocan_model-vocan_text_keys.
+
+          "read from database using model id to get the implementation class
+          ls_object_model = lo_med_provider->get_object_model( iv_technical_name = lv_model_name
+                                                               iv_version        = lv_model_version
+                                                               iv_language       = sy-langu ).
+        ENDIF.
+
+        IF ls_object_model IS INITIAL.
+          RAISE EXCEPTION TYPE /iwbep/cx_mgw_med_exception
+            EXPORTING
+              textid               = /iwbep/cx_mgw_med_exception=>object_model_not_found
+              object_model_name    = lv_technical_name
+              object_model_version = lv_version.
+        ELSE.
+          IF ls_object_model-class_name IS INITIAL.
+            RAISE EXCEPTION TYPE /iwbep/cx_mgw_med_exception
+              EXPORTING
+                textid               = /iwbep/cx_mgw_med_exception=>model_provider_not_found
+                object_model_name    = lv_technical_name
+                object_model_version = lv_version.
+          ELSE.
+            TRY.
+                CREATE OBJECT lo_vocan_provider TYPE (ls_object_model-class_name).
+                lo_vocan_provider->initialize(
+                    EXPORTING
+                      iv_vocan_version             = iv_vocan_version             " Vocabulary Annotation File Version
+                      iv_vocan_technical_name      = iv_vocan_technical_name      " Technical Vocabulary Annotation File Name
+  ).
+
+              CATCH cx_sy_create_object_error INTO lx_create_obj_error.
+                RAISE EXCEPTION TYPE /iwbep/cx_mgw_med_exception
+                  EXPORTING
+                    previous = lx_create_obj_error.
+            ENDTRY.
+          ENDIF.
+        ENDIF.
+
+        "Get the actual (translatable) vocabulary texts
+        lo_vocan_provider->get_vocan_texts( EXPORTING
+                                             iv_language = iv_language
+                                             it_vocan_text_keys = lt_vocan_text_keys
+                                            CHANGING
+                                             ct_vocan_texts_obj = et_obj_vocan_text ).
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_med_exception /iwbep/cx_mgw_tech_exception INTO lx_exception .
+        lv_operation_error = 1.
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = ls_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_get_vocan_text
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace ).
+
+  ENDMETHOD.
+
+
+  METHOD handle_changeset_error.
+
+    DATA: lv_text_reject    TYPE string,
+          lv_text_rollback  TYPE string,
+          ls_batch_request  TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_batch_request,
+          ls_batch_response TYPE ty_s_batch_response.
+
+
+* Create rollback and reject response if not already
+    IF ms_msg_container_reject IS INITIAL.
+      MESSAGE i049(/iwbep/cm_mgw_rt) INTO lv_text_rollback.
+      ms_msg_container_reject = create_message_container( lv_text_rollback ).
+
+      MESSAGE i050(/iwbep/cm_mgw_rt) INTO lv_text_reject.
+      ms_msg_container_rollback = create_message_container( lv_text_reject ).
+    ENDIF.
+
+    LOOP AT it_changeset INTO ls_batch_request.
+      ls_batch_response-packet_no     = ls_batch_request-packet_no.
+      ls_batch_response-operation_no  = ls_batch_request-operation_no.
+      ls_batch_response-changeset     = ls_batch_request-changeset.
+      ls_batch_response-function_code = ls_batch_request-function_code.
+
+      IF ls_batch_request-operation_no < iv_changeset_op_num.
+        ls_batch_response-es_message_container = ms_msg_container_rollback.
+        ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-rollback.
+
+      ELSEIF ls_batch_request-operation_no = iv_changeset_op_num.
+        ls_batch_response-es_message_container = is_message_container.
+        ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-error.
+
+      ELSE.
+        ls_batch_response-es_message_container = ms_msg_container_reject.
+        ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-reject.
+      ENDIF.
+
+      APPEND ls_batch_response TO ct_batch_response.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD idp_init.
+
+    DATA: lv_time_start       TYPE i,
+          lv_time_stop        TYPE i,
+          lv_is_idp_requested TYPE abap_bool.
+
+
+    " Create IDP Utilitiy Object
+    CREATE OBJECT eo_idp_util
+      EXPORTING
+        it_http_header_parameters = it_http_header.
+
+    lv_is_idp_requested = eo_idp_util->is_idp_requested( ).
+
+    IF ( lv_is_idp_requested = abap_true ).
+      IF ( eo_idp_util->has_been_processed( ) = abap_true ).
+
+        GET RUN TIME FIELD lv_time_start.
+
+        eo_idp_util->retrieve_result(
+          IMPORTING
+            ev_entity_data = ev_idp_data
+         ).
+
+        GET RUN TIME FIELD lv_time_stop.
+
+        " Add Performance Trace Data for Idempotent
+        mo_sutil_runtime->hub_perf_add_idempotent(
+          EXPORTING
+            iv_request_time_start = iv_time_start
+            iv_idp_time_start     = lv_time_start
+            iv_idp_time_stop      = lv_time_stop
+            iv_idp_source_class   = '/IWBEP/CL_IDP_UTIL'
+            iv_idp_source_method  = 'RETRIEVE_RESULT'
+            iv_source_class       = co_class_name
+            iv_source_method      = iv_source_method
+            iv_agent              = co_agent
+          CHANGING
+            cv_entity_data        = ev_idp_data
+        ).
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD idp_store.
+
+    DATA: lv_serialized_data TYPE xstring,
+          lv_type_kind       TYPE abap_typekind,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_busi_exception.
+
+
+    IF io_idp_util IS NOT BOUND OR io_idp_util->is_idp_requested( ) <> abap_true.
+      RETURN.
+    ENDIF.
+
+    /iwbep/cl_idp_util=>adjust_http_header_supported( CHANGING ct_http_parameters = ct_custom_header ).
+
+    lv_type_kind = cl_abap_datadescr=>get_data_type_kind( is_data ).
+
+    IF lv_type_kind = cl_abap_datadescr=>typekind_table.
+      CALL TRANSFORMATION id
+        SOURCE     backend_version = ms_backend_version
+                   entityset       = is_data
+                   perf_data       = it_performance_trace
+                   inline_info     = it_inline_info
+                   headers         = ct_custom_header
+                   message_header  = cs_message_container-message_header
+                   message_details = cs_message_container-message_details
+        OPTIONS    value_handling  = 'move'
+        RESULT XML lv_serialized_data.
+    ELSE.
+      CALL TRANSFORMATION id
+        SOURCE     backend_version = ms_backend_version
+                   entity          = is_data
+                   perf_data       = it_performance_trace
+                   inline_info     = it_inline_info
+                   headers         = ct_custom_header
+                   message_header  = cs_message_container-message_header
+                   message_details = cs_message_container-message_details
+        OPTIONS    value_handling  = 'move'
+        RESULT XML lv_serialized_data.
+    ENDIF.
+
+* Idempotent behavior support
+    TRY.
+        io_idp_util->store_result(
+          EXPORTING
+            iv_entity_data     = lv_serialized_data
+         ).
+        IF mv_changeset_processing <> abap_true.  " Otherwise the COMMIT is done at the end of the changeset
+          COMMIT WORK.  "Needed for the IDP framework
+        ENDIF.
+
+      CATCH /iwbep/cx_mgw_busi_exception INTO lx_exception.
+
+        " No Changeset: Rollback DB update in provider
+        IF mv_changeset_processing <> abap_true.  " Otherwise the ROLLBACK is done at the end of the changeset
+          ROLLBACK WORK.                               "#EC CI_ROLLBACK
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = is_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = cs_message_container
+            ct_http_header     = ct_custom_header
+        ).
+
+        RETURN.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD init_request.
+
+    DATA: lv_correlation_id          TYPE sysuuid_c,
+          lv_service_is_ral_relevant TYPE abap_bool,
+          ls_request_header          TYPE ihttpnvp,
+          lv_soft_state_first_req    TYPE abap_bool,
+          ls_soft_state_info         TYPE /iwbep/if_mgw_core_types=>ty_s_soft_state_info,
+          ls_hub_version             TYPE /iwbep/cl_mgw_util_versions=>ty_s_mgw_hub_version.
+
+
+    " Performance Trace for Shortcut
+    IF mv_is_shortcut = abap_true.
+      mo_sutil_runtime->hub_perf_init( ).
+      ev_time_start = mo_sutil_runtime->performance_start(
+                        iv_class_name  = co_class_name
+                        iv_method_name = iv_method_name
+                      ).
+      IF ev_time_start IS INITIAL.
+        GET RUN TIME FIELD ev_time_start.
+      ENDIF.
+    ENDIF.
+
+    " Set Service Attributes for Error Log
+    set_service_attributes(
+      iv_method_name     = iv_method_name
+      is_request_context = cs_request_context
+    ).
+
+    " Authority Check for Service
+    IF iv_do_check_authority = abap_true.
+      /iwbep/cl_mgw_runt_remote_util=>authority_check(
+        iv_service_document_name = cs_request_context-service_doc_name
+        iv_service_namespace     = cs_request_context-namespace
+        iv_service_version       = cs_request_context-version
+      ).
+    ENDIF.
+
+    " Soft State Flags
+    READ TABLE it_request_header INTO ls_request_header
+      WITH TABLE KEY name = /iwbep/cl_mgw_remote_handler=>co_header_soft_state.
+    IF sy-subrc <> 0.
+      mv_soft_state_active = abap_false.
+    ELSE.
+      ls_soft_state_info = ls_request_header-value.
+      IF ls_soft_state_info-mode IS INITIAL.  "Old Gateway System
+        ls_soft_state_info-mode = /iwbep/if_mgw_core_types=>gcs_soft_state_mode-immediate.
+      ENDIF.
+      IF ls_soft_state_info-before = abap_true OR
+         ls_soft_state_info-mode   = /iwbep/if_mgw_core_types=>gcs_soft_state_mode-immediate.
+        IF mv_soft_state_active = abap_false.
+          lv_soft_state_first_req = abap_true.
+        ELSE.
+          lv_soft_state_first_req = abap_false.
+        ENDIF.
+        mv_soft_state_active = abap_true.
+      ELSE.
+        mv_soft_state_active = abap_false.
+      ENDIF.
+    ENDIF.
+
+    " Get and Set HUB Version for Non Batch Request
+    IF mv_batch_processing <> abap_true.
+      READ TABLE it_request_header INTO ls_request_header
+        WITH TABLE KEY name = /iwbep/cl_mgw_remote_handler=>co_header_gw_version.
+      IF sy-subrc = 0.
+        ls_hub_version = ls_request_header-value.
+        /iwbep/cl_mgw_util_versions=>set_hub_version( ls_hub_version ).
+      ELSE.
+        READ TABLE it_request_header INTO ls_request_header
+          WITH TABLE KEY name = /iwbep/cl_mgw_remote_handler=>co_header_bep_version.  " HUB SP08
+        IF sy-subrc = 0.
+          ls_hub_version = ls_request_header-value.
+          /iwbep/cl_mgw_util_versions=>set_hub_version( ls_hub_version ).
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " Create Context and Runtime if required
+    IF iv_do_create_runtime = abap_true.
+      /iwbep/cl_mgw_runtime_factory=>create_runtime(
+        EXPORTING
+          is_request_context      = cs_request_context
+          iv_soft_state_enabled   = ls_soft_state_info-enabled
+          iv_soft_state_mode      = ls_soft_state_info-mode
+          iv_soft_state_before    = ls_soft_state_info-before
+          iv_soft_state_first_req = lv_soft_state_first_req
+        IMPORTING
+          eo_mgw_context          = mo_mgw_context
+          eo_mgw_runtime          = mo_mgw_runtime ).
+
+      "has been filled during runtime creation through service info evaluation
+      mo_mgw_context->get_parameter(
+        EXPORTING
+          iv_name  = /iwbep/if_mgw_context=>gc_param_isn
+        IMPORTING
+         ev_value =  cs_request_context-technical_request-service_name ).
+      mo_mgw_context->get_parameter(
+        EXPORTING
+          iv_name  = /iwbep/if_mgw_context=>gc_param_isv
+        IMPORTING
+         ev_value =  cs_request_context-technical_request-service_version ).
+
+      mo_ral_rt_facade = /iwbep/cl_mgw_runtime_factory=>get_ral_rt_facade( ).
+    ENDIF.
+
+    " Prepare Read Access Logging
+    CLEAR cs_request_context-technical_request-is_ral_relevant.
+    IF mo_ral_rt_facade IS BOUND.
+      IF iv_method_name	EQ 'GET_ENTITY_TYPE'    OR
+         iv_method_name	EQ 'GET_ENTITY_SET'     OR
+         iv_method_name EQ 'CREATE_ENTITY_TYPE' OR
+         iv_method_name EQ 'EXECUTE_OPERATION'.
+
+        IF iv_method_name	EQ 'GET_ENTITY_TYPE' OR
+           iv_method_name	EQ 'CREATE_ENTITY_TYPE'.
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~get_expand_root
+            EXPORTING
+              iv_cardinality     = /iwbep/if_mgw_med_odata_types=>gcs_cardinality-cardinality_1_1
+            CHANGING
+              cs_request_details = cs_request_context.
+        ELSEIF iv_method_name	EQ 'GET_ENTITY_SET'.
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~get_expand_root
+            EXPORTING
+              iv_cardinality     = /iwbep/if_mgw_med_odata_types=>gcs_cardinality-cardinality_0_n
+            CHANGING
+              cs_request_details = cs_request_context.
+        ENDIF.
+
+        mo_ral_rt_facade->prepare_read_access_logging(
+          EXPORTING
+            is_request_context = cs_request_context
+          IMPORTING
+            ev_service_is_ral_relevant = lv_service_is_ral_relevant
+            ev_request_is_ral_relevant = cs_request_context-technical_request-is_ral_relevant ).
+        IF cs_request_context-technical_request-is_ral_relevant EQ abap_true AND
+           (   iv_method_name	EQ 'GET_ENTITY_TYPE' OR
+               iv_method_name	EQ 'GET_ENTITY_SET'  OR
+             ( iv_method_name EQ 'EXECUTE_OPERATION' AND cs_request_context-http_method EQ 'GET' ) ) AND
+           mv_batch_processing EQ abap_false.
+          "batch parallelization does not set mv_batch_processing ->
+          "evaluate specific request header but individual read operations in $batch
+          "may use co-deployement proxy
+          IF cs_request_context-technical_request-co_deployment_info-is_batch EQ abap_false.
+            READ TABLE it_request_header TRANSPORTING NO FIELDS
+              WITH KEY name = /iwbep/cl_mgw_remote_handler=>co_header_batch_para.
+            IF sy-subrc NE 0.
+              "non-batch read requests are not allowed
+              RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+                EXPORTING
+                  textid           = /iwbep/cx_mgw_busi_exception=>request_requires_batch
+                  http_status_code = /iwbep/cx_mgw_busi_exception=>gcs_http_status_codes-forbidden
+                  sap_note_id      = 2182094.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+        "context (correlation, IP address) needs to be set even if concrete
+        "request is not RAL-relevant (RAL confirmation is called with
+        "channel status NOT_RELEVANT)
+        IF lv_service_is_ral_relevant EQ abap_true.
+          mo_sutil_runtime->get_passport_attributes(
+            IMPORTING
+              ev_transaction_id = lv_correlation_id ).
+          CLEAR ls_request_header.
+          READ TABLE cs_request_context-technical_request-request_header INTO ls_request_header
+            WITH KEY name = '~remote_addr'.
+          mo_ral_rt_facade->set_context(
+            EXPORTING
+              iv_correlation_id = lv_correlation_id
+              iv_ip_address     = ls_request_header-value ).
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+ METHOD process_batch.
+
+   CONSTANTS:
+     co_method_name   TYPE seomtdname VALUE 'PROCESS_BATCH'.
+
+   DATA:
+     lv_time_start             TYPE i,
+     lv_lines                  TYPE i,
+     lv_app_sum                TYPE i,
+     lv_app_time               TYPE i,
+     lv_wait_total             TYPE i,
+     lv_non_gw_time            TYPE i,
+     lv_appfw_time             TYPE i,
+     lv_appdb_time             TYPE i,
+     lv_appext_time            TYPE i,
+     lv_batch_task_max         TYPE i,
+     lv_batch_parallel         TYPE xsdboolean,
+     lv_last_packet_type       TYPE char1,
+     lv_last_packet_no         TYPE string,
+     ls_batch_packet           TYPE ty_s_batch_packet,
+     lt_batch_packet           TYPE ty_t_batch_packet,
+     ls_batch_request          TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_batch_request,
+     ls_batch_perf_data        TYPE /iwbep/sutil_hub_perf_data,
+     lt_batch_perf_data        TYPE /iwbep/sutil_hub_perf_data_t,
+     ls_request_header         TYPE ihttpnvp,
+     ls_hub_version            TYPE /iwbep/cl_mgw_util_versions=>ty_s_mgw_hub_version,
+     lv_max_operations         TYPE i,
+     lt_operation_info         TYPE /iwbep/t_mgw_operation_info,
+     ls_operation_info         TYPE /iwbep/s_mgw_operation_info,
+     lv_use_deferred_resp_crea TYPE abap_bool,
+     ls_batch_response_loc     TYPE /iwbep/cl_mgw_local_handler=>ty_s_batch_response,
+     ls_batch_response         TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_batch_response,
+     lv_pack_no_string         TYPE string,
+     lv_oper_no_string         TYPE string,
+     lv_last_operation_id      TYPE string,
+     lv_batch_error            TYPE abap_bool.
+
+   FIELD-SYMBOLS:
+     <ls_batch_request>   TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_batch_request,
+     <ls_batch_packet>    TYPE ty_s_batch_packet,
+     <ls_batch_perf_data> TYPE ty_s_batch_deferred_perf.
+
+   " Performance Trace for Shortcut
+   IF mv_is_shortcut = abap_true.
+     mo_sutil_runtime->hub_perf_init( ).
+     READ TABLE it_request_header INTO ls_request_header
+       WITH TABLE KEY name = /iwbep/cl_mgw_remote_handler=>co_header_gw_version.
+     IF sy-subrc = 0.
+       ls_hub_version = ls_request_header-value.
+       /iwbep/cl_mgw_util_versions=>set_hub_version( ls_hub_version ).
+     ENDIF.
+     lv_time_start = mo_sutil_runtime->performance_start(
+                       iv_class_name  = co_class_name
+                       iv_method_name = co_method_name ).
+     IF lv_time_start IS INITIAL.
+       GET RUN TIME FIELD lv_time_start.
+     ENDIF.
+   ENDIF.
+
+   " Set Batch URI
+   mo_sutil_runtime->set_service_attributes(
+     iv_request_uri = iv_batch_uri
+     iv_http_method = 'POST' ).
+
+   READ TABLE it_request_header INTO ls_request_header
+     WITH TABLE KEY name = /iwbep/cl_mgw_remote_handler=>co_header_batch_def_resp_crea.
+   IF sy-subrc EQ 0 AND ls_request_header-value EQ abap_true.
+     lv_use_deferred_resp_crea = abap_true.
+   ENDIF.
+
+   " BEGIN Batch
+   batch_begin( ).
+
+   " Create Batch Packets
+   lv_max_operations = lines( it_batch_request ).
+   LOOP AT it_batch_request INTO ls_batch_request.
+     IF sy-tabix EQ 1.
+       mo_sutil_runtime->set_service_attributes(
+        iv_service_name    = ls_batch_request-request_context-service_doc_name
+        iv_service_version = ls_batch_request-request_context-version ).
+       ls_batch_request-request_context-technical_request-batch_info-first_operation = abap_true.
+     ENDIF.
+     " Operation can be first and last at the same time
+     IF sy-tabix EQ lv_max_operations.
+       ls_batch_request-request_context-technical_request-batch_info-last_operation = abap_true.
+     ENDIF.
+
+
+     ls_batch_request-request_context-technical_request-batch_info-operation_id = ls_batch_request-packet_no && '-' && ls_batch_request-operation_no.
+     IF ls_batch_request-request_context-technical_request-batch_info-last_operation EQ abap_true.
+       lv_last_operation_id = ls_batch_request-request_context-technical_request-batch_info-operation_id.
+     ENDIF.
+
+
+     IF lv_use_deferred_resp_crea EQ abap_true.
+       CLEAR ls_operation_info.
+       determine_operation_type(
+         EXPORTING
+           is_batch_request  = ls_batch_request
+         CHANGING
+           cs_operation_info = ls_operation_info ).
+       ls_operation_info-entity_set     = ls_batch_request-entity_set.
+       ls_operation_info-entity_type    = ls_batch_request-entity_type.
+       ls_operation_info-action_name    = ls_batch_request-action_name.
+       INSERT ls_operation_info INTO TABLE lt_operation_info.
+     ENDIF.
+
+     " Create batch packets for queries and changesets
+     IF ls_batch_request-changeset IS INITIAL.
+
+       " One packet for consecutive queries (all queries until changeset)
+       IF lv_last_packet_type = /iwbep/cl_mgw_remote_handler=>mcs_packet_type-query.
+         " Same packet
+         lv_lines = lines( lt_batch_packet ).
+         READ TABLE lt_batch_packet ASSIGNING <ls_batch_packet> INDEX lv_lines.
+         APPEND ls_batch_request TO <ls_batch_packet>-batch_operations.
+       ELSE.
+         " New packet
+         CLEAR ls_batch_packet.
+         ls_batch_packet-packet_no   = ls_batch_request-packet_no.
+         ls_batch_packet-packet_type = /iwbep/cl_mgw_remote_handler=>mcs_packet_type-query.
+         APPEND ls_batch_request TO ls_batch_packet-batch_operations.
+         INSERT ls_batch_packet INTO TABLE lt_batch_packet.
+       ENDIF.
+
+       " One packet for each changeset
+     ELSE.
+       IF lv_last_packet_type = /iwbep/cl_mgw_remote_handler=>mcs_packet_type-changeset AND
+          ls_batch_request-packet_no = lv_last_packet_no.
+         " Same changeset packet
+         lv_lines = lines( lt_batch_packet ).
+         READ TABLE lt_batch_packet ASSIGNING <ls_batch_packet> INDEX lv_lines.
+         APPEND ls_batch_request TO <ls_batch_packet>-batch_operations.
+       ELSE.
+         " New changeset packet
+         CLEAR ls_batch_packet.
+         ls_batch_packet-packet_no   = ls_batch_request-packet_no.
+         ls_batch_packet-packet_type = /iwbep/cl_mgw_remote_handler=>mcs_packet_type-changeset.
+         APPEND ls_batch_request TO ls_batch_packet-batch_operations.
+         INSERT ls_batch_packet INTO TABLE lt_batch_packet.
+       ENDIF.
+     ENDIF.
+     lv_last_packet_no   = ls_batch_request-packet_no.
+     lv_last_packet_type = ls_batch_packet-packet_type.
+   ENDLOOP.
+
+
+* Process Batch Packet
+   LOOP AT lt_batch_packet INTO ls_batch_packet.
+     IF ls_batch_packet-packet_type = /iwbep/cl_mgw_remote_handler=>mcs_packet_type-query.
+
+       " Direct call for single batch query
+       IF lines( ls_batch_packet-batch_operations ) = 1.
+         READ TABLE ls_batch_packet-batch_operations INTO ls_batch_request INDEX 1.
+         process_single_batch_query(
+           EXPORTING
+             is_batch_request     = ls_batch_request
+             it_operation_info    = lt_operation_info
+           IMPORTING
+             ev_batch_error       = lv_batch_error
+           CHANGING
+             ct_batch_response    = et_batch_response
+             ct_performance_trace = et_performance_trace ).
+
+         IF lv_batch_error EQ abap_true.
+           EXIT. "from batch package loop
+         ENDIF.
+
+         " Parallelize batch queries based on configuration and no soft state
+       ELSE.
+*       Check Default Global Configuration
+         mo_sutil_runtime->get_batch_config(
+           IMPORTING
+             ev_batch_parallel = lv_batch_parallel
+             ev_batch_task_max = lv_batch_task_max ).
+         IF lv_batch_parallel = abap_true AND mv_soft_state_active = abap_false AND
+            "no parallelization if data provider wants to use deferred batch response creation
+            lv_use_deferred_resp_crea EQ abap_false.
+           GET RUN TIME FIELD ls_batch_perf_data-time_start.
+           process_multiple_batch_query(
+             EXPORTING
+               iv_batch_task_max    = lv_batch_task_max
+               it_batch_request     = ls_batch_packet-batch_operations
+               is_hub_version       = ls_hub_version
+             IMPORTING
+               ev_app_time          = lv_app_time
+               ev_app_sum           = lv_app_sum
+               ev_wait_total        = lv_wait_total
+               ev_non_gw_time       = lv_non_gw_time
+               ev_appfw_time        = lv_appfw_time
+               ev_appdb_time        = lv_appdb_time
+               ev_appext_time       = lv_appext_time
+             CHANGING
+               ct_batch_response    = et_batch_response
+               ct_performance_trace = lt_batch_perf_data ).
+
+           mo_sutil_runtime->hub_perf_add_query_times(
+             iv_app_time    = lv_app_time
+             iv_app_sum     = lv_app_sum
+             iv_wait_total  = lv_wait_total
+             iv_non_gw_time = lv_non_gw_time
+             iv_appfw_time   = lv_appfw_time
+             iv_appdb_time     = lv_appdb_time
+             iv_appext_time   = lv_appext_time ).
+
+           GET RUN TIME FIELD ls_batch_perf_data-time_stop.
+           ls_batch_perf_data-source_class  = /iwbep/cl_mgw_remote_handler=>co_batch_multiple_query.
+           ls_batch_perf_data-agent         = co_agent.
+           ls_batch_perf_data-ncalls        = 1.
+           ls_batch_perf_data-levelno       = 3.
+           ls_batch_perf_data-packetno      = ls_batch_packet-packet_no.
+           INSERT ls_batch_perf_data INTO TABLE lt_batch_perf_data.
+         ELSE.
+           LOOP AT ls_batch_packet-batch_operations INTO ls_batch_request.
+             process_single_batch_query(
+               EXPORTING
+                 is_batch_request     = ls_batch_request
+                 it_operation_info    = lt_operation_info
+               IMPORTING
+                 ev_batch_error       = lv_batch_error
+               CHANGING
+                 ct_batch_response    = et_batch_response
+                 ct_performance_trace = lt_batch_perf_data ).
+             IF lv_batch_error EQ abap_true.
+               EXIT. "from read operation loop in package
+             ENDIF.
+           ENDLOOP.
+           IF lv_batch_error EQ abap_true.
+             EXIT. "from batch package loop
+           ENDIF.
+         ENDIF.
+       ENDIF.
+     ELSE.
+       process_changeset(
+         EXPORTING
+           it_changeset         = ls_batch_packet-batch_operations
+         CHANGING
+           ct_batch_response    = et_batch_response
+           ct_performance_trace = lt_batch_perf_data ).
+     ENDIF.
+   ENDLOOP.
+
+   IF lv_batch_error EQ abap_false.
+
+     " construct batch response from deferred response data (mt_batch_response is filled
+   " from BATCH_END method)
+   IF mv_batch_deferred_resp_crea EQ abap_true.
+
+     LOOP AT mt_batch_deferred_response INTO ls_batch_response.
+       CLEAR ls_batch_response_loc.
+
+       " identification
+       SPLIT ls_batch_response-operation_id AT '-' INTO lv_pack_no_string lv_oper_no_string.
+       ls_batch_response_loc-packet_no    = lv_pack_no_string.
+       ls_batch_response_loc-operation_no = lv_oper_no_string.
+
+       READ TABLE et_batch_response TRANSPORTING NO FIELDS
+         WITH KEY packet_no    = ls_batch_response_loc-packet_no
+                  operation_no = ls_batch_response_loc-operation_no. "#EC CI_STDSEQ
+       IF sy-subrc EQ 0.
+         " response is already available, for example, due to error in
+         " pre-processing
+         CONTINUE.
+       ENDIF.
+
+       READ TABLE it_batch_request ASSIGNING <ls_batch_request>
+         WITH KEY packet_no    = ls_batch_response_loc-packet_no
+                  operation_no = ls_batch_response_loc-operation_no. "#EC CI_STDSEQ
+       ASSERT sy-subrc EQ 0. " must not happen -> no exception possible
+
+         IF ls_batch_response-exception IS INITIAL AND
+            <ls_batch_request>-function_code EQ /iwbep/cl_mgw_remote_handler=>co_fcode_get_entity.
+           TRY.
+               check_and_raise_et_no_content(
+                 EXPORTING
+                   ir_entity                    = ls_batch_response-response_data
+                   is_request_context           = <ls_batch_request>-request_context
+                 CHANGING
+                   cs_response_context          = ls_batch_response-entity_response_context ).
+             CATCH /iwbep/cx_mgw_busi_exception INTO ls_batch_response-exception ##no_handler.
+           ENDTRY.
+         ENDIF.
+
+       " needs to be called first since RAL may issue an exception that will
+       " be added to the response -> changing
+       ral_log_deferred_response( CHANGING cs_batch_response = ls_batch_response ).
+
+         ls_batch_response_loc-function_code = <ls_batch_request>-function_code.
+       IF ls_batch_response-exception IS INITIAL.
+
+         ls_batch_response_loc-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-ok.
+         " result
+         ls_batch_response_loc-er_data                    = ls_batch_response-response_data.
+         ls_batch_response_loc-er_deleted_data            = ls_batch_response-response_data_deleted.
+         ls_batch_response_loc-es_response_context        = ls_batch_response-entity_set_response_context.
+         ls_batch_response_loc-es_response_context_entity = ls_batch_response-entity_response_context.
+         ls_batch_response_loc-ev_serialized_data         = ls_batch_response-response_data_serialized.
+         ls_batch_response_loc-et_custom_header           = ls_batch_response-headers.
+         ls_batch_response_loc-et_expand_skiptoken        = ls_batch_response-expand_skiptokens.
+         ls_batch_response_loc-es_message_container       = ls_batch_response-msg_container.
+
+       ELSE.
+
+         ls_batch_response_loc-operation_state      = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-error.
+         ls_batch_response_loc-es_message_container = ls_batch_response-msg_container.
+         /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = ls_batch_response-exception
+            is_request_context = <ls_batch_request>-request_context
+            " specific context is not known anymore
+          CHANGING
+            cs_msg_canister    = ls_batch_response_loc-es_message_container
+            ct_http_header     = ls_batch_response_loc-et_custom_header ).
+
+       ENDIF.
+       READ TABLE mt_batch_deferred_perf ASSIGNING <ls_batch_perf_data>
+         WITH TABLE KEY operation_id = ls_batch_response-operation_id.
+       IF sy-subrc EQ 0.
+         ls_batch_response_loc-et_performance_trace = <ls_batch_perf_data>-performance_data.
+       ENDIF.
+
+       INSERT ls_batch_response_loc INTO TABLE et_batch_response.
+
+     ENDLOOP.
+
+     ENDIF.
+
+   ENDIF.
+
+   " Batch Performance Data
+   et_performance_trace = get_batch_performance_data(
+                            iv_time_start  = lv_time_start
+                            iv_method_name = co_method_name ).
+   INSERT LINES OF lt_batch_perf_data INTO TABLE et_performance_trace.
+
+
+   " END Batch
+   batch_end( ).
+
+   mo_sutil_runtime->performance_stop( lv_time_start ).
+
+   " Finalize Request
+   finalize_request(
+     EXPORTING
+       iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_process_batch
+       iv_operation_error   = lv_batch_error
+     CHANGING
+       ct_response_header   = et_response_header
+       ct_performance_trace = et_performance_trace ).
+
+   " Finalize Traces after each batch request
+   mo_sutil_runtime->finalize_traces( ).
+
+ ENDMETHOD.
+
+
+  METHOD process_changeset.
+
+    DATA: lv_changeset_op_num     TYPE i,
+          lv_changeset_op_total   TYPE i,
+          lv_operation_error      TYPE xsdboolean,
+          ls_response_header      TYPE ihttpnvp,
+          ls_batch_request        TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_batch_request,
+          ls_batch_response       TYPE ty_s_batch_response,
+          ls_changest_op_info     TYPE /iwbep/s_mgw_operation_info,
+          lt_changest_op_info     TYPE /iwbep/t_mgw_operation_info,
+          ls_performance_trace    TYPE /iwbep/sutil_hub_perf_data,
+          lt_batch_response_org   TYPE ty_t_batch_response,
+          lt_changeset_defer_data TYPE /iwbep/if_mgw_core_srv_runtime=>ty_t_changeset_data.
+
+
+* Initialization
+    GET RUN TIME FIELD ls_performance_trace-time_start.
+
+* Save original response data for error handling
+    lt_batch_response_org = ct_batch_response.
+
+* START a Changeset
+    lv_changeset_op_total = lines( it_changeset ).
+    LOOP AT it_changeset INTO ls_batch_request.
+      ls_changest_op_info-entity_set  = ls_batch_request-entity_set.
+      ls_changest_op_info-entity_type = ls_batch_request-entity_type.
+      ls_changest_op_info-action_name = ls_batch_request-action_name.
+      CALL METHOD determine_operation_type
+        EXPORTING
+          is_batch_request  = ls_batch_request
+        CHANGING
+          cs_operation_info = ls_changest_op_info.
+      INSERT ls_changest_op_info INTO TABLE lt_changest_op_info.
+    ENDLOOP.
+    me->changeset_begin(
+      EXPORTING
+        iv_changeset_op_total = lv_changeset_op_total
+        it_changeset_op_info  = lt_changest_op_info
+    ).
+
+* Process changeset operations
+    LOOP AT it_changeset INTO ls_batch_request.
+      lv_changeset_op_num = sy-tabix.
+      me->changeset_set_op_info( lv_changeset_op_num ).
+
+      CLEAR: ls_batch_response.
+
+      " Prepare Batch Response
+      ls_batch_response-packet_no     = ls_batch_request-packet_no.
+      ls_batch_response-operation_no  = ls_batch_request-operation_no.
+      ls_batch_response-changeset     = ls_batch_request-changeset.
+      ls_batch_response-function_code = ls_batch_request-function_code.
+
+      CASE ls_batch_request-function_code.
+
+        WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_create_entity.
+          me->create_entity_type(
+            EXPORTING
+              is_request_context   = ls_batch_request-request_context
+              it_request_header    = ls_batch_request-request_headers
+              iv_entity_data       = ls_batch_request-entity_data
+              it_changeset_input   = it_changeset
+            IMPORTING
+              ev_serialized_data   = ls_batch_response-ev_serialized_data
+              er_entity            = ls_batch_response-er_data
+              es_message_container = ls_batch_response-es_message_container
+              et_custom_header     = ls_batch_response-et_custom_header
+              et_inline_info       = ls_batch_response-et_inline_info
+              et_response_header   = ls_batch_response-et_response_header
+              et_performance_trace = ls_batch_response-et_performance_trace
+          ).
+
+        WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_update_entity.
+          me->update_entity_type(
+            EXPORTING
+              is_request_context   = ls_batch_request-request_context
+              it_request_header    = ls_batch_request-request_headers
+              iv_entity_data       = ls_batch_request-entity_data
+              it_changeset_input   = it_changeset
+            IMPORTING
+              ev_serialized_data   = ls_batch_response-ev_serialized_data
+              er_entity            = ls_batch_response-er_data
+              es_message_container = ls_batch_response-es_message_container
+              et_custom_header     = ls_batch_response-et_custom_header
+              et_response_header   = ls_batch_response-et_response_header
+              et_performance_trace = ls_batch_response-et_performance_trace
+          ).
+
+        WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_delete_entity.
+          me->delete_entity_type(
+            EXPORTING
+              is_request_context   = ls_batch_request-request_context
+              it_request_header    = ls_batch_request-request_headers
+              it_changeset_input   = it_changeset
+            IMPORTING
+              ev_serialized_data   = ls_batch_response-ev_serialized_data
+              es_message_container = ls_batch_response-es_message_container
+              et_custom_header     = ls_batch_response-et_custom_header
+              et_response_header   = ls_batch_response-et_response_header
+              et_performance_trace = ls_batch_response-et_performance_trace
+          ).
+
+        WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_execute_operation.
+          execute_operation(
+            EXPORTING
+              is_request_context   = ls_batch_request-request_context
+              it_request_header    = ls_batch_request-request_headers
+              it_changeset_input   = it_changeset
+            IMPORTING
+              ev_serialized_data   = ls_batch_response-ev_serialized_data
+              er_data              = ls_batch_response-er_data
+              es_message_container = ls_batch_response-es_message_container
+              et_custom_header     = ls_batch_response-et_custom_header
+              et_inline_info       = ls_batch_response-et_inline_info
+              et_response_header   = ls_batch_response-et_response_header
+              et_performance_trace = ls_batch_response-et_performance_trace
+          ).
+
+        WHEN OTHERS.
+          ASSERT 0 = 1.
+
+      ENDCASE.
+
+      " Error Handling
+      READ TABLE ls_batch_response-et_response_header INTO ls_response_header
+        WITH TABLE KEY name = /iwbep/cl_mgw_remote_handler=>co_header_error.
+      IF sy-subrc = 0 AND ls_response_header-value = abap_true.
+        lv_operation_error = abap_true.
+        ct_batch_response = lt_batch_response_org.
+        handle_changeset_error(
+          EXPORTING
+            iv_changeset_op_num  = lv_changeset_op_num
+            is_message_container = ls_batch_response-es_message_container
+            it_changeset         = it_changeset
+          CHANGING
+            ct_batch_response    = ct_batch_response
+        ).
+        EXIT.
+      ELSE.
+        IF mv_changeset_defer_mode = abap_false.
+          ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-ok.
+          INSERT ls_batch_response INTO TABLE ct_batch_response.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+* Add Changeset Response for deferred processing if no error
+    IF mv_changeset_defer_mode = abap_true AND lv_operation_error = abap_false.
+      me->changeset_get_defer_data(
+        IMPORTING
+          et_changeset_defer_data = lt_changeset_defer_data
+      ).
+      IF lt_changeset_defer_data IS NOT INITIAL.
+        add_changeset_response(
+          EXPORTING
+            it_changeset            = it_changeset
+            it_changeset_defer_data = lt_changeset_defer_data
+          CHANGING
+            ct_batch_response       = ct_batch_response
+        ).
+      ENDIF.
+    ENDIF.
+
+* Changeset END
+    me->changeset_end( lv_operation_error ).
+
+* Add Performance Data
+    GET RUN TIME FIELD ls_performance_trace-time_stop.
+    ls_performance_trace-source_class  = /iwbep/cl_mgw_remote_handler=>co_batch_changeset.
+    ls_performance_trace-agent         = co_agent.
+    ls_performance_trace-ncalls        = 1.
+    ls_performance_trace-levelno       = 3.
+    ls_performance_trace-packetno      = ls_batch_request-packet_no.
+    INSERT ls_performance_trace INTO TABLE ct_performance_trace.
+
+    CLEAR: mv_changeset_defer_mode.
+
+  ENDMETHOD.
+
+
+  METHOD process_multiple_batch_query.
+
+    DATA: lv_xml_offset          TYPE i,
+          lv_op_payload          TYPE xstring,
+          lv_request_data        TYPE xstring,
+          lv_response_data       TYPE xstring,
+          ls_batch_request       TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_batch_request,
+          ls_batch_response      TYPE ty_s_batch_response,
+          ls_batch_info_request  TYPE /iwbep/cl_mgw_remote_handler=>ty_s_batch_info,
+          lt_batch_info_request  TYPE /iwbep/cl_mgw_remote_handler=>ty_t_batch_info,
+          ls_batch_info_response TYPE /iwbep/cl_mgw_remote_handler=>ty_s_batch_info,
+          lt_batch_info_response TYPE /iwbep/cl_mgw_remote_handler=>ty_t_batch_info.
+
+
+    " Prepare for Parallelization
+    LOOP AT it_batch_request INTO ls_batch_request.
+
+      ls_batch_info_request-packet_no     = ls_batch_request-packet_no.
+      ls_batch_info_request-operation_no  = ls_batch_request-operation_no.
+      ls_batch_info_request-changeset     = ls_batch_request-changeset.
+      ls_batch_info_request-function_code = ls_batch_request-function_code.
+      ls_batch_info_request-action_name   = ls_batch_request-action_name.
+      ls_batch_info_request-content_type  = 'xml'.
+
+      CALL TRANSFORMATION id
+        SOURCE     context = ls_batch_request-request_context
+        RESULT XML lv_op_payload.
+
+      ls_batch_info_request-xml_offset   = xstrlen( lv_request_data ).
+      ls_batch_info_request-xml_size     = xstrlen( lv_op_payload ).
+
+      CONCATENATE lv_request_data
+                  lv_op_payload
+        INTO lv_request_data IN BYTE MODE.
+
+      APPEND ls_batch_info_request TO lt_batch_info_request.
+
+    ENDLOOP.
+
+    " Parallelization
+    /iwbep/cl_mgw_query_scheduler=>parallelize_batch_queries(
+      EXPORTING
+        iv_batch_task_max      = iv_batch_task_max
+        iv_request_data        = lv_request_data
+        it_batch_info_request  = lt_batch_info_request
+        is_hub_version         = is_hub_version
+      IMPORTING
+        ev_app_time            = ev_app_time
+        ev_app_sum             = ev_app_sum
+        ev_wait_total          = ev_wait_total
+        ev_non_gw_time         = ev_non_gw_time
+        ev_appfw_time          = ev_appfw_time
+        ev_appdb_time          = ev_appdb_time
+        ev_appext_time         = ev_appext_time
+      CHANGING
+        cv_response_data       = lv_response_data
+        ct_batch_info_response = lt_batch_info_response
+        ct_hub_perf_data       = ct_performance_trace
+    ).
+
+    " Get and Store result for each query operation
+    LOOP AT lt_batch_info_response INTO ls_batch_info_response.
+      CLEAR ls_batch_response.
+      ls_batch_response-packet_no       = ls_batch_info_response-packet_no.
+      ls_batch_response-operation_no    = ls_batch_info_response-operation_no.
+      ls_batch_response-changeset       = ls_batch_info_response-changeset.
+      ls_batch_response-function_code   = ls_batch_info_response-function_code.
+      ls_batch_response-operation_state = ls_batch_info_response-operation_state.
+
+      ls_batch_response-ev_serialized_data = lv_response_data+lv_xml_offset(ls_batch_info_response-xml_size).
+      lv_xml_offset = lv_xml_offset + ls_batch_info_response-xml_size.
+
+      APPEND ls_batch_response TO ct_batch_response.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD process_single_batch_query.
+
+    DATA:
+      ls_response_header     TYPE ihttpnvp,
+      lt_request_header      TYPE tihttpnvp,
+      ls_batch_response      TYPE ty_s_batch_response,
+      ls_performance_trace   TYPE /iwbep/sutil_hub_perf_data,
+      ls_batch_deferred_perf TYPE ty_s_batch_deferred_perf.
+
+
+* Initialization
+    GET RUN TIME FIELD ls_performance_trace-time_start.
+
+* Prepare Batch Response
+    ls_batch_response-packet_no     = is_batch_request-packet_no.
+    ls_batch_response-operation_no  = is_batch_request-operation_no.
+    ls_batch_response-changeset     = is_batch_request-changeset.
+    ls_batch_response-function_code = is_batch_request-function_code.
+
+    CASE is_batch_request-function_code.
+
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_get_entity_set.
+        get_entity_set(
+          EXPORTING
+            is_request_context   = is_batch_request-request_context
+            it_request_header    = lt_request_header
+            it_operation_info    = it_operation_info
+          IMPORTING
+            er_entityset         = ls_batch_response-er_data
+            er_deleted_entityset = ls_batch_response-er_deleted_data
+            es_response_context  = ls_batch_response-es_response_context
+            es_message_container = ls_batch_response-es_message_container
+            et_custom_header     = ls_batch_response-et_custom_header
+            et_inline_info       = ls_batch_response-et_inline_info
+            et_response_header   = ls_batch_response-et_response_header
+            et_performance_trace = ls_batch_response-et_performance_trace
+        ).
+
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_get_entity.
+        get_entity_type(
+          EXPORTING
+            is_request_context   = is_batch_request-request_context
+            it_request_header    = lt_request_header
+            it_operation_info    = it_operation_info
+          IMPORTING
+            er_entity            = ls_batch_response-er_data
+            es_response_context  = ls_batch_response-es_response_context_entity
+            es_message_container = ls_batch_response-es_message_container
+            et_custom_header     = ls_batch_response-et_custom_header
+            et_expand_skiptoken  = ls_batch_response-et_expand_skiptoken
+            et_inline_info       = ls_batch_response-et_inline_info
+            et_response_header   = ls_batch_response-et_response_header
+            et_performance_trace = ls_batch_response-et_performance_trace
+        ).
+
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_get_stream.
+        get_stream(
+          EXPORTING
+            is_request_context   = is_batch_request-request_context
+            it_request_header    = lt_request_header
+          IMPORTING
+            er_stream            = ls_batch_response-er_data
+            es_response_context  = ls_batch_response-es_response_context_entity
+            es_message_container = ls_batch_response-es_message_container
+            et_custom_header     = ls_batch_response-et_custom_header
+            et_response_header   = ls_batch_response-et_response_header
+            et_performance_trace = ls_batch_response-et_performance_trace
+        ).
+
+      WHEN /iwbep/cl_mgw_remote_handler=>co_fcode_execute_operation.
+        execute_operation(
+          EXPORTING
+            is_request_context   = is_batch_request-request_context
+            it_request_header    = lt_request_header
+          IMPORTING
+            ev_serialized_data   = ls_batch_response-ev_serialized_data
+            er_data              = ls_batch_response-er_data
+            es_message_container = ls_batch_response-es_message_container
+            et_custom_header     = ls_batch_response-et_custom_header
+            et_inline_info       = ls_batch_response-et_inline_info
+            et_response_header   = ls_batch_response-et_response_header
+            et_performance_trace = ls_batch_response-et_performance_trace
+        ).
+
+      WHEN OTHERS.
+        ASSERT 0 = 1.
+    ENDCASE.
+
+
+    IF ls_batch_response-es_message_container-message_header-exception_category EQ /iwbep/if_message_container=>gcs_exception_category-btc_compl.
+
+      ev_batch_error = abap_true.
+      " Exception that ends the complete batch processing - communicated using
+      " a single error response without operation assignment
+      CLEAR ct_batch_response.
+      ls_batch_response-packet_no       = 0.
+      ls_batch_response-operation_no    = 0.
+      ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-error.
+      APPEND ls_batch_response TO ct_batch_response.
+
+    ELSE.
+
+      ev_batch_error = abap_false.
+      " Error Handling
+      READ TABLE ls_batch_response-et_response_header INTO ls_response_header
+      WITH TABLE KEY name = /iwbep/cl_mgw_remote_handler=>co_header_error.
+    IF sy-subrc = 0 AND ls_response_header-value = abap_true.
+      ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-error.
+    ELSE.
+      ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-ok.
+    ENDIF.
+
+    IF mv_batch_deferred_resp_crea EQ abap_false OR
+      ls_batch_response-operation_state = /iwbep/cl_mgw_remote_handler=>mcs_operation_state-error.
+      APPEND ls_batch_response TO ct_batch_response.
+      ENDIF.
+
+    ENDIF.
+
+* Add Performance Data
+    GET RUN TIME FIELD ls_performance_trace-time_stop.
+    ls_performance_trace-source_class  = /iwbep/cl_mgw_remote_handler=>co_batch_single_query.
+    ls_performance_trace-agent         = co_agent.
+    ls_performance_trace-ncalls        = 1.
+    ls_performance_trace-levelno       = 3.
+    ls_performance_trace-packetno      = is_batch_request-packet_no.
+    INSERT ls_performance_trace INTO TABLE ct_performance_trace.
+
+  ENDMETHOD.
+
+
+  METHOD ral_log_deferred_response.
+
+    FIELD-SYMBOLS:
+      <ls_batch_deferred_ral> TYPE ty_s_batch_deferred_ral.
+
+    " must not be called if local handler is not in deferred response
+    " mode for $batch
+    ASSERT mv_batch_deferred_resp_crea EQ abap_true.
+
+    IF NOT mt_batch_deferred_ral IS INITIAL.
+      READ TABLE mt_batch_deferred_ral ASSIGNING <ls_batch_deferred_ral>
+        WITH TABLE KEY operation_id = cs_batch_response-operation_id.
+      IF sy-subrc EQ 0.
+        IF <ls_batch_deferred_ral>-ral_facade IS BOUND.
+          IF cs_batch_response-exception IS BOUND.
+            <ls_batch_deferred_ral>-ral_facade->log_exception( cs_batch_response-exception ).
+          ELSEIF cs_batch_response-entity_response_context-is_not_modified NE /iwbep/if_mgw_core_types=>gcs_modification_status-is_not_modified.
+            TRY.
+                <ls_batch_deferred_ral>-ral_facade->log_read_access( ir_data = cs_batch_response-response_data ).
+              CATCH /iwbep/cx_mgw_tech_exception INTO cs_batch_response-exception.
+                RETURN.
+            ENDTRY.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD session_is_terminated.
+
+
+    " No handling of terminated session at this time
+    RETURN.
+
+*    DATA: ls_request_header  TYPE ihttpnvp,
+*          ls_soft_state_info TYPE /iwbep/if_mgw_core_types=>ty_s_soft_state_info,
+*          lo_mgw_runtime     TYPE REF TO /iwbep/bd_mgw_srv_runtime.
+*
+*
+*    " Soft State Flags
+*    READ TABLE it_request_header INTO ls_request_header
+*      WITH KEY name = /iwbep/cl_mgw_remote_handler=>co_header_soft_state.
+*    IF sy-subrc = 0.
+*      ls_soft_state_info = ls_request_header-value.
+*    ENDIF.
+*
+*    TRY.
+*        /iwbep/cl_mgw_runtime_factory=>create_runtime(
+*          EXPORTING
+*            is_request_context      = is_request_context
+*            iv_soft_state_enabled   = abap_false
+*            iv_soft_state_mode      = ls_soft_state_info-mode
+*            iv_soft_state_before    = ls_soft_state_info-before
+*            iv_soft_state_first_req = abap_false
+*          IMPORTING
+*            eo_mgw_runtime          = lo_mgw_runtime
+*        ).
+*
+*        CALL BADI lo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~session_is_terminated
+*          EXPORTING
+*            iv_reason = is_request_context-termination_reason.
+*
+*        CALL BADI lo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~cleanup.
+*
+*      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception. "#EC NO_HANDLER
+*        " Ignore any exception
+*    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD set_service_attributes.
+
+    DATA: lv_request_uri    TYPE string,
+          ls_request_header TYPE ihttpnvp,
+          ls_parameter      TYPE /iwbep/s_mgw_name_value_pair.
+
+    " Get Request ID
+    READ TABLE is_request_context-parameters INTO ls_parameter
+      WITH KEY name = /iwbep/if_mgw_core_srv_runtime=>gcs_http_header_attributes-request_id.
+
+    " Get Request URI
+    READ TABLE is_request_context-technical_request-request_header INTO ls_request_header
+      WITH KEY name = '~request_uri'.
+    IF ls_request_header-value IS NOT INITIAL.
+      lv_request_uri = ls_request_header-value.
+    ELSE.
+      IF is_request_context-base_url IS NOT INITIAL.
+        lv_request_uri = is_request_context-base_url.
+      ELSE.
+        IF is_request_context-service_doc_name IS NOT INITIAL.
+          CONCATENATE is_request_context-namespace
+                      is_request_context-service_doc_name
+            INTO lv_request_uri.
+          CONCATENATE lv_request_uri
+                      iv_method_name
+            INTO lv_request_uri SEPARATED BY ' - '.
+        ELSE.
+          lv_request_uri = iv_method_name.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " Set Service Attributes for Error Log
+    mo_sutil_runtime->set_service_attributes(
+      iv_namespace       = is_request_context-namespace
+      iv_service_name    = is_request_context-service_doc_name
+      iv_service_version = is_request_context-version
+      iv_icf_node        = is_request_context-icf_root_node
+      iv_cache_timestamp = is_request_context-cache_timestamp
+      iv_request_id      = ls_parameter-value
+      iv_request_uri     = lv_request_uri
+      iv_http_method     = is_request_context-http_method
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD set_unsupported_defer.
+
+    IF mo_changeset_helper IS NOT BOUND.
+      mo_changeset_helper = /iwbep/cl_mgw_changeset_helper=>get_instance( ).
+    ENDIF.
+
+    mo_changeset_helper->set_unsupported_defer( abap_true ).
+
+  ENDMETHOD.
+
+
+  METHOD update_entity_type.
+
+    CONSTANTS: co_method_name   TYPE seomtdname VALUE 'UPDATE_ENTITY_TYPE'.
+
+    DATA: lv_time_start      TYPE i,
+          ls_request_context TYPE /iwbep/if_mgw_core_srv_runtime=>ty_s_mgw_request_context,
+          lv_operation_error TYPE abap_bool,
+          lx_exception       TYPE REF TO /iwbep/cx_mgw_base_exception.
+
+    DATA: lv_empty_data     TYPE string,
+          lo_idp_util       TYPE REF TO /iwbep/cl_idp_util,
+          lo_entry_provider TYPE REF TO /iwbep/if_mgw_entry_provider.
+
+    FIELD-SYMBOLS:
+          <fd_data>             TYPE any.
+
+
+    TRY.
+        ls_request_context = is_request_context.
+
+        init_request(
+          EXPORTING
+            iv_method_name     = co_method_name
+            it_request_header  = it_request_header
+          IMPORTING
+            ev_time_start      = lv_time_start
+           CHANGING
+            cs_request_context   = ls_request_context
+        ).
+
+        " IDP Handling
+        idp_init(
+          EXPORTING
+            iv_time_start    = lv_time_start
+            iv_source_method = co_method_name
+            it_http_header   = ls_request_context-parameters
+          IMPORTING
+            eo_idp_util      = lo_idp_util
+            ev_idp_data      = ev_serialized_data
+        ).
+
+        IF ev_serialized_data IS NOT INITIAL.
+
+          " No Changeset deferred processing for IDP
+          set_unsupported_defer( ).
+
+          RETURN. "Done, the result has been retrieved from the IDP framework
+        ENDIF.
+
+        " Begin Changeset if first operation
+        IF mv_changeset_op_first = abap_true.
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_begin
+            EXPORTING
+              it_operation_info  = mt_changeset_op_info
+              it_changeset_input = it_changeset_input
+            CHANGING
+              cv_defer_mode      = mv_changeset_defer_mode.
+
+          " No Watchdog for Defer Mode
+          IF mv_changeset_defer_mode = abap_true.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " Inform Remote Handler about Defer Mode
+          IF mo_remote_handler IS BOUND.
+            mo_remote_handler->set_changeset_defer_mode( mv_changeset_defer_mode ).
+          ENDIF.
+        ENDIF.
+
+        " Create Data provider
+        CREATE OBJECT lo_entry_provider
+          TYPE
+          /iwbep/cl_mgw_entry_raw_prv
+          EXPORTING
+            iv_raw_data = iv_entity_data.
+
+        " Process Update Entity
+        CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~update_entity
+          EXPORTING
+            iv_entity_name      = ls_request_context-target_entity
+            iv_source_name      = ls_request_context-source_entity
+            io_data_provider    = lo_entry_provider
+            is_request_details  = is_request_context
+          CHANGING
+            ct_headers          = et_custom_header
+            cs_response_context = es_response_context
+            cr_entity           = er_entity.
+
+        " Last operation
+        IF mv_changeset_op_last = abap_true.
+
+          " Deferred Processing: Process now!
+          IF mv_changeset_defer_mode = abap_true.
+            CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_process
+              CHANGING
+                ct_changeset_data = mt_changeset_defer_data.
+          ELSE.
+            changeset_deactivate_watchdog( ).
+          ENDIF.
+
+          " End Changeset
+          CALL BADI mo_mgw_runtime->/iwbep/if_mgw_core_srv_runtime~changeset_end.
+        ENDIF.
+
+        " Deferred processing
+        IF mv_changeset_defer_mode = abap_true.
+          IF mv_is_shortcut = abap_true.
+            add_defer_performance_data(
+              EXPORTING
+                iv_time_start  = lv_time_start
+                iv_method_name = co_method_name
+            ).
+          ENDIF.
+          RETURN.
+        ENDIF.
+
+        /iwbep/cl_mgw_handler_util=>fill_inner_error_for_header(
+          EXPORTING
+            iv_system_alias = is_request_context-system_alias_info-system_alias
+          CHANGING
+            cs_msg_canister = es_message_container
+        ).
+
+      CATCH /iwbep/cx_mgw_busi_exception /iwbep/cx_mgw_tech_exception INTO lx_exception.
+
+        lv_operation_error = abap_true.
+
+        /iwbep/cl_mgw_handler_util=>handle_exception(
+          EXPORTING
+            ix_exception       = lx_exception
+            is_request_context = is_request_context
+            io_context         = mo_mgw_context
+          CHANGING
+            cs_msg_canister    = es_message_container
+            ct_http_header     = et_custom_header
+        ).
+    ENDTRY.
+
+    " Performance Trace
+    et_performance_trace = mo_sutil_runtime->hub_perf_get_data( ).
+
+    " IDP Store result if no error and required
+    IF lv_operation_error = abap_false.
+      IF er_entity IS BOUND.
+        ASSIGN er_entity->* TO <fd_data>.
+      ELSE.
+        ASSIGN lv_empty_data TO <fd_data>.
+      ENDIF.
+      idp_store(
+        EXPORTING
+          io_idp_util          = lo_idp_util
+          is_data              = <fd_data>
+          is_request_context   = ls_request_context
+          it_performance_trace = et_performance_trace
+        CHANGING
+          cs_message_container = es_message_container
+          ct_custom_header     = et_custom_header
+      ).
+    ENDIF.
+
+    " Finalize Request
+    finalize_request(
+      EXPORTING
+        iv_time_start        = lv_time_start
+        iv_method_name       = co_method_name
+        iv_function_code     = /iwbep/cl_mgw_remote_handler=>co_fcode_update_entity
+        iv_operation_error   = lv_operation_error
+      CHANGING
+        ct_response_header   = et_response_header
+        ct_performance_trace = et_performance_trace
+    ).
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,280 @@
+CLASS cl_sadl_mdp_factory DEFINITION
+  PUBLIC
+  CREATE PRIVATE
+  GLOBAL FRIENDS cl_sadl_aunit_friend.
+
+  PUBLIC SECTION.
+
+    CLASS-METHODS check_sadl
+      IMPORTING io_mp         TYPE REF TO cl_bsa_sadl_mp
+      EXPORTING ev_successful TYPE abap_bool
+                et_messages   TYPE if_sadl_types=>tt_error_messages
+      RAISING   cx_sadl_static.
+
+    CLASS-METHODS get_mdp_for_mp
+      IMPORTING io_mp         TYPE REF TO cl_bsa_sadl_mp
+      RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider
+      RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    CLASS-METHODS get_mdp_for_sadl_api
+      IMPORTING io_sadl_api   TYPE REF TO if_sadl_entity_api
+      RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider
+      RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    CLASS-METHODS get_mdp_for_id
+      IMPORTING iv_sadl_id    TYPE if_sadl_types=>ty_uuid
+      RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider
+      RAISING   cx_sadl_static cx_sadl_contract_violation.  "  for classic load: cx_sadl_load_not_in_cache
+
+    CLASS-METHODS get_mdp_for_load
+      IMPORTING ir_load       TYPE REF TO if_sadl_load=>ty_sadl_load
+      RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider.
+
+    CLASS-METHODS create_mdp_for_exposure
+      IMPORTING it_types_ids  TYPE string_table
+      RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider
+      RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    CLASS-METHODS get_entity_load_by_id
+      IMPORTING iv_entity_id          TYPE sadl_entity_id
+      RETURNING VALUE(rr_entity_load) TYPE REF TO if_sadl_load=>ty_entity_load
+      RAISING   cx_sadl_static cx_sadl_contract_violation.  "  for classic load: cx_sadl_load_not_in_cache
+
+    CLASS-METHODS remove_mdp_by_id
+      IMPORTING iv_sadl_id TYPE if_sadl_types=>ty_uuid.
+
+  PRIVATE SECTION.
+
+    TYPES: BEGIN OF ty_mdp,
+             load_id TYPE if_sadl_types=>ty_uuid,
+             mdp     TYPE REF TO if_sadl_metadata_provider,
+           END OF ty_mdp.
+
+    CLASS-DATA gt_mdp TYPE SORTED TABLE OF ty_mdp WITH UNIQUE KEY load_id.
+
+    CLASS-METHODS _compile
+      IMPORTING io_mp          TYPE REF TO cl_bsa_sadl_mp " cl_sadl_mp_entity
+      RETURNING VALUE(rr_load) TYPE REF TO if_sadl_load=>ty_sadl_load
+      RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    CLASS-METHODS _create_and_register_mdp
+      IMPORTING ir_load       TYPE REF TO if_sadl_load=>ty_sadl_load
+      RETURNING VALUE(ro_mdp) TYPE REF TO if_sadl_metadata_provider.
+
+    CLASS-METHODS _raise_exception_for_messages
+      IMPORTING
+        it_error_messages TYPE if_sadl_types=>tt_error_messages
+      RAISING
+        cx_sadl_contract_violation.
+
+ENDCLASS.
+
+
+
+CLASS CL_SADL_MDP_FACTORY IMPLEMENTATION.
+
+
+  METHOD check_sadl.
+    DATA(lo_compiler) = cl_sadl_load_assembler=>instance( ).
+    lo_compiler->compile( EXPORTING io_mp         = io_mp
+                          IMPORTING ev_successful = ev_successful
+                                    et_messages   = et_messages  ).
+  ENDMETHOD.
+
+
+  METHOD create_mdp_for_exposure.
+    " ----------------
+    IF cl_sadl_todo_marker=>prototype_v4_mdp_wo_temp_load( ) AND it_types_ids IS NOT INITIAL.
+      " PN - hack: lead is first
+      SPLIT it_types_ids[ 1 ] AT '~' INTO DATA(lv_leading_entity_type) DATA(lv_leading_entity_id).
+      ro_mdp = cl_sadl_mdp_exposure=>get_for_entity( iv_type = CONV #( lv_leading_entity_type )
+                                                     iv_id   = CONV #( lv_leading_entity_id ) ).
+      CAST cl_sadl_mdp_exposure( ro_mdp )->mt_exposure_global_entity_ids = it_types_ids. " TEMPORARY WORKAROUND
+      RETURN.
+    ENDIF.
+    " ----------------
+
+    DATA lr_load TYPE REF TO if_sadl_load=>ty_sadl_load.
+
+    lr_load = NEW #( ).
+    TRY.
+        lr_load->sadl_uuid = cl_system_uuid=>create_uuid_c32_static( ).
+      CATCH cx_uuid_error.
+        RAISE EXCEPTION TYPE lcx_internal. "system is dead
+    ENDTRY.
+
+    DATA(lt_typed_ids) = it_types_ids.
+    LOOP AT lt_typed_ids INTO DATA(lv_typed_id).
+      SPLIT lv_typed_id AT '~' INTO DATA(lv_entity_type) DATA(lv_entity_id).
+      DATA(lo_mdp) = cl_sadl_mdp_exposure=>get_for_entity( iv_type = CONV #( lv_entity_type )
+                                                           iv_id   = CONV #( lv_entity_id ) ).
+      lo_mdp->get_entity_ids( IMPORTING et_ids = DATA(lt_ids) ).
+      IF lines( lt_ids ) > 1 AND NOT line_exists( lt_typed_ids[ table_line = 'CDS~I_DRAFTADMINISTRATIVEDATA' ] ).
+        APPEND 'CDS~I_DRAFTADMINISTRATIVEDATA' TO lt_typed_ids.
+      ENDIF.
+*      ENDIF.
+      LOOP AT lt_ids ASSIGNING FIELD-SYMBOL(<s_id>).
+        DATA(lv_name) = substring_after( val = <s_id>  sub = '~' ).
+        DATA(lr_bsa_node) = lo_mdp->get_node( lv_name ).
+        INSERT lr_bsa_node->* INTO TABLE lr_load->bsa_metadata_nodes.
+        DATA(lr_entity_load) =  lo_mdp->get_entity_load( lv_name ).
+        INSERT lr_entity_load->* INTO TABLE lr_load->entity_loads ASSIGNING FIELD-SYMBOL(<s_entity_load>).
+        <s_entity_load>-entity_id = cl_sadl_entity_util=>replace_bo_name( iv_bo_name = lr_load->sadl_uuid  iv_entity_id = <s_entity_load>-entity_id ).
+        <s_entity_load>-sadl_entity-id = cl_sadl_entity_util=>replace_bo_name( iv_bo_name = lr_load->sadl_uuid  iv_entity_id = <s_entity_load>-sadl_entity-id ).
+        IF <s_entity_load>-draft_bo_sibling IS NOT INITIAL.
+          DATA(lr_sibling_load) = cl_sadl_mdp_factory=>get_entity_load_by_id( <s_entity_load>-draft_bo_sibling ).
+          <s_entity_load>-draft_bo_sibling = cl_sadl_entity_util=>replace_bo_name( iv_bo_name = lr_load->sadl_uuid  iv_entity_id = lr_sibling_load->entity_id ).
+        ENDIF.
+        TRY.
+            DATA(lv_timestamp) = lo_mdp->get_latest_timestamp( ).
+          CATCH cx_sadl_static.
+            CLEAR lv_timestamp.
+        ENDTRY.
+        IF lv_timestamp > lr_load->timestamp.
+          lr_load->timestamp = lv_timestamp.
+        ENDIF.
+        IF lv_entity_type = cl_sadl_entity_factory=>co_type-cds.
+          INSERT VALUE #( type = lv_entity_type id = lv_entity_id checksum = CONV #( lv_timestamp ) ) INTO TABLE lr_load->entity_checksums.
+        ENDIF.
+        LOOP AT <s_entity_load>-sadl_entity-associations ASSIGNING FIELD-SYMBOL(<s_assoc>).
+          DATA(lr_target_load) = cl_sadl_mdp_factory=>get_entity_load_by_id( <s_assoc>-target_id ).
+          <s_assoc>-target_id = cl_sadl_entity_util=>replace_bo_name( iv_bo_name = lr_load->sadl_uuid  iv_entity_id = lr_target_load->entity_id ).
+        ENDLOOP.
+      ENDLOOP.
+*      ENDIF.
+    ENDLOOP.
+
+*----- clean up search scope: remove paths pointing to entities not contained in load
+    LOOP AT lr_load->entity_loads ASSIGNING <s_entity_load>.
+      LOOP AT <s_entity_load>-query_options-search_scope ASSIGNING FIELD-SYMBOL(<v_search_scope>) WHERE table_line CP '*.*'.
+        SPLIT <v_search_scope> AT '.' INTO TABLE DATA(lt_path).
+        DELETE lt_path INDEX lines( lt_path ).
+        LOOP AT lt_path ASSIGNING FIELD-SYMBOL(<v_assoc>).
+          READ TABLE <s_entity_load>-sadl_entity-associations WITH TABLE KEY name = <v_assoc> ASSIGNING <s_assoc>.
+          IF sy-subrc <> 0. RAISE EXCEPTION TYPE lcx_internal. ENDIF.
+          CHECK NOT line_exists( lr_load->entity_loads[ entity_id = <s_assoc>-target_id ] ).
+          DELETE <s_entity_load>-query_options-search_scope_details WHERE alias = <v_search_scope>.
+          DELETE <s_entity_load>-query_options-search_scope.
+          EXIT.
+        ENDLOOP.
+      ENDLOOP.
+    ENDLOOP.
+
+    ro_mdp = get_mdp_for_load( ir_load = lr_load ).
+  ENDMETHOD.
+
+
+  METHOD get_entity_load_by_id.
+    DATA(lo_mdp) = get_mdp_for_id( iv_entity_id ).
+    rr_entity_load = lo_mdp->get_entity_load_by_id( iv_entity_id ).
+  ENDMETHOD.
+
+
+  METHOD get_mdp_for_id.
+    " this method may be called also for entity ID
+    IF iv_sadl_id CA '~'.  " entity ID
+      DATA(lv_sadl_id) = CONV if_sadl_types=>ty_uuid( substring_before( val = iv_sadl_id  sub = `~` ) ).
+    ELSE.
+      lv_sadl_id = iv_sadl_id.
+    ENDIF.
+    READ TABLE gt_mdp ASSIGNING FIELD-SYMBOL(<s_mdp>) WITH KEY load_id = lv_sadl_id.
+    IF sy-subrc = 0.
+      ro_mdp = <s_mdp>-mdp.
+    ELSE.
+      IF cl_sadl_mdp_exposure=>is_exposure_id( lv_sadl_id ).
+        ro_mdp = cl_sadl_mdp_exposure=>get_for_exposure_id( lv_sadl_id ).
+      ELSE.
+        RAISE EXCEPTION TYPE cx_sadl_load_not_in_cache EXPORTING sadl_uuid = lv_sadl_id.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_mdp_for_load.
+    IF cl_sadl_mdp_exposure=>is_exposure_id( ir_load->sadl_uuid ).
+      RAISE EXCEPTION TYPE lcx_internal. " ... this method may be used for compound/classic load only
+    ENDIF.
+    READ TABLE gt_mdp ASSIGNING FIELD-SYMBOL(<s_mdp>) WITH KEY load_id = ir_load->sadl_uuid.
+    IF sy-subrc = 0.
+      ro_mdp = <s_mdp>-mdp.
+    ELSE.
+      ro_mdp = _create_and_register_mdp( ir_load ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_mdp_for_mp.
+    IF io_mp IS NOT BOUND.
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation.
+    ENDIF.
+    DATA(lv_uuid) = io_mp->if_bsa_sadl_mp~get_uuid( ).
+    IF cl_sadl_mdp_exposure=>is_exposure_id( lv_uuid ).
+      RAISE EXCEPTION TYPE lcx_internal. " ... this method may be used for compound/classic load only
+    ENDIF.
+    READ TABLE gt_mdp ASSIGNING FIELD-SYMBOL(<s_mdp>) WITH KEY load_id = lv_uuid.
+    IF sy-subrc = 0.
+      ro_mdp = <s_mdp>-mdp.
+    ELSE.  " return MDP for load, if load exists
+      DATA(lr_load) = cl_sadl_entity_load_handler=>get_sadl_load( io_mp ).
+      IF lr_load IS NOT BOUND.
+        lr_load = _compile( io_mp ).
+      ENDIF.
+      ro_mdp = _create_and_register_mdp( lr_load ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_mdp_for_sadl_api.
+    " (prototype)
+    io_sadl_api->get_entities( IMPORTING et_entities = DATA(lt_entities) ).
+    IF lt_entities IS INITIAL.
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation.
+    ENDIF.
+    DATA(lv_id) = io_sadl_api->get_entity( CONV #( lt_entities[ 1 ] ) )->get_id( ).
+    ro_mdp = get_mdp_for_id( lv_id ).
+  ENDMETHOD.
+
+
+  METHOD remove_mdp_by_id.
+    IF cl_sadl_mdp_exposure=>is_exposure_id( iv_sadl_id ).
+      RAISE EXCEPTION TYPE lcx_internal. " ... this method may be used for compound/classic load only
+    ENDIF.
+    DELETE TABLE gt_mdp WITH TABLE KEY load_id = iv_sadl_id.
+    cl_sadl_entity_provider_sadl=>unregister_entities_by_sadl_id( iv_sadl_id ).
+  ENDMETHOD.
+
+
+  METHOD _compile.
+    DATA ls_load TYPE if_sadl_load=>ty_sadl_load.
+    DATA(lo_compiler) = cl_sadl_load_assembler=>instance( ).
+    lo_compiler->compile( EXPORTING io_mp             = io_mp
+                          IMPORTING es_load           = ls_load
+                                    ev_successful     = DATA(lv_successful)
+                                    et_messages = DATA(lt_error_messages) ).
+    IF lv_successful <> abap_true.
+      _raise_exception_for_messages( lt_error_messages ).
+    ENDIF.
+    cl_sadl_entity_load_handler=>add_sadl_load( ls_load ).
+    rr_load = cl_sadl_entity_load_handler=>get_sadl_load( io_mp ).
+  ENDMETHOD.
+
+
+  METHOD _create_and_register_mdp.
+    ro_mdp = NEW cl_sadl_metadata_provider( ir_load ).
+    INSERT VALUE #( load_id = ir_load->sadl_uuid  mdp = ro_mdp ) INTO TABLE gt_mdp.
+  ENDMETHOD.
+
+
+  METHOD _raise_exception_for_messages.
+    LOOP AT it_error_messages ASSIGNING FIELD-SYMBOL(<s_error_message>)
+                              WHERE msg_severity = if_sadl_types=>co_sadl_error_severity-error.
+      IF <s_error_message>-msg_class IS INSTANCE OF cx_sadl_compilation_previous
+          AND <s_error_message>-msg_class->previous IS BOUND.
+        RAISE EXCEPTION TYPE cx_sadl_contract_previous EXPORTING previous = <s_error_message>-msg_class->previous.
+      ELSE.
+        RAISE EXCEPTION TYPE cx_sadl_contract_previous EXPORTING previous = <s_error_message>-msg_class.
+      ENDIF.
+    ENDLOOP.
+    RAISE EXCEPTION TYPE cx_sadl_contract_violation. " error without error msg
+  ENDMETHOD.
+ENDCLASS.

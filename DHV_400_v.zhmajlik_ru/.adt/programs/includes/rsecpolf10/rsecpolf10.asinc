@@ -1,0 +1,1296 @@
+*&---------------------------------------------------------------------*
+*&  Include           SECPOLF10
+*&---------------------------------------------------------------------*
+
+*&---------------------------------------------------------------------*
+*&      Form  USER_COMMAND
+*&---------------------------------------------------------------------*
+FORM user_command USING r_ucomm     LIKE sy-ucomm
+                        rs_selfield TYPE slis_selfield.     "#EC *
+
+  DATA:
+    lt_attributes     TYPE security_policy_attribute_list,
+    ls_attributes     TYPE sec_policy_attrib_key_value,
+    lt_attribute_info TYPE sec_policy_attribute_info_list,
+    ls_attribute_info TYPE security_policy_attribute_info,
+    ls_list           TYPE ts_list,
+    lt_list           TYPE tt_list,
+    ls_list_ref       TYPE REF TO ts_list,
+    ld_title          TYPE lvc_title,
+    ls_output         TYPE ts_userlist,
+    ld_par1           TYPE symsgv.
+
+  CASE rs_selfield-fieldname.
+    WHEN 'BNAME'.
+
+      CALL FUNCTION 'AUTHORITY_CHECK_TCODE'
+        EXPORTING
+          tcode  = 'SU01'
+        EXCEPTIONS
+          ok     = 0
+          not_ok = 1
+          OTHERS = 2.
+
+      IF sy-subrc NE 0.
+
+        ld_par1 = 'SU01'.
+        MESSAGE e172(00) WITH ld_par1.
+
+      ELSE.
+
+        READ TABLE gt_output INTO ls_output INDEX rs_selfield-tabindex.
+        SET PARAMETER ID 'XUS' FIELD ls_output-bname."usr02-bname.
+        CALL TRANSACTION 'SU01'.
+
+      ENDIF.
+
+    WHEN 'SECURITY_POLICY'.
+
+      AUTHORITY-CHECK OBJECT 'S_SECPOL'
+       ID 'ACTVT'      FIELD '03'
+       ID 'POLICYNAME' DUMMY.
+
+      IF sy-subrc <> 0.
+
+        MESSAGE s018(security_policy) DISPLAY LIKE 'E'.
+        RETURN.
+
+      ELSE.
+
+        READ TABLE gt_output INTO ls_output INDEX rs_selfield-tabindex.
+
+        TRY.
+            lt_attributes =  cl_security_policy=>get_attribute_value_list( ls_output-security_policy ).
+            lt_attribute_info = cl_security_policy_attribute=>list_all_available( ).
+
+          CATCH cx_security_policy.                     "#EC NO_HANDLER
+        ENDTRY.
+
+        LOOP AT lt_attribute_info INTO ls_attribute_info.
+          CLEAR ls_list.
+          ls_list-type          = ls_attribute_info-type.
+          ls_list-name          = ls_attribute_info-name.
+          ls_list-default       = ls_attribute_info-default_value.
+          ls_list-value         = ls_attribute_info-default_value.
+          ls_list-description   = ls_attribute_info-description.
+          INSERT ls_list INTO TABLE lt_list.
+        ENDLOOP.
+
+        LOOP AT lt_attributes INTO ls_attributes.
+          READ TABLE lt_list REFERENCE INTO ls_list_ref WITH KEY name = ls_attributes-name.
+          CHECK sy-subrc = 0.
+          ls_list_ref->value = ls_attributes-value.
+        ENDLOOP.
+
+        IF lt_list[] IS NOT INITIAL.
+          ld_title = text_006.
+          REPLACE '&1' WITH ls_output-security_policy INTO ld_title.
+
+          PERFORM display_alv_secpol_attrb USING lt_list
+                                                 ld_title.
+        ENDIF.
+
+      ENDIF.
+
+  ENDCASE.
+
+ENDFORM.                    "user_command
+
+*&---------------------------------------------------------------------*
+*&      Form  MAIN
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM main.
+
+  DATA:
+    lt_attribute_list       TYPE tt_secpol,
+    lt_userlist             TYPE tt_userlist.
+
+  AUTHORITY-CHECK OBJECT 'S_SECPOL'
+   ID 'ACTVT'      FIELD '03'
+   ID 'POLICYNAME' DUMMY.
+
+  IF sy-subrc <> 0.
+
+    MESSAGE s018(security_policy) DISPLAY LIKE 'E'.
+    gd_exit = 'X'.
+    RETURN.
+
+  ELSE.
+
+    PERFORM get_secpol TABLES lt_attribute_list.
+
+    PERFORM get_users TABLES lt_attribute_list
+                             lt_userlist.
+
+    IF lt_userlist IS NOT INITIAL.
+
+      PERFORM preper_output TABLES lt_userlist.
+
+    ELSE.
+
+      MESSAGE s001(01).
+      gd_exit = 'X'.
+      RETURN.
+
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.                    " MAIN
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_SECPOL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_LT_ATTRIBUTE_LIST  text
+*----------------------------------------------------------------------*
+FORM preper_output TABLES pt_userlist       TYPE tt_userlist.
+
+  DATA:
+    lt_user_name         TYPE suid_tt_bname,
+    ls_user_name         TYPE suid_st_bname,
+    lt_user_name_address TYPE TABLE OF usaddr3 WITH HEADER LINE,
+    ld_miss_user_lin     TYPE i,
+    ls_output            TYPE ts_userlist,
+    ls_sp_info           TYPE security_policy_info,
+    lo_identity          TYPE REF TO cl_identity,
+    lt_node_root         TYPE suid_tt_node_root,
+    lr_node_root         TYPE REF TO   suid_st_node_root,
+    ls_message           TYPE symsg,
+    ls_reference_user    TYPE suid_st_node_reference_user.
+
+  FIELD-SYMBOLS:
+     <lp_userlist>       TYPE ts_userlist,
+     <lp_user_address>   TYPE usaddr3.
+
+  LOOP AT pt_userlist ASSIGNING <lp_userlist>.
+    ls_user_name-bname = <lp_userlist>-bname.
+    APPEND ls_user_name TO lt_user_name.
+  ENDLOOP.
+
+sort pt_userlist.
+
+  CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+    EXPORTING
+      percentage = 1
+      text       = text_014.
+
+  TRY.
+      CALL METHOD cl_identity=>retrieve
+        EXPORTING
+          it_bname        = lt_user_name
+          iv_enqueue_mode = if_identity=>co_enqueue_mode_no_lock
+        IMPORTING
+          et_node_root    = lt_node_root.
+
+    CATCH cx_suid_identity.                             "#EC NO_HANDLER
+  ENDTRY.
+
+  CALL FUNCTION 'SUSR_USER_ADDRESS_READ_ARRAY'
+    TABLES
+      user_name_tab         = lt_user_name
+      user_name_address_tab = lt_user_name_address
+    EXCEPTIONS
+      OTHERS                = 0.
+
+  LOOP AT lt_user_name_address ASSIGNING <lp_user_address>.
+
+    READ TABLE lt_node_root REFERENCE INTO lr_node_root
+      WITH KEY  bname = <lp_user_address>-bname
+      BINARY SEARCH.
+
+    IF sy-subrc = 0.
+
+      lo_identity ?= lr_node_root->idref.
+
+      READ TABLE pt_userlist ASSIGNING <lp_userlist>
+        WITH KEY bname =  <lp_user_address>-bname
+        BINARY SEARCH.
+
+      IF sy-subrc = 0.
+
+        TRY.
+            CALL METHOD cl_suid_tools=>auth_check_single
+              EXPORTING
+                iv_nodename  = if_identity_definition=>gc_node_root
+                iv_operation = cl_suid_tools=>co_activity_retrieve
+                iv_class     = <lp_userlist>-class
+              IMPORTING
+                es_msg       = ls_message.
+
+          CATCH cx_suid_identity.                       "#EC NO_HANDLER
+        ENDTRY.
+
+        IF ls_message-msgty = if_suid_msg_buffer=>co_type_error.
+
+          ld_miss_user_lin = ld_miss_user_lin + 1.
+          CONTINUE .
+
+        ELSE.
+
+          MOVE-CORRESPONDING <lp_userlist>     TO ls_output.
+          MOVE-CORRESPONDING <lp_user_address> TO ls_output. "#EC ENHOK
+
+*         reference user
+          TRY.
+              lo_identity->if_identity~get_reference_user(
+                 EXPORTING
+                   iv_request_before_image = if_identity=>co_true
+                IMPORTING
+                  es_reference_user  = ls_reference_user ).
+              ls_output-refuser = ls_reference_user-refuser.
+            CATCH cx_suid_identity.                     "#EC NO_HANDLER
+          ENDTRY.
+
+*         Security Policy Name description
+          IF ls_output-secpol_text IS INITIAL.
+            TRY.
+                ls_sp_info = cl_security_policy=>get_info( name = ls_output-security_policy ).
+                ls_output-secpol_text = ls_sp_info-description.
+              CATCH cx_security_policy.                 "#EC NO_HANDLER
+            ENDTRY.
+          ENDIF.
+
+          APPEND ls_output TO gt_output.
+
+        ENDIF.
+
+      ENDIF.
+
+    ENDIF.
+
+  ENDLOOP.
+
+  IF ld_miss_user_lin > 0.
+    MESSAGE i888(01) WITH ld_miss_user_lin.
+  ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_SECPOL
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_USERS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_users TABLES pt_attribute_list TYPE tt_secpol
+                      pt_userlist       TYPE tt_userlist.
+
+  DATA:
+    ls_secpol      TYPE tr_secpol,
+    lr_secpol      TYPE ttr_secpol,
+    ld_old_secpol  TYPE security_policy_name.
+
+  FIELD-SYMBOLS:
+    <lp_attribute_list> TYPE ts_secpol.
+
+  IF pt_attribute_list[] IS NOT INITIAL.
+
+    SORT pt_attribute_list BY name.
+    DELETE ADJACENT DUPLICATES FROM pt_attribute_list.
+
+    ls_secpol-sign = 'I'.
+    ls_secpol-option = 'EQ'.
+
+    LOOP AT pt_attribute_list ASSIGNING <lp_attribute_list>.
+      IF <lp_attribute_list>-name = ld_old_secpol.
+        CONTINUE.
+      ELSE.
+        ls_secpol-low = <lp_attribute_list>-name.
+        APPEND ls_secpol TO lr_secpol.
+        ld_old_secpol = <lp_attribute_list>-name.
+      ENDIF.
+    ENDLOOP.
+
+    SELECT *
+       FROM usr02                                         ##too_many_itab_fields
+       INTO CORRESPONDING FIELDS OF TABLE pt_userlist   "#EC CI_GENBUFF
+       WHERE security_policy IN lr_secpol.
+
+  ELSEIF secattr[] IS INITIAL AND
+        secvalue[] IS INITIAL.
+
+    SELECT *
+       FROM usr02                                         ##too_many_itab_fields
+       INTO CORRESPONDING FIELDS OF TABLE pt_userlist   "#EC CI_GENBUFF
+       WHERE security_policy IN secname.
+
+  ENDIF.
+
+ENDFORM.                    " GET_USERS
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_SECPOL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_LT_USERLIST  text
+*----------------------------------------------------------------------*
+FORM display_alv_secpol.
+
+  DATA:
+    lt_fieldcat     TYPE slis_t_fieldcat_alv,
+    ld_repid        TYPE sy-repid,
+    ls_variant      TYPE disvariant,
+    lt_sort         TYPE slis_t_sortinfo_alv,
+    ls_exclude      TYPE slis_extab,
+    lt_exclude_tab  TYPE slis_t_extab.
+
+  IF gt_output IS INITIAL AND
+     gs_dialog_status = gc_true.
+
+    MESSAGE s001(01).
+    RETURN.
+
+  ELSE.
+
+*   field catalog for ALV
+    PERFORM get_fieldcat CHANGING lt_fieldcat.
+
+    PERFORM sort_fields CHANGING lt_sort.
+
+    ls_exclude-fcode = '&INFO'.
+    APPEND ls_exclude TO lt_exclude_tab.
+
+    ld_repid = sy-repid.
+
+    IF p_layout IS NOT INITIAL.
+
+      ls_variant-variant = p_layout.
+
+    ENDIF.
+
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_callback_program          = ld_repid
+        i_callback_html_top_of_page = 'HTML_TOP_OF_PAGE'
+        i_callback_user_command     = 'USER_COMMAND'
+        i_grid_title                = p_title
+        it_fieldcat                 = lt_fieldcat
+        is_variant                  = ls_variant
+        i_save                      = 'A'
+        it_sort                     = lt_sort
+        it_excluding                = lt_exclude_tab[]
+      TABLES
+        t_outtab                    = gt_output
+      EXCEPTIONS
+        OTHERS                      = 0.
+
+  ENDIF.
+
+ENDFORM.                    " DISPLAY_ALV_SECPOL
+
+**&---------------------------------------------------------------------*
+**&      Form  GET_SECPOL
+**&---------------------------------------------------------------------*
+**       text
+**----------------------------------------------------------------------*
+**      -->P_LT_ATTRIBUTE_LIST  text
+**----------------------------------------------------------------------*
+*FORM get_secpol TABLES pt_attribute_list TYPE tt_secpol_rt.
+*
+*  DATA:
+*    lt_attribute_list       TYPE tt_secpol_rt,
+*    ls_attribute_list       TYPE ts_secpol_rt,
+*    lr_secattr_ex           TYPE ttr_secattr,
+*    lt_attribute_list_ex    TYPE tt_secpol_rt,
+*    ls_attribute_list_ex    TYPE ts_secpol_rt,
+*    lt_attributes           TYPE security_policy_attribute_list,
+*    ls_attributes           TYPE sec_policy_attrib_key_value,
+*    lt_pol_list             TYPE security_policy_list,
+*    ls_pol_list             TYPE security_policy_info,
+*    lt_all_secpol_attr      TYPE tt_secpol_rt,
+*    ls_all_secpol_attr      TYPE ts_secpol_rt,
+*    lt_policy_attr          TYPE security_policy_attribute_list,
+*    ls_policy_attr          TYPE sec_policy_attrib_key_value.
+*
+*  FIELD-SYMBOLS:
+*    <pl_secattr>            TYPE tr_secattr.
+*
+*  IF secattr[]  IS NOT INITIAL OR
+*     secvalue[] IS NOT INITIAL.
+*
+**   get list of configured attributes
+*    SELECT name attrib_key attrib_value ##too_many_itab_fields
+*      INTO CORRESPONDING FIELDS OF TABLE lt_attribute_list "#EC CI_GENBUFF
+*      FROM sec_policy_rt
+*      WHERE name         IN secname
+*        AND attrib_key   IN secattr
+*        AND attrib_value IN secvalue
+*      ORDER BY name attrib_key.
+*
+*    LOOP AT secattr ASSIGNING <pl_secattr>.
+*      IF  <pl_secattr>-sign = 'E' OR
+*          <pl_secattr>-option = 'NE'.
+*        <pl_secattr>-sign = 'I'.
+*        <pl_secattr>-option = 'EQ'.
+*        APPEND <pl_secattr> TO lr_secattr_ex.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    IF lr_secattr_ex[] IS NOT INITIAL .
+*      SELECT name attrib_key attrib_value ##too_many_itab_fields
+*        INTO CORRESPONDING FIELDS OF TABLE lt_attribute_list_ex "#EC CI_GENBUFF
+*        FROM sec_policy_rt
+*        WHERE name         IN secname
+*          AND attrib_key   IN lr_secattr_ex
+*          AND attrib_value IN secvalue
+*        ORDER BY name attrib_key.
+*      CLEAR lr_secattr_ex[].
+*    ENDIF.
+*
+*
+*    IF lt_attribute_list_ex[] IS NOT INITIAL.
+*
+*      LOOP AT lt_attribute_list INTO ls_attribute_list.
+*
+*        READ TABLE lt_attribute_list_ex INTO ls_attribute_list_ex
+*           WITH KEY name       = ls_attribute_list-name
+*           BINARY SEARCH.
+*
+*        IF sy-subrc <> 0.
+*          APPEND ls_attribute_list TO pt_attribute_list.
+*        ENDIF.
+*
+*      ENDLOOP.
+*
+*    ELSE.
+*
+*      LOOP AT lt_attribute_list INTO ls_attribute_list.
+*        APPEND ls_attribute_list TO pt_attribute_list.
+*      ENDLOOP.
+*
+*    ENDIF.
+*
+**   es wurden keine Attribute gefunden. Wir müssen nun die default Attribute überprüfen
+*    IF pt_attribute_list[]    IS INITIAL AND
+*       lt_attribute_list_ex[] IS INITIAL.
+*
+*      IF secname IS INITIAL.
+*
+*        lt_pol_list = cl_security_policy=>list_all_available( ).
+*
+*      ELSE.
+*
+*        SELECT name                                      ##too_many_itab_fields
+*          INTO CORRESPONDING FIELDS OF TABLE lt_pol_list "#EC CI_GENBUFF
+*          FROM sec_policy_cust
+*          WHERE name IN secname
+*          ORDER BY name.
+*
+*      ENDIF.
+*
+*      LOOP AT lt_pol_list INTO ls_pol_list.
+*        lt_attributes =  cl_security_policy=>get_attribute_value_list( ls_pol_list-name ).
+*        LOOP AT lt_attributes INTO ls_attributes.
+*          ls_all_secpol_attr-name         = ls_pol_list-name.
+*          ls_all_secpol_attr-attrib_key   = ls_attributes-name.
+*          APPEND ls_all_secpol_attr TO lt_all_secpol_attr.
+*        ENDLOOP.
+*      ENDLOOP.
+*
+*      SELECT name default_value FROM sec_policy_attr
+*        INTO TABLE lt_policy_attr
+*        WHERE name IN secattr
+*        ORDER BY name.
+*
+*      IF lt_policy_attr[] IS NOT INITIAL.
+*
+*        LOOP AT lt_policy_attr INTO ls_policy_attr.
+*
+*          READ TABLE lt_all_secpol_attr INTO ls_all_secpol_attr
+*          WITH KEY attrib_key = ls_policy_attr-name
+*          BINARY SEARCH.
+*          IF sy-subrc = 0 AND ls_policy_attr-value IN secvalue.
+*            ls_attribute_list-name = ls_all_secpol_attr-name.
+*            APPEND ls_attribute_list TO pt_attribute_list.
+*          ENDIF.
+*
+*        ENDLOOP.
+*
+*      ENDIF.
+*
+*    ENDIF.
+*
+*    SORT pt_attribute_list.
+*
+*  ENDIF.
+*
+*ENDFORM.                    " GET_SECPOL
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_FIELDCAT
+*&---------------------------------------------------------------------*
+FORM get_fieldcat  CHANGING pt_fieldcat TYPE slis_t_fieldcat_alv.
+
+  DATA:
+    lt_fieldcat TYPE slis_t_fieldcat_alv,
+    ls_fieldcat TYPE slis_fieldcat_alv.
+
+  CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+    EXPORTING
+      i_structure_name       = 'USUSERALL'
+    CHANGING
+      ct_fieldcat            = lt_fieldcat
+    EXCEPTIONS
+      inconsistent_interface = 0
+      program_error          = 0
+      OTHERS                 = 0.
+
+  LOOP AT lt_fieldcat INTO ls_fieldcat
+*   list must be in accordance with structure FROM_USUSERALL
+    WHERE ( fieldname = 'BNAME'      "Username
+         OR fieldname = 'CLASS'      "Usergroup
+         OR fieldname = 'LOCKICON'
+         OR fieldname = 'LOCKREASON'
+         OR fieldname = 'GLTGV'      " valid from
+         OR fieldname = 'GLTGB'      " valid to
+         OR fieldname = 'ACCNT'
+         OR fieldname = 'USTYP'
+         OR fieldname = 'REFUSER'
+         OR fieldname = 'USERALIAS'
+         OR fieldname = 'KOSTL'
+         OR fieldname = 'NAME_TEXT'  "Personal
+         OR fieldname = 'DEPARTMENT'
+         OR fieldname = 'FUNCTION'
+         OR fieldname = 'BUILDING_C'
+         OR fieldname = 'FLOOR_C'
+         OR fieldname = 'ROOMNUM_C'
+         OR fieldname = 'TEL_NUMBER'
+         OR fieldname = 'TEL_EXTENS'
+         OR fieldname = 'NAME1'      "Company
+         OR fieldname = 'NAME2'      "note 629200
+         OR fieldname = 'NAME3'
+         OR fieldname = 'NAME4'
+         OR fieldname = 'POST_CODE1'
+         OR fieldname = 'CITY1'
+         OR fieldname = 'STREET'
+         OR fieldname = 'COUNTRY'
+         OR fieldname = 'SECURITY_POLICY' ).
+    APPEND ls_fieldcat TO pt_fieldcat.
+  ENDLOOP.
+
+  REFRESH lt_fieldcat.
+
+  LOOP AT pt_fieldcat INTO ls_fieldcat.
+    CASE ls_fieldcat-fieldname.
+      WHEN 'BNAME'.
+        ls_fieldcat-key = 'X'.
+        CLEAR ls_fieldcat-key_sel.
+        ls_fieldcat-col_pos = '1'.
+      WHEN 'NAME_TEXT'.
+        ls_fieldcat-outputlen = '20'.
+        ls_fieldcat-col_pos = '3'.
+      WHEN 'CLASS'.
+        ls_fieldcat-col_pos = '4'.
+      WHEN 'ACCNT'.
+        ls_fieldcat-col_pos = '5'.
+      WHEN 'USTYP'.
+        ls_fieldcat-outputlen = '10'.
+        ls_fieldcat-col_pos = '6'.
+      WHEN 'UFLAG'.
+        ls_fieldcat-icon ='X'.
+        ls_fieldcat-outputlen = 8.
+        ls_fieldcat-no_out = 'X'.
+      WHEN 'DATE_FROM'.
+        ls_fieldcat-col_pos = '7'.
+      WHEN 'DATE_TO'.
+        ls_fieldcat-col_pos = '8'.
+      WHEN 'REFUSER'.
+        ls_fieldcat-col_pos = '10'.
+      WHEN 'NAME1'.
+        ls_fieldcat-ddictxt = 'M'.
+        ls_fieldcat-no_out = 'X'.
+        ls_fieldcat-no_out = 'X'.
+      WHEN 'NAME2'.
+        ls_fieldcat-ddictxt = 'M'.
+        ls_fieldcat-no_out = 'X'.
+      WHEN 'NAME3'.
+        ls_fieldcat-ddictxt = 'M'.
+        ls_fieldcat-no_out = 'X'.
+      WHEN 'NAME4'.
+        ls_fieldcat-ddictxt = 'M'.
+        ls_fieldcat-no_out = 'X'.
+      WHEN OTHERS.
+        ls_fieldcat-no_out = 'X'.
+    ENDCASE.
+    MODIFY pt_fieldcat FROM ls_fieldcat.
+  ENDLOOP.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname = 'SECURITY_POLICY'.
+  ls_fieldcat-seltext_s = text_010.
+  ls_fieldcat-seltext_m = text_010.
+  ls_fieldcat-seltext_l = text_010.
+  ls_fieldcat-outputlen = 40.
+  ls_fieldcat-col_pos = '12'.
+  APPEND ls_fieldcat TO pt_fieldcat.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname = 'SECPOL_TEXT'.
+  ls_fieldcat-rollname  = 'SCRTEXT_L'.
+  ls_fieldcat-seltext_l = text_013.
+  ls_fieldcat-outputlen = 40.
+  ls_fieldcat-col_pos = '13'.
+  APPEND ls_fieldcat TO pt_fieldcat.
+
+ENDFORM.                    " GET_FIELDCAT
+
+*&---------------------------------------------------------------------*
+*&      Form  HTML_TOP_OF_PAGE
+*&---------------------------------------------------------------------*
+FORM html_top_of_page USING ir_cl_dd_doc  TYPE REF TO cl_dd_document. "#EC *
+
+  TYPES:   BEGIN OF ts_bname,
+             bname TYPE xubname,
+           END OF ts_bname.
+
+  DATA:
+    ld_text               TYPE sdydo_text_element,
+    ld_select_option      TYPE sdydo_text_element,
+    ls_output             TYPE ts_userlist,
+    lr_system             TYPE REF TO  cl_dd_area,
+    lr_dist               TYPE REF TO  cl_dd_area,
+    lr_sel_crit           TYPE REF TO  cl_dd_area,
+    lr_crit_sign          TYPE REF TO  cl_dd_area,
+    ld_secvalue_low(100)  TYPE c.
+
+  DATA:
+     lt_bname          TYPE TABLE OF ts_bname,
+     ls_bname          TYPE          ts_bname,
+     lv_cnt            TYPE          i,
+     lin_c(10)         TYPE          c,
+     ld_title          TYPE          lvc_title.
+
+  FIELD-SYMBOLS:
+    <lp_secname>       LIKE LINE OF secname,
+    <lp_secattr>       LIKE LINE OF secattr,
+    <lp_secvalue>      LIKE LINE OF secvalue.
+
+  LOOP AT gt_output INTO ls_output.
+
+    MOVE-CORRESPONDING ls_output TO ls_bname.
+    APPEND ls_bname TO lt_bname.
+
+  ENDLOOP.
+
+* create area for standard header -------------------------------
+  CALL METHOD ir_cl_dd_doc->horizontal_split
+    EXPORTING
+      split_area = ir_cl_dd_doc
+    IMPORTING
+      below_area = lr_system.
+
+  IF p_title IS NOT INITIAL.
+
+    ld_title = p_title.
+
+    PERFORM susr_users_list_parse_title
+      IN PROGRAM saplsusd
+      USING    lv_cnt
+      CHANGING ld_title.
+
+    ld_text = ld_title.
+
+  ELSE.
+
+    SORT lt_bname.
+    DELETE ADJACENT DUPLICATES FROM lt_bname.
+    DESCRIBE TABLE lt_bname LINES lv_cnt.
+    WRITE lv_cnt TO lin_c+2 LEFT-JUSTIFIED.
+    CONCATENATE text_008 ': ' lin_c INTO ld_text.
+
+  ENDIF.
+
+  CALL METHOD ir_cl_dd_doc->add_gap
+    EXPORTING
+      width = 2.
+
+  CALL METHOD ir_cl_dd_doc->add_text
+    EXPORTING
+      text      = ld_text
+      sap_style = 'HEADING'.
+
+  CALL METHOD ir_cl_dd_doc->new_line
+    EXPORTING
+      repeat = 1.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 2.
+
+  ld_text = text_002.   "system
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium
+      sap_emphasis = cl_dd_document=>strong.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 41.
+
+  ld_text = sy-sysid.
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 10.
+
+  ld_text = text_003.   "client
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium
+      sap_emphasis = cl_dd_document=>strong.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 22.
+
+  ld_text = sy-mandt.
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 10.
+
+  ld_text = text_004.
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium
+      sap_emphasis = cl_dd_document=>strong.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 22.
+
+  ld_text = sy-uname.
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 1.
+
+  WRITE sy-datum TO ld_text.
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium.
+
+  CALL METHOD lr_system->add_gap
+    EXPORTING
+      width = 1.
+
+  WRITE sy-uzeit TO ld_text.
+  CALL METHOD lr_system->add_text
+    EXPORTING
+      text         = ld_text
+      sap_fontsize = cl_dd_document=>medium.
+
+
+* create area for selections criteria-------------------------------
+  IF secname[]  IS NOT INITIAL OR
+     secattr[]  IS NOT INITIAL OR
+     secvalue[] IS NOT INITIAL.
+
+    CALL METHOD ir_cl_dd_doc->horizontal_split
+      EXPORTING
+        split_area = lr_system
+      IMPORTING
+        below_area = lr_dist.
+
+    CALL METHOD lr_dist->add_gap
+      EXPORTING
+        width = 1.
+
+    ld_text = text_009.
+    CALL METHOD lr_dist->add_text
+      EXPORTING
+        text         = ld_text
+        sap_fontsize = cl_dd_document=>medium
+        sap_emphasis = cl_dd_document=>strong.
+
+    CALL METHOD ir_cl_dd_doc->horizontal_split
+      EXPORTING
+        split_area = lr_dist
+      IMPORTING
+        below_area = lr_sel_crit.
+
+    CALL METHOD ir_cl_dd_doc->vertical_split
+      EXPORTING
+        split_area  = lr_sel_crit
+        split_width = '17%'
+      IMPORTING
+        right_area  = lr_crit_sign.
+
+    IF NOT secname[] IS INITIAL.
+
+      CALL METHOD lr_sel_crit->add_gap
+        EXPORTING
+          width = 1.
+
+      ld_text = text_010.
+      CALL METHOD lr_sel_crit->add_text
+        EXPORTING
+          text         = ld_text
+          sap_fontsize = cl_dd_document=>medium.
+
+      LOOP AT secname ASSIGNING <lp_secname>.
+
+        CONCATENATE
+               <lp_secname>-sign
+               <lp_secname>-option
+               <lp_secname>-low
+          INTO ld_select_option
+          SEPARATED BY gc_space.
+
+        CALL METHOD lr_crit_sign->add_text
+          EXPORTING
+            text         = ld_select_option
+            sap_fontsize = cl_dd_document=>medium.
+
+        IF NOT lr_sel_crit IS INITIAL.
+          CALL METHOD lr_sel_crit->new_line.
+        ENDIF.
+
+        IF NOT lr_crit_sign IS INITIAL.
+          CALL METHOD lr_crit_sign->new_line.
+        ENDIF.
+
+      ENDLOOP.  "AT secname
+
+    ENDIF.   "NOT secname IS INITIAL
+
+    IF NOT secattr[] IS INITIAL.
+
+      CALL METHOD lr_sel_crit->add_gap
+        EXPORTING
+          width = 1.
+
+      ld_text = text_011.
+      CALL METHOD lr_sel_crit->add_text
+        EXPORTING
+          text         = ld_text
+          sap_fontsize = cl_dd_document=>medium.
+
+      LOOP AT secattr ASSIGNING <lp_secattr>.
+
+        CONCATENATE
+               <lp_secattr>-sign
+               <lp_secattr>-option
+               <lp_secattr>-low
+          INTO ld_select_option
+          SEPARATED BY gc_space.
+
+        CALL METHOD lr_crit_sign->add_text
+          EXPORTING
+            text         = ld_select_option
+            sap_fontsize = cl_dd_document=>medium.
+
+        IF NOT lr_sel_crit  IS INITIAL.
+          CALL METHOD lr_sel_crit->new_line.
+        ENDIF.
+
+        IF NOT lr_crit_sign IS INITIAL.
+          CALL METHOD lr_crit_sign->new_line.
+        ENDIF.
+
+      ENDLOOP.  "AT secattr
+
+    ENDIF.   "NOT secattr IS INITIAL
+
+    IF secvalue[] IS NOT INITIAL.
+
+      CALL METHOD lr_sel_crit->add_gap
+        EXPORTING
+          width = 1.
+
+      ld_text = text_012.
+      CALL METHOD lr_sel_crit->add_text
+        EXPORTING
+          text         = ld_text
+          sap_fontsize = cl_dd_document=>medium.
+
+      LOOP AT secvalue ASSIGNING <lp_secvalue>.
+
+        ld_secvalue_low = <lp_secvalue>-low.
+
+        CONCATENATE
+               <lp_secvalue>-sign
+               <lp_secvalue>-option
+               ld_secvalue_low
+          INTO ld_select_option
+          SEPARATED BY gc_space.
+
+        CALL METHOD lr_crit_sign->add_text
+          EXPORTING
+            text         = ld_select_option
+            sap_fontsize = cl_dd_document=>medium.
+
+        IF NOT lr_sel_crit  IS INITIAL.
+          CALL METHOD lr_sel_crit->new_line.
+        ENDIF.
+
+        IF NOT lr_crit_sign IS INITIAL.
+          CALL METHOD lr_crit_sign->new_line.
+        ENDIF.
+
+      ENDLOOP.  "AT secvalue
+
+    ENDIF. "NOT secvalue IS INITIAL
+
+  ENDIF.
+
+  IF p_title IS NOT INITIAL.
+
+    CALL METHOD lr_sel_crit->add_gap
+      EXPORTING
+        width = 1.
+
+    ld_text = t_title.
+    CALL METHOD lr_sel_crit->add_text
+      EXPORTING
+        text         = ld_text
+        sap_fontsize = cl_dd_document=>medium.
+
+    ld_text = p_title.
+    CALL METHOD lr_crit_sign->add_text
+      EXPORTING
+        text         = ld_text
+        sap_fontsize = cl_dd_document=>medium.
+
+
+    IF NOT lr_sel_crit  IS INITIAL.
+      CALL METHOD lr_sel_crit->new_line.
+    ENDIF.
+
+    IF NOT lr_crit_sign IS INITIAL.
+      CALL METHOD lr_crit_sign->new_line.
+    ENDIF.
+
+  ENDIF.
+
+  IF p_layout IS NOT INITIAL.
+
+    CALL METHOD lr_sel_crit->add_gap
+      EXPORTING
+        width = 1.
+
+    ld_text = t_layout.
+    CALL METHOD lr_sel_crit->add_text
+      EXPORTING
+        text         = ld_text
+        sap_fontsize = cl_dd_document=>medium.
+
+    ld_text = p_layout.
+    CALL METHOD lr_crit_sign->add_text
+      EXPORTING
+        text         = ld_text
+        sap_fontsize = cl_dd_document=>medium.
+
+
+    IF NOT lr_sel_crit  IS INITIAL.
+      CALL METHOD lr_sel_crit->new_line.
+    ENDIF.
+
+    IF NOT lr_crit_sign IS INITIAL.
+      CALL METHOD lr_crit_sign->new_line.
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.                    "html_top_of_page
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DIALOG_STATUS
+*&---------------------------------------------------------------------*
+*
+* create spool list for backgound jobs
+*----------------------------------------------------------------------*
+FORM get_dialog_status USING pv_status TYPE tv_c1.
+
+  IF sy-binpt IS INITIAL AND sy-batch IS INITIAL.
+    pv_status = gc_true.
+  ELSE.
+    pv_status = gc_false.
+  ENDIF.
+
+ENDFORM.                    " get_dialog_status
+
+*&---------------------------------------------------------------------*
+*&      Form  SORT_FIELDS
+*&---------------------------------------------------------------------*
+FORM sort_fields CHANGING pt_sort TYPE slis_t_sortinfo_alv.
+
+  DATA: ls_sort TYPE slis_sortinfo_alv.
+
+  ls_sort-fieldname = 'BNAME'.
+  ls_sort-up = 'X'.
+  ls_sort-group = 'UL'.
+  APPEND ls_sort TO pt_sort.
+  ls_sort-fieldname = 'NAME_TEXT'.
+  ls_sort-up = 'X'.
+  ls_sort-group = 'UL'.
+  APPEND ls_sort TO pt_sort.
+
+ENDFORM.                    " SORT_FIELDS
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ALV_SECPOL_ATTRB
+*&---------------------------------------------------------------------*
+FORM display_alv_secpol_attrb USING pt_list  TYPE tt_list
+                                    pd_title TYPE	lvc_title.
+
+  DATA:
+    ls_fieldcat       TYPE slis_fieldcat_alv,
+    lt_fieldcat       TYPE slis_t_fieldcat_alv.
+
+  " Fieldcatalog
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname = 'NAME'.
+  ls_fieldcat-rollname  = 'SECURITY_POLICY_ATTRIB_KEY'.
+  ls_fieldcat-outputlen = 40.
+  ls_fieldcat-key       = 'X'.
+  INSERT ls_fieldcat INTO TABLE lt_fieldcat.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname = 'VALUE'.
+  ls_fieldcat-rollname  = 'SECURITY_POLICY_ATTRIB_VALUE'.
+  ls_fieldcat-outputlen = 10.
+  INSERT ls_fieldcat INTO TABLE lt_fieldcat.
+
+  CLEAR ls_fieldcat.
+  ls_fieldcat-fieldname = 'DESCRIPTION'.
+  ls_fieldcat-rollname  = 'SCRTEXT_L'.
+  ls_fieldcat-seltext_l = text_005.
+  ls_fieldcat-outputlen = 40.
+  INSERT ls_fieldcat INTO TABLE lt_fieldcat.
+
+  SORT pt_list BY name.
+
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING
+      i_grid_title          = pd_title
+      it_fieldcat           = lt_fieldcat
+      i_screen_start_column = 5
+      i_screen_start_line   = 5
+      i_screen_end_column   = 100
+      i_screen_end_line     = 25
+    TABLES
+      t_outtab              = pt_list
+    EXCEPTIONS
+      OTHERS                = 0.
+
+ENDFORM.                    " DISPLAY_ALV_SECPOL_ATTRB
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SECPOL
+*&---------------------------------------------------------------------*
+FORM get_secpol TABLES pt_attribute_list TYPE tt_secpol.
+
+  DATA:
+      lt_pol_list             TYPE security_policy_list,
+      ls_pol_list             TYPE security_policy_info,
+      lt_attributes           TYPE security_policy_attribute_list,
+      ls_attributes           TYPE sec_policy_attrib_key_value,
+      lt_all_secpol_attr      TYPE tt_secpol_rt,
+      ls_all_secpol_attr      TYPE ts_secpol_rt,
+      lt_attribute_list       TYPE tt_secpol,
+      ls_attribute_list       TYPE ts_secpol.
+
+  IF secattr[]  IS NOT INITIAL OR
+     secvalue[] IS NOT INITIAL.
+
+    IF secname IS INITIAL.
+
+      lt_pol_list = cl_security_policy=>list_all_available( ).
+
+    ELSE.
+
+      SELECT name                                      ##too_many_itab_fields
+        INTO CORRESPONDING FIELDS OF TABLE lt_pol_list  "#EC CI_GENBUFF
+        FROM sec_policy_cust
+        WHERE name IN secname
+        ORDER BY name.
+
+    ENDIF.
+
+    LOOP AT lt_pol_list INTO ls_pol_list.
+      lt_attributes =  cl_security_policy=>get_attribute_value_list( ls_pol_list-name ).
+      LOOP AT lt_attributes INTO ls_attributes.
+        ls_all_secpol_attr-name         = ls_pol_list-name.
+        ls_all_secpol_attr-attrib_key   = ls_attributes-name.
+        ls_all_secpol_attr-attrib_value = ls_attributes-value.
+        APPEND ls_all_secpol_attr TO lt_all_secpol_attr.
+      ENDLOOP.
+    ENDLOOP.
+
+
+    LOOP AT lt_all_secpol_attr
+       INTO ls_all_secpol_attr
+       WHERE attrib_key IN secattr
+         AND attrib_value IN secvalue.
+
+      ls_attribute_list-name = ls_all_secpol_attr-name.
+      APPEND ls_attribute_list TO lt_attribute_list.
+
+    ENDLOOP.
+    SORT lt_attribute_list.
+    DELETE ADJACENT DUPLICATES FROM lt_attribute_list.
+
+    PERFORM delete_ex_attr TABLES lt_all_secpol_attr
+                                  lt_attribute_list.
+
+    PERFORM delete_ex_value TABLES lt_all_secpol_attr
+                                   lt_attribute_list.
+
+    pt_attribute_list[] = lt_attribute_list[].
+
+  ENDIF.
+
+ENDFORM.                    " GET_SECPOL
+
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_EX
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM delete_ex_attr TABLES pt_all_secpol_attr TYPE tt_secpol_rt
+                           pt_attribute_list  TYPE tt_secpol.
+
+  DATA:
+      lr_secattr_ex           TYPE ttr_secattr,
+      lt_attribute_list_ex    TYPE tt_secpol,
+      ls_attribute_list_ex    TYPE ts_secpol,
+      ls_all_secpol_attr      TYPE ts_secpol_rt,
+      ls_attribute_list       TYPE ts_secpol,
+      lt_attribute_list       TYPE tt_secpol.
+
+  FIELD-SYMBOLS:
+    <pl_secattr>              TYPE tr_secattr.
+
+  LOOP AT secattr ASSIGNING <pl_secattr>.
+    IF  <pl_secattr>-sign = 'E' OR
+        <pl_secattr>-option = 'NE'.
+      <pl_secattr>-sign = 'I'.
+      <pl_secattr>-option = 'EQ'.
+      APPEND <pl_secattr> TO lr_secattr_ex.
+    ENDIF.
+  ENDLOOP.
+
+  IF lr_secattr_ex[] IS NOT INITIAL.
+
+    LOOP AT pt_all_secpol_attr
+      INTO ls_all_secpol_attr
+      WHERE attrib_key   IN lr_secattr_ex
+        AND attrib_value IN secvalue.
+
+      ls_attribute_list_ex-name = ls_all_secpol_attr-name.
+      APPEND ls_attribute_list_ex TO lt_attribute_list_ex.
+
+    ENDLOOP.
+
+    IF lt_attribute_list_ex[] IS NOT INITIAL.
+
+      lt_attribute_list[] = pt_attribute_list[].
+      CLEAR pt_attribute_list[].
+
+      LOOP AT lt_attribute_list INTO ls_attribute_list.
+
+        READ TABLE lt_attribute_list_ex INTO ls_attribute_list_ex
+           WITH KEY name       = ls_attribute_list-name
+           BINARY SEARCH.
+
+        IF sy-subrc <> 0.
+          APPEND ls_attribute_list TO pt_attribute_list.
+        ENDIF.
+
+      ENDLOOP.
+
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.                    " DELETE_EX_attr
+
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_EX_VALUE
+*&---------------------------------------------------------------------*
+FORM delete_ex_value TABLES pt_all_secpol_attr TYPE tt_secpol_rt
+                            pt_attribute_list  TYPE tt_secpol.
+
+  DATA:
+      lr_secvalue_ex           TYPE ttr_secvalue,
+      lt_attribute_list_ex    TYPE tt_secpol,
+      ls_attribute_list_ex    TYPE ts_secpol,
+      ls_all_secpol_attr      TYPE ts_secpol_rt,
+      ls_attribute_list       TYPE ts_secpol,
+      lt_attribute_list       TYPE tt_secpol.
+
+  FIELD-SYMBOLS:
+    <pl_secvalue>              TYPE tr_secvalue.
+
+  LOOP AT secvalue ASSIGNING <pl_secvalue>.
+    IF  <pl_secvalue>-sign = 'E' OR
+        <pl_secvalue>-option = 'NE'.
+      <pl_secvalue>-sign = 'I'.
+      <pl_secvalue>-option = 'EQ'.
+      APPEND <pl_secvalue> TO lr_secvalue_ex.
+    ENDIF.
+  ENDLOOP.
+
+  IF lr_secvalue_ex[] IS NOT INITIAL.
+
+    LOOP AT pt_all_secpol_attr
+      INTO ls_all_secpol_attr
+      WHERE attrib_key   IN secattr
+        AND attrib_value IN lr_secvalue_ex.
+
+      ls_attribute_list_ex-name = ls_all_secpol_attr-name.
+      APPEND ls_attribute_list_ex TO lt_attribute_list_ex.
+
+    ENDLOOP.
+
+    IF lt_attribute_list_ex[] IS NOT INITIAL.
+
+      lt_attribute_list[] = pt_attribute_list[].
+      CLEAR pt_attribute_list[].
+
+      LOOP AT lt_attribute_list INTO ls_attribute_list.
+
+        READ TABLE lt_attribute_list_ex INTO ls_attribute_list_ex
+           WITH KEY name       = ls_attribute_list-name
+           BINARY SEARCH.
+
+        IF sy-subrc <> 0.
+          APPEND ls_attribute_list TO pt_attribute_list.
+        ENDIF.
+
+      ENDLOOP.
+
+    ENDIF.
+
+  ENDIF.
+ENDFORM.                    " DELETE_EX_VALUE

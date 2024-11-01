@@ -1,0 +1,290 @@
+CLASS zcl_mm_d_generate_reserve DEFINITION
+  PUBLIC
+  INHERITING FROM /bobf/cl_lib_d_supercl_simple FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    METHODS /bobf/if_frw_determination~execute REDEFINITION.
+
+    METHODS add_log_messages
+      IMPORTING it_messages TYPE bapirettab
+                it_key      TYPE /bobf/t_frw_key
+                is_ctx      TYPE /bobf/s_frw_ctx_det
+                io_modify   TYPE REF TO /bobf/if_frw_modify
+                io_read     TYPE REF TO /bobf/if_frw_read.
+
+    METHODS after_rfc    IMPORTING p_task TYPE clike.
+    METHODS after_extend IMPORTING p_task TYPE clike.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+    DATA gv_resb    TYPE bapi2093_res_key-reserv_no.
+    DATA gs_ret     TYPE bapiret2.
+    DATA gt_err_res TYPE bapirettab.
+
+    METHODS get_child_data
+      IMPORTING iv_association     TYPE /bobf/obm_node_key
+                iv_node            TYPE /bobf/obm_assoc_key
+                it_key             TYPE /bobf/t_frw_key
+                io_read            TYPE REF TO /bobf/if_frw_read
+                VALUE(it_data)     TYPE STANDARD TABLE
+      CHANGING  ct_export          TYPE STANDARD TABLE   "#EC CI_VALPAR
+      RETURNING VALUE(et_messages) TYPE REF TO /bobf/if_frw_message.
+ENDCLASS.
+
+
+CLASS zcl_mm_d_generate_reserve IMPLEMENTATION.
+  METHOD add_log_messages.
+    " TODO: variable is assigned but only used in commented-out code (ABAP cleaner)
+    DATA lt_log TYPE ztmmi_reserve_error.
+    DATA ls_log TYPE zsmmi_reserve_error.
+
+    io_read->retrieve_by_association(
+      EXPORTING it_key         = it_key
+                iv_node        = is_ctx-node_key
+                iv_association = zif_mm_i_reserve_header_c=>sc_association-zmm_i_reserve_header-_reserveerror
+                iv_fill_data   = abap_true
+      IMPORTING et_data        = lt_log ).
+
+    LOOP AT it_messages ASSIGNING FIELD-SYMBOL(<ls_messages>).
+      ls_log-error_number  = <ls_messages>-number.
+      ls_log-error_id      = <ls_messages>-id.
+      ls_log-error_message = <ls_messages>-message.
+
+      LOOP AT it_key ASSIGNING FIELD-SYMBOL(<ls_key>). "#EC CI_NESTED
+        ls_log-isactiveentity = abap_true.
+        io_modify->create(
+            iv_source_node_key = zif_mm_i_reserve_header_c=>sc_node-zmm_i_reserve_header
+            iv_source_key      = <ls_key>-key
+            iv_assoc_key       = zif_mm_i_reserve_header_c=>sc_association-zmm_i_reserve_header-_reserveerror
+            iv_node            = zif_mm_i_reserve_header_c=>sc_node-zmm_i_reserve_error
+            is_data            = REF #( ls_log ) ).
+
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD after_extend.
+    " TODO: parameter P_TASK is never used (ABAP cleaner)
+
+    RECEIVE RESULTS FROM FUNCTION 'ZMM_STORAGE_EXTEND1'
+      IMPORTING  return                = gs_ret
+      EXCEPTIONS system_failure        = 1
+                 communication_failure = 2
+                 resource_failure      = 3
+                 OTHERS                = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD after_rfc.
+    " TODO: parameter P_TASK is never used (ABAP cleaner)
+
+    RECEIVE RESULTS FROM FUNCTION 'ZBAPI_RESERVATION_CREATE1'
+      IMPORTING  reservation           = gv_resb
+      TABLES     return                = gt_err_res
+      EXCEPTIONS system_failure        = 1
+                 communication_failure = 2
+                 resource_failure      = 3
+                 OTHERS                = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_child_data.
+    io_read->retrieve_by_association( EXPORTING it_key         = it_key
+                                                iv_node        = iv_node
+                                                iv_association = iv_association
+                                                iv_fill_data   = abap_true
+                                      IMPORTING et_data        = it_data
+                                                eo_message     = et_messages  ).
+    MOVE-CORRESPONDING it_data TO ct_export.
+  ENDMETHOD.                                             "#EC CI_VALPAR
+
+  METHOD /bobf/if_frw_determination~execute.
+    DATA lt_header   TYPE ztmmi_reserve_header.
+    DATA ls_header   TYPE zsmmi_reserve_header.
+    DATA lt_messages TYPE bapirettab.
+    DATA ls_reshead  TYPE bapi2093_res_head.
+    DATA lt_pos      TYPE ztmmi_reserve_item.
+    DATA lv_rspos    TYPE rspos.
+    DATA ls_item     TYPE bapi2093_res_item.
+    DATA ls_ret      TYPE bapiret2.
+    DATA lt_items    TYPE TABLE OF bapi2093_res_item.
+    DATA lv_atpcheck TYPE bapi2093_atpcheck    VALUE 'X'.
+    DATA lv_calcheck TYPE bapi2093_calcheck    VALUE 'X'.
+    DATA lt_ps       TYPE STANDARD TABLE OF bapi_profitability_segment.
+    DATA lt_ret      TYPE TABLE OF bapiret2.
+
+    io_read->retrieve( EXPORTING iv_node = is_ctx-node_key
+                                 it_key  = it_key
+                       IMPORTING et_data = lt_header ).
+
+    CLEAR: gt_err_res,
+           gs_ret,
+           lt_messages,
+           eo_message,
+           et_failed_key.
+
+    IF lt_header[ 1 ]-key IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    ls_header = CORRESPONDING #( lt_header[ 1 ] ).
+
+
+    TRY.
+        ls_header-bdter       = sy-datum.
+        ls_header-created     = sy-uname.
+        ls_header-umwrk       = ls_header-werks.
+        ls_reshead-res_date   = sy-datum.
+        ls_reshead-created_by = sy-uname.
+        ls_reshead-move_type  = ls_header-bwart.
+        ls_reshead-move_stloc = ls_header-umlgo.
+        ls_reshead-orderid    = ls_header-aufnr.
+        IF ls_reshead-move_stloc IS NOT INITIAL.
+          ls_reshead-move_plant = ls_header-werks.
+        ENDIF.
+        ls_reshead-costcenter = ls_header-kostl.
+        DATA(zif_header_associations) = zif_mm_i_reserve_header_c=>sc_association.
+        DATA(zif_header_node) = zif_mm_i_reserve_header_c=>sc_node.
+        get_child_data( EXPORTING iv_association = zif_header_associations-zmm_i_reserve_header-_reserveitem
+                                  iv_node        = zif_header_node-zmm_i_reserve_header
+                                  it_key         = it_key
+                                  io_read        = io_read
+                                  it_data        = lt_pos
+                        CHANGING  ct_export      = lt_pos ).
+        lv_rspos = 1.
+        LOOP AT lt_pos ASSIGNING FIELD-SYMBOL(<fs_pos>).
+          <fs_pos>-rspos     = lv_rspos.
+          ls_item-material   = <fs_pos>-matnr.
+          ls_item-material   = |{ ls_item-material ALPHA = IN }|.
+          ls_item-batch      = <fs_pos>-charg.
+          ls_item-stge_loc   = <fs_pos>-lgort.
+          ls_item-entry_qnt  = <fs_pos>-menge.
+          ls_item-entry_uom  = <fs_pos>-meins.
+          ls_item-gl_account = ls_header-saknr.
+          ls_item-plant      = ls_header-werks.
+          ls_item-movement   = 'X'.
+          ls_item-acct_man   = 'X'.
+          IF  ls_reshead-move_type = '201' AND ( ls_item-gl_account IS INITIAL OR ls_reshead-costcenter IS INITIAL ).
+            ls_ret-number  = '004'.
+            ls_ret-id      = 'E'.
+            ls_ret-message = 'Не заполнены МВЗ и номер счета'.
+            APPEND ls_ret TO lt_messages.
+          ENDIF.
+          IF  ls_reshead-move_type = '261' AND ( ls_reshead-orderid IS INITIAL OR ls_item-gl_account IS INITIAL ).
+            ls_ret-number  = '005'.
+            ls_ret-id      = 'E'.
+            ls_ret-message = 'Не заполнены заказ и номер счета'.
+            APPEND ls_ret TO lt_messages.
+          ENDIF.
+          IF ( ( ls_reshead-move_type = '201' OR ls_reshead-move_type = '206' ) AND ls_item-batch CP '1091*' ) OR
+          ( ls_reshead-move_type = 'ZM1' AND ls_item-batch NE '1091*' ).
+            ls_ret-number  = '003'.
+            ls_ret-id      = 'E'.
+            ls_ret-message = 'Вид движения и партия не соответствуют'.
+            APPEND ls_ret TO lt_messages.
+          ENDIF.
+          SELECT SINGLE meins FROM mara
+            WHERE matnr = @ls_item-material
+            INTO @DATA(lv_base_uom).
+          IF sy-subrc = 0.
+            IF lv_base_uom <> ls_item-entry_uom.
+              SELECT SINGLE @abap_true FROM marm
+                WHERE matnr = @ls_item-material
+                  AND meinh = @ls_item-entry_uom
+              " TODO: variable is assigned but never used (ABAP cleaner)
+                INTO @DATA(lv_uom).
+              IF sy-subrc = 0.
+                CALL FUNCTION 'MATERIAL_UNIT_CONVERSION'
+                  EXPORTING
+                    input  = ls_item-entry_qnt
+                    matnr  = ls_item-material
+                    meinh  = ls_item-entry_uom
+                    meins  = lv_base_uom
+                    charge = ls_item-batch
+                    werks  = ls_item-plant
+                  IMPORTING
+                    output = ls_item-entry_qnt.
+              ELSE.
+                ls_ret-number  = '001'.
+                ls_ret-id      = 'E'.
+                ls_ret-message = 'Не удалось привести ЕИ к базисной'.
+                APPEND ls_ret TO lt_messages.
+              ENDIF.
+            ENDIF.
+          ELSE.
+            ls_ret-number  = '002'.
+            ls_ret-id      = 'E'.
+            ls_ret-message = 'ЕИ для материала не заведена'.
+            APPEND ls_ret TO lt_messages.
+          ENDIF.
+          IF ls_header-umlgo IS NOT INITIAL.
+            SELECT SINGLE lgort FROM mard
+              " TODO: variable is assigned but never used (ABAP cleaner)
+              INTO @DATA(lv_tmp)
+              WHERE matnr = @ls_item-material
+                AND werks = @ls_item-plant
+                AND lgort = @ls_header-umlgo.
+            IF sy-subrc <> 0.
+              CALL FUNCTION 'ZMM_STORAGE_EXTEND1' STARTING NEW TASK 'EXTEND'
+                CALLING after_extend ON END OF TASK
+                EXPORTING
+                  iv_matnr = ls_item-material
+                  iv_werks = ls_item-plant
+                  iv_lgort = ls_header-umlgo.
+              WAIT FOR ASYNCHRONOUS TASKS UNTIL gs_ret IS NOT INITIAL.
+              IF gs_ret-type = 'E' OR gs_ret-type = 'A'.
+                APPEND gs_ret TO lt_messages.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+          APPEND ls_item TO lt_items.
+          lv_rspos = lv_rspos + 1.
+        ENDLOOP.
+        IF lt_messages IS INITIAL.
+            CALL FUNCTION 'ZBAPI_RESERVATION_CREATE1' STARTING NEW TASK 'RESERVE'
+              CALLING after_rfc ON END OF TASK
+              EXPORTING
+                reservationheader    = ls_reshead
+                atpcheck             = lv_atpcheck
+                calcheck             = lv_calcheck
+              TABLES
+                profitabilitysegment = lt_ps
+                reservationitems     = lt_items
+                return               = lt_ret.
+            WAIT FOR ASYNCHRONOUS TASKS UNTIL gv_resb IS NOT INITIAL.
+            LOOP AT gt_err_res INTO DATA(ls_err).
+              IF ls_err-type = 'E' OR ls_err-type = 'A'.
+                APPEND ls_err TO lt_messages.
+              ENDIF.
+            ENDLOOP.
+            ls_header-rsnum = gv_resb.
+        ENDIF.
+      CATCH cx_root.
+        ls_header-error_id      = '11'.
+        ls_header-error_message = 'Ошибка резервирования'.
+        ls_header-has_error     = abap_true.
+    ENDTRY.
+    IF lt_messages IS NOT INITIAL.
+      ls_header-error_id      = '21'.
+      ls_header-error_message = lt_messages[ 1 ]-message.
+      ls_header-has_error     = abap_true.
+      add_log_messages( it_messages = lt_messages
+                        it_key      = it_key
+                        is_ctx      = is_ctx
+                        io_read     = io_read
+                        io_modify   = io_modify ).
+    ENDIF.
+
+    GET REFERENCE OF ls_header INTO DATA(rs_header).
+    io_modify->update( iv_node = is_ctx-node_key
+                       iv_key  = rs_header->key
+                       is_data = rs_header ).
+
+  ENDMETHOD.
+ENDCLASS.

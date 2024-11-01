@@ -1,0 +1,412 @@
+CLASS /bobf/cl_sadl_transaction_mngr DEFINITION
+  PUBLIC
+  INHERITING FROM cl_sadl_frwk_transact_manager
+  CREATE PROTECTED
+  GLOBAL FRIENDS /bobf/cl_frw_message_factory    " asks for the message mode
+                 /bobf/cl_lib_draft.
+
+
+  PUBLIC SECTION.
+    TYPES:
+      BEGIN OF ty_modification,
+        bo_key      TYPE /bobf/obm_bo_key,
+        entity_id   TYPE sadl_entity_id,
+        change_mode TYPE /bobf/conf_change_mode,
+        create      TYPE if_sadl_batch~ty_create,
+        update      TYPE if_sadl_batch~ty_update,
+        delete      TYPE if_sadl_batch~ty_delete,
+      END OF ty_modification.
+    TYPES tt_modification TYPE STANDARD TABLE OF ty_modification WITH DEFAULT KEY.
+
+    TYPES:
+      BEGIN OF ty_action_activation,
+        entity_id     TYPE sadl_entity_id,
+        rt_key_values TYPE REF TO data,
+      END OF ty_action_activation.
+    TYPES tt_action_activation TYPE STANDARD TABLE OF ty_action_activation WITH DEFAULT KEY.
+
+    CLASS-METHODS get IMPORTING iv_entity_type                TYPE sadl_entity_type DEFAULT /bobf/if_sadl_c=>gc_entity_type
+                      RETURNING VALUE(ro_transaction_manager) TYPE REF TO cl_sadl_frwk_transact_manager
+                      RAISING   cx_sadl_static.
+
+    METHODS if_sadl_transaction_manager~discard_changes REDEFINITION .
+    METHODS if_sadl_transaction_manager~has_changes REDEFINITION .
+    METHODS if_sadl_transaction_manager~save REDEFINITION .
+    METHODS if_sadl_batch~modify  REDEFINITION .
+
+  PROTECTED SECTION.
+
+    CLASS-METHODS create_instance IMPORTING iv_entity_type           TYPE sadl_entity_type DEFAULT /bobf/if_sadl_c=>gc_entity_type
+                                            io_bopf_transaction_mngr TYPE REF TO /bobf/cl_tra_transaction_mgr OPTIONAL
+                                  RAISING   cx_sadl_static.
+    METHODS constructor IMPORTING iv_entity_type           TYPE sadl_entity_type
+                                  io_bopf_transaction_mngr TYPE REF TO /bobf/if_tra_transaction_mgr.
+    METHODS _create_message_handler REDEFINITION .
+    METHODS get_sadl_entity_transactional IMPORTING iv_entity_type                 TYPE sadl_entity_type DEFAULT /bobf/if_sadl_c=>gc_entity_type
+                                                    iv_entity_id                   TYPE sadl_entity_id
+                                          RETURNING VALUE(ro_sadl_entity_transact) TYPE REF TO /bobf/cl_sadl_entity_transact
+                                          RAISING   cx_sadl_static.
+
+
+    METHODS execute_action IMPORTING it_action TYPE if_sadl_batch=>tt_action
+                           EXPORTING ev_failed TYPE abap_bool
+                           RAISING   cx_sadl_static.
+    METHODS create_entity_table_ref IMPORTING io_sadl_entity_transact TYPE REF TO /bobf/cl_sadl_entity_transact
+                                    RETURNING VALUE(rr_table_ref)     TYPE REF TO data
+                                    RAISING   cx_sadl_static.
+    METHODS bopf_prepare_commit EXPORTING eo_message_before_commit    TYPE REF TO /bobf/if_frw_message
+                                          ev_local_update_task_failed TYPE abap_bool
+                                          ev_rejected                 TYPE abap_bool.
+    METHODS bopf_commit_and_finalize IMPORTING iv_local_update_task_failed TYPE abap_bool
+                                     EXPORTING eo_message_after_commit     TYPE REF TO /bobf/if_frw_message.
+
+  PRIVATE SECTION.
+
+    TYPES ty_message_mode TYPE c LENGTH 1.
+
+
+    CONSTANTS: BEGIN OF gc_message_mode,
+                 transient TYPE ty_message_mode VALUE 'T',
+                 durable   TYPE ty_message_mode VALUE 'D',
+               END OF gc_message_mode.
+
+    CLASS-DATA go_transaction_manager      TYPE REF TO /bobf/cl_sadl_transaction_mngr.
+    CLASS-DATA gv_message_mode             TYPE ty_message_mode.
+
+
+    DATA: mv_entity_type           TYPE sadl_entity_type,
+          mo_bopf_transaction_mngr TYPE REF TO /bobf/if_tra_transaction_mgr.
+
+
+
+
+    METHODS add_message IMPORTING io_message TYPE REF TO /bobf/if_frw_message.
+
+    METHODS changeset_has_only_activation IMPORTING it_create                    TYPE if_sadl_batch=>tt_create
+                                                    it_update                    TYPE if_sadl_batch=>tt_update
+                                                    it_delete                    TYPE if_sadl_batch=>tt_delete
+                                                    it_action                    TYPE if_sadl_batch=>tt_action
+                                          RETURNING VALUE(rv_is_only_activation) TYPE abap_bool.
+
+
+
+
+    CLASS-METHODS get_message_mode RETURNING VALUE(rv_message_mode) TYPE ty_message_mode.
+
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_SADL_TRANSACTION_MNGR IMPLEMENTATION.
+
+
+  METHOD add_message.
+    IF io_message IS BOUND.
+      CAST /bobf/cl_sadl_message_handler( if_sadl_transaction_manager~get_message_handler( ) )->add_bopf_messages( io_message ).
+    ENDIF.
+  ENDMETHOD.
+
+
+    METHOD bopf_commit_and_finalize.
+    "*** This requires that mo_bopf_transaction_mngr is an instance of /BOBF/CL_TRA_TRANSACTION_MNGR ***
+
+    "Dumping here probably indicates that an add-on is active which wraps the transaction manager.
+    "Such add-ons are currently not supported for CDS BOs.
+
+    CAST /bobf/cl_tra_transaction_mgr( mo_bopf_transaction_mngr
+                           )->commit_and_finalize_transact( EXPORTING iv_transaction_pattern      = /bobf/if_tra_c=>gc_tp_save_and_continue
+                                                                      iv_local_update_task_failed = iv_local_update_task_failed
+                                                            IMPORTING eo_message                  = eo_message_after_commit ).
+  ENDMETHOD.
+
+
+  METHOD bopf_prepare_commit.
+    "*** This requires that mo_bopf_transaction_mngr is an instance of /BOBF/CL_TRA_TRANSACTION_MNGR ***
+
+    "Dumping here probably indicates that an add-on is active which wraps the transaction manager.
+    "Such add-ons are currently not supported for CDS BOs.
+
+    CAST /bobf/cl_tra_transaction_mgr( mo_bopf_transaction_mngr
+                           )->prepare_commit( EXPORTING iv_transaction_pattern      = /bobf/if_tra_c=>gc_tp_save_and_continue
+                                              IMPORTING eo_message                  = eo_message_before_commit
+                                                        ev_local_update_task_failed = ev_local_update_task_failed
+                                                        ev_rejected                 = ev_rejected ).
+  ENDMETHOD.
+
+
+  METHOD changeset_has_only_activation.
+    DATA(lv_count_activation) = REDUCE #( INIT count = 0
+                                          FOR  action IN it_action WHERE ( name = /bobf/if_conf_cds_link_c=>gc_action_name-draft-activation )
+                                          NEXT count = count + 1 ).
+    rv_is_only_activation = boolc( it_create IS INITIAL AND
+                                   it_update IS INITIAL AND
+                                   it_delete IS INITIAL AND
+                                   lines( it_action ) = lv_count_activation ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    super->constructor( ).
+
+    ASSERT io_bopf_transaction_mngr IS BOUND.
+    ASSERT iv_entity_type IS NOT INITIAL.
+
+    mo_bopf_transaction_mngr = io_bopf_transaction_mngr.
+    mv_entity_type           = iv_entity_type.
+
+    IF mv_entity_type = cl_sadl_entity_factory=>co_type-cds.
+      gv_message_mode = gc_message_mode-durable.
+      /bobf/cl_tra_transaction_mgr=>set_session_stateless( ).
+    ELSE.
+      gv_message_mode = gc_message_mode-transient.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD create_entity_table_ref.
+    rr_table_ref = io_sadl_entity_transact->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+  ENDMETHOD.
+
+
+  METHOD create_instance.
+    go_transaction_manager = NEW #( iv_entity_type           = iv_entity_type
+                                    io_bopf_transaction_mngr = COND #( WHEN io_bopf_transaction_mngr IS BOUND
+                                                                       THEN io_bopf_transaction_mngr
+                                                                       ELSE /bobf/cl_tra_trans_mgr_factory=>get_transaction_manager( ) ) ).
+  ENDMETHOD.
+
+
+  METHOD execute_action.
+    DATA: lo_sadl_entity_transact TYPE REF TO            /bobf/cl_sadl_entity_transact,
+          lt_char1                TYPE STANDARD TABLE OF char1 WITH DEFAULT KEY,
+          lt_failed               TYPE if_sadl_entity_transactional=>tt_tabix,
+          lv_static_action_failed TYPE abap_bool.
+
+    FIELD-SYMBOLS: <lt_key_values> TYPE ANY TABLE,
+                   <lt_data>       TYPE ANY TABLE,
+                   <ls_action>     TYPE if_sadl_batch=>ty_action.
+
+    ev_failed = abap_false.
+
+    LOOP AT it_action ASSIGNING <ls_action>
+      GROUP BY ( entity_id  = <ls_action>-entity_id ) INTO DATA(ls_group).
+
+      lo_sadl_entity_transact = get_sadl_entity_transactional( iv_entity_type = mv_entity_type
+                                                               iv_entity_id   = ls_group-entity_id ).
+
+      DATA(lo_msg_handler) = lo_sadl_entity_transact->if_sadl_entity_transactional~get_message_handler( ).
+      lo_msg_handler->clear( ).
+
+      LOOP AT GROUP ls_group ASSIGNING <ls_action>.
+        ASSIGN <ls_action>-rt_key_values->* TO <lt_key_values>.
+        IF <ls_action>-r_returning_parameters IS BOUND.
+          ASSIGN <ls_action>-r_returning_parameters->* TO <lt_data>.
+        ELSE.
+          ASSIGN lt_char1 TO <lt_data>.
+        ENDIF.
+
+        IF <ls_action>-rs_importing_parameters IS BOUND.
+          ASSIGN <ls_action>-rs_importing_parameters->* TO FIELD-SYMBOL(<ls_action_parameters>).
+          lo_sadl_entity_transact->if_sadl_entity_transactional~execute(
+            EXPORTING iv_action_name          = <ls_action>-name
+                      i_action_parameters     = <ls_action_parameters>
+                      iv_alternative_key_name = <ls_action>-alternative_key_name
+                      it_key_values           = <lt_key_values>
+            IMPORTING et_failed               = lt_failed
+                      ev_static_action_failed = lv_static_action_failed
+                      et_data                 = <lt_data> ).
+        ELSE.
+          lo_sadl_entity_transact->if_sadl_entity_transactional~execute(
+            EXPORTING iv_action_name          = <ls_action>-name
+                      iv_alternative_key_name = <ls_action>-alternative_key_name
+                      it_key_values           = <lt_key_values>
+            IMPORTING et_failed               = lt_failed
+                      ev_static_action_failed = lv_static_action_failed
+                      et_data                 = <lt_data> ).
+        ENDIF.
+
+        ev_failed = boolc( lt_failed IS NOT INITIAL OR lv_static_action_failed = abap_true ).
+        IF ev_failed = abap_true.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+
+      " It's not necessary to add the messages to the SADL message handler (it's a singletion) because
+      " this was done already by the execute on the sadl entity transactional instances
+      "lo_msg_handler->get_messages( IMPORTING et_messages = DATA(lt_sadl_messages) ).
+      "_get_message_handler( )->add_messages( lt_sadl_messages ).
+
+      IF ev_failed = abap_true.
+        EXIT.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD get.
+    IF go_transaction_manager IS NOT BOUND.
+      create_instance( iv_entity_type = iv_entity_type ).
+    ENDIF.
+    ro_transaction_manager = go_transaction_manager.
+  ENDMETHOD.
+
+
+  METHOD get_message_mode.
+    rv_message_mode = gv_message_mode.
+  ENDMETHOD.
+
+
+  METHOD get_sadl_entity_transactional.
+    ro_sadl_entity_transact ?=
+      NEW /bobf/cl_sadl_entity_prov_tra( )->if_sadl_entity_transact_prov~get_transactional_runtime( EXPORTING iv_type = iv_entity_type
+                                                                                                              iv_id   = iv_entity_id ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_batch~modify.
+
+    DATA(lo_sadl_batch_handler) = NEW /bobf/cl_sadl_batch_handler( iv_entity_type                 = mv_entity_type
+                                                                   io_message_handler             = if_sadl_transaction_manager~get_message_handler( )
+                                                                   io_sadl_etty_transact_provider = NEW /bobf/cl_sadl_entity_prov_tra( ) ).
+    IF changeset_has_only_activation( it_create = it_create
+                                      it_update = it_update
+                                      it_delete = it_delete
+                                      it_action = it_action ).
+
+      DATA(lv_preparation_executed) = lo_sadl_batch_handler->execute_preparation_f_activate( it_action ).
+
+      IF lv_preparation_executed = abap_true.
+        if_sadl_transaction_manager~save( ).
+      ENDIF.
+
+      lo_sadl_batch_handler->execute_activation( EXPORTING it_action_activation = it_action
+                                                 IMPORTING ev_failed            = ev_failed ).
+
+    ELSE.
+      lo_sadl_batch_handler->execute( EXPORTING it_create =  it_create
+                                                           it_update =  it_update
+                                                           it_delete =  it_delete
+                                                           it_action =  it_action
+                                                 IMPORTING ev_failed =  ev_failed ).
+    ENDIF.
+
+    IF ev_failed = abap_true.
+      if_sadl_transaction_manager~discard_changes( ).
+    ELSE.
+      ev_failed = if_sadl_transaction_manager~save( ).
+      IF ev_failed = abap_true.
+        mo_bopf_transaction_mngr->cleanup( iv_cleanup_mode = /bobf/if_conf_c=>sc_cleanup_refresh ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~discard_changes.
+
+    " This is called to flush the SADL message handler. The messages are not stored to the DB
+    " because no COMMIT WORK is executed
+    /bobf/cl_sadl_message_handler=>get( mv_entity_type )->store_messages( ).
+
+    DATA(lo_message) = mo_bopf_transaction_mngr->cleanup( iv_cleanup_mode = /bobf/if_conf_c=>sc_cleanup_refresh ).
+
+    add_message( lo_message ).
+
+    IF lo_message IS BOUND.
+      lo_message->get( IMPORTING et_message = DATA(lt_message) ).
+      LOOP AT lt_message ASSIGNING FIELD-SYMBOL(<ls_message>).
+        ASSERT <ls_message>->lifetime <> /bobf/cm_frw=>co_lifetime_state.
+      ENDLOOP.
+    ENDIF.
+
+    rv_failed = abap_false.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~has_changes.
+    rv_has_changes = abap_false.
+    DATA(lo_change) = mo_bopf_transaction_mngr->get_transactional_changes( ).
+    IF lo_change IS BOUND.
+      DATA(lt_changes) = lo_change->get_changes( ).
+      LOOP AT lt_changes INTO DATA(ls_change).
+        IF ls_change-change_object->has_changes( iv_selection   = /bobf/if_frw_c=>sc_change_succ_only
+                                                 iv_change_mode = /bobf/if_frw_c=>sc_modify_create ) = abap_true.
+          rv_has_changes = abap_true.
+          RETURN.
+        ENDIF.
+        IF ls_change-change_object->has_changes( iv_selection   = /bobf/if_frw_c=>sc_change_succ_only
+                                                 iv_change_mode = /bobf/if_frw_c=>sc_modify_update ) = abap_true.
+          rv_has_changes = abap_true.
+          RETURN.
+        ENDIF.
+        IF ls_change-change_object->has_changes( iv_selection   = /bobf/if_frw_c=>sc_change_succ_only
+                                                 iv_change_mode = /bobf/if_frw_c=>sc_modify_delete ) = abap_true.
+          rv_has_changes = abap_true.
+          RETURN.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~save.
+
+    "we need to be privileged because the message handler calls convert keys.
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+
+        CASE mv_entity_type.
+
+          WHEN cl_sadl_entity_factory=>co_type-cds.
+
+            " Perform save steps FINALIZE - DO_SAVE
+            bopf_prepare_commit( IMPORTING eo_message_before_commit    = DATA(lo_message_before_commit)
+                                           ev_local_update_task_failed = DATA(lv_local_update_task_failed)
+                                           ev_rejected                 = rv_failed ).
+            add_message( lo_message_before_commit ).
+
+            "  Store durable messages
+            IF get_message_mode( ) = gc_message_mode-durable.
+              /bobf/cl_sadl_message_handler=>get( mv_entity_type )->store_messages( ).
+            ENDIF.
+
+            IF rv_failed = abap_false.
+              " Perform final save steps: COMMIT WORK + AFTER_SUCCESSFUL_SAVE
+              bopf_commit_and_finalize( EXPORTING iv_local_update_task_failed = lv_local_update_task_failed
+                                        IMPORTING eo_message_after_commit     = DATA(lo_message_after_commit) ).
+              add_message( lo_message_after_commit ). " Those messages can't be stored, as they appear after the COMMIT
+
+              /bobf/cl_sadl_message_handler=>get( mv_entity_type )->clear_message_location_cache( ).
+            ENDIF.
+
+
+          WHEN /bobf/if_sadl_c=>gc_entity_type.
+
+            mo_bopf_transaction_mngr->save( IMPORTING ev_rejected = rv_failed
+                                                      eo_message  = DATA(lo_messages_from_save) ).
+            add_message( lo_messages_from_save ).
+            IF rv_failed = abap_false.
+              /bobf/cl_sadl_message_handler=>get( mv_entity_type )->clear_message_location_cache( ).
+            ENDIF.
+
+
+          WHEN OTHERS.
+            ASSERT 1 = 0.
+
+        ENDCASE.
+
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _create_message_handler.
+    ro_message_handler = /bobf/cl_sadl_message_handler=>get( mv_entity_type ).
+  ENDMETHOD.
+ENDCLASS.

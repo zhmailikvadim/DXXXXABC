@@ -1,0 +1,2361 @@
+CLASS ltc_instanciation DEFINITION FOR TESTING DURATION SHORT RISK LEVEL HARMLESS
+  FINAL.
+
+  PRIVATE SECTION.
+    CONSTANTS gc_bo_name TYPE /bobf/obm_name VALUE /bobf/if_conf_obj_c=>sc_bo_name.
+    DATA mv_entity_id TYPE sadl_entity_id.
+
+    METHODS setup.
+
+    METHODS sadl_entity_is_filled FOR TESTING RAISING cx_static_check.
+    METHODS exception_when_id_is_unknown FOR TESTING RAISING cx_static_check.
+
+ENDCLASS.
+
+
+CLASS /bobf/cl_sadl_entity_transact DEFINITION LOCAL FRIENDS ltc_instanciation.
+
+
+
+CLASS ltc_instanciation IMPLEMENTATION.
+
+  METHOD setup.
+    mv_entity_id = gc_bo_name && `~ROOT`.
+  ENDMETHOD.
+
+
+  METHOD sadl_entity_is_filled.
+    "do some basic tests after instanciation
+    DATA(lo_transactional_entity) = NEW /bobf/cl_sadl_entity_transact( iv_id = mv_entity_id ).
+    cl_abap_unit_assert=>assert_equals( act = lo_transactional_entity->mo_sadl_entity->get_id( )
+                                        exp = mv_entity_id ).
+  ENDMETHOD.
+
+
+  METHOD exception_when_id_is_unknown.
+    TRY.
+        NEW /bobf/cl_sadl_entity_transact( iv_id = `THIS_ID~DOES_NOT_EXIST` ).
+        cl_abap_unit_assert=>fail( msg = `exception expected` ) ##no_text.
+      CATCH cx_sadl_contract_violation INTO DATA(lx_contract_violation).
+        cl_abap_unit_assert=>assert_equals( act = lx_contract_violation->textid  exp = cx_sadl_entity=>cx_unknown_entity ).
+    ENDTRY.
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+CLASS lth_message DEFINITION INHERITING FROM /bobf/cm_frw "is abstract, so we need a non-abstract subclass
+  FOR TESTING
+  FINAL.
+
+  PUBLIC SECTION.
+    TYPES gty_trigger TYPE c LENGTH 20.
+    CONSTANTS gc_create TYPE gty_trigger VALUE 'CREATE'.
+    CONSTANTS gc_update TYPE gty_trigger VALUE 'UPDATE'.
+    CONSTANTS gc_delete TYPE gty_trigger VALUE 'DELETE'.
+    CONSTANTS gc_retrieve TYPE gty_trigger VALUE 'RETRIEVE'.
+    CONSTANTS gc_retrieve_by_association TYPE gty_trigger VALUE 'RBA'.
+    CONSTANTS gc_action TYPE gty_trigger VALUE 'ACTION'.
+    CONSTANTS gc_retrieve_properties TYPE gty_trigger VALUE 'RETRIEVE_PROPERTIES'.
+
+    METHODS constructor IMPORTING iv_trigger TYPE gty_trigger.
+ENDCLASS.
+
+CLASS lth_message IMPLEMENTATION.
+  METHOD constructor.
+    super->constructor( textid = VALUE #( msgid = 'DUMMY'  msgno = '000'  attr1 = iv_trigger ) ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS ltd_sm_double DEFINITION INHERITING FROM /bobf/cl_tool_test_double_sm
+  FINAL
+  FOR TESTING.
+
+  PUBLIC SECTION.
+    TYPES gty_bo_node_root TYPE /bobf/s_conf_bo.
+    TYPES gty_bo_node_child TYPE /bobf/s_conf_obj.
+    TYPES gtt_bo_node_root TYPE STANDARD TABLE OF gty_bo_node_root WITH DEFAULT KEY.
+    TYPES gtt_bo_node_child TYPE STANDARD TABLE OF gty_bo_node_child WITH DEFAULT KEY.
+    TYPES: BEGIN OF gty_changed_fields_by_key,
+             key            TYPE /bobf/conf_key,
+             changed_fields TYPE /bobf/t_frw_name,
+           END OF gty_changed_fields_by_key.
+    TYPES gtt_changed_fields_by_key TYPE SORTED TABLE OF gty_changed_fields_by_key WITH NON-UNIQUE KEY key.
+    TYPES: BEGIN OF gty_retrieve_parameters,
+             it_key                  TYPE /bobf/t_frw_key,
+             it_requested_attributes TYPE /bobf/t_frw_name,
+           END OF gty_retrieve_parameters.
+    TYPES: BEGIN OF gty_rba_parameters,
+             iv_fill_data            TYPE abap_bool,
+             iv_edit_mode            TYPE /bobf/conf_edit_mode,
+             it_requested_attributes TYPE /bobf/t_frw_name,
+           END OF gty_rba_parameters.
+    TYPES: BEGIN OF gty_action_parameters,
+             bo_name TYPE /bobf/obm_name,
+           END OF gty_action_parameters.
+    TYPES gtt_key_list TYPE SORTED TABLE OF /bobf/conf_key WITH NON-UNIQUE KEY table_line.
+
+    CONSTANTS gc_bo_name TYPE /bobf/obm_name VALUE /bobf/if_conf_obj_c=>sc_bo_name.
+    CONSTANTS gc_bo_key TYPE /bobf/obm_bo_key VALUE /bobf/if_conf_obj_c=>sc_bo_key.
+    CONSTANTS gc_bo_node_name_root TYPE /bobf/obm_name VALUE 'ROOT'.
+    CONSTANTS gc_bo_node_key_root TYPE /bobf/obm_node_key VALUE /bobf/if_conf_obj_c=>sc_node-root.
+    CONSTANTS gc_bo_node_attribute_name TYPE string VALUE `BO_NAME`.
+    CONSTANTS gc_bo_node_attr_create_user TYPE string VALUE `CREATE_USER`.
+    CONSTANTS gc_bo_node_attr_create_time TYPE string VALUE `CREATE_TIME`.
+    CONSTANTS gc_association_key TYPE /bobf/obm_assoc_key VALUE /bobf/if_conf_obj_c=>sc_association-root-version.
+    CONSTANTS gc_association_name TYPE sadl_entity_association  VALUE 'VERSION'.
+    CONSTANTS gc_bo_node_key_child TYPE /bobf/conf_key VALUE '42DF5F67FFAE40D1E10000000A42201B'. "target node id of an association.
+    CONSTANTS gc_root_alt_key_name TYPE string VALUE `BUSINESS_OBJECT`.
+    CONSTANTS gc_root_alt_key_default_value TYPE gty_bo_node_root-bo_name VALUE 'DEFAULT_BO_NAME'.
+    CONSTANTS gc_child_alt_key_name TYPE string VALUE `VERSION`.
+    CONSTANTS gc_child_alt_key_default_value TYPE gty_bo_node_child-version VALUE '12345'. "NUMC(5)
+    CONSTANTS gc_action_name_activate TYPE string VALUE `ACTIVATE`.
+    CONSTANTS gc_action_key_activate TYPE /BOBF/act_key VALUE /bobf/if_conf_obj_c=>sc_action-root-activate.
+    CONSTANTS gc_action_name_new_version TYPE string VALUE `CREATE_NEW_VERSION`.
+    CONSTANTS gc_action_name_rename TYPE string VALUE `RENAME`.
+    CONSTANTS gc_existing_node_id TYPE /bobf/conf_key     VALUE '00000000000000000000000000381575'. "EXISTS
+    CONSTANTS gc_non_existing_node_id TYPE /bobf/conf_key VALUE 'FFFFFFFFFFFFFFFFFFFFFFFFFFC7EA8B'. "-EXISTS
+    CONSTANTS gc_node_id_with_children TYPE /bobf/conf_key VALUE '04110000000000000000000000000000'.
+    CONSTANTS gc_node_id_without_children TYPE /bobf/conf_key VALUE 'FBEE0000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_all_1      TYPE /bobf/conf_key VALUE 'BAC11000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_all_2      TYPE /bobf/conf_key VALUE 'BAC12000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_entity_1 TYPE /bobf/conf_key VALUE 'BAC21000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_entity_2 TYPE /bobf/conf_key VALUE 'BAC22000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_action_1 TYPE /bobf/conf_key VALUE 'BAC31000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_action_2 TYPE /bobf/conf_key VALUE 'BAC32000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_assoc_1 TYPE /bobf/conf_key VALUE 'BAC41000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_assoc_2 TYPE /bobf/conf_key VALUE 'BAC42000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_elements_1 TYPE /bobf/conf_key VALUE 'BAC51000000000000000000000000000'.
+    CONSTANTS gc_node_id_props_elements_2 TYPE /bobf/conf_key VALUE 'BAC52000000000000000000000000000'.
+    CLASS-DATA gs_node_instance TYPE gty_bo_node_root. "value defined in class_constructor
+    CLASS-DATA gs_node_instance_with_children TYPE gty_bo_node_root. "value defined in class_constructor
+    CLASS-DATA gs_node_instance_w_o_children TYPE gty_bo_node_root. "value defined in class_constructor
+    CLASS-DATA gs_child_instance1 TYPE gty_bo_node_child. "value defined in class_constructor
+    CLASS-DATA gs_child_instance2 TYPE gty_bo_node_child. "value defined in class_constructor
+
+    CLASS-METHODS class_constructor.
+
+    DATA ms_retrieve_params       TYPE gty_retrieve_parameters READ-ONLY.
+    DATA ms_rba_params            TYPE gty_rba_parameters READ-ONLY.
+    DATA mt_changed_fields_by_key TYPE gtt_changed_fields_by_key READ-ONLY.
+    DATA mv_edit_mode             TYPE /bobf/conf_edit_mode.
+    DATA mv_action_executed       TYPE abap_bool.
+    DATA mv_action_parm_value     TYPE string.
+    DATA mt_instances_root        TYPE gtt_bo_node_root.
+    DATA mt_instances_child       TYPE gtt_bo_node_child.
+
+    DATA: BEGIN OF ms_keys READ-ONLY,
+            created    TYPE gtt_key_list,
+            deleted    TYPE gtt_key_list,
+            retrieved  TYPE gtt_key_list,
+            rba_source TYPE gtt_key_list,
+            updated    TYPE gtt_key_list,
+          END OF ms_keys.
+
+    METHODS reset.
+    METHODS expect_keys IMPORTING it_created    TYPE gtt_key_list OPTIONAL
+                                  it_deleted    TYPE gtt_key_list OPTIONAL
+                                  it_retrieved  TYPE gtt_key_list OPTIONAL
+                                  it_updated    TYPE gtt_key_list OPTIONAL
+                                  it_rba_source TYPE gtt_key_list OPTIONAL.
+    METHODS expect_no_keys.
+    METHODS expect_changed_fields IMPORTING it_changed_fields_by_key TYPE gtt_changed_fields_by_key.
+    METHODS /bobf/if_tra_service_manager~retrieve                REDEFINITION.
+    METHODS /bobf/if_tra_service_manager~retrieve_by_association REDEFINITION.
+    METHODS /bobf/if_tra_service_manager~convert_altern_key      REDEFINITION.
+    METHODS /bobf/if_tra_service_manager~modify                  REDEFINITION.
+    METHODS /bobf/if_tra_service_manager~retrieve_property       REDEFINITION.
+    METHODS /bobf/if_tra_service_manager~do_action               REDEFINITION.
+    METHODS constructor.
+
+  PRIVATE SECTION.
+    DATA mv_last_used_key TYPE /bobf/conf_key.
+
+    METHODS draw_new_key RETURNING VALUE(rv_new_key) TYPE /bobf/conf_key.
+    METHODS create_single IMPORTING is_modification TYPE /bobf/s_frw_modification
+                          EXPORTING eo_change       TYPE REF TO /bobf/if_frw_change.
+    METHODS delete_single IMPORTING is_modification TYPE /bobf/s_frw_modification
+                          EXPORTING eo_change       TYPE REF TO /bobf/if_frw_change.
+    METHODS update_single IMPORTING is_modification TYPE /bobf/s_frw_modification
+                          EXPORTING eo_change       TYPE REF TO /bobf/if_frw_change.
+    METHODS register_std_instances.
+
+ENDCLASS.
+
+
+CLASS ltd_sm_double IMPLEMENTATION.
+
+  METHOD class_constructor.
+    CONSTANTS lc_child_key1 TYPE gty_bo_node_child-key VALUE '1'.
+    CONSTANTS lc_child_key2 TYPE gty_bo_node_child-key VALUE '2'.
+    CONSTANTS lc_child_version1 TYPE gty_bo_node_child-version VALUE '11'.
+    CONSTANTS lc_child_version2 TYPE gty_bo_node_child-version VALUE '12'.
+    CONSTANTS lc_child_description1 TYPE gty_bo_node_child-description VALUE 'DESCRIPTION_CHILD_1'.
+    CONSTANTS lc_child_description2 TYPE gty_bo_node_child-description VALUE 'DESCRIPTION_CHILD_2'.
+    FIELD-SYMBOLS <lv_node_attribute> TYPE data.
+
+    gs_node_instance-key = gc_existing_node_id.
+    ASSIGN COMPONENT gc_bo_node_attribute_name OF STRUCTURE gs_node_instance TO <lv_node_attribute>.
+    <lv_node_attribute> = 'DUMMY_BO'.
+
+    gs_node_instance_with_children-key = gc_node_id_with_children.
+    ASSIGN COMPONENT gc_bo_node_attribute_name OF STRUCTURE gs_node_instance_with_children TO <lv_node_attribute>.
+    <lv_node_attribute> = 'DUMMY_BO_WITH_CHILDREN'.
+
+    gs_node_instance_w_o_children-key = gc_node_id_without_children.
+    ASSIGN COMPONENT gc_bo_node_attribute_name OF STRUCTURE gs_node_instance_w_o_children TO <lv_node_attribute>.
+    <lv_node_attribute> = 'DUMMY_BO_WITHOUT_CHILDREN'.
+
+    gs_child_instance1 = VALUE #( key         = lc_child_key1  parent_key = gc_node_id_with_children  root_key = gc_node_id_with_children
+                                  version     = lc_child_version1
+                                  description = lc_child_description1 ).
+    gs_child_instance2 = VALUE #( key         = lc_child_key2  parent_key = gc_node_id_with_children  root_key = gc_node_id_with_children
+                                  version     = lc_child_version2
+                                  description = lc_child_description2 ).
+
+    ASSIGN COMPONENT gc_bo_node_attribute_name OF STRUCTURE gs_node_instance TO <lv_node_attribute>.
+    <lv_node_attribute> = 'DUMMY_BO'.
+
+  ENDMETHOD.
+
+  METHOD constructor.
+    super->constructor( ).
+    register_std_instances( ).
+  ENDMETHOD.
+
+  METHOD reset.
+    "all instance variables must be reset to their initial values here (we cannot re-instanciate the double in the SETUP method):
+    CLEAR ms_keys.
+    CLEAR ms_retrieve_params.
+    CLEAR mt_changed_fields_by_key.
+    mv_edit_mode = /bobf/if_conf_c=>sc_edit_read_only.
+    mv_action_executed = abap_false.
+    CLEAR mv_action_parm_value.
+    CLEAR mt_instances_root.
+    CLEAR mt_instances_child.
+    register_std_instances( ).
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_service_manager~retrieve.
+    CLEAR eo_change.
+    CLEAR eo_message.
+    CLEAR et_data.
+    CLEAR et_failed_key.
+
+    cl_abap_unit_assert=>assert_equals( act = iv_before_image  exp = abap_false ).
+
+    ms_retrieve_params-it_key = it_key.
+    ms_retrieve_params-it_requested_attributes = it_requested_attributes.
+    mv_edit_mode = iv_edit_mode.
+
+    LOOP AT it_key INTO DATA(ls_key).
+      INSERT ls_key-key INTO TABLE ms_keys-retrieved.
+
+      CASE iv_node_key.
+        WHEN gc_bo_node_key_root.
+          IF line_exists( mt_instances_root[ key = ls_key-key ] ). "#EC CI_STDSEQ
+            IF iv_fill_data = abap_true.
+              APPEND mt_instances_root[ key = ls_key-key ] TO et_data. "#EC CI_STDSEQ
+            ENDIF.
+          ELSE.
+            APPEND ls_key TO et_failed_key.
+          ENDIF.
+        WHEN gc_bo_node_key_child.
+          IF line_exists( mt_instances_child[ key = ls_key-key ] ). "#EC CI_STDSEQ
+            IF iv_fill_data = abap_true.
+              APPEND mt_instances_child[ key = ls_key-key ] TO et_data. "#EC CI_STDSEQ
+            ENDIF.
+          ELSE.
+            APPEND ls_key TO et_failed_key.
+          ENDIF.
+        WHEN OTHERS.
+          cl_abap_unit_assert=>fail( `unexpected node_key` ) ##no_text.
+      ENDCASE.
+    ENDLOOP.
+
+    eo_message = /bobf/cl_frw_factory=>get_message( ).
+    eo_message->add_cm( NEW lth_message( lth_message=>gc_retrieve ) ).
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_service_manager~retrieve_by_association.
+    CLEAR eo_message.
+    CLEAR eo_change.
+    CLEAR et_data.
+    CLEAR et_key_link.
+    CLEAR et_target_key.
+    CLEAR et_failed_key.
+
+    cl_abap_unit_assert=>assert_equals( act = iv_node_key  exp = gc_bo_node_key_root ).
+    cl_abap_unit_assert=>assert_equals( act = iv_association  exp = gc_association_key ).
+    cl_abap_unit_assert=>assert_equals( act = iv_before_image  exp = abap_false ).
+    cl_abap_unit_assert=>assert_equals( act = iv_invalidate_cache  exp = abap_false ).
+
+    ms_rba_params-iv_fill_data = iv_fill_data.
+    ms_rba_params-iv_edit_mode = iv_edit_mode.
+    ms_rba_params-it_requested_attributes = it_requested_attributes.
+
+    LOOP AT it_key INTO DATA(ls_key).
+      INSERT ls_key-key INTO TABLE ms_keys-rba_source.
+      IF line_exists( mt_instances_root[ key = ls_key-key ] ). "#EC CI_STDSEQ
+        LOOP AT mt_instances_child ASSIGNING FIELD-SYMBOL(<ls_child>) WHERE parent_key = ls_key-key. "#EC CI_STDSEQ
+          IF iv_fill_data = abap_true.
+            INSERT <ls_child> INTO TABLE et_data.
+          ENDIF.
+          INSERT VALUE #( key = <ls_child>-key ) INTO TABLE et_target_key.
+          INSERT VALUE #( source_key = ls_key-key  target_key = <ls_child>-key ) INTO TABLE et_key_link.
+        ENDLOOP.
+      ELSE.
+        APPEND ls_key TO et_failed_key.
+      ENDIF.
+
+*      IF ls_key-key = gc_node_id_with_children.
+*        IF iv_fill_data = abap_true.
+*          INSERT gs_child_instance1 INTO TABLE et_data.
+*          INSERT gs_child_instance2 INTO TABLE et_data.
+*        ENDIF.
+*        INSERT VALUE #( key = gs_child_instance1-key ) INTO TABLE et_target_key.
+*        INSERT VALUE #( key = gs_child_instance2-key ) INTO TABLE et_target_key.
+*        INSERT VALUE #( source_key = ls_key-key  target_key = gs_child_instance1-key ) INTO TABLE et_key_link.
+*        INSERT VALUE #( source_key = ls_key-key  target_key = gs_child_instance2-key ) INTO TABLE et_key_link.
+*      ELSEIF ls_key-key = gc_node_id_without_children
+*          OR ls_key-key = gc_existing_node_id.
+*        "no children - nothing to do
+*      ELSE. "node_id does not exist
+*        APPEND ls_key TO et_failed_key.
+*      ENDIF.
+    ENDLOOP.
+
+    eo_message = /bobf/cl_frw_factory=>get_message( ).
+    eo_message->add_cm( NEW lth_message( lth_message=>gc_retrieve_by_association ) ).
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_service_manager~convert_altern_key.
+    CONSTANTS lc_initial_key TYPE /bobf/conf_key VALUE IS INITIAL.
+
+    DATA lt_key_values TYPE STANDARD TABLE OF /bobf/s_conf_k_business_object ##needed.
+    DATA lt_key TYPE /bobf/t_frw_key ##needed.
+    DATA ls_key TYPE /bobf/s_frw_key.
+    DATA lv_node_key TYPE /bobf/conf_key.
+    DATA lo_change TYPE REF TO /bobf/if_frw_change.
+    DATA lo_tra_change TYPE REF TO /bobf/cl_tra_change.
+
+    CLEAR eo_change.
+    CLEAR eo_message.
+    cl_abap_unit_assert=>assert_equals( act = iv_node_key  exp = gc_bo_node_key_root ).
+    cl_abap_unit_assert=>assert_equals( act = iv_before_image  exp = abap_false ).
+    cl_abap_unit_assert=>assert_equals( act = iv_invalidate_cache  exp = abap_false ).
+    cl_abap_unit_assert=>assert_equals( act = iv_target_altkey_key  exp = /bobf/if_frw_c=>sc_alternative_key_key  ).
+    IF iv_check_existence = abap_true.
+      lt_key = it_key. "this will dump if structures are not compatible
+    ELSE.
+      lt_key_values = it_key. "this will dump if structures are not compatible
+    ENDIF.
+
+    CLEAR et_key.
+    CLEAR et_result.
+
+    "create change object to deliver the failed keys
+    lo_change = /bobf/cl_frw_factory=>get_change( ).
+
+    LOOP AT it_key ASSIGNING FIELD-SYMBOL(<ls_key>).
+      DATA(lv_tabix) = sy-tabix.
+      IF iv_check_existence = abap_true.
+        ls_key = <ls_key>.
+        CASE ls_key-key.
+          WHEN gc_non_existing_node_id
+          OR   lc_initial_key.
+            INSERT INITIAL LINE INTO TABLE et_key. "this is what the real service manager would do, as well
+            CONTINUE.
+          WHEN OTHERS.
+            "fill if key exists.
+            IF et_key IS SUPPLIED.
+              INSERT <ls_key> INTO TABLE et_key.
+            ENDIF.
+            INSERT VALUE #( index = lv_tabix  key = ls_key-key ) INTO TABLE et_result.
+        ENDCASE.
+      ELSE.
+        ASSIGN COMPONENT 'BO_NAME' OF STRUCTURE <ls_key> TO FIELD-SYMBOL(<lv_bo_name>).
+        cl_abap_unit_assert=>assert_subrc( ).
+        CASE <lv_bo_name>.
+          WHEN gs_node_instance-bo_name.               lv_node_key = gs_node_instance-key.
+          WHEN gs_node_instance_with_children-bo_name. lv_node_key = gs_node_instance_with_children-key.
+          WHEN OTHERS.
+            lo_change->add_change( iv_change_mode = /bobf/if_frw_c=>sc_modify
+                                   iv_node_key    = iv_node_key
+                                   iv_key         = iv_altkey_key
+                                   iv_failed      = abap_true ).
+            INSERT INITIAL LINE INTO TABLE et_key.
+            CONTINUE.
+        ENDCASE.
+        IF et_key IS SUPPLIED.
+          INSERT VALUE /bobf/s_frw_key( key = lv_node_key ) INTO TABLE et_key.
+        ENDIF.
+        INSERT VALUE #( index = lv_tabix  key = lv_node_key ) INTO TABLE et_result.
+      ENDIF.
+    ENDLOOP.
+
+    CREATE OBJECT lo_tra_change.
+    lo_tra_change->/bobf/if_tra_change~add( iv_bo_key = gc_bo_key
+                                            io_change = lo_change ).
+
+    eo_change = lo_tra_change.
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_service_manager~modify.
+    DATA lo_change TYPE REF TO /bobf/if_frw_change.
+    DATA lo_tra_change TYPE REF TO /bobf/cl_tra_change.
+    CLEAR eo_change.
+    eo_message = /bobf/cl_frw_factory=>get_message( ).
+
+    LOOP AT it_modification INTO DATA(ls_modification).
+      CLEAR lo_change.
+      CASE ls_modification-change_mode.
+        WHEN /bobf/if_frw_c=>sc_modify_create.
+          create_single( EXPORTING is_modification = ls_modification
+                         IMPORTING eo_change       = lo_change ).
+          eo_message->add_cm( NEW lth_message( lth_message=>gc_create ) ).
+
+        WHEN /bobf/if_frw_c=>sc_modify_delete.
+          delete_single( EXPORTING is_modification = ls_modification
+                         IMPORTING eo_change       = lo_change ).
+          eo_message->add_cm( NEW lth_message( lth_message=>gc_delete ) ).
+
+        WHEN /bobf/if_frw_c=>sc_modify_update.
+          update_single( EXPORTING is_modification = ls_modification
+                         IMPORTING eo_change       = lo_change ).
+          eo_message->add_cm( NEW lth_message( lth_message=>gc_update ) ).
+
+        WHEN OTHERS.
+          cl_abap_unit_assert=>fail( `double cannot handle this change mode` ) ##no_text.
+      ENDCASE.
+
+      IF lo_change IS BOUND.
+        IF lo_tra_change IS NOT BOUND.
+          CREATE OBJECT lo_tra_change.
+        ENDIF.
+        lo_tra_change->/bobf/if_tra_change~add( iv_bo_key = gc_bo_key
+                                                io_change = lo_change ).
+      ENDIF.
+    ENDLOOP.
+    IF lo_tra_change IS BOUND.
+      eo_change ?= lo_tra_change.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_service_manager~do_action.
+    DATA lr_action_parm TYPE REF TO gty_action_parameters.
+    CLEAR eo_change.
+    CLEAR et_failed_key.
+    CLEAR et_failed_action_key.
+    CLEAR et_data.
+    mv_action_executed = abap_true.
+    IF iv_act_key = /bobf/if_conf_obj_c=>sc_action-root-rename.
+      "parameter expected.
+      IF is_parameters IS INITIAL.
+        cl_abap_unit_assert=>fail( `Action Parameter missing` ) ##no_text.
+      ELSE.
+        lr_action_parm ?= is_parameters.
+        mv_action_parm_value = lr_action_parm->bo_name.
+      ENDIF.
+    ELSE.
+      LOOP AT it_key ASSIGNING FIELD-SYMBOL(<ls_key>).
+        IF <ls_key>-key = ltd_sm_double=>gc_non_existing_node_id.
+          APPEND <ls_key> TO et_failed_key.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    eo_message = /bobf/cl_frw_factory=>get_message( ).
+    eo_message->add_cm( NEW lth_message( lth_message=>gc_action ) ).
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_tra_service_manager~retrieve_property.
+    DATA ls_property TYPE /bobf/s_frw_property_k.
+    DATA lt_property TYPE /bobf/t_frw_property_k.
+
+    CLEAR: eo_property, eo_message.
+
+    LOOP AT it_key INTO DATA(ls_key).
+      CASE ls_key-key.
+        WHEN ltd_sm_double=>gc_node_id_props_entity_1.
+          "set entity properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_entity_1.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_delete_enable.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+        WHEN ltd_sm_double=>gc_node_id_props_entity_2.
+          "set entity properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_entity_2.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_delete_enable.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+        WHEN ltd_sm_double=>gc_node_id_props_action_1.
+          "set action properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_action_1.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_act.
+          ls_property-content_key   = gc_action_key_activate.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_true.
+          APPEND ls_property TO lt_property.
+        WHEN ltd_sm_double=>gc_node_id_props_action_2.
+          "set action properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_action_2.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_act.
+          ls_property-content_key   = gc_action_key_activate.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_false.
+          APPEND ls_property TO lt_property.
+        WHEN ltd_sm_double=>gc_node_id_props_assoc_1.
+          "set association properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_assoc_1.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_assoc_1.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_create_enable.
+          ls_property-value         = abap_true.
+          APPEND ls_property TO lt_property.
+        WHEN ltd_sm_double=>gc_node_id_props_assoc_2.
+          "set association properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_assoc_2.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_false.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_assoc_2.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_create_enable.
+          ls_property-value         = abap_false.
+          APPEND ls_property TO lt_property.
+        WHEN ltd_sm_double=>gc_node_id_props_elements_1.
+          "set element properties of BO_NAME
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name  = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name  = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name  = /bobf/if_conf_c=>sc_property_name_readonly.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          "set element properties of CREATE_USER
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          "set element properties of CREATE_TIME
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_time.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_time.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_time.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_readonly.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+        WHEN ltd_sm_double=>gc_node_id_props_elements_2.
+          "set element properties of BO_NAME
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_readonly.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          "set element properties of CREATE_USER
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          "set element properties of CREATE_TIME
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_time.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_time.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_elements_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_time.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_readonly.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+
+
+        WHEN ltd_sm_double=>gc_node_id_props_all_1.
+          "set entity properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_nod.
+          ls_property-content_key   = ltd_sm_double=>gc_bo_node_key_root.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_delete_enable.
+          ls_property-value         = abap_true.
+          APPEND ls_property TO lt_property.
+          "set action properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_act.
+          ls_property-content_key   = gc_action_key_activate.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_true.
+          APPEND ls_property TO lt_property.
+          "set association properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_create_enable.
+          ls_property-value         = abap_true.
+          APPEND ls_property TO lt_property.
+
+          CLEAR:  ls_property-content_key, ls_property-content_cat. " TODO: Check
+          "set element properties of BO_NAME
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name  = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name  = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name  = /bobf/if_conf_c=>sc_property_name_readonly.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          "set element properties of CREATE_USER
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_1.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+
+
+        WHEN ltd_sm_double=>gc_node_id_props_all_2.
+          "set entity properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_nod.
+          ls_property-content_key   = ltd_sm_double=>gc_bo_node_key_root.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_delete_enable.
+          ls_property-value         = abap_false.
+          APPEND ls_property TO lt_property.
+          "set action properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_act.
+          ls_property-content_key   = gc_action_key_activate.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_false.
+          APPEND ls_property TO lt_property.
+          "set association properties
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value         = abap_false.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key    = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-content_cat   = /bobf/if_conf_c=>sc_content_ass.
+          ls_property-content_key   = gc_association_key.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_create_enable.
+          ls_property-value         = abap_false.
+          APPEND ls_property TO lt_property.
+          "set element properties of BO_NAME
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attribute_name.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_readonly.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+          "set element properties of CREATE_USER
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_mandatory.
+          ls_property-value          = abap_true.
+          APPEND ls_property TO lt_property.
+          ls_property-parent_key     = ltd_sm_double=>gc_node_id_props_all_2.
+          ls_property-attribute_name = ltd_sm_double=>gc_bo_node_attr_create_user.
+          ls_property-property_name = /bobf/if_conf_c=>sc_property_name_enabled.
+          ls_property-value          = abap_false.
+          APPEND ls_property TO lt_property.
+
+        WHEN OTHERS.
+          cl_abap_unit_assert=>fail( `unexpected key for properties` ) ##no_text.
+      ENDCASE.
+    ENDLOOP.
+    eo_property = /bobf/cl_frw_factory=>get_property( ).
+    eo_property->add( lt_property ).
+
+    eo_message = /bobf/cl_frw_factory=>get_message( ).
+    eo_message->add_cm( NEW lth_message( lth_message=>gc_retrieve_properties ) ).
+  ENDMETHOD.
+
+
+  METHOD create_single.
+    DATA: lv_node_key   TYPE /bobf/conf_key,
+          lv_key        TYPE /bobf/conf_key,
+          ls_root_data  TYPE gty_bo_node_root,
+          ls_child_data TYPE gty_bo_node_child.
+    FIELD-SYMBOLS: <ls_root_data>  TYPE gty_bo_node_root,
+                   <ls_child_data> TYPE gty_bo_node_child.
+
+    DATA(lo_change) = /bobf/cl_frw_factory=>get_change( ).
+
+    IF is_modification-association IS NOT INITIAL.
+      "create by association
+      cl_abap_unit_assert=>assert_equals( act = is_modification-association  exp = gc_association_key ).
+      lv_node_key = gc_bo_node_key_child.  "Target node id of Association ROOT-VERSION
+    ELSE.
+      lv_node_key = is_modification-node.
+    ENDIF.
+
+    IF is_modification-key = gc_non_existing_node_id.
+      lo_change->add_change( iv_change_mode = /bobf/if_frw_c=>sc_modify_create
+                             iv_node_key    = lv_node_key
+                             iv_key         = is_modification-key
+                             iv_failed      = abap_true ).
+    ELSE.
+      IF is_modification-key IS INITIAL.
+        lv_key = draw_new_key( ).
+      ELSE.
+        lv_key = is_modification-key.
+      ENDIF.
+      INSERT lv_key INTO TABLE ms_keys-created.
+    ENDIF.
+
+    cl_abap_unit_assert=>assert_bound( is_modification-data ).
+    CASE lv_node_key.
+      WHEN gc_bo_node_key_root. "Root node
+        ASSIGN is_modification-data->* TO <ls_root_data>.
+        ls_root_data = <ls_root_data>. "local working copy
+
+        ls_root_data-key = lv_key.
+        IF ls_root_data-bo_name IS INITIAL.
+          ls_root_data-bo_name = gc_root_alt_key_default_value. "Determination of default alternative key value
+        ENDIF.
+
+        INSERT ls_root_data INTO TABLE mt_instances_root.
+
+      WHEN gc_bo_node_key_child.
+        ASSIGN is_modification-data->* TO <ls_child_data>.
+        ls_child_data = <ls_child_data>. "local working copy
+
+        ls_child_data-key = lv_key.
+        ls_child_data-parent_key = is_modification-source_key.
+        IF ls_child_data-version IS INITIAL.
+          ls_child_data-version = gc_child_alt_key_default_value. "Determination of default alternative key value
+        ENDIF.
+
+        INSERT ls_child_data INTO TABLE mt_instances_child.
+
+    ENDCASE.
+
+    eo_change = lo_change.
+  ENDMETHOD.
+
+
+  METHOD delete_single.
+    DATA lo_change TYPE REF TO /bobf/if_frw_change.
+    cl_abap_unit_assert=>assert_not_initial( is_modification-key ).
+    lo_change = /bobf/cl_frw_factory=>get_change( ).
+    IF is_modification-key = gc_non_existing_node_id.
+      lo_change->add_change( iv_change_mode = /bobf/if_frw_c=>sc_modify_delete
+                             iv_node_key    = is_modification-node
+                             iv_key         = is_modification-key
+                             iv_failed      = abap_true ).
+    ELSE.
+      INSERT is_modification-key INTO TABLE ms_keys-deleted.
+      lo_change->add_change( iv_change_mode = /bobf/if_frw_c=>sc_modify_delete
+                             iv_node_key    = is_modification-node
+                             iv_key         = is_modification-key
+                             iv_failed      = abap_false ).
+    ENDIF.
+    eo_change = lo_change.
+  ENDMETHOD.
+
+
+  METHOD update_single.
+    DATA lo_change TYPE REF TO /bobf/if_frw_change.
+    FIELD-SYMBOLS <ls_node_data> TYPE gty_bo_node_root ##needed.
+    lo_change = /bobf/cl_frw_factory=>get_change( ).
+
+    cl_abap_unit_assert=>assert_not_initial( is_modification-key ).
+    IF is_modification-key = ltd_sm_double=>gc_non_existing_node_id.
+      lo_change->add_change( iv_change_mode = /bobf/if_frw_c=>sc_modify_update
+                             iv_node_key    = is_modification-node
+                             iv_key         = is_modification-key
+                             iv_failed      = abap_true ).
+    ELSE.
+      INSERT is_modification-key INTO TABLE ms_keys-updated.
+      lo_change->add_change( iv_change_mode = /bobf/if_frw_c=>sc_modify_delete
+                             iv_node_key    = is_modification-node
+                             iv_key         = is_modification-key
+                             iv_failed      = abap_false ).
+      cl_abap_unit_assert=>assert_bound( is_modification-data ).
+      ASSIGN is_modification-data->* TO <ls_node_data>. "asserting that the types match
+      IF is_modification-changed_fields IS NOT INITIAL.
+        INSERT VALUE #( key = is_modification-key  changed_fields = is_modification-changed_fields ) INTO TABLE mt_changed_fields_by_key.
+      ENDIF.
+    ENDIF.
+    eo_change = lo_change.
+  ENDMETHOD.
+
+
+  METHOD draw_new_key.
+    CONSTANTS lc_increment LIKE mv_last_used_key VALUE '1'. "using typed constant avoids CodeInspector warning about type conversion
+
+    mv_last_used_key = mv_last_used_key + lc_increment.
+    rv_new_key = mv_last_used_key.
+  ENDMETHOD.
+
+
+  METHOD expect_keys.
+    cl_abap_unit_assert=>assert_equals( act = ms_keys-created    exp = it_created ).
+    cl_abap_unit_assert=>assert_equals( act = ms_keys-deleted    exp = it_deleted ).
+    cl_abap_unit_assert=>assert_equals( act = ms_keys-retrieved  exp = it_retrieved ).
+    cl_abap_unit_assert=>assert_equals( act = ms_keys-updated    exp = it_updated ).
+    cl_abap_unit_assert=>assert_equals( act = ms_keys-rba_source exp = it_rba_source ).
+  ENDMETHOD.
+
+
+  METHOD expect_no_keys.
+    expect_keys( ). "all parameters are initial
+  ENDMETHOD.
+
+
+  METHOD expect_changed_fields.
+    cl_abap_unit_assert=>assert_equals( act = mt_changed_fields_by_key
+                                        exp = it_changed_fields_by_key ).
+  ENDMETHOD.
+
+
+  METHOD register_std_instances.
+    mt_instances_root  = VALUE #( ( gs_node_instance ) ( gs_node_instance_with_children ) ( gs_node_instance_w_o_children ) ).
+    mt_instances_child = VALUE #( ( gs_child_instance1 ) ( gs_child_instance2 ) ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS ltd_bopf_sadl_message_handler DEFINITION INHERITING FROM /bobf/cl_sadl_message_handler FOR TESTING.
+  PUBLIC SECTION.
+    CLASS-METHODS inject.
+    CLASS-METHODS clear_registry.
+  PROTECTED SECTION.
+    METHODS map_location_to_sadl REDEFINITION.
+    METHODS pre_read_message_locations REDEFINITION.
+ENDCLASS.
+CLASS ltd_bopf_sadl_message_handler IMPLEMENTATION.
+  METHOD inject.
+    INSERT VALUE #( entity_type = 'BOPF' instance = NEW ltd_bopf_sadl_message_handler( iv_entity_type = 'BOPF' ) )
+      INTO TABLE mt_instance_registry.
+  ENDMETHOD.
+
+  METHOD map_location_to_sadl.
+    CLEAR et_locations.
+    CLEAR et_locations_entity.
+    APPEND VALUE #( primary_key_values = NEW i( ) ) TO et_locations.
+  ENDMETHOD.
+
+  METHOD pre_read_message_locations.
+  ENDMETHOD.
+
+  METHOD clear_registry.
+    CLEAR mt_instance_registry.
+  ENDMETHOD.
+ENDCLASS.
+
+CLASS ltc_crud DEFINITION FINAL FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+
+  PRIVATE SECTION.
+    CLASS-DATA go_sm_double TYPE REF TO ltd_sm_double.
+
+    DATA mo_crud TYPE REF TO if_sadl_entity_transactional.
+
+    "variables used frequently in tests:
+    DATA mt_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA mt_entity_data_exp TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    CLASS-METHODS class_setup.
+    CLASS-METHODS assert_table_contains_exactly IMPORTING it_act TYPE ANY TABLE
+                                                          it_exp TYPE ANY TABLE.
+    TYPES gtt_message_triggers TYPE SORTED TABLE OF lth_message=>gty_trigger WITH NON-UNIQUE KEY table_line.
+    METHODS expect_single_message IMPORTING iv_trigger TYPE lth_message=>gty_trigger.
+    METHODS expect_messages IMPORTING it_triggers TYPE gtt_message_triggers.
+
+    METHODS setup RAISING cx_static_check.
+
+    METHODS read_single FOR TESTING RAISING cx_static_check.
+    METHODS read_with_failures FOR TESTING RAISING cx_static_check.
+    METHODS read_nothing FOR TESTING RAISING cx_static_check.
+    METHODS read_ignoring_results FOR TESTING RAISING cx_static_check.
+    METHODS read_with_edit_lock FOR TESTING RAISING cx_static_check.
+    METHODS read_with_exclusive_lock FOR TESTING RAISING cx_static_check.
+    METHODS read_data_into_importing_table FOR TESTING RAISING cx_static_check.
+    METHODS read_with_requested_attributes FOR TESTING RAISING cx_static_check.
+    METHODS create_single FOR TESTING RAISING cx_static_check.
+    METHODS create_requesting_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS create_two FOR TESTING RAISING cx_static_check.
+    METHODS create_with_failed_key FOR TESTING RAISING cx_static_check.
+    METHODS create_with_specified_key FOR TESTING RAISING cx_static_check.
+    METHODS create_nothing FOR TESTING RAISING cx_static_check.
+    METHODS cba_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS cba_source_exists FOR TESTING RAISING cx_static_check.
+    METHODS cba_source_not_exists FOR TESTING RAISING cx_static_check.
+    METHODS cba_with_failed_target FOR TESTING RAISING cx_static_check.
+    METHODS cba_request_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS delete_single FOR TESTING RAISING cx_static_check.
+    METHODS delete_nothing FOR TESTING RAISING cx_static_check.
+    METHODS delete_two FOR TESTING RAISING cx_static_check.
+    METHODS delete_with_failed_key FOR TESTING RAISING cx_static_check.
+    METHODS update_nothing FOR TESTING RAISING cx_static_check.
+    METHODS update_single FOR TESTING RAISING cx_static_check.
+    METHODS update_two FOR TESTING RAISING cx_static_check.
+    METHODS update_some_elements FOR TESTING RAISING cx_static_check.
+    METHODS update_with_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS update_with_failed_key FOR TESTING RAISING cx_static_check.
+    METHODS rba_nothing FOR TESTING RAISING cx_static_check.
+    METHODS rba_two_source_keys FOR TESTING RAISING cx_static_check.
+    METHODS read_with_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS rba_with_source_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS rba_with_target_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS rba_with_failed_source_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS rba_with_trgt_altkey_req_elems FOR TESTING RAISING cx_static_check.
+    METHODS rba_with_requested_attributes FOR TESTING RAISING cx_static_check.
+    METHODS rba_with_edit_lock FOR TESTING RAISING cx_static_check.
+    METHODS rba_with_exclusive_lock FOR TESTING RAISING cx_static_check.
+    METHODS rba_keys FOR TESTING RAISING cx_static_check.
+    METHODS rba_keys_single FOR TESTING RAISING cx_static_check.
+    METHODS rba_keys_with_source_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS rba_keys_with_target_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS rba_keys_with_non_ex_src_key FOR TESTING RAISING cx_static_check.
+    METHODS get_properties_entity FOR TESTING RAISING cx_static_check.
+    METHODS get_properties_entity_single FOR TESTING RAISING cx_static_check.
+    METHODS get_properties_action FOR TESTING RAISING cx_static_check.
+    METHODS get_properties_association FOR TESTING RAISING cx_static_check.
+    METHODS get_properties_elements FOR TESTING RAISING cx_static_check.
+    METHODS get_properties_elements_all FOR TESTING RAISING cx_static_check.
+    METHODS get_prop_action_w_failed FOR TESTING RAISING cx_static_check.
+    METHODS get_prop_assoc_w_failed FOR TESTING RAISING cx_static_check.
+    METHODS get_prop_elem_w_failed FOR TESTING RAISING cx_static_check.
+    METHODS get_prop_elem_sngl_w_failed FOR TESTING RAISING cx_static_check.
+    METHODS get_prop_entity_w_failed FOR TESTING RAISING cx_static_check.
+    METHODS get_prop_ent_sngl_w_failed FOR TESTING RAISING cx_static_check.
+    METHODS get_properties_all FOR TESTING RAISING cx_static_check.
+    METHODS delete_alt_key FOR TESTING RAISING cx_static_check.
+    METHODS exec_action FOR TESTING RAISING cx_static_check.
+    METHODS exec_action_w_parms FOR TESTING RAISING cx_static_check.
+    METHODS exec_action_w_failed_keys FOR TESTING RAISING cx_static_check.
+    METHODS create_wrong_data_type FOR TESTING RAISING cx_static_check.
+    METHODS cba_wrong_data_type FOR TESTING RAISING cx_static_check.
+    METHODS update_wrong_data_type FOR TESTING RAISING cx_static_check.
+ENDCLASS.
+
+
+CLASS ltc_crud IMPLEMENTATION.
+
+  METHOD class_setup.
+    CREATE OBJECT go_sm_double.
+    DATA(lo_test_manager) = /bobf/cl_tool_test_manager=>get_manager( ).
+    lo_test_manager->inject_service_manager_double( iv_bo_key    = ltd_sm_double=>gc_bo_key
+                                                    io_sm_double = go_sm_double ).
+    lo_test_manager->activate_injections( ).
+
+    ltd_bopf_sadl_message_handler=>inject( ).
+  ENDMETHOD.
+
+
+  METHOD setup.
+    go_sm_double->reset( ).
+    mo_crud = NEW /bobf/cl_sadl_entity_transact( iv_id = ltd_sm_double=>gc_bo_name && `~` && ltd_sm_double=>gc_bo_node_name_root ).
+    mo_crud->get_message_handler( )->clear( ).
+  ENDMETHOD.
+
+
+  METHOD assert_table_contains_exactly.
+    DATA lr_act_table TYPE REF TO data.
+    DATA lr_exp_table TYPE REF TO data.
+    DATA lr_act_row TYPE REF TO data.
+    DATA lr_exp_row TYPE REF TO data.
+    FIELD-SYMBOLS <lt_act> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS <lt_exp> TYPE STANDARD TABLE.
+
+    "create local copies of it_act and it_exp which are STANDARD tables of the same row type:
+    CREATE DATA lr_act_row LIKE LINE OF it_act.
+    CREATE DATA lr_exp_row LIKE LINE OF it_exp.
+    ASSIGN lr_act_row->* TO FIELD-SYMBOL(<ls_act_row>).
+    ASSIGN lr_exp_row->* TO FIELD-SYMBOL(<ls_exp_row>).
+    CREATE DATA lr_act_table LIKE STANDARD TABLE OF <ls_act_row>.
+    CREATE DATA lr_exp_table LIKE STANDARD TABLE OF <ls_exp_row>.
+    ASSIGN  lr_act_table->* TO <lt_act>.
+    ASSIGN  lr_exp_table->* TO <lt_exp>.
+    <lt_act> = it_act.
+    <lt_exp> = it_exp.
+    "don't care about the order of entries:
+    SORT <lt_act>.
+    SORT <lt_exp>.
+    cl_abap_unit_assert=>assert_equals( act = <lt_act>  exp = <lt_exp> ).
+  ENDMETHOD.
+
+
+  METHOD read_single.
+    DATA ls_key_value TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA ls_entity_act TYPE ltd_sm_double=>gty_bo_node_root.
+
+    ls_key_value-key = ltd_sm_double=>gc_existing_node_id.
+    mo_crud->read_single( EXPORTING is_key_values  = ls_key_value
+                          IMPORTING es_entity_data = ls_entity_act ).
+
+    cl_abap_unit_assert=>assert_equals( act = ls_entity_act  exp = ltd_sm_double=>gs_node_instance ).
+
+    expect_single_message( lth_message=>gc_retrieve ).
+  ENDMETHOD.
+
+
+  METHOD read_with_failures.
+    DATA lt_failed_key_tabix_act TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lt_failed_key_tabix_exp TYPE if_sadl_entity_transactional=>tt_tabix.
+
+    DATA(lt_key_values) = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id )
+                                                                 ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+    mo_crud->read( EXPORTING it_key_values  = lt_key_values
+                   IMPORTING et_failed      = lt_failed_key_tabix_act
+                             et_entity_data = mt_entity_data_act ).
+
+    mt_entity_data_exp = VALUE #( ( ltd_sm_double=>gs_node_instance ) ).
+    cl_abap_unit_assert=>assert_equals( act = mt_entity_data_act
+                                        exp = mt_entity_data_exp ).
+    lt_failed_key_tabix_exp = VALUE #( ( 2 ) ). "index of non existing node_id in lt_key_values
+    cl_abap_unit_assert=>assert_equals( act = lt_failed_key_tabix_act
+                                        exp = lt_failed_key_tabix_exp ).
+  ENDMETHOD.
+
+
+  METHOD read_with_alt_key.
+    DATA(lt_key_values) = VALUE ltd_sm_double=>gtt_bo_node_root( ( bo_name = ltd_sm_double=>gs_node_instance-bo_name  extension = abap_false ) ).
+    mo_crud->read( EXPORTING it_key_values           = lt_key_values
+                             iv_alternative_key_name = ltd_sm_double=>gc_root_alt_key_name
+                   IMPORTING et_entity_data          = mt_entity_data_act ).
+
+    mt_entity_data_exp = VALUE #( ( ltd_sm_double=>gs_node_instance ) ).
+    cl_abap_unit_assert=>assert_equals( act = mt_entity_data_act  exp = mt_entity_data_exp ).
+  ENDMETHOD.
+
+
+  METHOD read_nothing.
+    DATA lt_key_values_emtpy TYPE ltd_sm_double=>gtt_bo_node_root VALUE IS INITIAL.
+    DATA lt_failed_key_tabix_act TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lt_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    INSERT INITIAL LINE INTO TABLE lt_failed_key_tabix_act. "prefill exporting parameters to check if they are cleared
+    INSERT INITIAL LINE INTO TABLE mt_entity_data_act.
+    mo_crud->read( EXPORTING it_key_values  = lt_key_values_emtpy
+                   IMPORTING et_failed      = lt_failed_key_tabix_act
+                             et_entity_data = lt_entity_data_act ).
+
+    cl_abap_unit_assert=>assert_initial( lt_failed_key_tabix_act ).
+    cl_abap_unit_assert=>assert_initial( lt_entity_data_act ).
+  ENDMETHOD.
+
+
+  METHOD read_ignoring_results.
+    DATA(lt_key_values) = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id )
+                                                           ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+    mo_crud->read( EXPORTING it_key_values         = lt_key_values
+                   IMPORTING et_entity_data        = mt_entity_data_act ). "not supplying et_entity_data is not supported (no IN_FILL_DATA parameter)
+    "the trick is not to dump when et_unknown_key_values is not supplied
+  ENDMETHOD.
+
+
+  METHOD read_with_edit_lock.
+    DATA lv_edit_mode TYPE if_sadl_entity_transactional=>ty_edit_mode VALUE if_sadl_entity_transactional=>co_edit_mode-edit.
+    mt_entity_data_act = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id ) ).
+    mo_crud->read( EXPORTING it_key_values         = mt_entity_data_act
+                             iv_edit_mode          = lv_edit_mode
+                   IMPORTING et_entity_data        = mt_entity_data_act ). "exporting = importing
+
+    mt_entity_data_exp = VALUE #( ( ltd_sm_double=>gs_node_instance ) ).
+    cl_abap_unit_assert=>assert_equals( act = mt_entity_data_act  exp = mt_entity_data_exp ).
+    cl_abap_unit_assert=>assert_equals( act = go_sm_double->mv_edit_mode exp = /bobf/if_conf_c=>sc_edit_optimistic ).
+  ENDMETHOD.
+
+
+  METHOD read_with_exclusive_lock.
+    DATA lv_edit_mode TYPE if_sadl_entity_transactional=>ty_edit_mode VALUE if_sadl_entity_transactional=>co_edit_mode-edit_exclusive.
+    mt_entity_data_act = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id ) ).
+    mo_crud->read( EXPORTING it_key_values         = mt_entity_data_act
+                             iv_edit_mode          = lv_edit_mode
+                   IMPORTING et_entity_data        = mt_entity_data_act ). "exporting = importing
+
+    mt_entity_data_exp = VALUE #( ( ltd_sm_double=>gs_node_instance ) ).
+    cl_abap_unit_assert=>assert_equals( act = mt_entity_data_act  exp = mt_entity_data_exp ).
+    cl_abap_unit_assert=>assert_equals( act = go_sm_double->mv_edit_mode exp = /bobf/if_conf_c=>sc_edit_exclusive ).
+  ENDMETHOD.
+
+
+  METHOD read_data_into_importing_table.
+    mt_entity_data_act = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id ) ).
+    mo_crud->read( EXPORTING it_key_values         = mt_entity_data_act
+                   IMPORTING et_entity_data        = mt_entity_data_act ). "exporting = importing
+
+    mt_entity_data_exp = VALUE #( ( ltd_sm_double=>gs_node_instance ) ).
+    cl_abap_unit_assert=>assert_equals( act = mt_entity_data_act  exp = mt_entity_data_exp ).
+  ENDMETHOD.
+
+
+  METHOD read_with_requested_attributes.
+    DATA(lt_key_values) = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id ) ).
+    mo_crud->read( EXPORTING it_key_values         = lt_key_values
+                             it_requested_elements = VALUE #( ( ltd_sm_double=>gc_bo_node_attribute_name ) ( CONV #( /bobf/if_conf_c=>sc_attribute_name_key ) ) )
+                   IMPORTING et_entity_data        = mt_entity_data_act ).
+
+    DATA(lt_requested_attributes_exp) = VALUE /bobf/t_frw_name( ( ltd_sm_double=>gc_bo_node_attribute_name ) ( CONV #( /bobf/if_conf_c=>sc_attribute_name_key ) ) ).
+    SORT lt_requested_attributes_exp.
+    DATA(lt_requested_attributes_act) = go_sm_double->ms_retrieve_params-it_requested_attributes.
+    SORT lt_requested_attributes_act. "we don't care about the sequence
+    cl_abap_unit_assert=>assert_equals( act = lt_requested_attributes_act
+                                        exp = lt_requested_attributes_exp ).
+  ENDMETHOD.
+
+
+  METHOD rba_keys.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_source_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lt_target_key_values TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children )
+                              ( key = ltd_sm_double=>gc_node_id_without_children )
+                              ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+
+    mo_crud->read_keys_by_association( EXPORTING iv_association_name   = ltd_sm_double=>gc_association_name
+                                                 it_source_key_values  = lt_source_keys
+                                       IMPORTING et_source_failed      = lt_source_failed
+                                                 et_target_key_values  = lt_target_key_values
+                                                 et_links              = lt_links_act ).
+
+    assert_table_contains_exactly( it_act = lt_source_failed
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix( ( 3 ) ) ). "third source key does not exist
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_target_key_values
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( key = ltd_sm_double=>gs_child_instance1-key )
+                                                                                    ( key = ltd_sm_double=>gs_child_instance2-key ) ) ).
+
+    "check some details about how service manager has been called:
+    cl_abap_unit_assert=>assert_initial( go_sm_double->ms_rba_params-it_requested_attributes ).
+    cl_abap_unit_assert=>assert_false( go_sm_double->ms_rba_params-iv_fill_data ).
+
+    expect_single_message( lth_message=>gc_retrieve_by_association ).
+  ENDMETHOD.
+
+
+  METHOD create_single.
+    DATA ls_entity TYPE ltd_sm_double=>gty_bo_node_root.
+
+    ls_entity-bo_name = 'BO_NAME'.
+    mo_crud->create_single( CHANGING cs_entity_data = ls_entity ).
+
+    cl_abap_unit_assert=>assert_not_initial( ls_entity-key ).
+    cl_abap_unit_assert=>assert_equals( act = ls_entity-bo_name  exp = 'BO_NAME' ).
+    go_sm_double->expect_keys( it_created = VALUE #( ( ls_entity-key ) ) ).
+
+    expect_single_message( lth_message=>gc_create ).
+  ENDMETHOD.
+
+
+  METHOD create_requesting_alt_key.
+    DATA ls_entity TYPE ltd_sm_double=>gty_bo_node_root.
+
+    CLEAR ls_entity-bo_name.
+    mo_crud->create_single( EXPORTING iv_requested_alternative_key = ltd_sm_double=>gc_root_alt_key_name
+                            CHANGING  cs_entity_data               = ls_entity ).
+
+    cl_abap_unit_assert=>assert_not_initial( ls_entity-key ).
+    cl_abap_unit_assert=>assert_equals( act = ls_entity-bo_name  exp = ltd_sm_double=>gc_root_alt_key_default_value ).
+  ENDMETHOD.
+
+
+  METHOD create_two.
+    DATA ls_entity1 TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA ls_entity2 TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA lt_entity_data TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    ls_entity1-bo_name = 'BO_NAME1'.
+    APPEND ls_entity1 TO lt_entity_data.
+    ls_entity2-bo_name = 'BO_NAME2'.
+    APPEND ls_entity2 TO lt_entity_data.
+
+    mo_crud->create( CHANGING ct_entity_data = lt_entity_data ).
+
+    cl_abap_unit_assert=>assert_equals( act = lt_entity_data[ 1 ]-bo_name  exp = ls_entity1-bo_name ) ##operator.
+    cl_abap_unit_assert=>assert_equals( act = lt_entity_data[ 2 ]-bo_name  exp = ls_entity2-bo_name ) ##operator.
+    cl_abap_unit_assert=>assert_not_initial( act = lt_entity_data[ 1 ]-key ) ##operator.
+    cl_abap_unit_assert=>assert_not_initial( act = lt_entity_data[ 2 ]-key ) ##operator.
+    cl_abap_unit_assert=>assert_differs( act = lt_entity_data[ 1 ]-key  exp = lt_entity_data[ 2 ]-key ) ##operator.
+    go_sm_double->expect_keys( it_created = VALUE #( ( lt_entity_data[ 1 ]-key ) ( lt_entity_data[ 2 ]-key ) ) ).
+  ENDMETHOD.
+
+
+  METHOD create_with_failed_key.
+    DATA lt_entity_data TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    APPEND VALUE #( bo_name = 'BO_NAME1'  ) TO lt_entity_data.
+    APPEND VALUE #( bo_name = 'BO_NAME2'  key = ltd_sm_double=>gc_non_existing_node_id ) TO lt_entity_data.
+    APPEND VALUE #( bo_name = 'BO_NAME3'  ) TO lt_entity_data.
+
+    mo_crud->create( IMPORTING et_failed      = DATA(lt_failed)
+                     CHANGING  ct_entity_data = lt_entity_data ).
+
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_failed ) exp = 1 ).
+    cl_abap_unit_assert=>assert_equals( act = lt_failed[ 1 ] exp = 2 ). "index 2 of lt_entity_data
+    go_sm_double->expect_keys( it_created = VALUE #( ( lt_entity_data[ 1 ]-key )  ( lt_entity_data[ 3 ]-key ) ) ).
+  ENDMETHOD.
+
+
+  METHOD create_nothing.
+    DATA lt_entity_data_empty TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    mo_crud->create( CHANGING ct_entity_data = lt_entity_data_empty ).
+
+    cl_abap_unit_assert=>assert_initial( lt_entity_data_empty ).
+    go_sm_double->expect_no_keys( ).
+  ENDMETHOD.
+
+
+  METHOD create_with_specified_key.
+    CONSTANTS lc_create_key TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '123'.
+    DATA ls_entity TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA lt_entity_data TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    ls_entity-key = lc_create_key.
+    ls_entity-bo_name = 'BO_NAME1'.
+    APPEND ls_entity TO lt_entity_data.
+
+    mo_crud->create( CHANGING ct_entity_data = lt_entity_data ).
+
+    go_sm_double->expect_keys( it_created = VALUE #( ( ls_entity-key ) ) ).
+  ENDMETHOD.
+
+
+  METHOD create_wrong_data_type.
+    DATA ls_item TYPE ltd_sm_double=>gty_bo_node_child.
+
+    TRY.
+        mo_crud->create_single( CHANGING cs_entity_data = ls_item ).
+        cl_abap_unit_assert=>fail( `CREATE should not accept wrond data type` ) ##no_text.
+      CATCH cx_sadl_contract_violation ##no_handler.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD cba_alt_key.
+    DATA ls_source_key TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA lt_target_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lv_source_failed TYPE abap_bool.
+    DATA lt_target_entity_data TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA ls_target_entity_data TYPE ltd_sm_double=>gty_bo_node_child.
+
+    ls_source_key = VALUE #( bo_name = ltd_sm_double=>gs_node_instance-bo_name ).
+    ls_target_entity_data-buffer_class = '/BOBF/CL_BUF_SIMPLE'.
+    APPEND ls_target_entity_data TO lt_target_entity_data.
+
+    mo_crud->create_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                              iv_source_alternative_key_name = ltd_sm_double=>gc_root_alt_key_name
+                                              is_source_key_values           = ls_source_key
+                                    IMPORTING et_target_failed               = lt_target_failed
+                                              ev_source_failed               = lv_source_failed
+                                    CHANGING  ct_target_entity_data          = lt_target_entity_data ).
+
+    cl_abap_unit_assert=>assert_false( lv_source_failed ).
+    cl_abap_unit_assert=>assert_initial( lt_target_failed ).
+    cl_abap_unit_assert=>assert_not_initial( lt_target_entity_data[ 1 ]-key ) ##operator.
+
+    expect_single_message( lth_message=>gc_create ).
+  ENDMETHOD.
+
+
+  METHOD cba_source_exists.
+    DATA ls_source_key TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA lt_target_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lv_source_failed TYPE abap_bool.
+    DATA lt_target_entity_data TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA ls_target_entity_data TYPE ltd_sm_double=>gty_bo_node_child.
+
+    ls_source_key = VALUE #( key = ltd_sm_double=>gc_existing_node_id ).
+    ls_target_entity_data-buffer_class = '/BOBF/CL_BUF_SIMPLE'.
+    APPEND ls_target_entity_data TO lt_target_entity_data.
+
+    mo_crud->create_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                              is_source_key_values           = ls_source_key
+                                    IMPORTING et_target_failed               = lt_target_failed
+                                              ev_source_failed               = lv_source_failed
+                                    CHANGING  ct_target_entity_data          = lt_target_entity_data ).
+
+    cl_abap_unit_assert=>assert_false( lv_source_failed ).
+    cl_abap_unit_assert=>assert_initial( lt_target_failed ).
+    cl_abap_unit_assert=>assert_not_initial( lt_target_entity_data[ 1 ]-key ) ##operator.
+
+    expect_single_message( lth_message=>gc_create ).
+  ENDMETHOD.
+
+
+  METHOD cba_source_not_exists.
+    DATA ls_source_key TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA lt_target_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lv_source_failed TYPE abap_bool.
+    DATA lt_target_entity_data TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA ls_target_entity_data TYPE ltd_sm_double=>gty_bo_node_child.
+
+    ls_source_key = VALUE #( key = ltd_sm_double=>gc_non_existing_node_id ).
+    ls_target_entity_data-buffer_class = '/BOBF/CL_BUF_SIMPLE'.
+    APPEND ls_target_entity_data TO lt_target_entity_data.
+
+    mo_crud->create_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                              is_source_key_values           = ls_source_key
+                                    IMPORTING et_target_failed               = lt_target_failed
+                                              ev_source_failed               = lv_source_failed
+                                    CHANGING  ct_target_entity_data          = lt_target_entity_data ).
+
+    cl_abap_unit_assert=>assert_true( lv_source_failed ).
+    cl_abap_unit_assert=>assert_initial( lt_target_failed ).
+    cl_abap_unit_assert=>assert_initial(  lt_target_entity_data[ 1 ]-key ) ##operator.
+  ENDMETHOD.
+
+
+  METHOD cba_with_failed_target.
+    DATA ls_source_key TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA lt_target_entity_data TYPE ltd_sm_double=>gtt_bo_node_child.
+
+    ls_source_key = VALUE #( key = ltd_sm_double=>gc_existing_node_id ).
+    APPEND VALUE #( buffer_class = 'A' ) TO lt_target_entity_data.
+    APPEND VALUE #( buffer_class = 'B'  key = ltd_sm_double=>gc_non_existing_node_id ) TO lt_target_entity_data. "results in a failed target key
+    APPEND VALUE #( buffer_class = 'C' ) TO lt_target_entity_data.
+
+    mo_crud->create_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                              is_source_key_values           = ls_source_key
+                                    IMPORTING et_target_failed               = DATA(lt_target_failed)
+                                              ev_source_failed               = DATA(lv_source_failed)
+                                    CHANGING  ct_target_entity_data          = lt_target_entity_data ).
+
+    cl_abap_unit_assert=>assert_false( lv_source_failed ).
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_target_failed )  exp = 1 ).
+    cl_abap_unit_assert=>assert_equals( act = lt_target_failed[ 1 ]  exp = 2 ).
+  ENDMETHOD.
+
+
+  METHOD cba_request_alt_key.
+    DATA ls_source_key TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA ls_target_entity_data TYPE ltd_sm_double=>gty_bo_node_child.
+
+    ls_source_key = VALUE #( key = ltd_sm_double=>gc_existing_node_id ).
+    CLEAR ls_target_entity_data.
+
+    mo_crud->create_by_association_single( EXPORTING iv_association_name         = ltd_sm_double=>gc_association_name
+                                                     is_source_key_values        = ls_source_key
+                                                     iv_requested_target_alt_key = ltd_sm_double=>gc_child_alt_key_name
+                                           IMPORTING ev_target_failed            = DATA(lv_target_failed)
+                                                     ev_source_failed            = DATA(lv_source_failed)
+                                           CHANGING  cs_target_entity_data       = ls_target_entity_data ).
+
+    cl_abap_unit_assert=>assert_false( lv_source_failed ).
+    cl_abap_unit_assert=>assert_false( lv_target_failed ).
+    cl_abap_unit_assert=>assert_not_initial( ls_target_entity_data-key ).
+    cl_abap_unit_assert=>assert_equals( act = ls_target_entity_data-version  exp = ltd_sm_double=>gc_child_alt_key_default_value ).
+  ENDMETHOD.
+
+
+  METHOD cba_wrong_data_type.
+    DATA ls_target_entity_data TYPE ltd_sm_double=>gty_bo_node_root. " !!! wrong data type
+
+    TRY.
+        mo_crud->create_by_association_single(
+          EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                    is_source_key_values           = VALUE ltd_sm_double=>gty_bo_node_root( key = ltd_sm_double=>gc_existing_node_id )
+          CHANGING  cs_target_entity_data          = ls_target_entity_data ).
+        cl_abap_unit_assert=>fail( `CREATE_BY_ASSOCIATION should not accept wrond data type` ) ##no_text.
+      CATCH cx_sadl_contract_violation ##no_handler.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD delete_single.
+    CONSTANTS lc_delete_key TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '031373'.
+    DATA ls_entity TYPE ltd_sm_double=>gty_bo_node_root.
+
+    ls_entity-key = lc_delete_key.
+    mo_crud->delete_single( ls_entity ).
+
+    go_sm_double->expect_keys( it_deleted = VALUE #( ( ls_entity-key ) ) ).
+
+    expect_single_message( lth_message=>gc_delete ).
+  ENDMETHOD.
+
+
+  METHOD delete_alt_key.
+    DATA ls_key_values TYPE ltd_sm_double=>gty_bo_node_root.
+
+    ls_key_values-bo_name = ltd_sm_double=>gs_node_instance-bo_name.
+    mo_crud->delete_single( EXPORTING is_key_values           = ls_key_values
+                                      iv_alternative_key_name = ltd_sm_double=>gc_root_alt_key_name
+                            IMPORTING ev_failed               = DATA(lv_delete_failed) ).
+
+    cl_abap_unit_assert=>assert_false( lv_delete_failed ).
+    go_sm_double->expect_keys( it_deleted = VALUE #( ( ltd_sm_double=>gs_node_instance-key ) ) ).
+  ENDMETHOD.
+
+
+  METHOD delete_nothing.
+    DATA lt_entity_data_empty TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    mo_crud->delete( it_key_values = lt_entity_data_empty ).
+
+    go_sm_double->expect_no_keys( ).
+  ENDMETHOD.
+
+
+  METHOD delete_two.
+    CONSTANTS lc_key_001 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '001'.
+    CONSTANTS lc_key_002 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '002'.
+
+    mo_crud->delete( it_key_values = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = lc_key_001 )
+                                                                            ( key = lc_key_002 ) ) ).
+
+    go_sm_double->expect_keys( it_deleted = VALUE #( ( lc_key_001 ) ( lc_key_002 ) ) ).
+  ENDMETHOD.
+
+
+  METHOD delete_with_failed_key.
+    DATA lt_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+    CONSTANTS lc_key_001 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '001'.
+
+    mo_crud->delete( EXPORTING it_key_values = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_non_existing_node_id )
+                                                                                      ( key = lc_key_001 ) )
+                     IMPORTING et_failed = lt_failed ).
+
+    cl_abap_unit_assert=>assert_equals( act = lt_failed[ 1 ] exp = 1 ).
+    go_sm_double->expect_keys( it_deleted = VALUE #( ( lc_key_001 ) ) ).
+  ENDMETHOD.
+
+
+  METHOD update_nothing.
+    mo_crud->update( it_entity_data = VALUE ltd_sm_double=>gtt_bo_node_root( ) ).
+
+    go_sm_double->expect_no_keys( ).
+  ENDMETHOD.
+
+
+  METHOD update_single.
+    CONSTANTS lc_key TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '234'.
+
+    mo_crud->update_single( is_entity_data = VALUE ltd_sm_double=>gty_bo_node_root( key = lc_key ) ).
+
+    go_sm_double->expect_keys( it_updated = VALUE #( ( lc_key ) ) ).
+    "more assertions are implemented in LTD_SM_DOUBLE->UPDATE_SINGLE
+
+    expect_single_message( lth_message=>gc_update ).
+  ENDMETHOD.
+
+
+  METHOD update_wrong_data_type.
+    DATA ls_child TYPE ltd_sm_double=>gty_bo_node_child.
+
+    TRY.
+        mo_crud->update_single( ls_child ). "wrong data type
+        cl_abap_unit_assert=>fail( `UPDATE should not accept wrong data type` ).
+      CATCH cx_sadl_contract_violation ##no_handler.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD update_two.
+    CONSTANTS lc_key1 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '234'.
+    CONSTANTS lc_key2 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '567'.
+
+    mo_crud->update( it_entity_data = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = lc_key1 )
+                                                                             ( key = lc_key2 ) ) ).
+
+    go_sm_double->expect_keys( it_updated = VALUE #( ( lc_key1 ) ( lc_key2 ) ) ).
+  ENDMETHOD.
+
+
+  METHOD update_some_elements.
+    CONSTANTS lc_key1 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '234'.
+    CONSTANTS lc_key2 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '567'.
+    CONSTANTS lc_updated_element_name TYPE sadl_entity_element VALUE `BO_NAME`.
+
+    mo_crud->update( it_updated_elements_per_tabix = VALUE #( ( tabix = 1  elements = VALUE #( ( lc_updated_element_name ) ) ) )
+                     it_entity_data                = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = lc_key1 )
+                                                                                            ( key = lc_key2 ) ) ).
+
+    go_sm_double->expect_keys( it_updated = VALUE #( ( lc_key1 ) ( lc_key2 ) ) ).
+    go_sm_double->expect_changed_fields( VALUE #( ( key = lc_key1  changed_fields = VALUE #( ( lc_updated_element_name ) ) ) ) ).
+  ENDMETHOD.
+
+
+  METHOD update_with_alt_key.
+    CONSTANTS lc_updated_element_name TYPE sadl_entity_element VALUE `BO_ESR_NAME`.
+
+    mo_crud->update( it_updated_elements_per_tabix = VALUE #( ( tabix = 1  elements = VALUE #( ( lc_updated_element_name ) ) ) )
+                     it_entity_data                = VALUE ltd_sm_double=>gtt_bo_node_root( ( bo_name = ltd_sm_double=>gs_node_instance-bo_name ) )
+                     iv_alternative_key_name       = ltd_sm_double=>gc_root_alt_key_name ).
+
+* TODO: verify something
+*    go_sm_double->expect_changed_fields( VALUE #( ( changed_fields = VALUE #( ( lc_updated_element_name ) ) ) ) ).
+  ENDMETHOD.
+
+
+  METHOD update_with_failed_key.
+    CONSTANTS lc_key1 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE '234'.
+    CONSTANTS lc_key2 TYPE ltd_sm_double=>gty_bo_node_root-key VALUE ltd_sm_double=>gc_non_existing_node_id.
+    CONSTANTS lc_updated_element_name TYPE sadl_entity_element VALUE `BO_NAME`.
+
+    mo_crud->update( EXPORTING it_updated_elements_per_tabix = VALUE #( ( tabix = 1  elements = VALUE #( ( lc_updated_element_name ) ) ) )
+                               it_entity_data                = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = lc_key1 )
+                                                                                                      ( key = lc_key2 ) )
+                     IMPORTING et_failed                     = DATA(lt_failed) ).
+
+    go_sm_double->expect_keys( it_updated = VALUE #( ( lc_key1 ) ) ).
+    go_sm_double->expect_changed_fields( VALUE #( ( key = lc_key1  changed_fields = VALUE #( ( lc_updated_element_name ) ) ) ) ).
+    cl_abap_unit_assert=>assert_equals( act = lt_failed[ 1 ] exp = 2 ).
+
+  ENDMETHOD.
+
+  METHOD rba_nothing.
+    DATA lt_target_entity_data TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links TYPE if_sadl_entity_transactional=>tt_tabix_links.
+    DATA lt_source_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+
+    INSERT INITIAL LINE INTO TABLE: lt_target_entity_data, lt_links. "verify that exporting parameters are properly cleared
+    mo_crud->read_by_association( EXPORTING iv_association_name   = ltd_sm_double=>gc_association_name
+                                            it_source_key_values  = VALUE ltd_sm_double=>gtt_bo_node_root( )
+                                  IMPORTING et_source_failed      = lt_source_failed
+                                            et_target_entity_data = lt_target_entity_data
+                                            et_links              = lt_links ).
+    cl_abap_unit_assert=>assert_initial( lt_source_failed ).
+    cl_abap_unit_assert=>assert_initial( lt_target_entity_data ).
+    cl_abap_unit_assert=>assert_initial( lt_links ).
+    go_sm_double->expect_no_keys( ).
+  ENDMETHOD.
+
+
+  METHOD rba_two_source_keys.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_source_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children )
+                              ( key = ltd_sm_double=>gc_node_id_without_children )
+                              ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+    mo_crud->read_by_association( EXPORTING iv_association_name   = ltd_sm_double=>gc_association_name
+                                            it_source_key_values  = lt_source_keys
+                                  IMPORTING et_source_failed      = lt_source_failed
+                                            et_target_entity_data = lt_target_entity_data_act
+                                            et_links              = lt_links_act ).
+
+    assert_table_contains_exactly( it_act = lt_source_failed
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix( ( 3 ) ) ). "third source key does not exist
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( ltd_sm_double=>gs_child_instance1 )
+                                                                                    ( ltd_sm_double=>gs_child_instance2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    "check some details about how service manager has been called:
+    cl_abap_unit_assert=>assert_initial( go_sm_double->ms_rba_params-it_requested_attributes ).
+    cl_abap_unit_assert=>assert_true( go_sm_double->ms_rba_params-iv_fill_data ).
+    cl_abap_unit_assert=>assert_equals( act = go_sm_double->ms_rba_params-iv_edit_mode  exp = /bobf/if_conf_c=>sc_edit_read_only ).
+  ENDMETHOD.
+
+
+  METHOD rba_with_requested_attributes.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_source_failed TYPE if_sadl_entity_transactional=>tt_tabix.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children )
+                              ( key = ltd_sm_double=>gc_node_id_without_children )
+                              ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+    mo_crud->read_by_association( EXPORTING iv_association_name   = ltd_sm_double=>gc_association_name
+                                            it_source_key_values  = lt_source_keys
+                                            it_requested_elements = VALUE #( ( ltd_sm_double=>gc_bo_node_attr_create_user ) ( ltd_sm_double=>gc_bo_node_attr_create_time ) )
+                                  IMPORTING et_source_failed      = lt_source_failed
+                                            et_target_entity_data = lt_target_entity_data_act
+                                            et_links              = lt_links_act ).
+    assert_table_contains_exactly( it_act = lt_source_failed
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix( ( 3 ) ) ). "third source key does not exist
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( ltd_sm_double=>gs_child_instance1 )
+                                                                                    ( ltd_sm_double=>gs_child_instance2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    DATA(lt_requested_attributes_exp) = VALUE /bobf/t_frw_name( ( ltd_sm_double=>gc_bo_node_attr_create_user ) ( ltd_sm_double=>gc_bo_node_attr_create_time ) ).
+    SORT lt_requested_attributes_exp.
+    DATA(lt_requested_attributes_act) = go_sm_double->ms_rba_params-it_requested_attributes.
+    SORT lt_requested_attributes_act. "we don't care about the sequence
+    cl_abap_unit_assert=>assert_equals( act = lt_requested_attributes_act
+                                        exp = lt_requested_attributes_exp ).
+
+
+  ENDMETHOD.
+
+  "TODO: test rba without supplying et_target_entity_data (results in contract violation)
+
+  METHOD rba_with_source_alt_key.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+
+    lt_source_keys = VALUE #( ( bo_name = ltd_sm_double=>gs_node_instance_with_children-bo_name ) ).
+
+    mo_crud->read_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                            it_source_key_values           = lt_source_keys
+                                            iv_source_alternative_key_name = ltd_sm_double=>gc_root_alt_key_name
+                                  IMPORTING et_source_failed               = DATA(lt_source_failed)
+                                            et_target_entity_data          = lt_target_entity_data_act
+                                            et_links                       = DATA(lt_links_act) ).
+
+    cl_abap_unit_assert=>assert_initial( lt_source_failed ).
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( ltd_sm_double=>gs_child_instance1 )
+                                                                                    ( ltd_sm_double=>gs_child_instance2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+  ENDMETHOD.
+
+
+  METHOD rba_with_failed_source_alt_key.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+
+    lt_source_keys = VALUE #( ( bo_name = ltd_sm_double=>gs_node_instance_with_children-bo_name ) ( ) ).  "second key is initial.
+
+    mo_crud->read_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                            it_source_key_values           = lt_source_keys
+                                            iv_source_alternative_key_name = ltd_sm_double=>gc_root_alt_key_name
+                                  IMPORTING et_source_failed               = DATA(lt_source_failed)
+                                            et_target_entity_data          = lt_target_entity_data_act
+                                            et_links                       = DATA(lt_links_act) ).
+
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_source_failed ) exp = 1 ).
+    cl_abap_unit_assert=>assert_equals( act = lt_source_failed[ 1 ] exp = 2 ).
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( ltd_sm_double=>gs_child_instance1 )
+                                                                                    ( ltd_sm_double=>gs_child_instance2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+  ENDMETHOD.
+
+
+  METHOD rba_with_target_alt_key.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children ) ).
+
+    mo_crud->read_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                            it_source_key_values           = lt_source_keys
+                                            iv_target_alternative_key_name = ltd_sm_double=>gc_child_alt_key_name
+                                  IMPORTING et_source_failed               = DATA(lt_source_failed)
+                                            et_target_entity_data          = lt_target_entity_data_act
+                                            et_links                       = lt_links_act ).
+    cl_abap_unit_assert=>assert_initial( lt_source_failed ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( ltd_sm_double=>gs_child_instance1 )
+                                                                                    ( ltd_sm_double=>gs_child_instance2 ) ) ).
+    "check that all attributes actually have been requested (and do not appear by accident):
+    cl_abap_unit_assert=>assert_initial( act = go_sm_double->ms_rba_params-it_requested_attributes ).
+  ENDMETHOD.
+
+
+  METHOD rba_with_trgt_altkey_req_elems.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children ) ).
+
+    mo_crud->read_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                            it_source_key_values           = lt_source_keys
+                                            iv_target_alternative_key_name = ltd_sm_double=>gc_child_alt_key_name
+                                            it_requested_elements          = VALUE #( ( `DESCRIPTION` ) )
+                                  IMPORTING et_source_failed               = DATA(lt_source_failed)
+                                            et_target_entity_data          = lt_target_entity_data_act
+                                            et_links                       = lt_links_act ).
+    cl_abap_unit_assert=>assert_initial( lt_source_failed ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_target_entity_data_act )  exp = 2 ).
+    "check if result contains requested element AND target key field:
+    SORT lt_target_entity_data_act BY description.
+    "check requested attribute DESCRIPTION:
+    cl_abap_unit_assert=>assert_equals( act = lt_target_entity_data_act[ 1 ]-description  exp = ltd_sm_double=>gs_child_instance1-description ) ##operator.
+    cl_abap_unit_assert=>assert_equals( act = lt_target_entity_data_act[ 2 ]-description  exp = ltd_sm_double=>gs_child_instance2-description ) ##operator.
+    "check alt key field VERSION:
+    cl_abap_unit_assert=>assert_equals( act = lt_target_entity_data_act[ 1 ]-version  exp = ltd_sm_double=>gs_child_instance1-version ) ##operator.
+    cl_abap_unit_assert=>assert_equals( act = lt_target_entity_data_act[ 2 ]-version  exp = ltd_sm_double=>gs_child_instance2-version ) ##operator.
+    "performance: check that not all attributes have been requested:
+    cl_abap_unit_assert=>assert_not_initial( act = go_sm_double->ms_rba_params-it_requested_attributes ).
+  ENDMETHOD.
+
+
+  METHOD rba_with_edit_lock.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+    DATA lv_edit_mode TYPE if_sadl_entity_transactional=>ty_edit_mode VALUE if_sadl_entity_transactional=>co_edit_mode-edit.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children )
+                              ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+    mo_crud->read_by_association( EXPORTING iv_association_name   = ltd_sm_double=>gc_association_name
+                                            it_source_key_values  = lt_source_keys
+                                            iv_target_edit_mode   = lv_edit_mode
+                                  IMPORTING et_source_failed      = DATA(lt_source_failed)
+                                            et_target_entity_data = lt_target_entity_data_act
+                                            et_links              = lt_links_act ).
+
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( ltd_sm_double=>gs_child_instance1 )
+                                                                                    ( ltd_sm_double=>gs_child_instance2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    cl_abap_unit_assert=>assert_equals( act = go_sm_double->ms_rba_params-iv_edit_mode  exp = /bobf/if_conf_c=>sc_edit_optimistic ).
+
+    cl_abap_unit_assert=>assert_equals( act = lt_source_failed[ 1 ] exp = 2 ).
+  ENDMETHOD.
+
+
+  METHOD rba_with_exclusive_lock.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+    DATA lv_edit_mode TYPE if_sadl_entity_transactional=>ty_edit_mode VALUE if_sadl_entity_transactional=>co_edit_mode-edit_exclusive.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children ) ).
+    mo_crud->read_by_association( EXPORTING iv_association_name   = ltd_sm_double=>gc_association_name
+                                            it_source_key_values  = lt_source_keys
+                                            iv_target_edit_mode   = lv_edit_mode
+                                  IMPORTING "et_source_failed      = lt_source_failed
+                                            et_target_entity_data = lt_target_entity_data_act
+                                            et_links              = lt_links_act ).
+
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( ltd_sm_double=>gs_child_instance1 )
+                                                                                    ( ltd_sm_double=>gs_child_instance2 ) ) ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    cl_abap_unit_assert=>assert_equals( act = go_sm_double->ms_rba_params-iv_edit_mode  exp = /bobf/if_conf_c=>sc_edit_exclusive ).
+  ENDMETHOD.
+
+
+  METHOD rba_keys_single.
+    DATA ls_source_key TYPE ltd_sm_double=>gty_bo_node_root.
+    DATA lv_source_failed TYPE abap_bool.
+    DATA lt_target_key_values TYPE ltd_sm_double=>gtt_bo_node_child.
+
+    ls_source_key = VALUE #( key = ltd_sm_double=>gc_node_id_with_children ).
+
+    mo_crud->read_key_by_association_single( EXPORTING iv_association_name   = ltd_sm_double=>gc_association_name
+                                                       is_source_key_values  = ls_source_key
+                                             IMPORTING ev_source_failed      = lv_source_failed
+                                                       et_target_key_values  = lt_target_key_values ).
+
+    cl_abap_unit_assert=>assert_false( lv_source_failed ).
+
+    assert_table_contains_exactly( it_act = lt_target_key_values
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( key = ltd_sm_double=>gs_child_instance1-key )
+                                                                                    ( key = ltd_sm_double=>gs_child_instance2-key ) ) ).
+    cl_abap_unit_assert=>assert_initial( go_sm_double->ms_rba_params-it_requested_attributes ).
+    cl_abap_unit_assert=>assert_false( go_sm_double->ms_rba_params-iv_fill_data ).
+  ENDMETHOD.
+
+
+  METHOD rba_keys_with_source_alt_key.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( bo_name = ltd_sm_double=>gs_node_instance_with_children-bo_name  ) ).
+
+    mo_crud->read_keys_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                                 it_source_key_values           = lt_source_keys
+                                                 iv_source_alternative_key_name = ltd_sm_double=>gc_root_alt_key_name
+                                       IMPORTING et_source_failed               = DATA(lt_source_failed)
+                                                 et_target_key_values           = lt_target_entity_data_act
+                                                 et_links                       = lt_links_act ).
+
+    cl_abap_unit_assert=>assert_initial( lt_source_failed ).
+    assert_table_contains_exactly( it_act = lt_target_entity_data_act
+                                   it_exp = VALUE ltd_sm_double=>gtt_bo_node_child( ( key = ltd_sm_double=>gs_child_instance1-key )
+                                                                                    ( key = ltd_sm_double=>gs_child_instance2-key ) ) ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    cl_abap_unit_assert=>assert_false( go_sm_double->ms_rba_params-iv_fill_data ). "READ KEYS should not read data
+  ENDMETHOD.
+
+
+  METHOD rba_keys_with_target_alt_key.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_with_children )
+                              ( key = ltd_sm_double=>gc_non_existing_node_id  ) ).
+
+    mo_crud->read_keys_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                                 it_source_key_values           = lt_source_keys
+                                                 iv_target_alternative_key_name = ltd_sm_double=>gc_child_alt_key_name
+                                       IMPORTING et_source_failed               = DATA(lt_source_failed)
+                                                 et_target_key_values           = lt_target_entity_data_act
+                                                 et_links                       = lt_links_act ).
+    cl_abap_unit_assert=>assert_not_initial( lt_source_failed ).
+    assert_table_contains_exactly( it_act = lt_links_act
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_tabix_links( ( source = 1  target = 1 )
+                                                                                                ( source = 1  target = 2 ) ) ).
+    "inspect target data:
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_target_entity_data_act )  exp = 2 ).
+    SORT lt_target_entity_data_act BY version.
+    cl_abap_unit_assert=>assert_equals( act = lt_target_entity_data_act[ 1 ]-version  exp = ltd_sm_double=>gs_child_instance1-version ) ##operator.
+    cl_abap_unit_assert=>assert_equals( act = lt_target_entity_data_act[ 2 ]-version  exp = ltd_sm_double=>gs_child_instance2-version ) ##operator.
+    "see if spy is called as expected:
+    cl_abap_unit_assert=>assert_not_initial( go_sm_double->ms_rba_params-it_requested_attributes ). "performance: READ KEYS should not read data
+  ENDMETHOD.
+
+
+  METHOD rba_keys_with_non_ex_src_key.
+    DATA lt_source_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_target_entity_data_act TYPE ltd_sm_double=>gtt_bo_node_child.
+    DATA lt_links_act TYPE if_sadl_entity_transactional=>tt_tabix_links.
+
+    lt_source_keys = VALUE #( ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+
+    mo_crud->read_keys_by_association( EXPORTING iv_association_name            = ltd_sm_double=>gc_association_name
+                                                 it_source_key_values           = lt_source_keys
+                                                 iv_target_alternative_key_name = ltd_sm_double=>gc_child_alt_key_name
+                                       IMPORTING et_source_failed               = DATA(lt_source_failed)
+                                                 et_target_key_values           = lt_target_entity_data_act
+                                                 et_links                       = lt_links_act ).
+    cl_abap_unit_assert=>assert_not_initial( lt_source_failed ).
+    cl_abap_unit_assert=>assert_initial( lt_target_entity_data_act ).
+    cl_abap_unit_assert=>assert_initial( lt_links_act ).
+  ENDMETHOD.
+
+
+  METHOD get_properties_entity.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_entity_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_node_id_props_entity_2
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_entity( EXPORTING it_key_values = lt_keys
+                                    IMPORTING et_properties = DATA(lt_properties) ).
+
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-delete_enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals( exp = abap_false  act = lt_properties[ 2 ]-delete_enabled ) ##operator.
+
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+  METHOD get_properties_entity_single.
+    DATA ls_key TYPE ltd_sm_double=>gty_bo_node_root.
+
+    ls_key = VALUE #( key       = ltd_sm_double=>gc_node_id_props_entity_1
+                      bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                      extension = abap_false ).
+
+    mo_crud->get_properties_entity_single( EXPORTING is_key_values = ls_key
+                                           IMPORTING es_properties = DATA(ls_properties) ).
+
+    cl_abap_unit_assert=>assert_equals( exp = abap_true  act = ls_properties-delete_enabled ).
+  ENDMETHOD.
+
+
+  METHOD get_properties_action.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_action_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_node_id_props_action_2
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_action( EXPORTING iv_action_name = `ACTIVATE`
+                                              it_key_values  = lt_keys
+                                    IMPORTING et_properties  = DATA(lt_properties)
+                                              et_failed      = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals( exp = abap_false  act = lt_properties[ 2 ]-enabled ) ##operator.
+    cl_abap_unit_assert=>assert_initial( lt_failed ).
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+  METHOD get_properties_association.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_assoc_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_node_id_props_assoc_2
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_association( EXPORTING iv_association_name = ltd_sm_double=>gc_association_name
+                                                   it_key_values       = lt_keys
+                                         IMPORTING et_properties       = DATA(lt_properties)
+                                                   et_failed           = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_properties ) exp = 2 ).
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-create_enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals( exp = abap_false  act = lt_properties[ 2 ]-enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals( exp = abap_false  act = lt_properties[ 2 ]-create_enabled ) ##operator.
+    cl_abap_unit_assert=>assert_initial( lt_failed ).
+
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+  METHOD get_properties_elements.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_requested_elements TYPE if_sadl_entity_transactional=>tt_element_names.
+
+    lt_requested_elements = VALUE #( ( ltd_sm_double=>gc_bo_node_attribute_name )
+                                     ( ltd_sm_double=>gc_bo_node_attr_create_time )
+                                     ( ltd_sm_double=>gc_bo_node_attr_create_user ) ).
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_elements_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_node_id_props_elements_2
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_elements( EXPORTING it_requested_elements       = lt_requested_elements
+                                                it_key_values               = lt_keys
+                                      IMPORTING et_props_by_tabix_and_elems = DATA(lt_properties)
+                                                et_failed                   = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_properties ) exp = 6 ).   "2 instances with 3 attributes each.
+    assert_table_contains_exactly( it_act = lt_properties
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_props_elements_by_tabix( ( tabix                     = 1
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attribute_name
+                                                                                                              properties-mandatory      = abap_true
+                                                                                                              properties-update_enabled = abap_true
+                                                                                                              properties-hidden         = abap_false )
+                                                                                                            ( tabix                     = 1
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attr_create_time
+                                                                                                              properties-mandatory      = abap_false
+                                                                                                              properties-update_enabled = abap_false
+                                                                                                              properties-hidden         = abap_false )
+                                                                                                            ( tabix                     = 1
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attr_create_user
+                                                                                                              properties-mandatory      = abap_false
+                                                                                                              properties-update_enabled = abap_false
+                                                                                                              properties-hidden         = abap_true )
+                                                                                                            ( tabix                     = 2
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attribute_name
+                                                                                                              properties-mandatory      = abap_true
+                                                                                                              properties-update_enabled = abap_true
+                                                                                                              properties-hidden         = abap_false )
+                                                                                                            ( tabix                     = 2
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attr_create_time
+                                                                                                              properties-mandatory      = abap_false
+                                                                                                              properties-update_enabled = abap_false
+                                                                                                              properties-hidden         = abap_false )
+                                                                                                            ( tabix                     = 2
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attr_create_user
+                                                                                                              properties-mandatory      = abap_false
+                                                                                                              properties-update_enabled = abap_false
+                                                                                                              properties-hidden         = abap_true ) ) ).
+
+    cl_abap_unit_assert=>assert_initial( lt_failed ).
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+  METHOD get_properties_elements_all.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    lt_keys = VALUE #( ( key = ltd_sm_double=>gc_node_id_props_elements_1 ) ).
+    mo_crud->get_properties_elements( EXPORTING it_requested_elements       = VALUE #( )
+                                                it_key_values               = lt_keys
+                                      IMPORTING et_props_by_tabix_and_elems = DATA(lt_properties)
+                                                et_failed                   = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( act = lt_properties[ element_name = ltd_sm_double=>gc_bo_node_attribute_name ]-properties-mandatory "#EC CI_SORTSEQ
+                                        exp = abap_true ).
+    cl_abap_unit_assert=>assert_initial( lt_failed ).
+  ENDMETHOD.
+
+
+  METHOD get_prop_action_w_failed.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_action_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_non_existing_node_id
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_action( EXPORTING iv_action_name = `ACTIVATE`
+                                              it_key_values  = lt_keys
+                                    IMPORTING et_properties  = DATA(lt_properties)
+                                              et_failed      = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals( act = lt_failed[ 1 ] exp = 2 ).
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+  METHOD get_prop_assoc_w_failed.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_assoc_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_non_existing_node_id
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_association( EXPORTING iv_association_name = ltd_sm_double=>gc_association_name
+                                                   it_key_values       = lt_keys
+                                         IMPORTING et_properties       = DATA(lt_properties)
+                                                   et_failed           = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_properties ) exp = 2 ).
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-create_enabled ) ##operator.
+    cl_abap_unit_assert=>assert_initial( lt_properties[ 2 ] ).
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_failed )  exp = 1 ).
+    cl_abap_unit_assert=>assert_equals( act = lt_failed[ 1 ] exp = 2 ).
+
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+  METHOD get_prop_elem_w_failed.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_requested_elements TYPE if_sadl_entity_transactional=>tt_element_names.
+
+    lt_requested_elements = VALUE #( ( ltd_sm_double=>gc_bo_node_attribute_name )
+                                     ( ltd_sm_double=>gc_bo_node_attr_create_time )
+                                     ( ltd_sm_double=>gc_bo_node_attr_create_user ) ).
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_elements_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_non_existing_node_id
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_elements( EXPORTING it_requested_elements       = lt_requested_elements
+                                                it_key_values               = lt_keys
+                                      IMPORTING et_props_by_tabix_and_elems = DATA(lt_properties)
+                                                et_failed                   = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( act = lines( lt_properties ) exp = 3 ).   "1 instances with 3 attributes each.
+    assert_table_contains_exactly( it_act = lt_properties
+                                   it_exp = VALUE if_sadl_entity_transactional=>tt_props_elements_by_tabix( ( tabix                     = 1
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attribute_name
+                                                                                                              properties-mandatory      = abap_true
+                                                                                                              properties-update_enabled = abap_true
+                                                                                                              properties-hidden         = abap_false )
+                                                                                                            ( tabix                     = 1
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attr_create_time
+                                                                                                              properties-mandatory      = abap_false
+                                                                                                              properties-update_enabled = abap_false
+                                                                                                              properties-hidden         = abap_false )
+                                                                                                            ( tabix                     = 1
+                                                                                                              element_name              = ltd_sm_double=>gc_bo_node_attr_create_user
+                                                                                                              properties-mandatory      = abap_false
+                                                                                                              properties-update_enabled = abap_false
+                                                                                                              properties-hidden         = abap_true )
+    ) ).
+    cl_abap_unit_assert=>assert_equals( act = lt_failed[ 1 ] exp = 2 ).
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+
+  METHOD get_prop_elem_sngl_w_failed.
+    DATA ls_key TYPE ltd_sm_double=>gty_bo_node_root.
+
+    ls_key = VALUE #( key       = ltd_sm_double=>gc_non_existing_node_id
+                      bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                      extension = abap_false ).
+
+    mo_crud->get_properties_entity_single( EXPORTING is_key_values = ls_key
+                                           IMPORTING es_properties = DATA(ls_properties)
+                                                     ev_failed     = DATA(lv_failed) ).
+
+    cl_abap_unit_assert=>assert_initial( ls_properties ).
+    cl_abap_unit_assert=>assert_equals( exp = abap_true  act = lv_failed ).
+  ENDMETHOD.
+
+
+
+  METHOD get_prop_entity_w_failed.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_entity_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_non_existing_node_id
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties_entity( EXPORTING it_key_values = lt_keys
+                                    IMPORTING et_properties = DATA(lt_properties)
+                                              et_failed     = DATA(lt_failed) ).
+
+    cl_abap_unit_assert=>assert_equals( exp = abap_true   act = lt_properties[ 1 ]-delete_enabled ) ##operator.
+    cl_abap_unit_assert=>assert_equals(  act = lt_failed[ 1 ] exp = 2 ).
+    expect_single_message( lth_message=>gc_retrieve_properties ).
+  ENDMETHOD.
+
+
+  METHOD get_prop_ent_sngl_w_failed.
+    DATA ls_key TYPE ltd_sm_double=>gty_bo_node_root.
+
+    ls_key = VALUE #( key       = ltd_sm_double=>gc_non_existing_node_id
+                      bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                      extension = abap_false ).
+
+    mo_crud->get_properties_entity_single( EXPORTING is_key_values = ls_key
+                                           IMPORTING es_properties = DATA(ls_properties)
+                                                     ev_failed     = DATA(lv_failed) ).
+
+    cl_abap_unit_assert=>assert_initial( ls_properties ).
+    cl_abap_unit_assert=>assert_equals( exp = abap_true  act = lv_failed ).
+
+  ENDMETHOD.
+
+  METHOD get_properties_all.
+    DATA lt_keys TYPE ltd_sm_double=>gtt_bo_node_root.
+    DATA lt_exp_entity_props TYPE if_sadl_entity_transact_props=>tt_properties_entity_by_tabix.
+    DATA lt_exp_action_props TYPE if_sadl_entity_transact_props=>tt_properties_actions_by_tabix.
+    DATA lt_exp_assoc_props TYPE if_sadl_entity_transact_props=>tt_props_associations_by_tabix.
+    DATA lt_exp_element_props TYPE if_sadl_entity_transact_props=>tt_props_elements_by_tabix.
+
+
+    lt_keys = VALUE #( ( key       = ltd_sm_double=>gc_node_id_props_all_1
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false )
+                       ( key       = ltd_sm_double=>gc_node_id_props_all_2
+                         bo_name   = ltd_sm_double=>gs_node_instance-bo_name
+                         extension = abap_false ) ).
+
+    mo_crud->get_properties( EXPORTING it_key_values                 = lt_keys
+                                       iv_fill_entity_properties     = abap_true
+                                       it_requested_elements         = VALUE #( ( ltd_sm_double=>gc_bo_node_attribute_name )
+                                                                                ( ltd_sm_double=>gc_bo_node_attr_create_user ) )
+                                       it_requested_actions          = value #( ( `ACTIVATE` ) )
+                                       it_requested_associations     = value #( ( ltd_sm_double=>gc_association_name ) )
+                             IMPORTING et_entity_properties          = DATA(lt_entity_properties)
+                                       et_element_properties         = DATA(lt_element_properties)
+                                       et_action_properties          = DATA(lt_action_properties)
+                                       et_association_properties     = DATA(lt_assoc_properties)
+    ).
+
+    " Assert entity props
+    lt_exp_entity_props = value #( ( tabix = 1 properties = VALUE #( update_enabled = abap_false delete_enabled = abap_true ) )
+                                   ( tabix = 2 properties = VALUE #( update_enabled = abap_false delete_enabled = abap_false ) ) ).
+    cl_abap_unit_assert=>assert_equals( exp = lt_exp_entity_props act = lt_entity_properties ).
+
+    " Assert action props
+    lt_exp_action_props = VALUE #( ( tabix = 1 action = 'ACTIVATE' properties-enabled = abap_true )
+                                   ( tabix = 2 action = 'ACTIVATE' properties-enabled = abap_false ) ).
+    cl_abap_unit_assert=>assert_equals( exp = lt_exp_action_props act = lt_action_properties ).
+
+    " Assert association properties
+    lt_exp_assoc_props = VALUE #( ( tabix = 1
+                                    association = ltd_sm_double=>gc_association_name
+                                    properties = value #( enabled = abap_true create_enabled = abap_true ) )
+                                  ( tabix = 2
+                                    association = ltd_sm_double=>gc_association_name
+                                    properties = value #( enabled = abap_false create_enabled = abap_false ) ) ).
+    cl_abap_unit_assert=>assert_equals( exp = lt_exp_assoc_props act = lt_assoc_properties ).
+
+    " Assert element properties
+    lt_exp_element_props = VALUE #( ( tabix                     = 1
+                                      element_name              = ltd_sm_double=>gc_bo_node_attribute_name
+                                      properties-mandatory      = abap_true
+                                      properties-update_enabled = abap_true
+                                      properties-hidden         = abap_false )
+                                    ( tabix                     = 1
+                                      element_name              = ltd_sm_double=>gc_bo_node_attr_create_user
+                                      properties-mandatory      = abap_false
+                                      properties-update_enabled = abap_false
+                                      properties-hidden         = abap_true )
+                                    ( tabix                     = 2
+                                      element_name              = ltd_sm_double=>gc_bo_node_attribute_name
+                                      properties-mandatory      = abap_true
+                                      properties-update_enabled = abap_true
+                                      properties-hidden         = abap_false )
+                                    ( tabix                     = 2
+                                      element_name              = ltd_sm_double=>gc_bo_node_attr_create_user
+                                      properties-mandatory      = abap_false
+                                      properties-update_enabled = abap_false
+                                      properties-hidden         = abap_true ) ).
+    cl_abap_unit_assert=>assert_equals( exp = lt_exp_element_props act = lt_element_properties ).
+
+
+
+  ENDMETHOD.
+
+
+  METHOD exec_action.
+    DATA(lt_keys) = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id ) ).
+
+    mo_crud->execute( EXPORTING iv_action_name = ltd_sm_double=>gc_action_name_activate
+                                it_key_values  = lt_keys ).
+
+    cl_abap_unit_assert=>assert_true( go_sm_double->mv_action_executed ).
+    expect_single_message( lth_message=>gc_action ).
+  ENDMETHOD.
+
+
+  METHOD exec_action_w_parms.
+    DATA(lt_keys) = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id ) ).
+    DATA ls_action_parms TYPE ltd_sm_double=>gty_action_parameters.
+    ls_action_parms-bo_name = 'DUMMY_BO'.
+
+    mo_crud->execute( EXPORTING iv_action_name      = ltd_sm_double=>gc_action_name_rename
+                                i_action_parameters = ls_action_parms
+                                it_key_values       = lt_keys ).
+
+    cl_abap_unit_assert=>assert_true( go_sm_double->mv_action_executed ).
+    cl_abap_unit_assert=>assert_equals( exp = 'DUMMY_BO'
+                                        act = go_sm_double->mv_action_parm_value ).
+  ENDMETHOD.
+
+
+  METHOD exec_action_w_failed_keys.
+    DATA(lt_keys) = VALUE ltd_sm_double=>gtt_bo_node_root( ( key = ltd_sm_double=>gc_existing_node_id )
+                                                           ( key = ltd_sm_double=>gc_non_existing_node_id ) ).
+
+    mo_crud->execute( EXPORTING iv_action_name = ltd_sm_double=>gc_action_name_new_version
+                                it_key_values  = lt_keys
+                      IMPORTING et_failed      = DATA(lt_failed) ).
+    cl_abap_unit_assert=>assert_equals( act = lt_failed[ 1 ] exp = 2 ). "index 2 of keys
+  ENDMETHOD.
+
+
+  METHOD expect_messages.
+    DATA lv_failed TYPE abap_bool VALUE abap_false.
+
+    mo_crud->get_message_handler( )->get_messages( IMPORTING et_messages = DATA(lt_messages) ).
+
+    LOOP AT it_triggers INTO DATA(lv_trigger).
+      IF NOT line_exists( lt_messages[ message->t100key-attr1 = lv_trigger ] ). "#EC CI_SORTSEQ
+        cl_abap_unit_assert=>fail( msg = |expected message missing: { lv_trigger }|  quit = if_aunit_constants=>no ) ##no_text.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT lt_messages INTO DATA(ls_message).
+      IF NOT line_exists( it_triggers[ table_line = CONV #( ls_message-message->t100key-attr1 ) ] ).
+        cl_abap_unit_assert=>fail( msg = |unexpected message: { ls_message-message->t100key-attr1 }|  quit = if_aunit_constants=>no ) ##no_text.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_failed = abap_true.
+      cl_abap_unit_assert=>fail( quit = if_aunit_constants=>method ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD expect_single_message.
+    expect_messages( VALUE #( ( iv_trigger ) ) ).
+  ENDMETHOD.
+
+ENDCLASS.

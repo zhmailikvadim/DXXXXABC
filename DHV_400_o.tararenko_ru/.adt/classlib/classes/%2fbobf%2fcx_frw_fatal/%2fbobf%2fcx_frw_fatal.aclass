@@ -1,0 +1,366 @@
+CLASS /bobf/cx_frw_fatal DEFINITION
+  PUBLIC
+  INHERITING FROM cx_dynamic_check
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES if_t100_message .
+
+    CONSTANTS:
+      BEGIN OF /bobf/cx_frw_fatal,
+        msgid TYPE symsgid VALUE '/BOBF/FRW',
+        msgno TYPE symsgno VALUE '024',
+        attr1 TYPE scx_attrname VALUE '',
+        attr2 TYPE scx_attrname VALUE '',
+        attr3 TYPE scx_attrname VALUE '',
+        attr4 TYPE scx_attrname VALUE '',
+      END OF /bobf/cx_frw_fatal .
+    CONSTANTS:
+      BEGIN OF sc_application_error,
+        msgid TYPE symsgid VALUE '/BOBF/FRW',
+        msgno TYPE symsgno VALUE '013',
+        attr1 TYPE scx_attrname VALUE 'MV_BO_NAME',
+        attr2 TYPE scx_attrname VALUE 'MV_APPLICATION_COMPONENT',
+        attr3 TYPE scx_attrname VALUE '',
+        attr4 TYPE scx_attrname VALUE '',
+      END OF sc_application_error .
+    CONSTANTS:
+      BEGIN OF sc_configuration_error,
+        msgid TYPE symsgid VALUE '/BOBF/FRW',
+        msgno TYPE symsgno VALUE '014',
+        attr1 TYPE scx_attrname VALUE 'MV_BO_NAME',
+        attr2 TYPE scx_attrname VALUE 'MV_APPLICATION_COMPONENT',
+        attr3 TYPE scx_attrname VALUE '',
+        attr4 TYPE scx_attrname VALUE '',
+      END OF sc_configuration_error .
+    DATA mv_bo_name TYPE /bobf/obm_name READ-ONLY .
+    DATA mv_proxy_bo_name TYPE string READ-ONLY .
+    DATA mv_application_component TYPE string READ-ONLY .
+    DATA application_information TYPE string READ-ONLY .
+
+    METHODS constructor
+      IMPORTING
+        !textid                   LIKE if_t100_message=>t100key OPTIONAL
+        !previous                 LIKE previous OPTIONAL
+        !mv_bo_name               TYPE /bobf/obm_name OPTIONAL
+        !mv_proxy_bo_name         TYPE string OPTIONAL
+        !mv_application_component TYPE string OPTIONAL
+        !application_information  TYPE string OPTIONAL .
+    METHODS process_error .
+    "! Issues a MESSAGE TYPE 'X' with the receiver as T100-message
+    "! This method checks whether it is running in the context of a unit test.
+    "! In that case, it calls CL_ABAP_UNIT_ASSERT=&gt;FAIL( ) instead of raising a MESSAGE.
+    METHODS message_type_x.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+
+    TYPES:
+      ty_appl_info TYPE c LENGTH 255 .
+    TYPES:
+      tt_appl_info TYPE STANDARD TABLE OF ty_appl_info WITH DEFAULT KEY .
+
+    METHODS _build_appl_info_from_exc
+      RETURNING
+        VALUE(rt_application_information) TYPE tt_appl_info .
+    METHODS _get_appl_component_from_bo .
+
+ENDCLASS.
+
+
+
+CLASS /BOBF/CX_FRW_FATAL IMPLEMENTATION.
+
+
+  METHOD constructor ##ADT_SUPPRESS_GENERATION.
+    CALL METHOD super->constructor
+      EXPORTING
+        previous = previous.
+    me->mv_bo_name = mv_bo_name .
+    me->mv_proxy_bo_name = mv_proxy_bo_name .
+    me->application_information = application_information .
+    CLEAR me->textid.
+    IF textid IS INITIAL.
+      if_t100_message~t100key = /bobf/cx_frw_fatal .
+    ELSE.
+      if_t100_message~t100key = textid.
+    ENDIF.
+    process_error( ).
+  ENDMETHOD.
+
+
+  METHOD message_type_x.
+    "Check if we are within an AUnit test execution. In that case, gracefully
+    "abort the test class, but do not dump.  Thus, it is easier to locate the
+    "test triggering the failure.
+    DATA lt_callstack TYPE abap_callstack.
+    DATA ls_callstack_entry TYPE abap_callstack_line ##needed.
+    DATA lv_error_detail TYPE string.
+
+    CALL FUNCTION 'SYSTEM_CALLSTACK' IMPORTING callstack = lt_callstack.
+    LOOP AT lt_callstack INTO ls_callstack_entry WHERE mainprogram CP 'CL_AUNIT_TEST_CLASS*'.
+      IF application_information IS NOT INITIAL.
+        lv_error_detail = application_information.
+      ELSEIF previous IS BOUND.
+        DATA(lo_previous) = previous.
+        WHILE lo_previous->previous IS BOUND.
+          lo_previous = lo_previous->previous.
+        ENDWHILE.
+        lv_error_detail = lo_previous->get_text( ).
+      ENDIF.
+      cl_abap_unit_assert=>fail( level  = if_aunit_constants=>fatal
+                                 quit   = if_aunit_constants=>class
+                                 msg    = get_text( )
+                                 detail = lv_error_detail ).
+    ENDLOOP.
+
+    "if we reach this point, we are NOT called from a unit test
+    MESSAGE me TYPE 'X'.
+  ENDMETHOD.
+
+
+  METHOD process_error.
+
+    TYPES: lty_appl_info_complete TYPE c LENGTH 2550.
+
+    DATA: lv_offset              TYPE i,
+          lv_exception_info_line TYPE i VALUE 1,
+          lv_remaining_lines     TYPE i VALUE 10,
+          lt_exception_info      TYPE tt_appl_info,
+          lv_exception_info      TYPE ty_appl_info,
+          lv_exception_info_idx  TYPE i,
+          lv_appl_info           TYPE ty_appl_info,
+          lv_appl_info_complete  TYPE lty_appl_info_complete.
+
+    _get_appl_component_from_bo( ).
+
+    " clear the application information section
+    CALL FUNCTION 'TH_DEL_APPL_INFO'
+      EXPORTING
+        level              = 0
+      EXCEPTIONS
+        OTHERS             = 0.
+
+    " get info from exception chain
+    lt_exception_info = _build_appl_info_from_exc( ).
+
+    IF application_information IS NOT INITIAL.
+      " fill the application information section with the handed over text
+
+      "move application info to local variable for easy processing
+      lv_appl_info_complete = me->application_information.
+      DO 10 TIMES.
+        lv_offset = ( sy-index - 1 ) * 255.
+        lv_appl_info = lv_appl_info_complete+lv_offset(255).
+        IF lv_appl_info IS NOT INITIAL.
+          CALL FUNCTION 'TH_SET_APPL_INFO'
+            EXPORTING
+              appl_info     = lv_appl_info
+              mode          = 2
+              appl_info_len = 255
+            EXCEPTIONS
+              OTHERS        = 0.
+          lv_remaining_lines = lv_remaining_lines - 1.
+        ENDIF.
+      ENDDO.
+
+      IF lt_exception_info IS NOT INITIAL.
+        " fill remaining lines with information from exceptions
+        " Information from most inner exception has the highest priority
+        IF lv_remaining_lines > 1.
+
+          " enough space to separate text and exception chain with an empty row?
+          IF lines( lt_exception_info ) >= lv_remaining_lines - 2.
+            CLEAR lv_exception_info.
+            CALL FUNCTION 'TH_SET_APPL_INFO'
+              EXPORTING
+                appl_info     = lv_exception_info
+                mode          = 2
+                appl_info_len = 255
+              EXCEPTIONS
+                OTHERS        = 0.
+            lv_remaining_lines = lv_remaining_lines - 1.
+          ENDIF.
+
+          " write header line
+          lv_exception_info = 'Exception chain (click button "Unformatted Display" for all details):' ##no_text.
+          CALL FUNCTION 'TH_SET_APPL_INFO'
+            EXPORTING
+              appl_info     = lv_exception_info
+              mode          = 2
+              appl_info_len = 255
+            EXCEPTIONS
+              OTHERS        = 0.
+          lv_remaining_lines = lv_remaining_lines - 1.
+
+          lv_exception_info_idx = 1.
+
+          " write exception info to dump
+          " - reverse sequence (lowest exception is most important)
+          " - if possible, two lines for each entry, otherwise only one
+          IF lines( lt_exception_info ) > lv_remaining_lines.
+            " put two lines into one
+            lv_exception_info_idx = lines( lt_exception_info ).
+            WHILE lv_exception_info_idx >= 1.
+              READ TABLE lt_exception_info INTO lv_appl_info INDEX lv_exception_info_idx.
+              lv_appl_info = | | && lv_exception_info_line && |. | && lv_appl_info.
+              lv_exception_info_idx  = lv_exception_info_idx - 1.
+              READ TABLE lt_exception_info INTO lv_exception_info INDEX lv_exception_info_idx.
+              lv_exception_info_idx  = lv_exception_info_idx - 1.
+              lv_appl_info = lv_appl_info && |, | && lv_exception_info.
+              " write to dump
+              CALL FUNCTION 'TH_SET_APPL_INFO'
+                EXPORTING
+                  appl_info     = lv_appl_info
+                  mode          = 2
+                  appl_info_len = 255
+                EXCEPTIONS
+                  OTHERS        = 0.
+              lv_remaining_lines     = lv_remaining_lines - 1.
+              lv_exception_info_line = lv_exception_info_line + 1.
+            ENDWHILE.
+          ELSE.
+            " each line separately
+            lv_exception_info_idx = lines( lt_exception_info ).
+            WHILE lv_exception_info_idx >= 1.
+              READ TABLE lt_exception_info INTO lv_appl_info INDEX lv_exception_info_idx.
+              lv_exception_info_idx  = lv_exception_info_idx - 1.
+              lv_appl_info = | | && lv_exception_info_line && |. | && lv_appl_info.
+              " write to dump
+              CALL FUNCTION 'TH_SET_APPL_INFO'
+                EXPORTING
+                  appl_info     = lv_appl_info
+                  mode          = 2
+                  appl_info_len = 255
+                EXCEPTIONS
+                  OTHERS        = 0.
+              CLEAR lv_appl_info.
+              READ TABLE lt_exception_info INTO lv_exception_info INDEX lv_exception_info_idx.
+              lv_appl_info = |    | && lv_exception_info.
+              " write to dump
+              CALL FUNCTION 'TH_SET_APPL_INFO'
+                EXPORTING
+                  appl_info     = lv_appl_info
+                  mode          = 2
+                  appl_info_len = 255
+                EXCEPTIONS
+                  OTHERS        = 0.
+              lv_remaining_lines     = lv_remaining_lines - 2.
+              lv_exception_info_idx  = lv_exception_info_idx - 1.
+              lv_exception_info_line = lv_exception_info_line + 1.
+            ENDWHILE.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    ELSE.
+      " use default handling in order to fill the application information section of the dump
+      LOOP AT lt_exception_info INTO lv_exception_info.
+        CALL FUNCTION 'TH_SET_APPL_INFO'
+          EXPORTING
+            appl_info     = lv_exception_info
+            mode          = 2
+            appl_info_len = 255
+          EXCEPTIONS
+            OTHERS        = 0.
+        lv_remaining_lines = lv_remaining_lines - 1.
+      ENDLOOP.
+    ENDIF.
+
+    " add empty rows in order to push the message to the top
+    CLEAR lv_exception_info.
+    DO lv_remaining_lines TIMES.
+      CALL FUNCTION 'TH_SET_APPL_INFO'
+        EXPORTING
+          appl_info     = lv_exception_info
+          mode          = 2
+          appl_info_len = 255
+        EXCEPTIONS
+          OTHERS        = 0.
+    ENDDO.
+
+  ENDMETHOD.
+
+
+  METHOD _build_appl_info_from_exc.
+
+    DATA: lx_exception    TYPE REF TO cx_root,
+          lv_exc_type     TYPE string,
+          lv_exc_text     TYPE string,
+          lv_program      TYPE syrepid,
+          lv_include      TYPE syrepid,
+          lv_source_line  TYPE i,
+          lv_src_line_str TYPE string,
+          lv_appl_info    TYPE ty_appl_info,
+          lv_dummy        TYPE string ##needed.
+
+    lx_exception = me->previous.
+    " Drill down the exception hierarchy in order to collect all the information we have
+    WHILE lx_exception IS NOT INITIAL.
+
+      " Get exception type
+      lv_exc_type = cl_abap_classdescr=>get_class_name( lx_exception ).
+      SPLIT lv_exc_type AT '=' INTO lv_dummy lv_exc_type.
+
+      " Get source position
+      lx_exception->get_source_position(
+        IMPORTING
+          program_name = lv_program
+          include_name = lv_include
+          source_line  = lv_source_line
+      ).
+
+      "Build line entry for application info with position details
+      CLEAR lv_appl_info.
+      lv_src_line_str = lv_source_line.
+      CONCATENATE lv_exc_type ', Program: ' lv_program      "#EC NOTEXT
+      ', Include: ' lv_include ', Position: ' lv_src_line_str INTO lv_appl_info. "#EC NOTEXT
+      APPEND lv_appl_info TO rt_application_information.
+
+      " Build line entry for application info with exception text
+      CLEAR  lv_appl_info.
+      SET LOCALE LANGUAGE 'E'.
+      lv_exc_text  = lx_exception->get_text( ).
+      SET LOCALE LANGUAGE ' '.
+      CONCATENATE 'Info: ' lv_exc_text INTO lv_appl_info SEPARATED BY space. "#EC NOTEXT
+      APPEND lv_appl_info TO rt_application_information.
+
+      lx_exception = lx_exception->previous.
+    ENDWHILE.
+
+  ENDMETHOD.
+
+
+  METHOD _get_appl_component_from_bo.
+
+    DATA lv_devclass  TYPE tadir-devclass.
+    DATA lv_component TYPE tdevc-component.
+    DATA lv_posid     TYPE df14l-ps_posid.
+
+    IF NOT mv_bo_name IS INITIAL.
+      SELECT SINGLE devclass FROM tadir INTO lv_devclass WHERE
+          pgmid = 'R3TR' AND ( object = 'BOBF' AND obj_name = mv_bo_name ). "#EC CI_SEL_NESTED - error handling in LOOPs is OK
+
+      IF sy-subrc <> 0.
+        SELECT SINGLE devclass FROM tadir INTO lv_devclass WHERE
+        pgmid = 'R3TR' AND ( object = 'BOBX' AND obj_name = mv_bo_name ). "#EC CI_SEL_NESTED - error handling in LOOPs is OK
+      ENDIF.
+
+      IF NOT lv_devclass IS INITIAL.
+        SELECT SINGLE component FROM tdevc INTO lv_component WHERE devclass = lv_devclass.
+
+        IF sy-subrc = 0.
+          SELECT SINGLE ps_posid  FROM df14l INTO lv_posid WHERE fctr_id = lv_component AND as4local = 'A'. "#EC CI_SEL_NESTED - error handling in LOOPs is OK
+          mv_application_component = lv_posid.
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+
+    IF mv_application_component IS INITIAL.
+      mv_application_component = |'Unknown or local'|.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

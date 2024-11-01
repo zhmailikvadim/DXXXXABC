@@ -1,0 +1,346 @@
+class CL_SADL_GW_CDS_HELPER definition
+  public
+  create public .
+
+public section.
+
+  types:
+    BEGIN OF ts_cds_view,
+        cds_view_name TYPE string,
+      END OF ts_cds_view .
+  types:
+    tt_cds_view TYPE STANDARD TABLE OF ts_cds_view WITH DEFAULT KEY
+                    WITH UNIQUE SORTED KEY cds_view_name COMPONENTS cds_view_name .
+  types:
+    BEGIN OF ts_cds_view_mapping.
+    INCLUDE TYPE ts_cds_view.
+    TYPES:
+      datasource_name TYPE string,
+      END OF ts_cds_view_mapping .
+  types:
+    tt_cds_view_mapping TYPE STANDARD TABLE OF ts_cds_view_mapping WITH DEFAULT KEY
+                    WITH UNIQUE SORTED KEY cds_view_name COMPONENTS cds_view_name .
+
+  class-data:
+    BEGIN OF gs_element_ref_annotations,
+        entity  TYPE stringtab,
+        element TYPE stringtab,
+      END OF gs_element_ref_annotations .
+
+  methods CONSTRUCTOR
+    importing
+      !IO_CDS_FACTORY type ref to IF_SADL_GW_CDS_FACTORY optional .
+  class-methods CLASS_CONSTRUCTOR .
+  methods GET_ELEMENT_REF_ANNOTATIONS
+    importing
+      !IO_CDS_PARSER type ref to IF_SADL_GW_CDS_PARSER
+    returning
+      value(RT_ANNOTATIONS) type IF_SADL_GW_CDS_PARSER=>TT_ELEMENT_ANNOTATION .
+  methods IS_BO_VIEW
+    importing
+      !IO_CDS_PARSER type ref to IF_SADL_GW_CDS_PARSER
+    returning
+      value(RV_RESULT) type ABAP_BOOL
+    raising
+      CX_SADL_GEN_DRFT_GENERATOR .
+  methods IS_DRAFT_ENABLED
+    importing
+      !IO_CDS_PARSER type ref to IF_SADL_GW_CDS_PARSER
+    returning
+      value(RV_RESULT) type ABAP_BOOL
+    raising
+      CX_SADL_GEN_DRFT_GENERATOR .
+  methods IS_CONSUMPTION_VIEW
+    importing
+      !IO_CDS_PARSER type ref to IF_SADL_GW_CDS_PARSER
+    returning
+      value(RV_RESULT) type ABAP_BOOL
+    raising
+      CX_SADL_GEN_DRFT_GENERATOR .
+  methods CHECK_CONSUMPTION_COMPOSITION
+    importing
+      !IV_CDS_VIEW type STRING
+    raising
+      CX_SADL_GEN_DRFT_GENERATOR .
+  methods GET_CDS_VIEW_MAPPING
+    importing
+      !IT_CDS_VIEWS type TT_CDS_VIEW
+    returning
+      value(RT_MAPPING) type TT_CDS_VIEW_MAPPING
+    raising
+      CX_SADL_GEN_DRFT_GENERATOR .
+protected section.
+
+  data MO_CDS_FACTORY type ref to IF_SADL_GW_CDS_FACTORY .
+  data MO_CDS_COMPOSITION type ref to IF_SADL_GW_CDS_COMPOSITION .
+
+  methods GET_ASSOCIATION
+    importing
+      !IV_CDS_VIEW_NAME type STRING
+      !IV_ASSOCIATION_NAME type STRING
+    returning
+      value(RO_ASSOCIATION) type ref to IF_SADL_GW_CDS_PARSER_ASSOC
+    raising
+      CX_SADL_GEN_DRFT_GENERATOR .
+  methods INVALID_BO_VIEW
+    importing
+      !IV_BO_CDS_VIEW type STRING
+      !IV_BO_PARENT_VIEW type STRING optional
+      !IS_TOKEN type QLVIEW_DDLPARSER_TOKEN
+    returning
+      value(RX_EXCEPTION) type ref to CX_SADL_GW_CDS_CHECK .
+  methods EXTRACT_ELEMENT_REF_ANNOS
+    importing
+      !IO_ANNOTATABLE type ref to IF_SADL_GW_CDS_ANNOTATABLE
+      !IV_ELEMENT_NAME type STRING optional
+      !IV_ANNOTATION_NAME type STRING
+    returning
+      value(RT_ANNOTATIONS) type IF_SADL_GW_CDS_PARSER=>TT_ELEMENT_ANNOTATION .
+  methods CHECK_ASSOCIATION_NAME
+    importing
+      !IS_BO_VIEW type IF_SADL_GW_CDS_COMPOSITION=>TS_COMPOSITION
+      !IS_CONS_VIEW type IF_SADL_GW_CDS_COMPOSITION=>TS_COMPOSITION
+      !IV_FIELD_NAME type STRING
+    raising
+      CX_SADL_GEN_DRFT_GENERATOR .
+private section.
+ENDCLASS.
+
+
+
+CLASS CL_SADL_GW_CDS_HELPER IMPLEMENTATION.
+
+
+  METHOD check_association_name.
+    ASSIGN COMPONENT iv_field_name OF STRUCTURE:
+      is_bo_view    TO FIELD-SYMBOL(<v_bo_association>),
+      is_cons_view  TO FIELD-SYMBOL(<v_cons_association>).
+
+    IF <v_bo_association> <> <v_cons_association>.
+      DATA(lo_parser) = me->mo_cds_factory->get_parser( iv_cds_view = COND #(
+        WHEN iv_field_name = if_sadl_gw_cds_composition=>co_associations-from_parent
+        THEN is_cons_view-parent_cds_view
+        ELSE is_cons_view-cds_view
+      ) ).
+
+      DATA(lt_associations) = lo_parser->get_associations( ).
+      DATA(lr_association) = REF #( lt_associations[ key alias COMPONENTS alias = <v_cons_association> ] ).
+
+      RAISE EXCEPTION TYPE cx_sadl_gw_cds_check
+        EXPORTING
+          textid          = cx_sadl_gw_cds_check=>inconsist_assoc_name
+          ddl_token       = lr_association->content->get_token( )
+          assoc_name      = <v_cons_association>
+          orig_assoc_name = <v_bo_association>.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD check_consumption_composition.
+    DATA(lv_cds_view) = to_upper( iv_cds_view ).
+    DATA(lo_cds_view) = me->mo_cds_factory->get_parser( lv_cds_view ).
+
+    IF NOT me->is_consumption_view( lo_cds_view ).
+      RAISE EXCEPTION TYPE cx_sadl_gw_cds_check
+        EXPORTING
+          textid   = cx_sadl_gw_cds_check=>consumption_view_expected
+          cds_view = iv_cds_view.
+    ENDIF.
+
+    DATA(lt_cons_views) = me->mo_cds_composition->get_composition( lv_cds_view ).
+
+    DATA(ls_datasource) = lo_cds_view->get_datasource( ).
+    DATA(lt_bo_views) = me->mo_cds_composition->get_composition( iv_cds_view = to_upper( ls_datasource-name ) ).
+
+    DATA(lt_cons_mapping) = me->get_cds_view_mapping( CORRESPONDING #( lt_cons_views MAPPING cds_view_name = cds_view EXCEPT * ) ).
+    DATA(lt_errors) = VALUE cx_sadl_gw_cds_check=>tt_exception( ).
+
+    LOOP AT lt_cons_views ASSIGNING FIELD-SYMBOL(<s_cons_view>) WHERE cds_view = lv_cds_view OR parent_cds_view = lv_cds_view.
+      DATA(lv_bo_cds_view) = lt_cons_mapping[ KEY cds_view_name COMPONENTS cds_view_name = <s_cons_view>-cds_view ]-datasource_name.
+      DATA(lv_bo_parent_view) = COND #( WHEN <s_cons_view>-parent_cds_view IS NOT INITIAL
+        THEN lt_cons_mapping[ KEY cds_view_name COMPONENTS cds_view_name = <s_cons_view>-parent_cds_view ]-datasource_name
+      ).
+
+      DATA(lr_bo_view) = REF #( lt_bo_views[ KEY cds_view COMPONENTS cds_view = lv_bo_cds_view ] OPTIONAL ).
+      IF lr_bo_view IS NOT BOUND.
+        DATA(lo_from_parent) = me->get_association(
+            iv_cds_view_name           = <s_cons_view>-parent_cds_view
+            iv_association_name        = <s_cons_view>-association_from_parent
+        ).
+        INSERT me->invalid_bo_view(
+           iv_bo_cds_view    = lv_bo_cds_view
+           iv_bo_parent_view = lv_bo_parent_view
+           is_token          = lo_from_parent->get_token( )
+        ) INTO TABLE lt_errors.
+        CONTINUE.
+      ENDIF.
+
+      IF lr_bo_view->parent_cds_view <> lv_bo_parent_view.
+        DATA(lo_to_parent) = me->get_association(
+            iv_cds_view_name           = <s_cons_view>-cds_view
+            iv_association_name        = <s_cons_view>-association_to_parent
+        ).
+        INSERT me->invalid_bo_view(
+           iv_bo_cds_view    = lv_bo_cds_view
+           iv_bo_parent_view = lv_bo_parent_view
+           is_token          = lo_to_parent->get_token( )
+        ) INTO TABLE lt_errors.
+        CONTINUE.
+      ENDIF.
+
+      IF <s_cons_view>-parent_cds_view = lv_cds_view.
+        TRY.
+            me->check_association_name(
+                is_bo_view                 = lr_bo_view->*
+                is_cons_view               = <s_cons_view>
+                iv_field_name              = if_sadl_gw_cds_composition=>co_associations-from_parent
+            ).
+          CATCH cx_sadl_gen_drft_generator INTO DATA(lx_from_parent).
+            INSERT lx_from_parent INTO TABLE lt_errors.
+        ENDTRY.
+
+      ELSEIF <s_cons_view>-cds_view = lv_cds_view.
+        TRY.
+            me->check_association_name(
+                is_bo_view                 = lr_bo_view->*
+                is_cons_view               = <s_cons_view>
+                iv_field_name              = if_sadl_gw_cds_composition=>co_associations-to_parent
+            ).
+          CATCH cx_sadl_gen_drft_generator INTO DATA(lx_to_parent).
+            INSERT lx_to_parent INTO TABLE lt_errors.
+        ENDTRY.
+
+        TRY.
+            me->check_association_name(
+                is_bo_view                 = lr_bo_view->*
+                is_cons_view               = <s_cons_view>
+                iv_field_name              = if_sadl_gw_cds_composition=>co_associations-to_root
+            ).
+          CATCH cx_sadl_gen_drft_generator INTO DATA(lx_to_root).
+            INSERT lx_to_root INTO TABLE lt_errors.
+        ENDTRY.
+      ENDIF.
+    ENDLOOP.
+    IF lt_errors IS NOT INITIAL.
+      RAISE EXCEPTION TYPE cx_sadl_gw_cds_check EXPORTING details = lt_errors.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD class_constructor.
+    "Pseudo Constants
+    gs_element_ref_annotations-entity = VALUE #(
+      ( |ObjectModel.representativeKey| )
+      ( |ObjectModel.semanticKey| )
+      ( |ObjectModel.entityChangeStateId| )
+    ).
+    gs_element_ref_annotations-element = VALUE #(
+      ( |ObjectModel.text.element| )
+      ( |Semantics.amount.currencyCode| )
+      ( |Semantics.quantity.unitOfMeasure| )
+    ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    me->mo_cds_factory = COND #( WHEN io_cds_factory IS BOUND
+      THEN io_cds_factory
+      ELSE cl_sadl_gw_cds_factory=>get_instance( )
+    ).
+
+    me->mo_cds_composition = NEW cl_sadl_gw_cds_composition( me->mo_cds_factory ).
+  ENDMETHOD.
+
+
+  METHOD extract_element_ref_annos.
+    DATA(lo_annotation) = io_annotatable->get_annotation( iv_annotation_name ).
+    IF lo_annotation IS NOT BOUND.
+      RETURN.
+    ENDIF.
+
+    DATA(lt_sub_annotations) = SWITCH if_sadl_gw_cds_parser_anno=>tt_annotation( lo_annotation->get_type( )
+       WHEN cl_qlast_constants=>annotation_type_text   THEN VALUE #( ( content = lo_annotation ) )
+       WHEN cl_qlast_constants=>annotation_type_array  THEN lo_annotation->get_children( )
+    ).
+
+    LOOP AT lt_sub_annotations ASSIGNING FIELD-SYMBOL(<s_sub_annotation>).
+      CHECK <s_sub_annotation>-content->get_type( ) = cl_qlast_constants=>annotation_type_text.
+      INSERT VALUE #(
+          source_element  = to_upper( iv_element_name )
+          annotation_name = to_upper( iv_annotation_name )
+          target_element  = to_upper( <s_sub_annotation>-content->get_content_as_text( ) )
+      ) INTO TABLE rt_annotations.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD get_association.
+    DATA(lo_parser) = me->mo_cds_factory->get_parser( iv_cds_view_name ).
+    DATA(lt_associations) = lo_parser->get_associations( ).
+    ro_association = lt_associations[ KEY alias COMPONENTS alias = iv_association_name ]-content.
+  ENDMETHOD.
+
+
+  METHOD get_cds_view_mapping.
+    rt_mapping = VALUE #( FOR s_cds_view IN it_cds_views
+      LET o_cds_view = me->mo_cds_factory->get_parser( s_cds_view-cds_view_name ) IN (
+        cds_view_name   = to_upper( s_cds_view-cds_view_name )
+        datasource_name = to_upper( o_cds_view->get_datasource( )-name )
+    ) ).
+  ENDMETHOD.
+
+
+  METHOD get_element_ref_annotations.
+    rt_annotations = VALUE #(
+      FOR v_annotation_name IN gs_element_ref_annotations-entity
+      ( LINES OF me->extract_element_ref_annos(
+          io_annotatable     = io_cds_parser
+          iv_annotation_name = v_annotation_name
+      ) )
+    ).
+
+    rt_annotations = VALUE #( BASE rt_annotations
+      FOR s_element IN io_cds_parser->get_elements( )
+      FOR v_annotation_name IN gs_element_ref_annotations-element
+      ( LINES OF me->extract_element_ref_annos(
+          io_annotatable     = s_element-content
+          iv_element_name    = s_element-alias
+          iv_annotation_name = v_annotation_name
+      ) )
+    ).
+  ENDMETHOD.
+
+
+  method INVALID_BO_VIEW.
+    rx_exception = NEW cx_sadl_gw_cds_check(
+        textid      = COND #( WHEN iv_bo_parent_view IS INITIAL
+          THEN cx_sadl_gw_cds_check=>invalid_composition_root
+          ELSE cx_sadl_gw_cds_check=>inconsistent_composition
+        )
+        ddl_token   = is_token
+        cds_view    = iv_bo_cds_view
+        parent_view = iv_bo_parent_view
+    ).
+  endmethod.
+
+
+  METHOD is_bo_view.
+    DATA(lo_root) = io_cds_parser->get_composition_root( ).
+    DATA(lo_tr_delegated) = lo_root->get_annotation( if_sadl_gw_cds_parser=>co_annotations-object_model-tr_proc_enabled ).
+    rv_result = xsdbool( lo_tr_delegated IS BOUND AND lo_tr_delegated->is_truthy( ) ).
+  ENDMETHOD.
+
+
+  METHOD is_consumption_view.
+    DATA(lo_root) = io_cds_parser->get_composition_root( ).
+    DATA(lo_tr_delegated) = lo_root->get_annotation( if_sadl_gw_cds_parser=>co_annotations-object_model-tr_proc_delegated ).
+    rv_result = xsdbool( lo_tr_delegated IS BOUND AND lo_tr_delegated->is_truthy( ) ).
+  ENDMETHOD.
+
+
+  METHOD is_draft_enabled.
+    DATA(lo_root) = io_cds_parser->get_composition_root( ).
+    DATA(lo_drft_enabled) = lo_root->get_annotation( if_sadl_gw_cds_parser=>co_annotations-object_model-draft_enabled ).
+    rv_result = xsdbool( lo_drft_enabled IS BOUND AND lo_drft_enabled->is_truthy( ) ).
+  ENDMETHOD.
+ENDCLASS.

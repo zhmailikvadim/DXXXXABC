@@ -1,0 +1,433 @@
+*"* use this source file for your ABAP unit test classes
+CLASS lcl_http_sever_net_test DEFINITION DEFERRED.
+CLASS cl_http_server_net DEFINITION LOCAL FRIENDS lcl_http_sever_net_test.
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_http_sever_net_test
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_http_sever_net_test
+  DEFINITION FINAL FOR TESTING
+  DURATION LONG
+  RISK LEVEL HARMLESS.
+
+  PRIVATE SECTION.
+
+    METHODS:
+    test_xsrf_logon FOR TESTING,
+    test_xsrf FOR TESTING.
+ENDCLASS.                    "lcl_http_sever_net_test
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_http_ext_echo_test IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_http_sever_net_test IMPLEMENTATION.
+  METHOD test_xsrf_logon.
+    DATA: lv_url TYPE string VALUE '/sap/bc/icf/verification/system_logon',
+          lv_active TYPE char1,
+          lv_url_suffix TYPE string,
+          lv_client TYPE REF TO if_http_client,
+          lv_dest TYPE rfcoptions VALUE 'NONE',
+          lv_method TYPE string VALUE 'GET',
+          lv_path TYPE string,
+          lv_rc   TYPE string,
+          lv_subrc TYPE sysubrc,
+          lv_errmsg TYPE string.
+    DATA: lv_login_xsrf_id  TYPE string.
+    DATA: lv_xsrf_cookie    TYPE string.
+
+    DATA: lv_th_service  TYPE plg_srv,
+          lv_th_host     TYPE plg_host.
+    DATA: lv_service     TYPE string,
+          lv_host        TYPE string.
+    DATA: lv_context TYPE string.
+
+    DATA:  lv_error_text TYPE string.
+
+    DATA: lv_content     TYPE string,
+          lv_prefix      TYPE string,
+          lv_suffix      TYPE string,
+          lv_xsrf_token  TYPE string.
+
+*   Check whether the ICF service is active
+    CALL METHOD cl_icf_tree=>if_icf_tree~check_service_active
+      EXPORTING
+        url       = lv_url
+        hostnr    = 0 "use default_host !
+      IMPORTING
+        active    = lv_active
+        urlsuffix = lv_url_suffix.
+
+    IF lv_active IS INITIAL or lv_url_suffix is not initial.
+      cl_aunit_assert=>abort( msg = 'ICF service /sap/bc/icf/verification/system_logon not active' ).
+    ENDIF.
+
+    CALL FUNCTION 'TH_GET_PLUGIN_INFO'
+      EXPORTING
+        protocol         = 1
+        local            = 1
+        plgtype          = 1
+      IMPORTING
+        host             = lv_th_host
+        service          = lv_th_service
+      EXCEPTIONS
+        no_plugin_active = 1
+        internal_error   = 2
+        OTHERS           = 3.                               "#EC FB_RC
+
+    lv_host  = lv_th_host.
+    lv_service = lv_th_service.
+
+    CALL METHOD cl_http_client=>create
+      EXPORTING
+        host               = lv_host
+        service            = lv_service
+      IMPORTING
+        client             = lv_client
+      EXCEPTIONS
+        internal_error     = 1
+        argument_not_found = 2
+        plugin_not_active  = 3
+        OTHERS             = 4.
+    IF sy-subrc <> 0.
+      lv_rc = sy-subrc.
+      CONCATENATE 'Create failed with rc ' lv_rc INTO lv_error_text.
+      cl_aunit_assert=>abort( msg = lv_error_text ).
+    ENDIF.
+
+* check for the xsrf-login cookie and due to sap-language also for sap-usercontext cookie
+    lv_client->propertytype_accept_cookie = lv_client->co_enabled.
+    lv_client->request->set_method( lv_method ).
+    lv_client->request->set_version( if_http_request=>co_protocol_version_1_1 ).
+    lv_client->PROPERTYTYPE_LOGON_POPUP = lv_client->CO_DISABLED.
+*    CONCATENATE lv_url '?sap-client=' sy-mandt '&sap-language=EN' INTO lv_path. "#EC NOTEXT
+*Remark: Add additional ;-fields in order to gurantee that the cookie is set to the correct path (and NOT
+* to ~path_translated), since Business Client does create paths with ;-fields and this lead to failing logon in case
+* of active XSRF logon !
+    CONCATENATE lv_url ';TtT=1/;xXx=FfT;xx=2/' '?sap-client=' sy-mandt '&sap-language=EN&saml2=disabled' INTO lv_path. "#EC NOTEXT
+    cl_http_utility=>set_request_uri( request = lv_client->request
+                                      uri     = lv_path ).
+
+    CALL METHOD lv_client->send
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+    IF sy-subrc <> 0.
+      CALL METHOD lv_client->get_last_error
+        IMPORTING
+          code    = lv_subrc
+          message = lv_errmsg.
+      cl_aunit_assert=>fail( msg = lv_errmsg ).
+    ENDIF.
+
+    CALL METHOD lv_client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2.
+    IF sy-subrc <> 0.
+      CALL METHOD lv_client->get_last_error
+        IMPORTING
+          code    = lv_subrc
+          message = lv_errmsg.
+      cl_aunit_assert=>fail( msg = lv_errmsg ).
+    ENDIF.
+
+* check for availability of XSRF login cookie
+    CONCATENATE if_http_form_fields_sap=>sap_login_xsrf '_ ' sy-sysid INTO lv_login_xsrf_id.
+    CALL METHOD lv_client->response->get_cookie
+      EXPORTING
+        name  = lv_login_xsrf_id
+      IMPORTING
+        value = lv_xsrf_cookie.
+
+    IF lv_xsrf_cookie IS INITIAL.
+      CONCATENATE 'XSRF cookie' lv_login_xsrf_id 'is not available !' INTO lv_error_text.
+      cl_aunit_assert=>fail( msg = lv_error_text ).
+    ENDIF.
+*
+* check for sap-login-XSRF form field
+* system logon content will be in format:
+* ...
+* 6350  ="hidden" name="sap-login-XSRF" value="6hEZUa9hKAU
+* 6400  fKof7ZetqRdF231/Iho9ggQ3U4+Fqsjk=">##<input type="
+*...
+*
+    lv_content = lv_client->response->get_cdata( ).
+    find if_http_form_fields_sap=>sap_login_xsrf in lv_content.
+    if sy-subrc <> 0.
+      cl_aunit_assert=>fail( msg =  'XSRF formfield sap-login-XSRF is not available !' ).
+    endif.
+*    SPLIT lv_content AT if_http_form_fields_sap=>sap_login_xsrf INTO lv_prefix lv_suffix.
+*    lv_content = lv_suffix.
+*    SPLIT lv_content AT 'value=' INTO lv_prefix lv_suffix.
+*    lv_content = lv_suffix.
+*    SPLIT lv_content AT '>' INTO lv_xsrf_token lv_suffix.
+*    IF lv_xsrf_token IS NOT INITIAL AND lv_xsrf_token(1) = '"'.
+*      SPLIT lv_xsrf_token AT '"' INTO lv_prefix lv_xsrf_token  lv_suffix.
+*    ENDIF.
+
+* check for availability of user context cookie (e.g. sap-language=EN&sap-client=005)
+    CALL METHOD lv_client->response->get_cookie
+      EXPORTING
+        name  = 'sap-usercontext'
+      IMPORTING
+        value = lv_context.
+
+    IF lv_context IS INITIAL or lv_context na 'sap-language' or lv_context na 'sap-client'.
+      cl_aunit_assert=>fail( msg = 'User context cookie sap-usercontext is not available !' ).
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD test_xsrf.
+    DATA: client TYPE REF TO if_http_client,
+     dest TYPE rfcoptions VALUE 'NONE',
+     l_url TYPE string VALUE '/sap/bc/echo',
+     method TYPE string VALUE 'GET',
+     l_active TYPE char1,
+     l_url_suffix TYPE string,
+     path TYPE string,
+     subrc TYPE sysubrc,
+     timeout TYPE i VALUE 0,
+     errmsg TYPE string,
+     lv_xsrf_field TYPE string,
+     lv_xsrf_field_cp TYPE string,
+     lv_x       TYPE c LENGTH 100,
+     lv_xsrf_cookie_value TYPE string,
+     lv_xsrf_cookie_name TYPE string,
+     lv_message TYPE string.
+    DATA: lv_session_mgmt_state TYPE abap_bool.
+    DATA: lv_onlyhttps      TYPE c LENGTH 4,
+         lv_subrc          type sysubrc.
+
+    CALL 'C_SAPGPARAM'
+        ID 'NAME' FIELD 'login/ticket_only_by_https'
+        ID 'VALUE' FIELD lv_onlyhttps.
+    IF sy-subrc = 0 AND lv_onlyhttps = '1'.
+      cl_aunit_assert=>abort( msg = 'Profile parameter login/ticket_only_by_https is active !' ).
+    endif.
+
+*   Check whether the ICF service is active
+    CALL METHOD cl_icf_tree=>if_icf_tree~check_service_active
+      EXPORTING
+        url       = l_url
+        hostnr    = 0
+      IMPORTING
+        active    = l_active
+        urlsuffix = l_url_suffix.
+
+    IF l_active IS INITIAL.
+      cl_aunit_assert=>abort( msg = 'ICF service /sap/bc/echo not active' ).
+    ENDIF.
+
+    CALL METHOD cl_http_client=>create_by_destination
+      EXPORTING
+        destination              = dest
+      IMPORTING
+        client                   = client
+      EXCEPTIONS
+        destination_not_found    = 1
+        internal_error           = 2
+        argument_not_found       = 3
+        destination_no_authority = 4
+        plugin_not_active        = 5
+        OTHERS                   = 6.
+
+    IF sy-subrc <> 0.
+      IF sy-subrc = 5.
+        cl_aunit_assert=>abort( msg = 'Plugin not active' ).
+      ELSE.
+        cl_aunit_assert=>abort( msg = 'Create HTTP Client by destination failed' ).
+      ENDIF.
+    ENDIF.
+
+    client->propertytype_accept_cookie = client->co_enabled.
+    client->request->set_method( method ).
+    client->request->set_version( if_http_request=>co_protocol_version_1_1 ).
+    path =  '/sap/bc/echo?xsrf=2'.                          "#EC NOTEXT
+    path = |{ path }&sap-client={ sy-mandt }|.
+
+    cl_http_utility=>set_request_uri( request = client->request
+                                      uri     = path ).
+
+    CALL METHOD client->send
+      EXPORTING
+        timeout                    = timeout
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+    CALL METHOD client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+* With active security session management no XSRF cookie is created
+    lv_session_mgmt_state = cl_http_security_session_admin=>session_management_is_active( ).
+    IF  lv_session_mgmt_state = abap_false.
+      CONCATENATE if_http_form_fields_sap=>sap_xsrf '_' sy-sysid '_' sy-mandt INTO lv_xsrf_cookie_name.
+
+      client->response->get_cookie(
+        EXPORTING name  = lv_xsrf_cookie_name
+        IMPORTING value = lv_xsrf_cookie_value ).
+
+      IF lv_xsrf_cookie_value IS INITIAL.
+        CONCATENATE 'Missing XSRF cookie ' lv_xsrf_cookie_name INTO lv_message.
+        cl_aunit_assert=>fail( msg = lv_message ).
+      ENDIF.
+    ENDIF.
+
+* XSRF test with valid token
+    lv_xsrf_field_cp = lv_xsrf_field = client->response->get_header_field( if_http_form_fields_sap=>sap_xsrf ).
+    IF lv_xsrf_field IS INITIAL.
+      CONCATENATE 'Missing XSRF header ' if_http_form_fields_sap=>sap_xsrf INTO lv_message.
+      cl_aunit_assert=>fail( msg = lv_message ).
+    ENDIF.
+
+    client->request->delete_form_field( 'xsrf' ).
+    CLEAR path.
+    CONCATENATE '/sap/bc/echo?' if_http_form_fields_sap=>sap_xsrf '=' lv_xsrf_field INTO  path. "#EC NOTEXT
+    cl_http_utility=>set_request_uri( request = client->request
+                                      uri     = path ).
+
+    CALL METHOD client->send
+      EXPORTING
+        timeout                    = timeout
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+    CALL METHOD client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+    lv_xsrf_field = client->response->get_header_field( name = 'xsrf_check_successful' ).
+    IF lv_xsrf_field IS INITIAL.
+      cl_aunit_assert=>fail( msg = 'Missing xsrf_check header !' ).
+    ENDIF.
+
+* XSRF test with invalid token
+    client->request->delete_form_field( 'xsrf' ).
+    IF strlen( lv_xsrf_field_cp ) > 5.
+      lv_x = lv_xsrf_field_cp.
+      lv_x(3) = '010'.
+      lv_xsrf_field_cp = lv_x.
+    ELSE.
+      lv_xsrf_field_cp = '01010'.
+    ENDIF.
+    CLEAR path.
+    CONCATENATE '/sap/bc/echo?' if_http_form_fields_sap=>sap_xsrf '=' lv_xsrf_field_cp INTO  path. "#EC NOTEXT
+    cl_http_utility=>set_request_uri( request = client->request
+                                      uri     = path ).
+
+    CALL METHOD client->send
+      EXPORTING
+        timeout                    = timeout
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+    CALL METHOD client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+    lv_xsrf_field = client->response->get_header_field( name = 'xsrf_check_successful' ).
+    IF lv_xsrf_field IS NOT INITIAL.
+      cl_aunit_assert=>fail( msg = 'Check was invalid XSRF token successful  !' ).
+    ENDIF.
+
+    "cleanup: delete security session
+    CONCATENATE '/sap/public/bc/icf/logoff?sap-client=' sy-mandt INTO path.
+    cl_http_utility=>set_request_uri( request = client->request
+                                      uri     = path ).
+
+    CALL METHOD client->send
+      EXPORTING
+        timeout                    = timeout
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2
+        http_processing_failed     = 3
+        OTHERS                     = 4.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+    CALL METHOD client->receive
+      EXCEPTIONS
+        http_communication_failure = 1
+        http_invalid_state         = 2.
+    IF sy-subrc <> 0.
+      CALL METHOD client->get_last_error
+        IMPORTING
+          code    = subrc
+          message = errmsg.
+      cl_aunit_assert=>fail( msg = errmsg ).
+    ENDIF.
+
+    CALL METHOD client->close
+      EXCEPTIONS
+        http_invalid_state = 1
+        OTHERS             = 2.
+  ENDMETHOD.
+
+ENDCLASS.                    "lcl_http_ext_echo_test IMPLEMENTATION

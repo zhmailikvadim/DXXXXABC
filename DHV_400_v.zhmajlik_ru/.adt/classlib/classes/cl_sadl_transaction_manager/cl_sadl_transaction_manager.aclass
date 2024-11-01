@@ -1,0 +1,289 @@
+CLASS cl_sadl_transaction_manager DEFINITION PUBLIC CREATE PRIVATE
+                                  GLOBAL FRIENDS cl_sadl_aunit_friend
+                                                 th_sadl_transact_manager_spy.
+  PUBLIC SECTION.
+    INTERFACES if_sadl_transaction_manager.
+    INTERFACES if_sadl_batch.
+    CLASS-METHODS get_transaction_manager RETURNING VALUE(ro_transaction_manager) TYPE REF TO cl_sadl_transaction_manager.
+    METHODS register_entity_transaction IMPORTING io_entity_transaction TYPE REF TO cl_sadl_frwk_transact_manager
+                                                  iv_entity_type        TYPE        sadl_entity_type
+                                                  " ir_sadl_load          TYPE REF TO if_sadl_load=>ty_sadl_load
+                                                  io_mdp                TYPE REF TO if_sadl_metadata_provider
+                                        RAISING   cx_sadl_static.
+
+  PRIVATE SECTION.
+    CLASS-DATA go_transaction_manager TYPE REF TO cl_sadl_transaction_manager.
+
+    TYPES: BEGIN OF ty_entity_transaction,
+             entity_type TYPE        sadl_entity_type,
+             transaction TYPE REF TO if_sadl_transaction_manager,
+*             sadl_load   TYPE REF TO if_sadl_load=>ty_sadl_load,
+             mdp         TYPE REF TO if_sadl_metadata_provider,
+           END OF ty_entity_transaction.
+    TYPES tt_entity_transaction TYPE SORTED TABLE OF ty_entity_transaction WITH UNIQUE KEY entity_type.
+    TYPES: BEGIN OF ty_keys,
+             keys        TYPE stringtab, " names of primary key fields
+             key_data    TYPE REF TO data, " table with primary keys of the modified instances
+             entity_id   TYPE sadl_entity_id,
+             entity_type TYPE sadl_entity_type,
+             entity      TYPE REF TO if_sadl_entity,
+           END OF ty_keys.
+    TYPES tt_keys TYPE SORTED TABLE OF ty_keys WITH UNIQUE KEY entity_id.
+    TYPES:
+      BEGIN OF ty_serialized_keys,
+        entity_type  TYPE sadl_entity_type,
+        entity_id    TYPE sadl_entity_id,
+        key_elements TYPE stringtab,
+        key_data     TYPE stringtab,
+      END OF ty_serialized_keys,
+      tt_serialized_keys TYPE SORTED TABLE OF ty_serialized_keys WITH UNIQUE KEY entity_type entity_id.
+
+    DATA mt_entity_transaction TYPE tt_entity_transaction.
+    DATA mo_message_handler TYPE REF TO cl_sadl_frwk_message_handler.
+
+    METHODS constructor.
+    METHODS _add_messages IMPORTING io_frwk_msg_handler TYPE REF TO if_sadl_message_handler
+*                                    ir_sadl_load        TYPE REF TO if_sadl_load=>ty_sadl_load
+                                    io_mdp              TYPE REF TO if_sadl_metadata_provider
+                                    it_keys             TYPE tt_keys OPTIONAL.
+    METHODS _get_modify_keys IMPORTING iv_entity_type TYPE sadl_entity_type
+                                       it_create      TYPE if_sadl_batch=>tt_create
+                                       it_update      TYPE if_sadl_batch=>tt_update
+                                       it_delete      TYPE if_sadl_batch=>tt_delete
+                                       it_action      TYPE if_sadl_batch=>tt_action
+                             EXPORTING et_keys        TYPE tt_keys
+                             RAISING   cx_sadl_entity cx_sadl_static.
+
+    METHODS _get_serialized_keys IMPORTING is_key                    TYPE ty_keys
+                                 CHANGING  ct_serialized_keys        TYPE tt_serialized_keys
+                                 RETURNING VALUE(rr_serialized_keys) TYPE REF TO ty_serialized_keys.
+
+ENDCLASS.
+
+
+
+CLASS CL_SADL_TRANSACTION_MANAGER IMPLEMENTATION.
+
+
+  METHOD constructor.
+    if_sadl_transaction_manager~get_message_handler( ).
+  ENDMETHOD.
+
+
+  METHOD get_transaction_manager.
+    IF go_transaction_manager IS NOT BOUND.
+      CREATE OBJECT go_transaction_manager.
+    ENDIF.
+    ro_transaction_manager = go_transaction_manager.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_batch~modify.
+    DATA lt_keys TYPE tt_keys.
+
+    LOOP AT mt_entity_transaction INTO DATA(ls_entity_transaction).
+      DATA(lo_fwk_msg_handler) = ls_entity_transaction-transaction->get_message_handler( ).
+      CAST if_sadl_batch( ls_entity_transaction-transaction )->modify( EXPORTING it_create = it_create
+                                                                                 it_update = it_update
+                                                                                 it_delete = it_delete
+                                                                                 it_action = it_action
+                                                                       IMPORTING ev_failed = ev_failed ).
+      _get_modify_keys( EXPORTING iv_entity_type = ls_entity_transaction-entity_type
+                                  it_create      = it_create
+                                  it_update      = it_update
+                                  it_delete      = it_delete
+                                  it_action      = it_action
+                        IMPORTING et_keys        = lt_keys ).
+      _add_messages( io_frwk_msg_handler = lo_fwk_msg_handler
+                     it_keys             = lt_keys
+                     io_mdp              = ls_entity_transaction-mdp ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~discard_changes.
+    LOOP AT mt_entity_transaction INTO DATA(ls_entity_transaction).
+      DATA(lo_fwk_msg_handler) = ls_entity_transaction-transaction->get_message_handler( ).
+      ls_entity_transaction-transaction->discard_changes( ).
+      _add_messages( io_frwk_msg_handler = lo_fwk_msg_handler
+                     io_mdp              = ls_entity_transaction-mdp ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~get_message_handler.
+    IF mo_message_handler IS NOT BOUND.
+      mo_message_handler = NEW cl_sadl_transact_message_hndlr( ).
+    ENDIF.
+    ro_message_handler = mo_message_handler.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~has_changes.
+    LOOP AT mt_entity_transaction INTO DATA(ls_entity_transaction).
+      IF ls_entity_transaction-transaction->has_changes( ) = abap_true.
+        rv_has_changes = abap_true.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_transaction_manager~save.
+    LOOP AT mt_entity_transaction INTO DATA(ls_entity_transaction).
+      DATA(lo_fwk_msg_handler) = ls_entity_transaction-transaction->get_message_handler( ).
+      rv_failed = xsdbool( ls_entity_transaction-transaction->save( ) = abap_true OR rv_failed = abap_true ).
+      _add_messages( io_frwk_msg_handler = lo_fwk_msg_handler
+                     io_mdp              = ls_entity_transaction-mdp ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD register_entity_transaction.
+    IF io_entity_transaction IS NOT BOUND.
+      RAISE EXCEPTION TYPE cx_sadl_register_transaction EXPORTING textid = cx_sadl_register_transaction=>cx_unbound_manager.
+    ENDIF.
+    READ TABLE mt_entity_transaction INTO DATA(ls_entity_transaction) WITH KEY entity_type = iv_entity_type.
+    IF sy-subrc = 0.
+      IF ls_entity_transaction-transaction <> io_entity_transaction.
+        RAISE EXCEPTION TYPE cx_sadl_register_transaction EXPORTING textid = cx_sadl_register_transaction=>cx_another_manager_registered.
+      ENDIF.
+    ELSE.
+      IF mt_entity_transaction IS NOT INITIAL.
+        " currently only one transaction manager is allowed, because a slave mode does not exist
+        RAISE EXCEPTION TYPE cx_sadl_register_transaction EXPORTING textid = cx_sadl_register_transaction=>cx_another_manager_registered.
+      ENDIF.
+      INSERT VALUE #( entity_type = iv_entity_type
+                      transaction = io_entity_transaction
+                      mdp         = io_mdp ) INTO TABLE mt_entity_transaction.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _add_messages.
+    DATA lt_serialized_keys TYPE tt_serialized_keys.
+    FIELD-SYMBOLS <t_key_data> TYPE INDEX TABLE.
+
+    io_frwk_msg_handler->get_messages( IMPORTING et_messages = DATA(lt_messages) ).
+    IF lines( it_keys ) > 0.
+      " re-read stateful messages from DB. Avoid doubles!
+*DELETE lt_messages WHERE lifetime = if_sadl_message_handler=>co_lifetime-state.
+
+*----- delete only state messages with locations matching it_keys
+      LOOP AT lt_messages ASSIGNING FIELD-SYMBOL(<s_message>)
+        WHERE lifetime = if_sadl_message_handler=>co_lifetime-state.
+        DATA(lv_key_matched) = abap_false.
+        LOOP AT <s_message>-locations ASSIGNING FIELD-SYMBOL(<s_location>).
+
+*------ unique key in it_keys is only entity id, not type
+          READ TABLE it_keys WITH TABLE KEY entity_id = <s_location>-entity_id ASSIGNING FIELD-SYMBOL(<s_key>).
+          CHECK sy-subrc = 0.
+          CHECK <s_location>-entity_type = <s_key>-entity_type.
+          ASSIGN <s_location>-primary_key_values->* TO FIELD-SYMBOL(<s_loc_key_value>).
+          CHECK sy-subrc = 0.
+* we can only compare serialized keys as unfortunately key structure may comprise non-key fields which can differ in comparison
+          DATA(lr_serialized_keys) = _get_serialized_keys( EXPORTING is_key             = <s_key>
+                                                           CHANGING  ct_serialized_keys = lt_serialized_keys ).
+          CHECK lr_serialized_keys IS BOUND.
+          DATA(lv_loc_key_val) = cl_sadl_entity_util=>serialize_key( it_key_elements = lr_serialized_keys->key_elements
+                                                                     is_data         = <s_loc_key_value> ).
+          CHECK line_exists( lr_serialized_keys->key_data[ table_line = lv_loc_key_val ] ).
+          lv_key_matched = abap_true.
+          EXIT.
+        ENDLOOP.
+        CHECK lv_key_matched = abap_true.
+        DELETE lt_messages.
+      ENDLOOP.
+    ENDIF.
+    io_frwk_msg_handler->clear( ).
+
+    LOOP AT it_keys ASSIGNING <s_key>.
+      ASSIGN <s_key>-key_data->* TO <t_key_data>.
+      io_frwk_msg_handler->get_messages( EXPORTING iv_target_entity_id   = <s_key>-entity_id
+                                                   iv_target_entity_type = <s_key>-entity_type
+                                                   it_target_keys        = <t_key_data>
+                                         IMPORTING et_messages           = DATA(lt_entity_messages) ).
+      INSERT LINES OF lt_entity_messages INTO TABLE lt_messages.
+    ENDLOOP.
+
+    cl_sadl_crud_runtime_util=>map_messages( EXPORTING io_mdp      = io_mdp
+                                             CHANGING  ct_messages = lt_messages ).
+    CAST cl_sadl_transact_message_hndlr( mo_message_handler )->collect_messages( lt_messages ). "do not add messages to store
+  ENDMETHOD.
+
+
+  METHOD _get_modify_keys.
+    TYPES: BEGIN OF ty_modify,
+             entity_id            TYPE sadl_entity_id,
+             alternative_key_name TYPE if_sadl_entity=>ty_key_name,
+             rs_entity_data       TYPE REF TO data,
+           END OF ty_modify.
+    DATA lt_modify TYPE STANDARD TABLE OF ty_modify WITH DEFAULT KEY.
+    FIELD-SYMBOLS <t_key_data> TYPE INDEX TABLE.
+    CLEAR et_keys.
+
+    MOVE-CORRESPONDING it_create TO lt_modify. " this doesn't fill alternative_key_name, but that's ok. CREATE must always fill the primary key as well
+    MOVE-CORRESPONDING it_update TO lt_modify KEEPING TARGET LINES.
+    LOOP AT it_delete ASSIGNING FIELD-SYMBOL(<s_delete>).
+      APPEND VALUE #( entity_id = <s_delete>-entity_id  alternative_key_name = <s_delete>-alternative_key_name  rs_entity_data = <s_delete>-rs_key_values ) TO lt_modify.
+    ENDLOOP.
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      FIELD-SYMBOLS <t_key_values> TYPE table.
+      ASSIGN <s_action>-rt_key_values->* TO <t_key_values>.
+      IF sy-subrc <> 0.
+        RAISE EXCEPTION TYPE lcx_internal.
+      ENDIF.
+      LOOP AT <t_key_values> ASSIGNING FIELD-SYMBOL(<s_key_values>).
+        APPEND VALUE #( entity_id = <s_action>-entity_id  alternative_key_name = <s_action>-alternative_key_name  rs_entity_data = REF #( <s_key_values> ) ) TO lt_modify.
+      ENDLOOP.
+    ENDLOOP.
+
+    LOOP AT lt_modify ASSIGNING FIELD-SYMBOL(<s_modify>).
+      READ TABLE et_keys WITH KEY entity_id = <s_modify>-entity_id ASSIGNING FIELD-SYMBOL(<s_key>).
+      IF sy-subrc <> 0.
+        INSERT VALUE #( entity_id = <s_modify>-entity_id  entity_type = iv_entity_type ) INTO TABLE et_keys ASSIGNING <s_key>.
+        ASSIGN <s_modify>-rs_entity_data->* TO FIELD-SYMBOL(<s_data>).
+        CREATE DATA <s_key>-key_data LIKE TABLE OF <s_data>.
+        UNASSIGN <s_data>.
+      ENDIF.
+      ASSIGN <s_key>-key_data->* TO <t_key_data>.
+      ASSIGN <s_modify>-rs_entity_data->* TO <s_data>.
+      IF <s_modify>-alternative_key_name IS NOT INITIAL.
+        IF <s_key>-entity IS NOT BOUND.
+          <s_key>-entity = cl_sadl_entity_factory=>get_instance( )->get_entity( iv_type = iv_entity_type  iv_id = <s_modify>-entity_id ).
+        ENDIF.
+        cl_sadl_crud_runtime_util=>read_primary_key( EXPORTING io_entity = <s_key>-entity  iv_alternative_key_name = <s_modify>-alternative_key_name
+                                                     CHANGING  cs_data = <s_data> ).
+      ENDIF.
+      APPEND <s_data> TO <t_key_data>.
+      UNASSIGN: <s_data>, <t_key_data>.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _get_serialized_keys.
+    FIELD-SYMBOLS <t_key_data> TYPE INDEX TABLE.
+
+    ASSIGN is_key-key_data->* TO <t_key_data>.
+    CHECK sy-subrc = 0.
+
+    READ TABLE ct_serialized_keys WITH TABLE KEY entity_type = is_key-entity_type  entity_id = is_key-entity_id REFERENCE INTO rr_serialized_keys.
+    IF sy-subrc <> 0.
+      INSERT VALUE #( entity_type = is_key-entity_type  entity_id = is_key-entity_id ) INTO TABLE ct_serialized_keys REFERENCE INTO rr_serialized_keys.
+      IF is_key-entity IS BOUND.
+        DATA(lo_entity) = is_key-entity.
+      ELSE.
+        TRY.
+            lo_entity = cl_sadl_entity_factory=>get_instance( )->get_entity( iv_type = is_key-entity_type  iv_id = is_key-entity_id ).
+          CATCH cx_sadl_static.
+            RETURN.
+        ENDTRY.
+      ENDIF.
+      lo_entity->get_key_elements( IMPORTING et_key_elements = rr_serialized_keys->key_elements ).
+      LOOP AT <t_key_data> ASSIGNING FIELD-SYMBOL(<s_req_key_data>).
+        INSERT cl_sadl_entity_util=>serialize_key( it_key_elements = rr_serialized_keys->key_elements
+                                                   is_data         = <s_req_key_data> ) INTO TABLE rr_serialized_keys->key_data.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

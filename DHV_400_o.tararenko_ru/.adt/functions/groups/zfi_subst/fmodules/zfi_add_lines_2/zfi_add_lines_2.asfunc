@@ -1,0 +1,170 @@
+FUNCTION ZFI_ADD_LINES_2
+  TABLES
+    T_ACCCR LIKE ACCCR OPTIONAL
+    T_ACCHD LIKE ACCHD OPTIONAL
+    T_ACCIT LIKE ACCIT OPTIONAL.
+
+
+
+* Описание : СОЗДАНИЕ ДОКУМЕНТА АВТОМАТИЧЕСКОГО ПЕРЕРАСЧЕТА МЕЖДУ ФУНКЦИОНАЛЬНЫМИ СФЕРАМИ
+* Код ТС : DEV.030- УУ.06.E-010
+* Разработчик : Бондарь Я.С.
+* Постановка задачи: Сиренко А.А.
+* Redmine #11550
+* В данном модуле формируются дополнительные строки в  FI документе
+* при этом суммы с одинаковой ФС складываются и проводятся на счет из табл  zfkber_hkont
+* и балансируются
+  DATA:
+    lt_hkont      TYPE SORTED TABLE OF zfkber_hkont WITH UNIQUE KEY fkber,
+    lv_def_hk     TYPE bseg-hkont,
+    lt_new_it     TYPE STANDARD TABLE OF  accit,
+    lt_new_cr     TYPE STANDARD TABLE OF  acccr,
+    lt_new_it2    TYPE STANDARD TABLE OF  accit,
+    lt_new_cr2    TYPE STANDARD TABLE OF  acccr,
+    lt_new_cr3    TYPE SORTED TABLE OF acccr WITH UNIQUE KEY curtp,
+    ls_last       TYPE accit,
+    ls_acccr      TYPE acccr,
+    lv_glvor      TYPE acchd-glvor,
+    lv_last_posnr TYPE accit-posnr,
+    lv_bschl      TYPE bseg-bschl.
+  FIELD-SYMBOLS:
+    <ls_accit> TYPE accit,
+    <ls_hkont> TYPE zfkber_hkont.
+  "  проверяем - активно ли замещение
+  SELECT SINGLE low
+    INTO @DATA(lv_low)
+    FROM tvarvc
+    WHERE name = 'ZSWITCH_ CO010'
+      AND type = 'P'
+      AND numb = @space.
+  IF lv_low IS INITIAL.
+    RETURN.
+  ENDIF.
+  IF t_acchd[] IS NOT INITIAL.
+    lv_glvor = t_acchd[ 1 ]-glvor.
+  ENDIF.
+  "  определяется максимальная позиция
+  LOOP AT t_accit ASSIGNING <ls_accit>.
+    AT LAST.
+      lv_last_posnr = <ls_accit>-posnr.
+    ENDAT.
+  ENDLOOP.
+
+  " формируется набор строк по которым нужны сводные проводки по ФС(функциональным сферам)
+  LOOP AT t_accit ASSIGNING <ls_accit>
+                  WHERE  fkber <> space.
+    IF lv_glvor = 'KOAE'.
+      CHECK <ls_accit>-ktosl <> space .
+    ENDIF.
+    IF <ls_accit>-shkzg = 'S'.
+      lv_bschl = '40'.
+    ELSE.
+      lv_bschl = '50'.
+    ENDIF.
+    READ TABLE lt_new_it ASSIGNING FIELD-SYMBOL(<ls_line>)
+                         WITH KEY bukrs = <ls_accit>-bukrs
+                                  fkber = <ls_accit>-fkber
+                                  bschl = lv_bschl
+                         BINARY SEARCH.
+    IF sy-subrc <> 0.
+      INSERT <ls_accit> INTO lt_new_it INDEX sy-tabix ASSIGNING <ls_line>.
+      ADD 1 TO lv_last_posnr.
+      <ls_line>-posnr = lv_last_posnr.
+      <ls_line>-bschl = lv_bschl.
+    ENDIF.
+    LOOP AT t_acccr ASSIGNING FIELD-SYMBOL(<ls_cr>)
+                    WHERE posnr = <ls_accit>-posnr.
+      READ TABLE lt_new_cr ASSIGNING FIELD-SYMBOL(<ls_new_cr>)
+                           WITH KEY  posnr = <ls_line>-posnr
+                                     curtp = <ls_cr>-curtp
+                          BINARY SEARCH.
+      IF sy-subrc <> 0.
+        INSERT <ls_cr> INTO lt_new_cr INDEX sy-tabix ASSIGNING <ls_new_cr>.
+        <ls_new_cr>-posnr = <ls_line>-posnr.
+      ELSE.
+        ADD <ls_cr>-wrbtr TO <ls_new_cr>-wrbtr.
+      ENDIF.
+
+    ENDLOOP.
+  ENDLOOP.
+  UNASSIGN <ls_accit>.
+  IF lt_new_it[] IS INITIAL.
+    RETURN.
+  ENDIF.
+  "  выборка счетов для доп строк
+  SELECT *
+    FROM zfkber_hkont
+    INTO TABLE lt_hkont
+    FOR ALL ENTRIES IN lt_new_it
+    WHERE fkber = lt_new_it-fkber
+      OR fkber = space.
+  "    определяем счет для балансирования
+  READ TABLE lt_hkont ASSIGNING <ls_hkont>
+                      WITH KEY fkber = space.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+  lv_def_hk = <ls_hkont>-hkont.
+  SORT lt_new_it BY bschl bukrs.
+  "  дополняем строками для каждой ФС
+  LOOP AT   lt_new_it ASSIGNING <ls_line>.
+    DATA(lv_tabix) = sy-tabix + 1.
+    READ TABLE lt_hkont ASSIGNING <ls_hkont>
+                        WITH KEY fkber = <ls_line>-fkber.
+    CHECK sy-subrc = 0.
+    <ls_line>-hkont = <ls_hkont>-hkont.
+    CLEAR: <ls_line>-fkber.
+    "    накапливаем суммы для балансирующей проводки
+    APPEND <ls_line> TO lt_new_it2.
+    READ TABLE lt_new_cr TRANSPORTING NO FIELDS
+                           WITH KEY  posnr = <ls_line>-posnr
+                          BINARY SEARCH.
+    IF sy-subrc = 0.
+      LOOP AT lt_new_cr ASSIGNING <ls_new_cr>
+                        FROM sy-tabix.
+        IF   <ls_new_cr>-posnr <>  <ls_line>-posnr.
+          EXIT.
+        ENDIF.
+        APPEND <ls_new_cr> TO lt_new_cr2.
+        ls_acccr = <ls_new_cr>.
+        CLEAR ls_acccr-posnr.
+        READ TABLE lt_new_cr3 ASSIGNING FIELD-SYMBOL(<ls_cr3>)
+          WITH TABLE KEY curtp = <ls_new_cr>-curtp.
+        IF sy-subrc <> 0.
+          INSERT ls_acccr INTO TABLE lt_new_cr3.
+        ELSE.
+          ADD ls_acccr-wrbtr TO <ls_cr3>-wrbtr.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    "   at end of shkzg
+    READ TABLE lt_new_it ASSIGNING FIELD-SYMBOL(<ls_next>) INDEX lv_tabix.
+    IF sy-subrc <> 0 OR <ls_line>-bschl <> <ls_next>-bschl
+                     OR <ls_line>-bukrs <> <ls_next>-bukrs.
+      ls_last = <ls_line>.
+      ls_last-hkont = lv_def_hk.
+      ADD 1 TO lv_last_posnr.
+      ls_last-posnr = lv_last_posnr.
+      IF <ls_line>-bschl = '40'.
+        ls_last-bschl = '50'.
+        ls_last-shkzg = 'H'.
+      ELSE.
+        ls_last-bschl = '40'.
+        ls_last-shkzg = 'S'.
+      ENDIF.
+      APPEND ls_last TO lt_new_it2.
+      LOOP AT lt_new_cr3 INTO ls_acccr.
+        ls_acccr-posnr = lv_last_posnr.
+        ls_acccr-wrbtr = abs( ls_acccr-wrbtr ).
+        IF ls_last-shkzg = 'H'.
+          ls_acccr-wrbtr = - ls_acccr-wrbtr.
+        ENDIF.
+        APPEND ls_acccr TO lt_new_cr2.
+      ENDLOOP.
+      CLEAR: lt_new_cr3,ls_last.
+    ENDIF.
+  ENDLOOP.
+  APPEND  LINES OF lt_new_cr2 TO t_acccr.
+  APPEND  LINES OF lt_new_it2 TO t_accit.
+ENDFUNCTION.

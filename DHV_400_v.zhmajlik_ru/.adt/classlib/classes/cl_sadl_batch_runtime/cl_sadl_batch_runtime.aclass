@@ -1,0 +1,111 @@
+CLASS cl_sadl_batch_runtime DEFINITION
+  PUBLIC FINAL CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    INTERFACES if_sadl_batch.
+    METHODS constructor IMPORTING io_sadl_api TYPE REF TO if_sadl_entity_api.
+    METHODS get_message_handler RETURNING VALUE(ro_message_handler) TYPE REF TO if_sadl_message_handler.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    DATA mo_sadl_api TYPE REF TO if_sadl_entity_api.
+ENDCLASS.
+
+
+
+CLASS CL_SADL_BATCH_RUNTIME IMPLEMENTATION.
+
+
+  METHOD constructor.
+    mo_sadl_api = io_sadl_api.
+  ENDMETHOD.
+
+
+  METHOD get_message_handler.
+    ro_message_handler = cl_sadl_transact_manager_fctr=>get_transaction_manager( )->get_message_handler( ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_batch~modify.
+    DATA lt_bo_update TYPE if_sadl_batch=>tt_update.
+    DATA lt_bo_create TYPE if_sadl_batch=>tt_create.
+    DATA lt_bo_delete TYPE if_sadl_batch=>tt_delete.
+    DATA lt_bo_action TYPE if_sadl_batch=>tt_action.
+    DATA lr_sadl_keys TYPE REF TO data.
+
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<s_update>) WHERE updated_elements IS NOT INITIAL.
+      DATA(lo_runtime) = CAST cl_sadl_entity_runtime( mo_sadl_api->get_runtime( CONV #( <s_update>-entity_id ) ) ).
+      lo_runtime->map_update_request( EXPORTING is_sadl_update = <s_update>
+                                      IMPORTING et_bo_updates  = DATA(lt_bo_update_single_sadl_struc) ).
+      APPEND LINES OF lt_bo_update_single_sadl_struc TO lt_bo_update.
+    ENDLOOP.
+
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<s_create>).
+      IF <s_create>-source-association_name IS INITIAL.
+        lo_runtime = CAST cl_sadl_entity_runtime( mo_sadl_api->get_runtime( CONV #( <s_create>-entity_id ) ) ).
+      ELSE.
+        lo_runtime = CAST cl_sadl_entity_runtime( mo_sadl_api->get_runtime( CONV #( <s_create>-source-entity_id ) ) ).
+      ENDIF.
+      lo_runtime->map_create_request( EXPORTING is_sadl_create = <s_create>
+                                      IMPORTING es_bo_create   = DATA(ls_bo_create)
+                                                es_bo_action   = DATA(ls_bo_action_activate) ).
+      APPEND ls_bo_create TO lt_bo_create.
+      IF ls_bo_action_activate-name IS NOT INITIAL.
+        APPEND ls_bo_action_activate TO lt_bo_action.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT it_delete ASSIGNING FIELD-SYMBOL(<s_delete>).
+      lo_runtime = CAST cl_sadl_entity_runtime( mo_sadl_api->get_runtime( CONV #( <s_delete>-entity_id ) ) ).
+      ASSIGN <s_delete>-rs_key_values->* TO FIELD-SYMBOL(<s_deref>).
+      CREATE DATA lr_sadl_keys LIKE STANDARD TABLE OF <s_deref>.
+      FIELD-SYMBOLS <t_sadl_keys> TYPE STANDARD TABLE.
+      ASSIGN lr_sadl_keys->* TO <t_sadl_keys>.
+      APPEND <s_deref> TO <t_sadl_keys>.
+
+      lo_runtime->map_delete_request( EXPORTING it_sadl_keys               = <t_sadl_keys>
+                                      IMPORTING er_bo_keys                 = DATA(lr_bo_keys)
+                                                ev_alternative_key         = DATA(lv_alt_key)
+                                                ev_referenced_sadl_entity  = DATA(lv_ref_sadl_entity) ).
+
+      FIELD-SYMBOLS <t_bo_keys> TYPE STANDARD TABLE.
+      DATA lr_bo_key TYPE REF TO data.
+      ASSIGN lr_bo_keys->* TO <t_bo_keys>.
+      LOOP AT <t_bo_keys> REFERENCE INTO lr_bo_key.
+        APPEND VALUE #( entity_id = lv_ref_sadl_entity  alternative_key_name = lv_alt_key  rs_key_values = lr_bo_key
+                      ) TO lt_bo_delete.
+      ENDLOOP.
+    ENDLOOP.
+
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<s_action>).
+      lo_runtime = CAST cl_sadl_entity_runtime( mo_sadl_api->get_runtime( CONV #( <s_action>-entity_id ) ) ).
+      lo_runtime->map_action_request( EXPORTING is_sadl_action = <s_action>
+                                      IMPORTING es_bo_action   = DATA(ls_bo_action) ).
+      APPEND ls_bo_action TO lt_bo_action.
+    ENDLOOP.
+
+    IF lt_bo_update IS NOT INITIAL OR lt_bo_create IS NOT INITIAL OR lt_bo_delete IS NOT INITIAL OR lt_bo_action IS NOT INITIAL.
+      DATA(lo_batch) = CAST if_sadl_batch( cl_sadl_transact_manager_fctr=>get_transaction_manager( ) ).
+      lo_batch->modify( EXPORTING it_update = lt_bo_update
+                                  it_create = lt_bo_create
+                                  it_delete = lt_bo_delete
+                                  it_action = lt_bo_action
+                        IMPORTING ev_failed = ev_failed ).
+      IF ev_failed = abap_false.
+        LOOP AT it_create ASSIGNING <s_create>.
+          DATA(lv_tabix) = sy-tabix.
+          lo_runtime = CAST cl_sadl_entity_runtime( mo_sadl_api->get_runtime( CONV #( <s_create>-entity_id ) ) ).
+          lo_runtime->map_create_response( is_bo_create   = lt_bo_create[ lv_tabix ]
+                                           is_sadl_create = <s_create> ).
+        ENDLOOP.
+
+        LOOP AT it_action ASSIGNING <s_action>.
+          lv_tabix = sy-tabix.
+          lo_runtime = CAST cl_sadl_entity_runtime( mo_sadl_api->get_runtime( CONV #( <s_action>-entity_id ) ) ).
+          lo_runtime->map_action_response( is_bo_action   = lt_bo_action[ lv_tabix ]
+                                           is_sadl_action = <s_action> ).
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,397 @@
+CLASS lcl_update DEFINITION INHERITING FROM /bobf/cl_frw_lock_manager CREATE PUBLIC FINAL.
+
+  PUBLIC SECTION.
+    METHODS after_successful_save REDEFINITION.
+
+  PROTECTED SECTION.
+    METHODS reacquire_locks REDEFINITION.
+    METHODS keep_exclusive_locks REDEFINITION.
+
+ENDCLASS.
+
+
+CLASS lcl_dialog DEFINITION INHERITING FROM /bobf/cl_frw_lock_manager CREATE PUBLIC FINAL.
+
+  PROTECTED SECTION.
+    METHODS del_update_locks_from_buffer REDEFINITION.
+
+    METHODS reacquire_locks REDEFINITION.
+    METHODS keep_exclusive_locks REDEFINITION.
+
+ENDCLASS.
+
+
+CLASS lcl_diagupd DEFINITION INHERITING FROM /bobf/cl_frw_lock_manager CREATE PUBLIC FINAL.
+
+  PROTECTED SECTION.
+    METHODS del_update_locks_from_buffer REDEFINITION.
+
+    METHODS reacquire_locks REDEFINITION.
+    METHODS keep_exclusive_locks REDEFINITION.
+
+  PRIVATE SECTION.
+    "! extend the scope of existing exclusive dialog locks by adding update locks
+    METHODS extend_scope_for_e_locks IMPORTING it_lock_info TYPE /bobf/cl_frw_lock_manager=>tt_lock_info.
+    "! extend the scope of existing optimistic dialog locks by adding update locks
+    METHODS extend_scope_for_o_locks IMPORTING io_change    TYPE REF TO /bobf/if_frw_change
+                                               it_lock_info TYPE /bobf/cl_frw_lock_manager=>tt_lock_info
+                                     EXPORTING eo_message   TYPE REF TO /bobf/if_frw_message.
+
+ENDCLASS.
+
+
+CLASS lcl_optimistic_dialog_n_update DEFINITION INHERITING FROM /bobf/cl_frw_lock_manager CREATE PUBLIC FINAL.
+
+  PROTECTED SECTION.
+    METHODS reacquire_locks REDEFINITION.
+    METHODS keep_exclusive_locks REDEFINITION.
+
+  PRIVATE SECTION.
+    "! extend the scope of existing optimistic dialog locks by adding update locks
+    METHODS extend_scope_for_o_locks IMPORTING io_change    TYPE REF TO /bobf/if_frw_change
+                                               it_lock_info TYPE /bobf/cl_frw_lock_manager=>tt_lock_info
+                                     EXPORTING eo_message   TYPE REF TO /bobf/if_frw_message.
+
+ENDCLASS.
+
+
+CLASS lcl_exclusive_dialog_n_update DEFINITION INHERITING FROM /bobf/cl_frw_lock_manager CREATE PUBLIC FINAL.
+
+  PROTECTED SECTION.
+    METHODS reacquire_locks REDEFINITION.
+    METHODS keep_exclusive_locks REDEFINITION.
+
+ENDCLASS.
+
+
+
+**********************************************************************
+
+
+
+CLASS lcl_update IMPLEMENTATION.
+
+  METHOD after_successful_save.
+    CLEAR eo_change.
+    CLEAR eo_message.
+
+    CHECK mo_conf->ms_obj-no_lock = abap_false.
+
+    IF iv_cleanup_mode = /bobf/if_conf_c=>sc_cleanup_refresh.
+      "This is a one-shot transaction. We don't bother cleaning up the locks
+      RETURN.
+    ENDIF.
+
+    " This scope only uses UPDATE locks. They are all gone after commit work
+    clear_lock_buffer( IMPORTING eo_message  = eo_message
+                                 eo_change   = eo_change ).
+    mo_bopf->notify_property_changes( eo_change ).
+  ENDMETHOD.
+
+
+  METHOD reacquire_locks.
+    CLEAR eo_message.
+    RETURN. "not used in this class
+  ENDMETHOD.
+
+
+  METHOD keep_exclusive_locks.
+    RETURN. "not used in this class (there are no DIALOG locks to keep)
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+**********************************************************************
+
+
+CLASS lcl_dialog IMPLEMENTATION.
+
+  METHOD reacquire_locks.
+    " NOTE that scopes DIALOG and DIAGUPD (in contrast to EXCDIAUPD and OPTDIAUPD)
+    " do NOT de-mote exclusive locks to optimistic locks after save.
+
+    " Nothing to re-acquire as scope DIALOG does not use update locks.
+    CLEAR eo_message.
+  ENDMETHOD.
+
+
+  METHOD del_update_locks_from_buffer.
+    RETURN. " In scope DIALOG, the buffer does not distinguish between DIALOG and UPDATE locks.
+  ENDMETHOD.
+
+
+  METHOD keep_exclusive_locks.
+    rv_keep_exclusive_locks = abap_true.
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+**********************************************************************
+
+
+CLASS lcl_diagupd IMPLEMENTATION.
+
+  METHOD reacquire_locks.
+    " NOTE that scopes DIALOG and DIAGUPD (in contrast to EXCDIAUPD and OPTDIAUPD)
+    " do NOT de-mote exclusive locks to optimistic locks after save.
+
+    extend_scope_for_e_locks( it_lock_info ).
+    extend_scope_for_o_locks( EXPORTING io_change    = io_change
+                                        it_lock_info = it_lock_info
+                              IMPORTING eo_message   = eo_message ).
+  ENDMETHOD.
+
+
+  METHOD del_update_locks_from_buffer.
+    RETURN. " In scope DIAGUPD, the buffer does not distinguish between DIALOG and UPDATE locks.
+  ENDMETHOD.
+
+
+  METHOD keep_exclusive_locks.
+    rv_keep_exclusive_locks = abap_true.
+  ENDMETHOD.
+
+
+  METHOD extend_scope_for_e_locks.
+    DATA: ls_node                 TYPE /bobf/s_frw_node,
+          lt_node_keys_to_lock    TYPE /bobf/t_frw_node,
+          lo_dont_care_for_change TYPE REF TO /bobf/if_frw_change.
+    FIELD-SYMBOLS: <ls_lock_info> LIKE LINE OF it_lock_info.
+
+    "Acquire update locks for existing exclusive dialog locks.
+
+    lo_dont_care_for_change = /bobf/cl_frw_factory=>get_change( ).
+
+    CLEAR lt_node_keys_to_lock.
+    LOOP AT it_lock_info ASSIGNING <ls_lock_info> WHERE is_deleted = abap_false
+                                                    AND generic = abap_false "generic locks should have been dealt with before
+                                                    AND edit_mode_dialog = /bobf/if_conf_c=>sc_edit_exclusive. "#EC CI_SORTSEQ
+      ls_node-node = <ls_lock_info>-lockable_node.
+      ls_node-key = <ls_lock_info>-key.
+      INSERT ls_node INTO TABLE lt_node_keys_to_lock.
+    ENDLOOP.
+    lock_bypassing_buffer( iv_edit_mode          = /bobf/if_conf_c=>sc_edit_exclusive
+                           iv_scope              = /bobf/if_conf_c=>sc_enqueue_scope_update
+                           it_lockable_node_keys = lt_node_keys_to_lock
+                           io_change             = lo_dont_care_for_change ).
+  ENDMETHOD.
+
+
+  METHOD extend_scope_for_o_locks.
+    DATA: ls_node                 TYPE /bobf/s_frw_node,
+          lt_node_keys_to_lock    TYPE /bobf/t_frw_node,
+          lo_dont_care_for_change TYPE REF TO /bobf/if_frw_change,
+          lt_lost_dialog_locks    TYPE /bobf/t_frw_node,
+          lt_lost_locks           TYPE /bobf/t_frw_node,
+          lo_failed_change        TYPE REF TO /bobf/if_frw_change,
+          lo_message              TYPE REF TO /bobf/if_frw_message.
+    FIELD-SYMBOLS: <ls_lock_info> LIKE LINE OF it_lock_info.
+
+    CLEAR eo_message.
+
+    LOOP AT it_lock_info ASSIGNING <ls_lock_info> WHERE is_deleted = abap_false
+                                                    AND generic = abap_false "generic locks have been dealt with before
+                                                    AND edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic. "#EC CI_SORTSEQ
+      ls_node-node = <ls_lock_info>-lockable_node.
+      ls_node-key = <ls_lock_info>-key.
+      INSERT ls_node INTO TABLE lt_node_keys_to_lock.
+    ENDLOOP.
+
+    IF lt_node_keys_to_lock IS NOT INITIAL.
+
+      lo_dont_care_for_change = /bobf/cl_frw_factory=>get_change( ).
+
+      "acquire the UPDATE part for the existing DIALOG locks:
+      lock_bypassing_buffer( EXPORTING iv_edit_mode          = /bobf/if_conf_c=>sc_edit_optimistic
+                                       iv_scope              = /bobf/if_conf_c=>sc_enqueue_scope_update
+                                       it_lockable_node_keys = lt_node_keys_to_lock
+                                       io_change             = lo_dont_care_for_change
+                             IMPORTING eo_message            = eo_message
+                                       et_failed_node        = lt_lost_locks ).
+      "for the successful node keys, check if we still have the DIALOG part:
+      remove_failed_nodes( EXPORTING it_failed = lt_lost_locks
+                           CHANGING  ct_all    = lt_node_keys_to_lock ).
+      lock_bypassing_buffer( EXPORTING iv_edit_mode          = /bobf/if_conf_c=>sc_edit_check_optimistic " CHECK only!
+                                       iv_scope              = /bobf/if_conf_c=>sc_enqueue_scope_dialog
+                                       it_lockable_node_keys = lt_node_keys_to_lock
+                                       io_change             = lo_dont_care_for_change
+                             IMPORTING eo_message            = lo_message
+                                       et_failed_node        = lt_lost_dialog_locks ).
+      collect_messages( EXPORTING io_message = lo_message
+                        CHANGING  co_message = eo_message ).
+      INSERT LINES OF lt_lost_dialog_locks INTO TABLE lt_lost_locks.
+
+      IF lt_lost_locks IS NOT INITIAL.
+        "Unlock (via buffer) those instances we could not lock or for which we lost the DIALOG part:
+        unlock( it_node   = lt_lost_locks
+                io_change = io_change ).
+        "Send change notifications for lost locks:
+        lo_failed_change = content_changes_for_node_keys( lt_lost_locks ).
+        mo_bopf->notify_property_changes( lo_failed_change ).
+        io_change->merge( lo_failed_change ).
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+ENDCLASS.
+
+
+**********************************************************************
+
+
+CLASS lcl_optimistic_dialog_n_update IMPLEMENTATION.
+
+  METHOD reacquire_locks.
+    "Acquire update locks for existing dialog locks.
+    "Only OPTIMISTIC dialog locks are expected to exist.
+    "Assumption: generic locks and locks for deleted instances have been dealt with before.
+    extend_scope_for_o_locks( EXPORTING io_change    = io_change
+                                        it_lock_info = it_lock_info
+                              IMPORTING eo_message   = eo_message ).
+  ENDMETHOD.
+
+
+  METHOD keep_exclusive_locks.
+    rv_keep_exclusive_locks = abap_false.
+  ENDMETHOD.
+
+
+  METHOD extend_scope_for_o_locks.
+    DATA: ls_node                  TYPE /bobf/s_frw_node,
+          lt_node_keys_to_lock     TYPE /bobf/t_frw_node,
+          lt_failed_update_lock    TYPE /bobf/t_frw_node,
+          lt_failed_dialog_lock    TYPE /bobf/t_frw_node,
+          lo_failed_update_message TYPE REF TO /bobf/if_frw_message,
+          lo_dont_care_for_change  TYPE REF TO /bobf/if_frw_change,
+          lo_failed_dialog_message TYPE REF TO /bobf/if_frw_message,
+          lo_failed_unlock_message TYPE REF TO /bobf/if_frw_message,
+          lt_failed_lock           TYPE /bobf/t_frw_node,
+          lo_change_failed         TYPE REF TO /bobf/if_frw_change.
+    FIELD-SYMBOLS: <ls_lock_info> LIKE LINE OF it_lock_info.
+
+    "Acquire update locks for existing optimistic dialog locks.
+
+* This is the "legacy" way of re-acquiring the lost UPDATE part after save.
+* There would be a better way of doing this by using LOCK_BYPASSING_BUFFER()
+* instead of LOCK() - as in LCL_DIAGUPD->EXTEND_SCOPE_FOR_O_LOCKS.
+* By doing so, I believe that the lock buffer attributes EDIT_MODE_DIALOG
+* and EDIT_MODE_UPDATE could be made obsolete and a lot of extra logic in
+* _LOCK() could be removed.  But this would be yet another refactoring.
+
+    CLEAR eo_message.
+
+    LOOP AT it_lock_info ASSIGNING <ls_lock_info> WHERE is_deleted = abap_false
+                                                    AND generic = abap_false "generic locks have been dealt with before
+                                                    AND edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic. "#EC CI_SORTSEQ
+      ls_node-node = <ls_lock_info>-lockable_node.
+      ls_node-key = <ls_lock_info>-key.
+      INSERT ls_node INTO TABLE lt_node_keys_to_lock.
+    ENDLOOP.
+
+    IF lt_node_keys_to_lock IS NOT INITIAL.
+
+      lo_dont_care_for_change = /bobf/cl_frw_factory=>get_change( ).
+
+      "Add update lock to get O[1,1]
+      lock( EXPORTING iv_edit_mode       = /bobf/if_conf_c=>sc_edit_optimistic
+                      iv_scope           = /bobf/if_conf_c=>sc_enqueue_scope_update
+                      it_node            = lt_node_keys_to_lock
+                      io_change          = lo_dont_care_for_change
+            IMPORTING et_node_not_locked = lt_failed_update_lock
+                      eo_message         = lo_failed_update_message ).
+      collect_messages( EXPORTING io_message = lo_failed_update_message
+                        CHANGING  co_message = eo_message ).
+
+      remove_failed_nodes( EXPORTING it_failed = lt_failed_update_lock
+                           CHANGING  ct_all    = lt_node_keys_to_lock ).
+
+      " 2.1 check if we still have the dialog part (via request for optimistic lock)
+      "     (Note that there is special treatment in method _LOCK for scope OPTDIAGUPD.)
+      lock( EXPORTING iv_edit_mode       = /bobf/if_conf_c=>sc_edit_optimistic
+                      iv_scope           = /bobf/if_conf_c=>sc_enqueue_scope_dialog
+                      it_node            = lt_node_keys_to_lock
+                      io_change          = lo_dont_care_for_change
+            IMPORTING et_node_not_locked = lt_failed_dialog_lock
+                      eo_message         = lo_failed_dialog_message ).
+      collect_messages( EXPORTING io_message = lo_failed_dialog_message
+                        CHANGING  co_message = eo_message ).
+
+      " care about missed dialog locks -> unlock update part
+      unlock( EXPORTING iv_scope   = /bobf/if_conf_c=>sc_enqueue_scope_update
+                        it_node    = lt_failed_dialog_lock
+                        io_change  = io_change
+              IMPORTING eo_message = lo_failed_unlock_message ).
+      collect_messages( EXPORTING io_message = lo_failed_unlock_message
+                        CHANGING  co_message = eo_message ).
+
+      " 3 send property change notifications for instances which are not locked again
+      INSERT LINES OF lt_failed_update_lock INTO TABLE lt_failed_lock.
+      INSERT LINES OF lt_failed_dialog_lock INTO TABLE lt_failed_lock.
+
+      "send change notifications for lost locks:
+      IF lt_failed_lock IS NOT INITIAL.
+        lo_change_failed = content_changes_for_node_keys( lt_failed_lock ).
+        mo_bopf->notify_property_changes( lo_change_failed ).
+        io_change->merge( lo_change_failed ).
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+**********************************************************************
+
+
+CLASS lcl_exclusive_dialog_n_update IMPLEMENTATION.
+
+  METHOD reacquire_locks.
+    DATA: ls_node               TYPE /bobf/s_frw_node,
+          lt_lockable_node_keys TYPE /bobf/t_frw_node,
+          lt_lock_node_keys     TYPE /bobf/t_frw_node.
+    FIELD-SYMBOLS: <ls_lock_info> LIKE LINE OF it_lock_info.
+
+    "Turn exclusive dialog locks into optimistic dialog locks
+    "Assumption: generic locks and locks for deleted instances have been dealt with before.
+
+    CLEAR eo_message.
+
+    LOOP AT it_lock_info ASSIGNING <ls_lock_info> WHERE is_deleted = abap_false
+                                                    AND generic    = abap_false
+                                                    AND edit_mode_dialog = /bobf/if_conf_c=>sc_edit_exclusive. "#EC CI_SORTSEQ
+      ls_node-key = <ls_lock_info>-key.
+      ls_node-node = <ls_lock_info>-lock_node.
+      INSERT ls_node INTO TABLE lt_lock_node_keys.
+      ls_node-node = <ls_lock_info>-lockable_node.
+      INSERT ls_node INTO TABLE lt_lockable_node_keys.
+    ENDLOOP.
+    "node keys to be re-locked have to be deleted from lock buffer, or re-locking will not work:
+    delete_locks_from_buffer( it_lock_node_keys = lt_lock_node_keys
+                              io_change         = io_change ).
+    "this acquires O-locks (and updates the lock-buffer) while the E-locks remain in the enqueue server:
+    lock( iv_edit_mode = /bobf/if_conf_c=>sc_edit_optimistic
+          it_node      = lt_lockable_node_keys
+          iv_scope     = /bobf/if_conf_c=>sc_enqueue_scope_dialog
+          io_change    = io_change ).
+    "now, release the E-locks without changing the lock buffer:
+    unlock_bypassing_buffer( iv_edit_mode          = /bobf/if_conf_c=>sc_edit_exclusive
+                             it_lockable_node_keys = lt_lockable_node_keys
+                             iv_generic            = abap_false
+                             io_change             = io_change ).
+
+    " Notifications of property changes not needed:
+    " as we keep the exclusive lock, no other session can interrupt the save phase
+
+  ENDMETHOD.
+
+
+  METHOD keep_exclusive_locks.
+    rv_keep_exclusive_locks = abap_false.
+  ENDMETHOD.
+
+ENDCLASS.

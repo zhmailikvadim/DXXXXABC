@@ -1,0 +1,832 @@
+
+CLASS ltd_sadl_transact_mgr_for_save DEFINITION INHERITING FROM /bobf/cl_sadl_transaction_mngr FINAL FOR TESTING.
+
+  PUBLIC SECTION.
+    CLASS-METHODS get_instance_for_testing IMPORTING io_bopf_transaction_manager TYPE REF TO /bobf/cl_tra_transaction_mgr
+                                           RETURNING VALUE(ro_instance)          TYPE REF TO if_sadl_transaction_manager.
+    METHODS set_result_for_prepare_commit IMPORTING iv_rejected TYPE abap_bool
+                                                    io_message  TYPE REF TO /bobf/cm_frw.
+    METHODS set_result_for_after_commit IMPORTING io_message  TYPE REF TO /bobf/cm_frw.
+    METHODS if_sadl_batch~modify REDEFINITION.
+
+  PROTECTED SECTION.
+    METHODS bopf_prepare_commit REDEFINITION.
+    METHODS bopf_commit_and_finalize REDEFINITION.
+  PRIVATE SECTION.
+    DATA mv_prepare_commit_rejected TYPE        abap_bool.
+    DATA mo_prepare_commit_message  TYPE REF TO /bobf/cm_frw.
+    DATA mo_commit_and_finalize_message TYPE REF TO /bobf/cm_frw.
+
+ENDCLASS.
+
+CLASS ltd_sadl_transact_mgr_for_save IMPLEMENTATION.
+
+  METHOD bopf_commit_and_finalize.
+    IF mo_commit_and_finalize_message IS BOUND.
+      eo_message_after_commit = /bobf/cl_frw_factory=>get_message( ).
+      eo_message_after_commit->add_cm( mo_commit_and_finalize_message ).
+    ENDIF.
+    CLEAR mo_commit_and_finalize_message.
+  ENDMETHOD.
+
+  METHOD bopf_prepare_commit.
+    ev_rejected = mv_prepare_commit_rejected.
+    IF mo_prepare_commit_message IS BOUND.
+      eo_message_before_commit = /bobf/cl_frw_factory=>get_message( ).
+      eo_message_before_commit->add_cm( mo_prepare_commit_message ).
+    ENDIF.
+    CLEAR mo_prepare_commit_message.
+  ENDMETHOD.
+
+  METHOD set_result_for_prepare_commit.
+    mv_prepare_commit_rejected = iv_rejected.
+    mo_prepare_commit_message = io_message.
+  ENDMETHOD.
+
+  METHOD get_instance_for_testing.
+    ro_instance = NEW ltd_sadl_transact_mgr_for_save(
+                        iv_entity_type           = cl_sadl_entity_factory=>co_type-cds "type CDS is required to trigger message handling logic
+                        io_bopf_transaction_mngr = io_bopf_transaction_manager ).
+  ENDMETHOD.
+
+  METHOD set_result_for_after_commit.
+    mo_commit_and_finalize_message = io_message.
+  ENDMETHOD.
+
+  METHOD if_sadl_batch~modify.
+    super->if_sadl_batch~modify( EXPORTING it_create = it_create
+                                  it_action = it_action
+                                  it_delete = it_delete
+                                  it_update = it_update
+                        IMPORTING ev_failed = ev_failed ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS ltd_bopf_frw_factory DEFINITION INHERITING FROM /bobf/cl_frw_factory FOR TESTING.
+  PUBLIC SECTION.
+    CLASS-METHODS inject_bo IMPORTING is_bo TYPE /bobf/s_frw_factory.
+ENDCLASS.
+
+CLASS ltd_bopf_frw_factory IMPLEMENTATION.
+  METHOD inject_bo.
+    get_factory( EXPORTING iv_bo_key = is_bo-key
+                 IMPORTING es_factory = DATA(ls_factory) ).
+    IF ls_factory IS INITIAL.
+      INSERT is_bo INTO TABLE gt_factory.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS ltd_service_manager DEFINITION INHERITING FROM /bobf/cl_tool_test_double_sm
+  FINAL
+  FOR TESTING.
+
+  PUBLIC SECTION.
+    TYPES gty_bo_node_root TYPE /bobf/s_conf_bo.
+    TYPES gty_bo_node_child TYPE /bobf/s_conf_obj.
+    TYPES gtt_bo_node_root TYPE STANDARD TABLE OF gty_bo_node_root WITH DEFAULT KEY.
+    TYPES gtt_bo_node_child TYPE STANDARD TABLE OF gty_bo_node_child WITH DEFAULT KEY.
+    METHODS constructor IMPORTING iv_bo_key TYPE /bobf/obm_bo_key.
+    METHODS /bobf/if_tra_service_manager~modify REDEFINITION.
+    METHODS /bobf/if_tra_service_manager~do_action REDEFINITION.
+    DATA mv_bo_key TYPE /bobf/obm_bo_key.
+ENDCLASS.
+
+CLASS ltd_service_manager IMPLEMENTATION.
+
+  METHOD constructor.
+    super->constructor( iv_call_orig_sm_for_non_impl = abap_false ).
+    mv_bo_key = iv_bo_key.
+  ENDMETHOD.
+
+  METHOD /bobf/if_tra_service_manager~modify.
+    cl_abap_unit_assert=>assert_not_initial( it_modification ).
+    "assert that all nodes are from the same BO.
+    DATA(ls_modification) = it_modification[ 1 ].
+    LOOP AT it_modification ASSIGNING FIELD-SYMBOL(<ls_modification>).
+      cl_abap_unit_assert=>assert_equals( act = <ls_modification>-node
+                                          exp = ls_modification-node ).
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD /bobf/if_tra_service_manager~do_action.
+    cl_abap_unit_assert=>assert_not_initial( it_key ).
+    cl_abap_unit_assert=>assert_not_initial( iv_act_key ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+
+CLASS ltd_tra_serv_mgr_factory DEFINITION INHERITING FROM /bobf/cl_tra_serv_mgr_factory FOR TESTING.
+  PUBLIC SECTION.
+    CLASS-METHODS get_service_mgr IMPORTING iv_bo_key                 TYPE /bobf/obm_bo_key
+                                  RETURNING VALUE(ro_service_manager) TYPE REF TO /bobf/if_tra_service_manager.
+    METHODS constructor IMPORTING iv_bo_key TYPE /bobf/obm_bo_key.
+  PRIVATE SECTION.
+
+ENDCLASS.
+
+CLASS ltd_tra_serv_mgr_factory IMPLEMENTATION.
+  METHOD constructor.
+    super->constructor( ).
+    READ TABLE gt_service_manager WITH KEY bo_key = iv_bo_key INTO DATA(ls_sm_factory).
+    IF sy-subrc = 0.
+      DATA(lo_service_manager) = ls_sm_factory-service_manager.
+    ELSE.
+      DATA ls_serv_manager TYPE ty_service_manager.
+      ls_serv_manager-bo_key = iv_bo_key.
+      ls_serv_manager-service_manager = NEW ltd_service_manager( iv_bo_key = iv_bo_key ).
+      INSERT ls_serv_manager INTO TABLE gt_service_manager.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_service_mgr.
+    READ TABLE gt_service_manager WITH KEY bo_key = iv_bo_key INTO DATA(ls_sm_factory).
+    IF sy-subrc = 0.
+      DATA(lo_service_manager) = ls_sm_factory-service_manager.
+    ELSE.
+      cl_abap_unit_assert=>fail( msg = 'Service Manager not found.' ).
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+
+
+
+
+
+CLASS ltd_bopf_transaction_manager DEFINITION INHERITING FROM /bobf/cl_tra_transaction_mgr FINAL FOR TESTING.
+
+  PUBLIC SECTION.
+
+
+    METHODS set_next_message IMPORTING io_message TYPE REF TO /bobf/cm_frw.
+    METHODS set_result_for_get_changes IMPORTING io_change TYPE REF TO /bobf/if_tra_change.
+    METHODS /bobf/if_tra_transaction_mgr~cleanup REDEFINITION.
+    METHODS /bobf/if_tra_transaction_mgr~get_transactional_changes REDEFINITION.
+
+    DATA: BEGIN OF ms_method_call_counter READ-ONLY,
+            discard_changes           TYPE i,
+            get_transactional_changes TYPE i,
+          END OF ms_method_call_counter.
+  PRIVATE SECTION.
+    DATA: BEGIN OF ms_result,
+            get_changes TYPE REF TO /bobf/if_tra_change,
+          END OF ms_result.
+    DATA mo_next_message TYPE REF TO /bobf/cm_frw.
+
+    METHODS add_message CHANGING co_frw_message TYPE REF TO /bobf/if_frw_message.
+
+ENDCLASS.
+
+CLASS ltd_bopf_transaction_manager IMPLEMENTATION.
+
+  METHOD /bobf/if_tra_transaction_mgr~get_transactional_changes.
+    ADD 1 TO ms_method_call_counter-get_transactional_changes.
+    eo_change = ms_result-get_changes.
+  ENDMETHOD.
+
+  METHOD set_next_message.
+    mo_next_message = io_message.
+  ENDMETHOD.
+
+  METHOD set_result_for_get_changes.
+    ms_result-get_changes = io_change.
+  ENDMETHOD.
+
+  METHOD /bobf/if_tra_transaction_mgr~cleanup.
+    ADD 1 TO ms_method_call_counter-discard_changes.
+    cl_abap_unit_assert=>assert_equals( act = iv_cleanup_mode  exp = /bobf/if_conf_c=>sc_cleanup_refresh ).
+    CLEAR eo_message.
+    add_message( CHANGING co_frw_message = eo_message ).
+  ENDMETHOD.
+
+  METHOD add_message.
+    IF mo_next_message IS BOUND.
+      co_frw_message = /bobf/cl_frw_factory=>get_message( ).
+      co_frw_message->add_cm( mo_next_message ).
+      CLEAR mo_next_message.
+    ENDIF.
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS ltd_bopf_frw DEFINITION  FOR TESTING.
+  PUBLIC SECTION.
+    INTERFACES /bobf/if_frw_service_layer PARTIALLY IMPLEMENTED.
+ENDCLASS.
+
+CLASS ltd_bopf_frw IMPLEMENTATION.
+ENDCLASS.
+
+CLASS ltd_sadl_transaction_mngr DEFINITION INHERITING FROM /bobf/cl_sadl_transaction_mngr FINAL FOR TESTING DURATION SHORT RISK LEVEL HARMLESS.
+  PROTECTED SECTION.
+    METHODS constructor.
+ENDCLASS.
+
+CLASS ltd_sadl_transaction_mngr IMPLEMENTATION.
+  METHOD constructor.
+
+     super->constructor( iv_entity_type = cl_sadl_entity_factory=>co_type-cds
+                         io_bopf_transaction_mngr = NEW ltd_bopf_transaction_manager( ) ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS ltc_batch DEFINITION DEFERRED.
+CLASS /bobf/cl_sadl_batch_handler DEFINITION LOCAL FRIENDS ltc_batch.
+
+CLASS ltc_batch DEFINITION FINAL FOR TESTING DURATION SHORT RISK LEVEL HARMLESS.
+  PUBLIC SECTION.
+    CONSTANTS gc_sadl_entity_id_1 TYPE sadl_entity_id       VALUE 'BO1~ROOT1'.
+    CONSTANTS gc_sadl_entity_id_2 TYPE sadl_entity_id       VALUE 'BO2~ROOT2'.
+    CONSTANTS gc_name_bo1         TYPE string               VALUE 'BO1'.
+    CONSTANTS gc_name_bo2         TYPE string               VALUE 'BO2'.
+    CONSTANTS gc_key_bo1          TYPE /bobf/obm_bo_key     VALUE '04110000000000000000000000000001'.
+    CONSTANTS gc_key_bo2          TYPE /bobf/obm_bo_key     VALUE '04110000000000000000000000000002'.
+    CONSTANTS gc_id_root_bo1      TYPE /bobf/obm_node_key   VALUE '0BBB0000000000000000000000000001'.
+    CONSTANTS gc_id_root_bo2      TYPE /bobf/obm_node_key   VALUE '0BBB0000000000000000000000000002'.
+    CONSTANTS gc_root_key_bo1     TYPE /bobf/conf_key       VALUE '00000000000000000000000000001111'.
+    CONSTANTS gc_root_key_bo2     TYPE /bobf/conf_key       VALUE '00000000000000000000000000002222'.
+    CONSTANTS gc_alt_key_root_bo1 TYPE /bobf/obm_altkey_key VALUE '0AAA0000000000000000000000000001'.
+    CONSTANTS gc_alt_key_root_bo2 TYPE /bobf/obm_altkey_key VALUE '0AAA0000000000000000000000000002'.
+    CONSTANTS gc_field_name_descr TYPE sadl_entity_element  VALUE 'DESCRIPTION'.
+    CONSTANTS gc_action_name_bo1  TYPE sadl_entity_action   VALUE if_draft_constants=>co_annotation_value-action_type-validation.
+    CONSTANTS gc_action_name_bo2  TYPE sadl_entity_action   VALUE if_draft_constants=>co_annotation_value-action_type-new.
+    CONSTANTS gc_action_key_bo1   TYPE /bobf/act_key        VALUE '0ACC0000000000000000000000000001'.
+    CONSTANTS gc_action_key_bo2   TYPE /bobf/act_key        VALUE '0ACC0000000000000000000000000002'.
+    CONSTANTS gc_act_rt_type_bo1  TYPE string               VALUE 'STRINGTAB'.
+    CONSTANTS gc_act_rt_type_bo2  TYPE string               VALUE 'STRINGTAB'.
+    CONSTANTS gc_act_ret_ent_bo1  TYPE sadl_entity_id       VALUE 'BOX~ROOTX'.
+    CONSTANTS gc_act_ret_ent_bo2  TYPE sadl_entity_id       VALUE 'BOY~ROOTY'.
+
+    TYPES: BEGIN OF ty_bopf_root,
+             key         TYPE /bobf/conf_key,
+             parent_key  TYPE /bobf/conf_key,
+             root_key    TYPE /bobf/conf_key,
+             indicator   TYPE boole_d,
+             description TYPE c LENGTH 30,
+             foreign_key TYPE /bobf/conf_key,
+           END OF ty_bopf_root.
+    TYPES tt_bopf_root TYPE STANDARD TABLE OF ty_bopf_root WITH DEFAULT KEY.
+
+    TYPES: BEGIN OF ty_sadl_root,
+             indicator   TYPE boole_d,
+             description TYPE c LENGTH 30,
+             foreign_key TYPE /bobf/conf_key,
+           END OF ty_sadl_root.
+
+    TYPES: BEGIN OF ty_action_parameter,
+             indicator   TYPE boole_d,
+             description TYPE c LENGTH 30,
+           END OF ty_action_parameter.
+
+    TYPES: tt_returning_parameter TYPE STANDARD TABLE OF ty_sadl_root.
+
+
+    CLASS-METHODS get_bo_key IMPORTING iv_sadl_entity_id TYPE sadl_entity_id
+                             RETURNING VALUE(rv_bo_key)  TYPE /bobf/obm_bo_key.
+    CLASS-METHODS get_alt_key IMPORTING iv_sadl_entity_id TYPE sadl_entity_id
+                              RETURNING VALUE(rv_alt_key) TYPE /bobf/obm_altkey_key.
+    METHODS constructor.
+
+
+  PROTECTED SECTION.
+    DATA mo_sadl_transaction_mngr TYPE REF TO /bobf/cl_sadl_transaction_mngr.
+
+  PRIVATE SECTION.
+    METHODS setup
+      RAISING
+        cx_sadl_static
+        /bobf/cx_frw.
+    METHODS modify_2_root_nodes FOR TESTING RAISING cx_sadl_static /bobf/cx_frw.
+    METHODS execute_2_actions FOR TESTING RAISING cx_sadl_static /bobf/cx_frw.
+    METHODS execute_action_activation FOR TESTING RAISING cx_static_check.
+    METHODS modification_update IMPORTING iv_entity_id    TYPE sadl_entity_id
+                                EXPORTING es_modification TYPE if_sadl_batch=>ty_update
+                                RAISING   cx_sadl_contract_violation
+                                          cx_sadl_static.
+
+    METHODS inject_entity_into_rt IMPORTING iv_sadl_entity_id TYPE sadl_entity_id RAISING cx_sadl_static /bobf/cx_frw.
+    DATA mo_sadl_batch_handler TYPE REF TO /bobf/cl_sadl_batch_handler.
+ENDCLASS.
+
+
+CLASS ltd_bopf_configuration DEFINITION INHERITING FROM /bobf/cl_confrt_complete FOR TESTING.
+  PUBLIC SECTION.
+    METHODS constructor IMPORTING iv_bo_key TYPE /bobf/conf_key RAISING /bobf/cx_frw.
+    METHODS /bobf/if_frw_configuration~query_node REDEFINITION.
+    METHODS /bobf/if_frw_configuration~get_node REDEFINITION.
+    METHODS /bobf/if_frw_configuration~get_bo REDEFINITION.
+    METHODS /bobf/if_frw_configuration~query_action REDEFINITION.
+    METHODS /bobf/if_frw_configuration~get_act REDEFINITION.
+    METHODS /bobf/if_frw_configuration~get_root_node REDEFINITION.
+
+  PRIVATE SECTION.
+    CLASS-METHODS get_bo_name_by_bo_key IMPORTING iv_bo_key         TYPE /bobf/obm_bo_key
+                                        RETURNING VALUE(ro_bo_name) TYPE /bobf/obm_name.
+    CLASS-METHODS get_node_name_by_node_key IMPORTING iv_node_key         TYPE /bobf/obm_node_key
+                                            RETURNING VALUE(rv_node_name) TYPE /bobf/obm_name.
+ENDCLASS.
+
+CLASS ltd_sadl_entity_rt_access DEFINITION INHERITING FROM /bobf/cl_sadl_entity_rt_access FOR TESTING.
+  PUBLIC SECTION.
+    CLASS-METHODS get_rt_access IMPORTING iv_id               TYPE sadl_entity_id
+                                RETURNING VALUE(ro_rt_access) TYPE REF TO ltd_sadl_entity_rt_access   "/bobf/cl_sadl_entity_rt_access
+                                RAISING   cx_sadl_contract_violation
+                                          cx_sadl_static.
+
+    CLASS-METHODS inject_bo IMPORTING iv_sadl_entity_id TYPE sadl_entity_id
+                            RAISING   cx_sadl_static /bobf/cx_frw.
+    METHODS constructor IMPORTING iv_entity_id TYPE sadl_entity_id RAISING cx_sadl_static.
+    METHODS get_bo_key REDEFINITION.
+    METHODS get_bopf_association_by_name REDEFINITION.
+ENDCLASS.
+
+
+CLASS ltd_sadl_entity_rt_access IMPLEMENTATION.
+  METHOD get_rt_access.
+    ro_rt_access = CAST ltd_sadl_entity_rt_access( get( iv_id ) ).
+  ENDMETHOD.
+
+  METHOD inject_bo.
+    DATA lo_serv_manager_factory TYPE REF TO ltd_tra_serv_mgr_factory.
+    DATA lv_bo_key TYPE /bobf/obm_bo_key.
+    DATA: lv_node_key TYPE /bobf/obm_node_key.
+
+    IF get_registered_instance_by_id( iv_type = 'BOPF'  iv_id = iv_sadl_entity_id ) IS BOUND.
+      RETURN.
+    ENDIF.
+    cl_sadl_entity_bo=>get_bo_node_name_by_entity_id( EXPORTING iv_entity_id = iv_sadl_entity_id
+                                                      IMPORTING ev_bo_name = DATA(lv_bo_name)
+                                                                ev_node_name = DATA(lv_node_name) ).
+    IF lv_bo_name = ltc_batch=>gc_name_bo1.
+      lo_serv_manager_factory = NEW ltd_tra_serv_mgr_factory( iv_bo_key = ltc_batch=>gc_key_bo1 ).
+      lo_serv_manager_factory->get_service_manager( iv_bo_key = ltc_batch=>gc_key_bo1 ).
+    ELSEIF lv_bo_name = ltc_batch=>gc_name_bo2.
+      lo_serv_manager_factory = NEW ltd_tra_serv_mgr_factory( iv_bo_key = ltc_batch=>gc_key_bo1 ).
+      lo_serv_manager_factory->get_service_manager( iv_bo_key = ltc_batch=>gc_key_bo1 ).
+    ENDIF.
+
+    IF iv_sadl_entity_id = ltc_batch=>gc_sadl_entity_id_1.
+      lv_bo_key = ltc_batch=>gc_key_bo1.
+      lv_node_key = ltc_batch=>gc_id_root_bo1.
+    ELSEIF iv_sadl_entity_id = ltc_batch=>gc_sadl_entity_id_2.
+      lv_bo_key = ltc_batch=>gc_key_bo2.
+      lv_node_key = ltc_batch=>gc_id_root_bo2.
+    ELSE.
+      cl_abap_unit_assert=>fail( 'unknown entity id' ).
+    ENDIF.
+    IF lv_bo_key IS NOT INITIAL.
+      /bobf/cl_tool_test_manager=>get_manager( )->inject_service_manager_double(
+          iv_bo_key    = lv_bo_key
+          io_sm_double = NEW ltd_service_manager( iv_bo_key = lv_bo_key ) ).
+    ENDIF.
+
+    DATA(lo_new_instance) = NEW ltd_sadl_entity_rt_access( iv_sadl_entity_id ).
+    lo_new_instance->initialize( iv_entity_id = iv_sadl_entity_id
+                                 io_frw_configuration = NEW ltd_bopf_configuration( lv_bo_key )
+                                 iv_node_key = lv_node_key ).
+    register_instance( lo_new_instance ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    DATA lv_bo_key TYPE /bobf/obm_bo_key.
+
+    super->constructor( 'BOPF' ).
+
+    IF iv_entity_id = ltc_batch=>gc_sadl_entity_id_1.
+      lv_bo_key = ltc_batch=>gc_key_bo1.
+    ELSEIF iv_entity_id = ltc_batch=>gc_sadl_entity_id_2.
+      lv_bo_key = ltc_batch=>gc_key_bo2.
+    ELSE.
+      cl_abap_unit_assert=>fail( 'unknown entity id' ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_bo_key.
+    DATA ls_bo TYPE /bobf/s_confro_obj .
+    mo_frw_configuration->get_bo( IMPORTING es_obj = ls_bo ).
+    rv_bo_key = ls_bo-bo_key.
+  ENDMETHOD.
+
+
+  METHOD get_bopf_association_by_name.
+    DATA ls_assoc TYPE /bobf/s_confro_assoc.
+    IF iv_sadl_association_name IS NOT INITIAL.
+      ls_assoc-assoc_name = iv_sadl_association_name.
+    ENDIF.
+    es_association = ls_assoc.
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+CLASS ltd_sadl_entity_transactional DEFINITION INHERITING FROM /bobf/cl_sadl_entity_transact FOR TESTING.
+  PUBLIC SECTION.
+    METHODS constructor IMPORTING iv_entity_id TYPE sadl_entity_id
+                        RAISING   cx_sadl_static
+                                  cx_sadl_contract_violation.
+    METHODS prepare_create REDEFINITION.
+    METHODS prepare_create_by_association REDEFINITION.
+    METHODS prepare_delete REDEFINITION.
+    METHODS prepare_execute REDEFINITION.
+    METHODS prepare_update REDEFINITION.
+
+  PROTECTED SECTION.
+    METHODS _execute REDEFINITION.
+
+  PRIVATE SECTION.
+    DATA mo_bopf_sadl_entity_rt_access TYPE REF TO ltd_sadl_entity_rt_access.
+ENDCLASS.
+
+CLASS ltd_sadl_entity_transactional IMPLEMENTATION.
+  METHOD constructor.
+    super->constructor( iv_entity_id ).
+    mo_bopf_sadl_entity_rt_access = ltd_sadl_entity_rt_access=>get_rt_access( iv_entity_id ).
+  ENDMETHOD.
+
+  METHOD _execute.
+    CLEAR et_data.
+    CLEAR et_failed.
+    CLEAR ev_static_action_failed.
+  ENDMETHOD.
+
+  METHOD prepare_create.
+    DATA ls_modification TYPE /bobf/s_frw_modification.
+    CLEAR et_bopf_modifications.
+
+    ls_modification-node        = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( ).
+    ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+    APPEND ls_modification TO et_bopf_modifications.
+  ENDMETHOD.
+
+  METHOD prepare_create_by_association.
+    cl_abap_unit_assert=>assert_not_initial( iv_association_name ).
+    cl_abap_unit_assert=>assert_not_initial( it_bopf_source_keys ).
+  ENDMETHOD.
+
+  METHOD prepare_delete.
+    cl_abap_unit_assert=>assert_not_initial( it_entity_key_values ).
+    et_bopf_keys = it_entity_key_values.
+  ENDMETHOD.
+
+  METHOD prepare_execute.
+    cl_abap_unit_assert=>assert_not_initial( it_entity_key_values ).
+    cl_abap_unit_assert=>assert_not_initial( iv_action_name ).
+    CASE iv_action_name.
+      WHEN ltc_batch=>gc_action_name_bo1.
+        ev_bopf_action_key = ltc_batch=>gc_action_key_bo1.
+      WHEN ltc_batch=>gc_action_name_bo2.
+        ev_bopf_action_key = ltc_batch=>gc_action_key_bo2.
+      WHEN OTHERS.
+        cl_abap_unit_assert=>fail( msg = 'unknown action name' ).
+    ENDCASE.
+    et_bopf_keys = it_entity_key_values.
+  ENDMETHOD.
+
+  METHOD prepare_update.
+    DATA ls_modification TYPE /bobf/s_frw_modification.
+    DATA lv_key TYPE /bobf/s_frw_key.
+    FIELD-SYMBOLS: <lt_bopf_data> TYPE STANDARD TABLE,
+                   <ls_bopf_data> TYPE any.
+
+    cl_abap_unit_assert=>assert_not_initial( it_entity_data ).
+
+    CLEAR et_bopf_keys.
+    CLEAR et_bopf_modifications.
+    CLEAR et_failed_converted.
+
+    ASSIGN it_entity_data TO <lt_bopf_data>.
+
+    CASE mo_sadl_entity->get_id( ).
+      WHEN ltc_batch=>gc_sadl_entity_id_1.
+        lv_key-key = ltc_batch=>gc_root_key_bo1.
+      WHEN ltc_batch=>gc_sadl_entity_id_2.
+        lv_key-key = ltc_batch=>gc_root_key_bo2.
+      WHEN OTHERS.
+        cl_abap_unit_assert=>fail( msg = 'Unknown entity id').
+    ENDCASE.
+    APPEND lv_key TO et_bopf_keys.
+
+    LOOP AT <lt_bopf_data> ASSIGNING <ls_bopf_data>.
+      ls_modification-node        = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( ).
+      ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_update.
+      APPEND ls_modification TO et_bopf_modifications.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS ltd_bopf_sadl_entity_prov_tra DEFINITION FOR TESTING.
+  PUBLIC SECTION.
+    INTERFACES if_sadl_entity_transact_prov.
+    METHODS constructor.
+  PRIVATE SECTION.
+    DATA mo_provider TYPE REF TO if_sadl_entity_transact_prov.
+ENDCLASS.
+
+CLASS ltd_bopf_sadl_entity_prov_tra IMPLEMENTATION.
+  METHOD constructor.
+    mo_provider = NEW /bobf/cl_sadl_entity_prov_tra( ).
+  ENDMETHOD.
+
+  METHOD if_sadl_entity_transact_prov~get_transactional_runtime.
+    ro_runtime = NEW ltd_sadl_entity_transactional( iv_entity_id = iv_id ).
+  ENDMETHOD.
+
+  METHOD if_sadl_entity_transact_prov~get_transaction_manager.
+    ro_transaction_manager = mo_provider->get_transaction_manager( iv_type = iv_type ).
+  ENDMETHOD.
+ENDCLASS.
+
+
+CLASS ltc_batch IMPLEMENTATION.
+
+  METHOD constructor.
+    DATA(lo_bopf_transaction_mgr) = NEW ltd_bopf_transaction_manager( ).
+
+    mo_sadl_batch_handler =
+     NEW /bobf/cl_sadl_batch_handler( iv_entity_type         = /bobf/if_sadl_c=>gc_entity_type
+                                      io_message_handler             = ltd_sadl_transact_mgr_for_save=>get_instance_for_testing( lo_bopf_transaction_mgr )->get_message_handler( )
+                                      io_sadl_etty_transact_provider = NEW ltd_bopf_sadl_entity_prov_tra( ) ).
+  ENDMETHOD.
+
+
+  METHOD setup.
+    mo_sadl_transaction_mngr = CAST #( ltd_sadl_transact_mgr_for_save=>get_instance_for_testing( EXPORTING io_bopf_transaction_manager =  NEW ltd_bopf_transaction_manager( ) ) ).
+    inject_entity_into_rt( gc_sadl_entity_id_1 ).
+    inject_entity_into_rt( gc_sadl_entity_id_2 ).
+    /bobf/cl_tool_test_manager=>get_manager( )->activate_injections( ).
+  ENDMETHOD.
+
+
+  METHOD execute_2_actions.
+    DATA ls_action TYPE if_sadl_batch=>ty_action.
+    DATA lt_action TYPE if_sadl_batch=>tt_action.
+    DATA ls_root_key TYPE ty_bopf_root.
+
+    FIELD-SYMBOLS <lt_root_keys> TYPE tt_bopf_root.
+    FIELD-SYMBOLS <ls_importing_parameter> TYPE ty_action_parameter.
+
+    "prepare Entity 1:
+    inject_entity_into_rt( gc_sadl_entity_id_1 ).
+    ls_action-entity_id = gc_sadl_entity_id_1.
+    ls_action-name      = gc_action_name_bo1.
+    ls_root_key-key     = gc_root_key_bo1.
+    "add key information
+    CREATE DATA ls_action-rt_key_values TYPE tt_bopf_root.
+    ASSIGN ls_action-rt_key_values->* TO <lt_root_keys>.
+    INSERT ls_root_key INTO TABLE <lt_root_keys>.
+    "add action parameter
+    CREATE DATA ls_action-rs_importing_parameters TYPE ty_action_parameter.
+    ASSIGN ls_action-rs_importing_parameters->* TO <ls_importing_parameter>.
+    <ls_importing_parameter>-indicator   = abap_true.
+    <ls_importing_parameter>-description = 'Parameter'.
+    APPEND ls_action TO lt_action.
+
+    "prepare Entity 2:
+    inject_entity_into_rt( gc_sadl_entity_id_2 ).
+    ls_action-entity_id = gc_sadl_entity_id_2.
+    ls_action-name      = gc_action_name_bo2.
+    ls_root_key-key     = gc_root_key_bo2.
+    "add key information
+    CREATE DATA ls_action-rt_key_values TYPE STANDARD TABLE OF ty_bopf_root.
+    ASSIGN ls_action-rt_key_values->* TO <lt_root_keys>.
+    INSERT ls_root_key INTO TABLE <lt_root_keys>.
+    "add returning parameter
+    CREATE DATA ls_action-r_returning_parameters TYPE tt_returning_parameter.
+    APPEND ls_action TO lt_action.
+
+    mo_sadl_batch_handler->execute_action( EXPORTING it_action = lt_action
+                                           IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+
+  ENDMETHOD.
+
+  METHOD execute_action_activation.
+    DATA ls_action TYPE if_sadl_batch=>ty_action.
+    DATA lt_action TYPE if_sadl_batch=>tt_action.
+
+    DATA ls_root_key TYPE ty_bopf_root.
+
+    FIELD-SYMBOLS <lt_root_keys> TYPE tt_bopf_root.
+
+    inject_entity_into_rt( gc_sadl_entity_id_1 ).
+    ls_action-entity_id = gc_sadl_entity_id_1.
+    ls_action-name      = /bobf/if_conf_cds_link_c=>gc_action_name-draft-activation.
+    ls_root_key-key     = gc_root_key_bo1.
+    "add key information
+    CREATE DATA ls_action-rt_key_values TYPE tt_bopf_root.
+    ASSIGN ls_action-rt_key_values->* TO <lt_root_keys>.
+    INSERT ls_root_key INTO TABLE <lt_root_keys>.
+    APPEND ls_action TO lt_action.
+
+    mo_sadl_batch_handler->execute_action( EXPORTING it_action = lt_action
+                                           IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+  ENDMETHOD.
+
+  METHOD modify_2_root_nodes.
+    DATA ls_update TYPE if_sadl_batch=>ty_update.
+    DATA lt_update TYPE if_sadl_batch=>tt_update.
+    DATA ls_modification TYPE /bobf/cl_sadl_transaction_mngr=>ty_modification.
+    DATA lt_modification TYPE /bobf/cl_sadl_transaction_mngr=>tt_modification.
+    DATA lr_root_data TYPE REF TO ty_sadl_root.
+
+    "prepare Entity 1:
+    modification_update( EXPORTING iv_entity_id = gc_sadl_entity_id_1
+                         IMPORTING es_modification = ls_update ).
+    APPEND ls_update TO lt_update.
+
+    "prepare Entity 2:
+    modification_update( EXPORTING iv_entity_id = gc_sadl_entity_id_2
+                         IMPORTING es_modification = ls_update ).
+    APPEND ls_update TO lt_update.
+
+    mo_sadl_batch_handler->execute( EXPORTING it_update = lt_update
+                                    IMPORTING ev_failed = DATA(lv_failed) ).
+    cl_abap_unit_assert=>assert_false( lv_failed ).
+  ENDMETHOD.
+
+
+  METHOD modification_update.
+    DATA lr_root_data TYPE REF TO ty_sadl_root.
+
+    clear es_modification.
+    CREATE DATA lr_root_data.
+    lr_root_data->description = 'DESCRIPTION UPDATED'.
+    es_modification = VALUE #( entity_id      = iv_entity_id
+                               rs_entity_data = lr_root_data
+                               updated_elements = VALUE #( ( gc_field_name_descr ) ) ).
+  ENDMETHOD.
+
+
+
+
+  METHOD inject_entity_into_rt.
+    DATA ls_frw_bo TYPE /bobf/s_frw_factory.
+    cl_sadl_entity_bo=>get_bo_node_name_by_entity_id( EXPORTING iv_entity_id = iv_sadl_entity_id
+                                                      IMPORTING ev_bo_name   = DATA(lv_bo_name)
+                                                                ev_node_name = DATA(lv_node_name) ).
+    ls_frw_bo-bo_name = lv_bo_name.
+    ls_frw_bo-key     = get_bo_key( iv_sadl_entity_id ).
+    ls_frw_bo-conf    = CAST /bobf/if_frw_configuration( NEW ltd_bopf_configuration( ls_frw_bo-key ) ).
+    ls_frw_bo-bopf    = CAST /bobf/if_frw_service_layer( NEW ltd_bopf_frw( ) ).
+
+    ltd_bopf_frw_factory=>inject_bo( is_bo = ls_frw_bo ).
+    ltd_sadl_entity_rt_access=>inject_bo( iv_sadl_entity_id ).
+  ENDMETHOD.
+
+
+  METHOD get_bo_key.
+    CASE iv_sadl_entity_id.
+      WHEN gc_sadl_entity_id_1.
+        rv_bo_key = gc_key_bo1.
+      WHEN gc_sadl_entity_id_2.
+        rv_bo_key = gc_key_bo2.
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD get_alt_key.
+    CASE iv_sadl_entity_id.
+      WHEN gc_sadl_entity_id_1.
+        rv_alt_key = gc_alt_key_root_bo1.
+      WHEN gc_sadl_entity_id_2.
+        rv_alt_key = gc_alt_key_root_bo2.
+    ENDCASE.
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+
+
+CLASS ltd_bopf_configuration IMPLEMENTATION.
+  METHOD constructor.
+    super->constructor( iv_bo_key ).
+    ms_obj-bo_key = iv_bo_key.
+    mr_root_node = new #( ).
+    mr_root_node->* = /bobf/if_frw_configuration~get_root_node( ).
+  ENDMETHOD.
+
+  METHOD /bobf/if_frw_configuration~query_node.
+    IF mv_bo_key = ltc_batch=>gc_key_bo1.
+      ev_node_key = ltc_batch=>gc_id_root_bo1.
+    ELSEIF mv_bo_key = ltc_batch=>gc_key_bo2.
+      ev_node_key = ltc_batch=>gc_id_root_bo2.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD /bobf/if_frw_configuration~get_node.
+    DATA ls_node TYPE /bobf/s_confro_node.
+
+    IF iv_node_key = ltc_batch=>gc_id_root_bo1.
+      es_node-node_name     = get_node_name_by_node_key( iv_node_key ).
+      es_node-node_key      = iv_node_key.
+      es_node-root_node_key = iv_node_key.
+    ELSEIF iv_node_key = ltc_batch=>gc_id_root_bo2.
+      es_node-node_name     = get_node_name_by_node_key( iv_node_key ).
+      es_node-node_key      = iv_node_key.
+      es_node-root_node_key = iv_node_key.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD /bobf/if_frw_configuration~get_root_node.
+    /bobf/if_frw_configuration~get_node(
+      EXPORTING
+        iv_node_key = ms_obj-root_node_key
+      IMPORTING
+        es_node     = rs_root_node
+    ).
+  ENDMETHOD.
+
+  METHOD /bobf/if_frw_configuration~query_action.
+    IF mv_bo_key = ltc_batch=>gc_key_bo1.
+      ev_act_key = ltc_batch=>gc_action_key_bo1.
+    ELSEIF mv_bo_key = ltc_batch=>gc_key_bo2.
+      ev_act_key = ltc_batch=>gc_action_key_bo2.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD /bobf/if_frw_configuration~get_act.
+    es_action-act_key = iv_act_key.
+    CASE iv_act_key.
+      WHEN ltc_batch=>gc_action_key_bo1.
+        es_action-node_key = ltc_batch=>gc_id_root_bo1.
+        es_action-act_name = ltc_batch=>gc_action_name_bo1.
+      WHEN ltc_batch=>gc_action_key_bo2.
+        es_action-node_key = ltc_batch=>gc_id_root_bo2.
+        es_action-act_name = ltc_batch=>gc_action_name_bo2.
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD /bobf/if_frw_configuration~get_bo.
+    CLEAR es_obj.
+    es_obj-bo_name = get_bo_name_by_bo_key( mv_bo_key ).
+    es_obj-bo_key  = mv_bo_key.
+  ENDMETHOD.
+
+  METHOD get_bo_name_by_bo_key.
+    CASE iv_bo_key.
+      WHEN ltc_batch=>gc_key_bo1.
+        cl_sadl_entity_bo=>get_bo_node_name_by_entity_id( EXPORTING iv_entity_id = ltc_batch=>gc_sadl_entity_id_1
+                                                          IMPORTING ev_bo_name   = DATA(lv_bo_name) ).
+      WHEN ltc_batch=>gc_key_bo2.
+        cl_sadl_entity_bo=>get_bo_node_name_by_entity_id( EXPORTING iv_entity_id = ltc_batch=>gc_sadl_entity_id_2
+                                                          IMPORTING ev_bo_name   = lv_bo_name ).
+    ENDCASE.
+    ro_bo_name = lv_bo_name.
+  ENDMETHOD.
+
+  METHOD get_node_name_by_node_key.
+    CASE iv_node_key.
+      WHEN ltc_batch=>gc_id_root_bo1.
+        cl_sadl_entity_bo=>get_bo_node_name_by_entity_id( EXPORTING iv_entity_id = ltc_batch=>gc_sadl_entity_id_1
+                                                          IMPORTING ev_node_name = DATA(lv_node_name) ).
+      WHEN ltc_batch=>gc_id_root_bo2.
+        cl_sadl_entity_bo=>get_bo_node_name_by_entity_id( EXPORTING iv_entity_id = ltc_batch=>gc_sadl_entity_id_2
+                                                          IMPORTING ev_node_name = lv_node_name ).
+    ENDCASE.
+    rv_node_name = lv_node_name.
+  ENDMETHOD.
+
+ENDCLASS.
+
+
+
+
+
+
+CLASS ltd_bopf_sadl_message_handler DEFINITION INHERITING FROM /bobf/cl_sadl_message_handler FOR TESTING.
+  PUBLIC SECTION.
+    CLASS-METHODS inject.
+    CLASS-METHODS clear_registry.
+  PROTECTED SECTION.
+    METHODS map_location_to_sadl REDEFINITION.
+    METHODS pre_read_message_locations REDEFINITION.
+ENDCLASS.
+CLASS ltd_bopf_sadl_message_handler IMPLEMENTATION.
+  METHOD inject.
+    CLEAR mt_instance_registry.
+    INSERT VALUE #( entity_type = cl_sadl_entity_factory=>co_type-cds
+                    instance = NEW ltd_bopf_sadl_message_handler( iv_entity_type = cl_sadl_entity_factory=>co_type-cds ) )
+      INTO TABLE mt_instance_registry.
+  ENDMETHOD.
+
+  METHOD map_location_to_sadl.
+    CLEAR et_locations.
+    APPEND VALUE #( primary_key_values = NEW i( ) ) TO et_locations.
+  ENDMETHOD.
+
+  METHOD pre_read_message_locations.
+  ENDMETHOD.
+
+  METHOD clear_registry.
+    CLEAR mt_instance_registry.
+  ENDMETHOD.
+ENDCLASS.

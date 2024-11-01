@@ -1,0 +1,2130 @@
+class /BOBF/CL_FRW_CHANGE definition
+  public
+  final
+  create public .
+
+public section.
+  type-pools ABAP .
+
+  interfaces /BOBF/IF_FRW_CHANGE .
+  interfaces IF_SERIALIZABLE_OBJECT .
+  interfaces /BOBF/IF_TRA_CLONE .
+
+  aliases ADD_CHANGE
+    for /BOBF/IF_FRW_CHANGE~ADD_CHANGE .
+  aliases CONDENSE
+    for /BOBF/IF_FRW_CHANGE~CONDENSE .
+  aliases GET
+    for /BOBF/IF_FRW_CHANGE~GET .
+  aliases GET_CHANGES
+    for /BOBF/IF_FRW_CHANGE~GET_CHANGES .
+  aliases HAS_CHANGES
+    for /BOBF/IF_FRW_CHANGE~HAS_CHANGES .
+  aliases MERGE
+    for /BOBF/IF_FRW_CHANGE~MERGE .
+
+  data MV_EXTERNAL type BOOLE_D read-only .
+
+  methods CLEANUP
+    importing
+      !IV_CHANGE_MODE type /BOBF/CONF_CHANGE_MODE optional .
+  methods CLEAR_EXTERNAL
+    importing
+      !IT_CHANGE type /BOBF/T_FRW_CHANGE optional .
+  methods CONSTRUCTOR
+    importing
+      !IV_EXTERNAL type BOOLE_D default ABAP_TRUE
+      !IT_CHANGE type /BOBF/T_FRW_CHANGE optional
+      !IT_CONTENT_CHANGE type /BOBF/T_FRW_CHANGE_CONTENT optional
+      !IT_CHANGE_LOAD type /BOBF/T_FRW_CHANGE optional
+      !IT_CHANGE_LOAD_KEY type /BOBF/T_FRW_CHANGE optional
+      !IV_RELOAD_INT type BOOLE_D optional
+      !IV_RELOAD_DEL type BOOLE_D optional
+    preferred parameter IT_CHANGE .
+  methods DELETE_FAILED .
+  methods FAILED_MODIFICATIONS
+    importing
+      !IV_CHANGE_MODE type /BOBF/CONF_CHANGE_MODE optional
+      !IS_NODE type /BOBF/S_FRW_NODE optional
+      !IT_NODE_MOD type /BOBF/T_FRW_NODE_MOD optional .
+  methods GET_TRIGGER
+    importing
+      !IV_CHANGE_MODE type /BOBF/CONF_CHANGE_MODE optional
+      !IS_CHANGE_MODE type /BOBF/S_CONFRO_CHG_MODE optional
+      !IV_EXECTIME type /BOBF/CONF_EXECTIME
+      !IV_NODE_KEY type /BOBF/OBM_NODE_KEY
+    exporting
+      !ET_CHANGED_KEY type /BOBF/T_FRW_KEY .
+  methods HAS_UNPROCESSED_CHANGES
+    importing
+      !IV_DET_PROCESSED type BOOLE_D optional
+      !IV_VAL_PROCESSED type BOOLE_D optional
+    returning
+      value(EV_CHANGE) type BOOLE_D .
+  methods PREPARE_FOR_EXPORT .
+  methods SET_ATTRIBUTES_REQUESTED
+    importing
+      !IV_ATTRIBUTES_REQUESTED type BOOLE_D .
+  methods SET_PROCESSED
+    importing
+      !IV_DET_PROCESSED type BOOLE_D optional
+      !IV_VAL_PROCESSED type BOOLE_D optional .
+  interface /BOBF/IF_FRW_C load .
+  methods SORT
+    importing
+      !IV_SORT type /BOBF/FRW_CHANGE_SORT default /BOBF/IF_FRW_C=>SC_CHANGE_SORT_COMPLETE
+    changing
+      !CT_CHANGE type /BOBF/T_FRW_CHANGE optional .
+  methods TRACE_EXTERNAL_CHANGES
+    importing
+      !IV_EXTERNAL_CHANGE type BOOLE_D default ABAP_TRUE .
+  methods EXPORT_CHANGES_FOR_NOTIFY
+    returning
+      value(EO_CHANGE) type ref to /BOBF/IF_FRW_CHANGE .
+  methods HAS_FAILED_CHANGES
+    returning
+      value(EV_FAILED) type BOOLE_D .
+  methods DELETE_DUPLICATE_NOTIFICATIONS .
+  "! This is a method for internal optimization
+  "! This method returns the association sources then deletes the member mt_association_source
+  "! Make sure to convert the returned association sources to content changes and then add them
+  "! using the ADD or ADD_CONTENT_CHANGE method. Otherwise the previously-added association
+  "! sources are gone
+  METHODS get_n_drop_association_sources RETURNING VALUE(rt_association_source) TYPE /bobf/if_frw_change=>tt_association_source.
+protected section.
+*"* protected components of class /BOBF/CL_FRW_CHANGE
+*"* do not include other source files here!!!
+private section.
+
+*"* private components of class /BOBF/CL_FRW_CHANGE
+*"* do not include other source files here!!!
+  data MT_CHANGE type /BOBF/T_FRW_CHANGE .
+  data MT_CHANGE_LOAD type /BOBF/T_FRW_CHANGE .
+  data MT_CHANGE_LOAD_KEY type /BOBF/T_FRW_CHANGE .
+  data MT_CONTENT_CHANGE type /BOBF/T_FRW_CHANGE_CONTENT .
+  data MT_ASSOCIATION_SOURCE type /bobf/if_frw_change=>tt_association_source.
+  data MV_SORTED type /BOBF/FRW_CHANGE_SORT .
+  data MV_RELOAD_DEL type CHAR1 .
+  data MV_RELOAD_INT type CHAR1 .
+
+  methods SET_RELOAD
+    importing
+      !IV_RELOAD type CHAR1
+    changing
+      !CV_RELOAD type CHAR1 .
+
+    "! Call this method after adding content changes.
+    "! The method applies a heuristic to reduce the memory footprint in critical cases while
+    "! at the same time trying not to decrease performance for standard use cases.
+    METHODS optimize_mem_new_notifications IMPORTING iv_number_of_changes_added TYPE i.
+
+    "! Call this method after adding entries to mt_change.
+    "! The method applies a heuristic to reduce the memory footprint in critical cases while
+    "! at the same time trying not to decrease performance for standard use cases.
+    METHODS optimize_mem_new_changes IMPORTING iv_number_of_changes_added TYPE i.
+
+    METHODS check_save_memory IMPORTING iv_number_of_changes_added  TYPE i
+                                            iv_number_of_changes_before TYPE i
+                                  RETURNING VALUE(rv_do_condense)       TYPE abap_bool.
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_FRW_CHANGE IMPLEMENTATION.
+
+
+method /BOBF/IF_FRW_CHANGE~ADD.
+* add new change lines and set MV_EXTERNAL
+
+  DATA:
+    lv_lines                 TYPE i,
+    lv_reload_int            TYPE char1,
+    lv_reload_del            TYPE char1,
+    ls_change                TYPE /BOBF/S_FRW_CHANGE.
+
+  FIELD-SYMBOLS:
+    <ls_change>              TYPE /BOBF/S_FRW_CHANGE.
+
+  IF it_change IS NOT INITIAL.
+
+    IF it_change_load     IS SUPPLIED
+    OR it_change_load_key IS SUPPLIED.
+*     NEW buffer supports different change tables
+      IF mt_change IS INITIAL.
+        mt_change = it_change.
+*        ls_change-external = mv_external.
+*        MODIFY mt_change FROM ls_change TRANSPORTING external
+*          WHERE external <> mv_external.
+        LOOP AT mt_change ASSIGNING <ls_change>
+          WHERE external <> mv_external.
+          <ls_change>-external = mv_external.
+        ENDLOOP.
+      ELSE.
+        lv_lines = lines( mt_change ).
+        ADD 1 TO lv_lines.
+        APPEND LINES OF it_change TO mt_change.
+        LOOP AT mt_change FROM lv_lines ASSIGNING <ls_change>
+          WHERE external <> mv_external.
+          <ls_change>-external = mv_external.
+        ENDLOOP.
+        optimize_mem_new_changes( iv_number_of_changes_added = lines( it_change ) ).
+      ENDIF.
+      mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_UNSORTED.
+
+*     NEW buffer can mark that change table contains reload lines
+*     set reload flags: X, ' ' or unknown
+      IF iv_reload_int IS SUPPLIED.
+        lv_reload_int = iv_reload_int.
+      ELSE.
+        lv_reload_int = /BOBF/IF_FRW_C=>SC_UNKNOWN.
+      ENDIF.
+      IF iv_reload_del IS SUPPLIED.
+        lv_reload_del = iv_reload_del.
+      ELSE.
+        lv_reload_del = /BOBF/IF_FRW_C=>SC_UNKNOWN.
+      ENDIF.
+      set_reload( EXPORTING iv_reload = lv_reload_int
+                  CHANGING  cv_reload = mv_reload_int ).
+      set_reload( EXPORTING iv_reload = lv_reload_del
+                  CHANGING  cv_reload = mv_reload_del ).
+
+    ELSE.
+*     OLD buffer only supports one common change table -> separate here:
+      DATA(lv_num_new_changes) = 0.
+      LOOP AT it_change INTO ls_change.
+        ls_change-external = mv_external.
+        CASE ls_change-change_mode.
+          WHEN /BOBF/IF_FRW_C=>SC_MODIFY_LOAD.
+            APPEND ls_change TO mt_change_load.
+          WHEN /BOBF/IF_FRW_C=>SC_MODIFY_LOAD_KEY.
+            APPEND ls_change TO mt_change_load_key.
+          WHEN /BOBF/IF_FRW_C=>SC_MODIFY_RELOAD_INT.
+            APPEND ls_change TO mt_change.
+            ADD 1 TO lv_num_new_changes.
+            lv_reload_int = abap_true.
+            mv_sorted     = /BOBF/IF_FRW_C=>SC_CHANGE_UNSORTED.
+          WHEN /BOBF/IF_FRW_C=>SC_MODIFY_RELOAD_INT_DELETE.
+            APPEND ls_change TO mt_change.
+            ADD 1 TO lv_num_new_changes.
+            lv_reload_del = abap_true.
+            mv_sorted     = /BOBF/IF_FRW_C=>SC_CHANGE_UNSORTED.
+          WHEN OTHERS.
+            APPEND ls_change TO mt_change.
+            ADD 1 TO lv_num_new_changes.
+            mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_UNSORTED.
+        ENDCASE.
+      ENDLOOP.
+      optimize_mem_new_changes( lv_num_new_changes ).
+*     set determined flags: X, ' ' as determined in loop above
+      set_reload( EXPORTING iv_reload = lv_reload_int
+                  CHANGING  cv_reload = mv_reload_int ).
+      set_reload( EXPORTING iv_reload = lv_reload_del
+                  CHANGING  cv_reload = mv_reload_del ).
+    ENDIF.
+
+  ENDIF.
+
+  IF mt_association_source IS INITIAL.
+    mt_association_source = it_association_source.
+  ELSE.
+    LOOP AT it_association_source ASSIGNING FIELD-SYMBOL(<ls_association_source>).
+      INSERT <ls_association_source> INTO TABLE mt_association_source.
+    ENDLOOP.
+  ENDIF.
+
+  IF it_content_change IS NOT INITIAL.
+    APPEND LINES OF it_content_change TO mt_content_change.
+    optimize_mem_new_notifications( iv_number_of_changes_added = lines( it_content_change ) ).
+  ENDIF.
+
+  IF it_change_load IS NOT INITIAL.
+    APPEND LINES OF it_change_load TO mt_change_load.
+  ENDIF.
+
+  IF it_change_load_key IS NOT INITIAL.
+    APPEND LINES OF it_change_load_key TO mt_change_load_key.
+  ENDIF.
+
+endmethod.
+
+
+method /BOBF/IF_FRW_CHANGE~ADD_CHANGE.
+
+  DATA: ls_change         TYPE /BOBF/S_FRW_CHANGE,
+        ls_key            TYPE /BOBF/S_FRW_KEY,
+        ls_node           TYPE /BOBF/S_FRW_NODE.
+
+  ls_change-change_mode = iv_change_mode.
+  ls_change-failed      = iv_failed.
+  ls_change-external    = mv_external.
+
+  CASE iv_change_mode.
+*   separately stored internal load changes
+    WHEN /BOBF/IF_FRW_C=>SC_MODIFY_LOAD.
+      IF iv_node_key IS NOT INITIAL.
+        ls_change-node_key = iv_node_key.
+        IF iv_key IS NOT INITIAL.
+          ls_change-key = iv_key.
+          APPEND ls_change TO mt_change_load.
+        ENDIF.
+        LOOP AT it_key INTO ls_key.
+          ls_change-key = ls_key-key.
+          APPEND ls_change TO mt_change_load.
+        ENDLOOP.
+      ENDIF.
+
+      LOOP AT it_node INTO ls_node.
+        ls_change-node_key = ls_node-node.
+        ls_change-key      = ls_node-key.
+        APPEND ls_change TO mt_change_load.
+      ENDLOOP.
+      RETURN.
+
+    WHEN /BOBF/IF_FRW_C=>SC_MODIFY_LOAD_KEY.
+      IF iv_node_key IS NOT INITIAL.
+        ls_change-node_key = iv_node_key.
+        IF iv_key IS NOT INITIAL.
+          ls_change-key = iv_key.
+          APPEND ls_change TO mt_change_load_key.
+        ENDIF.
+        LOOP AT it_key INTO ls_key.
+          ls_change-key = ls_key-key.
+          APPEND ls_change TO mt_change_load_key.
+        ENDLOOP.
+      ENDIF.
+
+      LOOP AT it_node INTO ls_node.
+        ls_change-node_key = ls_node-node.
+        ls_change-key      = ls_node-key.
+        APPEND ls_change TO mt_change_load_key.
+      ENDLOOP.
+      RETURN.
+
+*   all others are stored in common external change table
+  ENDCASE.
+
+  DATA(lv_num_added_changes) = 0.
+  IF iv_node_key IS NOT INITIAL.
+    ls_change-node_key = iv_node_key.
+    IF iv_key IS NOT INITIAL.
+      ls_change-key = iv_key.
+      APPEND ls_change TO mt_change.
+      lv_num_added_changes = 1.
+    ENDIF.
+    LOOP AT it_key INTO ls_key.
+      ls_change-key = ls_key-key.
+      APPEND ls_change TO mt_change.
+    ENDLOOP.
+    lv_num_added_changes = lv_num_added_changes + lines( it_key ).
+  ENDIF.
+
+  LOOP AT it_node INTO ls_node.
+    ls_change-node_key = ls_node-node.
+    ls_change-key      = ls_node-key.
+    APPEND ls_change TO mt_change.
+  ENDLOOP.
+  lv_num_added_changes = lv_num_added_changes + lines( it_node ).
+
+  IF lv_num_added_changes > 0.
+    mv_sorted = /bobf/if_frw_c=>sc_change_unsorted.
+
+    CASE iv_change_mode.
+*   set reload flags if change was added
+      WHEN /bobf/if_frw_c=>sc_modify_reload_int.
+        mv_reload_int = abap_true.
+      WHEN /bobf/if_frw_c=>sc_modify_reload_int_delete.
+        mv_reload_del = abap_true.
+    ENDCASE.
+
+    optimize_mem_new_changes( lv_num_added_changes ).
+  ENDIF.
+
+endmethod.
+
+
+method /BOBF/IF_FRW_CHANGE~ADD_CONTENT_CHANGE.
+
+  DATA: ls_content_change TYPE /BOBF/S_FRW_CHANGE_CONTENT,
+        ls_key            TYPE /BOBF/S_FRW_KEY.
+
+
+  ls_content_change-node_key    = iv_node_key.
+  ls_content_change-change_mode = iv_change_mode.
+  ls_content_change-content_key = iv_content_key.
+
+  IF iv_key IS NOT INITIAL.
+    ls_content_change-key = iv_key.
+    APPEND ls_content_change TO mt_content_change.
+  ENDIF.
+  LOOP AT it_key INTO ls_key.
+    ls_content_change-key = ls_key-key.
+    APPEND ls_content_change TO mt_content_change.
+  ENDLOOP.
+  optimize_mem_new_notifications( iv_number_of_changes_added = lines( it_key ) ). "plus/minus one is OK
+
+endmethod.
+
+
+method /BOBF/IF_FRW_CHANGE~CONDENSE.
+* condense rules:
+
+* failed -> to be deleted
+*    C   -> C                create
+*     D  -> D                delete
+*      U -> U                update
+
+*    C U -> C
+*    CD  ->   no change entries
+*     DU -> D
+*    CDU ->   no change entries
+
+  DATA:
+    lv_create                TYPE i,
+    lv_delete                TYPE i,
+    lv_prev_node_key         TYPE /BOBF/OBM_NODE_KEY,
+    lv_prev_key              TYPE /BOBF/CONF_KEY.
+
+
+  FIELD-SYMBOLS:
+    <ls_change>              TYPE /BOBF/S_FRW_CHANGE.
+
+  IF mv_sorted NE /BOBF/IF_FRW_C=>SC_CHANGE_SORT_COMPLETE.
+    sort( ).
+  ENDIF.
+
+* condense full table (prerequisite: sorted including change mode sequence CDU)
+  LOOP AT mt_change ASSIGNING <ls_change>.
+    IF lv_prev_key <> <ls_change>-key OR
+       lv_prev_node_key <> <ls_change>-node_key.
+      lv_prev_key = <ls_change>-key.
+      lv_prev_node_key = <ls_change>-node_key.
+      CLEAR: lv_create, lv_delete.
+    ENDIF.
+
+    IF <ls_change>-failed = abap_true.
+*     delete failed changes and duplicates
+      DELETE mt_change.
+
+    ELSE.
+      CASE <ls_change>-change_mode.
+        WHEN /BOBF/IF_FRW_C=>SC_MODIFY_CREATE.
+          lv_create = sy-tabix.
+
+        WHEN /BOBF/IF_FRW_C=>SC_MODIFY_DELETE.
+          lv_delete = sy-tabix.
+          IF lv_create > 0.
+*           CD -> nothing, delete both
+            DELETE mt_change.
+            DELETE mt_change INDEX lv_create.
+          ENDIF.
+
+        WHEN /BOBF/IF_FRW_C=>SC_MODIFY_UPDATE.
+          IF lv_create > 0 OR lv_delete > 0.
+*           CU  -> C          DU -> D
+            DELETE mt_change.
+          ENDIF.
+
+      ENDCASE.
+    ENDIF.
+
+  ENDLOOP.
+
+endmethod.
+
+
+method /BOBF/IF_FRW_CHANGE~GET.
+
+  IF et_change IS REQUESTED.
+*   OLD: common merged table required including LOAD and LOADKEY as before
+    IF et_change_load     IS NOT REQUESTED AND
+       et_change_load_key IS NOT REQUESTED AND
+       iv_no_load         = abap_false.
+      IF mt_change_load     IS NOT INITIAL
+      OR mt_change_load_key IS NOT INITIAL.
+        et_change = mt_change.
+        APPEND LINES OF mt_change_load     TO et_change.
+        APPEND LINES OF mt_change_load_key TO et_change.
+*       sort and delete DUPLICATES
+        sort( CHANGING  ct_change = et_change ).
+        ev_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_COMPLETE.
+      ELSE.
+*       only mt_change exported, sort as required,default=complete!!)
+        IF mv_sorted < iv_sorted.
+          sort( iv_sort = iv_sorted ).
+        ENDIF.
+        et_change = mt_change.
+        ev_sorted = mv_sorted.
+      ENDIF.
+
+*   NEW: separate tables required, CHANGE without LOAD/LOADKEY
+    ELSE.
+      IF mv_sorted < iv_sorted.
+        sort( iv_sort = iv_sorted ).
+      ENDIF.
+      et_change = mt_change.
+      ev_sorted = mv_sorted.
+    ENDIF.
+  ENDIF.
+
+  et_change_load        = mt_change_load.
+  et_change_load_key    = mt_change_load_key.
+
+  ev_reload_int         = mv_reload_int.
+  ev_reload_del         = mv_reload_del.
+
+  et_content_change     = mt_content_change.
+  et_association_source = mt_association_source.
+
+endmethod.
+
+
+METHOD /bobf/if_frw_change~get_changes.
+
+* note: 1 sort is slower than 1 loop over full table where
+* SORT only if needed for AT END OF Key logic
+* DUPRECS deleted in smaller export tables
+
+* note: mv_reload can have 3 values: X, ' ' and unknown (?)
+
+  DATA:
+    ls_node              TYPE /bobf/s_frw_node,
+    ls_key               TYPE /bobf/s_frw_key,
+    lv_flag              TYPE boole_d,
+    lv_tabix             TYPE i,
+    lv_create            TYPE i,
+    lv_update            TYPE i,
+    lv_delete            TYPE i,
+    lv_load              TYPE i,
+    lv_lock              TYPE i,
+    lv_check             TYPE i,
+    ls_change_mode       TYPE /bobf/s_confro_chg_mode,
+    ls_change_mode_cud   TYPE /bobf/s_confro_chg_mode.
+
+  FIELD-SYMBOLS:
+    <ls_change>          TYPE /bobf/s_frw_change.
+
+  CLEAR: et_change,
+         et_changed_key,
+         et_changed_node.
+
+  ASSERT ID /bobf/frw
+    CONDITION NOT ( iv_node_key    IS INITIAL AND
+                    et_changed_key IS REQUESTED ).
+* property and association changes are no more supported,
+* stored in mt_content_change separately
+  ASSERT ID /bobf/frw
+    CONDITION ( iv_change_mode NE /bobf/if_frw_c=>sc_modify_property             AND
+                iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_action      AND
+                iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_association AND
+                iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_node_attr   AND
+                iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_node ).
+
+  ASSERT ID /bobf/frw
+    CONDITION is_change_mode-property = abap_false.
+
+  CHECK mt_change          IS NOT INITIAL
+     OR mt_change_load     IS NOT INITIAL
+     OR mt_change_load_key IS NOT INITIAL.
+
+  ls_change_mode = is_change_mode.
+  CLEAR ls_change_mode-load.
+
+* --------------------------------------------------------------------
+* special optimized use cases with just 1 requested export parameter
+* --------------------------------------------------------------------
+* ____________________________________________________________________
+* check for given change modes and node key
+  IF is_change_mode  IS NOT INITIAL   AND
+     iv_node_key     IS NOT INITIAL   AND
+     et_changed_key  IS REQUESTED     AND
+     et_changed_node IS NOT REQUESTED AND
+     et_change       IS NOT REQUESTED.
+
+    IF ls_change_mode IS NOT INITIAL
+    OR ( is_change_mode-load = abap_true AND
+         ( mv_reload_int NE abap_false OR
+           mv_reload_del NE abap_false   ) ).
+*     sort because of END OF KEY logic
+      IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_key.
+        sort( iv_sort = /bobf/if_frw_c=>sc_change_sort_key ).
+      ENDIF.
+
+*     search in change table
+      READ TABLE mt_change BINARY SEARCH
+        WITH KEY node_key = iv_node_key
+        TRANSPORTING NO FIELDS.
+      lv_tabix = sy-tabix.
+      IF sy-subrc = 0.
+        LOOP AT mt_change ASSIGNING <ls_change> FROM lv_tabix.
+          IF <ls_change>-node_key <> iv_node_key.
+            EXIT.
+          ENDIF.
+
+          IF <ls_change>-failed = iv_failed.
+            CASE <ls_change>-change_mode.
+              WHEN /bobf/if_frw_c=>sc_modify_create.
+                lv_create = sy-tabix.
+              WHEN /bobf/if_frw_c=>sc_modify_update.
+                lv_update = sy-tabix.
+              WHEN /bobf/if_frw_c=>sc_modify_delete.
+                lv_delete = sy-tabix.
+              WHEN /bobf/if_frw_c=>sc_modify_reload_int.
+                mv_reload_int = abap_true.
+                lv_load = sy-tabix.
+              WHEN /bobf/if_frw_c=>sc_modify_reload_int_delete.
+                mv_reload_del = abap_true.
+                lv_load = sy-tabix.
+              WHEN /bobf/if_frw_c=>sc_modify_check.
+                lv_check = sy-tabix.
+              WHEN /bobf/if_frw_c=>sc_modify_lock.
+                lv_lock = sy-tabix.
+            ENDCASE.
+          ENDIF.
+
+          AT END OF key.
+            IF lv_create > 0 OR lv_delete > 0.
+              CLEAR lv_update.
+            ENDIF.
+            IF lv_create > 0 AND lv_delete > 0.
+              CLEAR lv_create.
+            ENDIF.
+            IF is_change_mode-create   = abap_true AND lv_create   > 0  OR
+               is_change_mode-update   = abap_true AND lv_update   > 0  OR
+               is_change_mode-delete   = abap_true AND lv_delete   > 0  OR
+               is_change_mode-load     = abap_true AND lv_load     > 0  OR
+               is_change_mode-check    = abap_true AND lv_check    > 0  OR
+               is_change_mode-lock     = abap_true AND lv_lock     > 0.
+
+              ls_key-key = <ls_change>-key.
+              APPEND ls_key TO et_changed_key.
+            ENDIF.
+            CLEAR: lv_create, lv_update, lv_delete, lv_load, lv_check, lv_lock.
+          ENDAT.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+    IF is_change_mode-load = abap_true.
+*     LOAD changes in separate table
+      LOOP AT mt_change_load ASSIGNING <ls_change>
+      WHERE node_key = iv_node_key
+      AND   failed   = iv_failed.
+        ls_key-key = <ls_change>-key.
+        APPEND ls_key TO et_changed_key.
+      ENDLOOP.
+      IF sy-subrc = 0.
+        SORT et_changed_key.
+        DELETE ADJACENT DUPLICATES FROM et_changed_key.
+      ENDIF.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for given change mode (called often from AFTER_LOADING)
+  IF iv_change_mode  IS NOT INITIAL   AND
+     et_changed_node IS REQUESTED     AND
+     et_changed_key  IS NOT REQUESTED AND
+     et_change       IS NOT REQUESTED.
+
+    CASE iv_change_mode.
+      WHEN /bobf/if_frw_c=>sc_modify_load_key.
+        LOOP AT mt_change_load_key ASSIGNING <ls_change>
+        WHERE failed = iv_failed.
+          ls_node-node = <ls_change>-node_key.
+          ls_node-key  = <ls_change>-key.
+          INSERT ls_node INTO TABLE et_changed_node.
+        ENDLOOP.
+
+      WHEN /bobf/if_frw_c=>sc_modify_load.
+        LOOP AT mt_change_load ASSIGNING <ls_change>
+        WHERE failed = iv_failed.
+          ls_node-node = <ls_change>-node_key.
+          ls_node-key  = <ls_change>-key.
+          INSERT ls_node INTO TABLE et_changed_node.
+        ENDLOOP.
+
+        IF mv_reload_del NE abap_false
+        OR mv_reload_int NE abap_false.
+          LOOP AT mt_change ASSIGNING <ls_change>
+          WHERE failed = iv_failed
+          AND  ( change_mode = /bobf/if_frw_c=>sc_modify_reload_int
+          OR     change_mode = /bobf/if_frw_c=>sc_modify_reload_int_delete ).
+            ls_node-node = <ls_change>-node_key.
+            ls_node-key  = <ls_change>-key.
+            INSERT ls_node INTO TABLE et_changed_node.
+          ENDLOOP.
+        ENDIF.
+
+      WHEN OTHERS.
+        LOOP AT mt_change ASSIGNING <ls_change>
+        WHERE failed      = iv_failed
+        AND   change_mode = iv_change_mode.
+          ls_node-node = <ls_change>-node_key.
+          ls_node-key  = <ls_change>-key.
+          INSERT ls_node INTO TABLE et_changed_node.
+        ENDLOOP.
+    ENDCASE.
+    IF et_changed_node IS NOT INITIAL.
+      DELETE ADJACENT DUPLICATES FROM et_changed_node.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for given change mode and node key
+  IF iv_change_mode  IS NOT INITIAL   AND
+     iv_node_key     IS NOT INITIAL   AND
+     et_changed_key  IS REQUESTED     AND
+     et_changed_node IS NOT REQUESTED AND
+     et_change       IS NOT REQUESTED.
+
+    CASE iv_change_mode.
+      WHEN /bobf/if_frw_c=>sc_modify_load.
+        LOOP AT mt_change_load ASSIGNING <ls_change>
+        WHERE node_key = iv_node_key
+        AND   failed   = iv_failed.
+          ls_key-key = <ls_change>-key.
+          APPEND ls_key TO et_changed_key.
+        ENDLOOP.
+        IF mv_reload_int NE abap_false
+        OR mv_reload_del NE abap_false.
+          LOOP AT mt_change ASSIGNING <ls_change>
+          WHERE node_key    = iv_node_key
+          AND   failed      = iv_failed
+          AND  (  change_mode = /bobf/if_frw_c=>sc_modify_reload_int
+          OR      change_mode = /bobf/if_frw_c=>sc_modify_reload_int_delete ).
+            ls_key-key = <ls_change>-key.
+            APPEND ls_key TO et_changed_key.
+          ENDLOOP.
+        ENDIF.
+        SORT et_changed_key.
+        DELETE ADJACENT DUPLICATES FROM et_changed_key.
+
+      WHEN /bobf/if_frw_c=>sc_modify_load_key.
+        LOOP AT mt_change_load_key ASSIGNING <ls_change>
+        WHERE node_key = iv_node_key
+        AND   failed   = iv_failed.
+          ls_key-key = <ls_change>-key.
+          APPEND ls_key TO et_changed_key.
+        ENDLOOP.
+        SORT et_changed_key.
+        DELETE ADJACENT DUPLICATES FROM et_changed_key.
+
+      WHEN OTHERS.
+        IF mv_sorted = /bobf/if_frw_c=>sc_change_unsorted.
+          LOOP AT mt_change ASSIGNING <ls_change>
+          WHERE node_key    = iv_node_key
+          AND   failed      = iv_failed
+          AND   change_mode = iv_change_mode.
+            ls_key-key = <ls_change>-key.
+            APPEND ls_key TO et_changed_key.
+          ENDLOOP.
+          SORT et_changed_key.
+          DELETE ADJACENT DUPLICATES FROM et_changed_key.
+        ELSE.
+          READ TABLE mt_change BINARY SEARCH
+            WITH KEY node_key = iv_node_key
+            TRANSPORTING NO FIELDS.
+          IF sy-subrc = 0.
+            lv_tabix = sy-tabix.
+            LOOP AT mt_change ASSIGNING <ls_change> FROM lv_tabix
+              WHERE failed = iv_failed
+              AND   change_mode = iv_change_mode.
+              IF <ls_change>-node_key <> iv_node_key.
+                EXIT.
+              ENDIF.
+              ls_key-key = <ls_change>-key.
+              APPEND ls_key TO et_changed_key.
+            ENDLOOP.
+            IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_key.
+              SORT et_changed_key BY key.
+            ENDIF.
+            DELETE ADJACENT DUPLICATES FROM et_changed_key.
+          ENDIF.
+        ENDIF.
+    ENDCASE.
+    RETURN.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for given change modes
+  IF is_change_mode  IS NOT INITIAL   AND
+     iv_node_key     IS INITIAL       AND
+     et_change       IS REQUESTED     AND
+     et_changed_node IS NOT REQUESTED AND
+     et_changed_key  IS NOT REQUESTED.
+
+    ls_change_mode_cud-create = abap_true.
+    ls_change_mode_cud-update = abap_true.
+    ls_change_mode_cud-delete = abap_true.
+
+    IF is_change_mode = ls_change_mode_cud.
+*     speed up call from do_determination
+      et_change = mt_change.   "get nearly all changes
+      DELETE et_change         "just delete few entries
+      WHERE  ( ( change_mode NE /bobf/if_frw_c=>sc_modify_create AND
+                 change_mode NE /bobf/if_frw_c=>sc_modify_delete AND
+                 change_mode NE /bobf/if_frw_c=>sc_modify_update )
+               OR
+               failed        NE iv_failed  ).
+
+      IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_complete.
+        sort( CHANGING ct_change = et_change ).
+      ENDIF.
+      RETURN.
+
+    ELSE.
+*     general case
+      IF ls_change_mode IS NOT INITIAL
+      OR ( is_change_mode-load = abap_true AND
+           ( mv_reload_int NE abap_false OR
+             mv_reload_del NE abap_false  )   ).
+        lv_flag = abap_false.
+        LOOP AT mt_change ASSIGNING <ls_change>
+        WHERE failed = iv_failed.
+          CASE <ls_change>-change_mode.
+            WHEN /bobf/if_frw_c=>sc_modify_create.
+              lv_flag = is_change_mode-create.
+            WHEN /bobf/if_frw_c=>sc_modify_update.
+              lv_flag = is_change_mode-update.
+            WHEN /bobf/if_frw_c=>sc_modify_delete.
+              lv_flag = is_change_mode-delete.
+            WHEN /bobf/if_frw_c=>sc_modify_reload_int.
+              lv_flag = is_change_mode-load.
+              mv_reload_int = abap_true.
+            WHEN /bobf/if_frw_c=>sc_modify_reload_int_delete.
+              lv_flag = is_change_mode-load.
+              mv_reload_del = abap_true.
+            WHEN /bobf/if_frw_c=>sc_modify_check.
+              lv_flag = is_change_mode-check.
+            WHEN /bobf/if_frw_c=>sc_modify_lock.
+              lv_flag = is_change_mode-lock.
+
+            WHEN OTHERS.
+              lv_flag = abap_false.
+          ENDCASE.
+          IF lv_flag EQ abap_true.
+            APPEND <ls_change> TO et_change.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+
+      lv_flag = abap_false.
+      IF is_change_mode-load = abap_true.
+        LOOP AT mt_change_load ASSIGNING <ls_change>
+        WHERE failed = iv_failed.
+          APPEND <ls_change> TO et_change.
+        ENDLOOP.
+        IF sy-subrc = 0.
+          lv_flag = abap_true.  "Load added
+        ENDIF.
+      ENDIF.
+
+*     delete duprecs if LOADs added or CHANGE not sorted completely
+      IF et_change IS NOT INITIAL.
+        IF lv_flag   = abap_true  "LOADs added
+        OR mv_sorted < /bobf/if_frw_c=>sc_change_sort_complete.
+          sort( CHANGING ct_change = et_change ).
+        ENDIF.
+      ENDIF.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for given change modes
+  IF is_change_mode  IS NOT INITIAL   AND
+     et_changed_node IS REQUESTED     AND
+     et_changed_key  IS NOT REQUESTED AND
+     et_change       IS NOT REQUESTED.
+
+    IF ls_change_mode IS NOT INITIAL
+    OR ( is_change_mode-load = abap_true AND
+         ( mv_reload_int NE abap_false OR
+           mv_reload_del NE abap_false  )   ).
+      LOOP AT mt_change ASSIGNING <ls_change>
+      WHERE failed = iv_failed.
+        CASE <ls_change>-change_mode.
+          WHEN /bobf/if_frw_c=>sc_modify_create.
+            lv_flag = is_change_mode-create.
+          WHEN /bobf/if_frw_c=>sc_modify_update.
+            lv_flag = is_change_mode-update.
+          WHEN /bobf/if_frw_c=>sc_modify_delete.
+            lv_flag = is_change_mode-delete.
+          WHEN /bobf/if_frw_c=>sc_modify_reload_int.
+            lv_flag = is_change_mode-load.
+            mv_reload_int = abap_true.
+          WHEN /bobf/if_frw_c=>sc_modify_reload_int_delete.
+            lv_flag = is_change_mode-load.
+            mv_reload_del = abap_true.
+          WHEN /bobf/if_frw_c=>sc_modify_check.
+            lv_flag = is_change_mode-check.
+          WHEN /bobf/if_frw_c=>sc_modify_lock.
+            lv_flag = is_change_mode-lock.
+          WHEN OTHERS.
+            CLEAR lv_flag.
+        ENDCASE.
+        IF lv_flag EQ abap_true.
+          ls_node-node = <ls_change>-node_key.
+          ls_node-key  = <ls_change>-key.
+          INSERT ls_node INTO TABLE et_changed_node.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+    IF is_change_mode-load = abap_true.
+      LOOP AT mt_change_load ASSIGNING <ls_change>
+      WHERE failed = iv_failed.
+        ls_node-node = <ls_change>-node_key.
+        ls_node-key  = <ls_change>-key.
+        INSERT ls_node INTO TABLE et_changed_node.
+      ENDLOOP.
+    ENDIF.
+    DELETE ADJACENT DUPLICATES FROM et_changed_node.
+    RETURN.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for all change modes
+  IF iv_change_mode  IS INITIAL       AND
+     is_change_mode  IS INITIAL       AND
+     iv_node_key     IS INITIAL       AND
+     et_changed_node IS REQUESTED     AND
+     et_changed_key  IS NOT REQUESTED AND
+     et_change       IS NOT REQUESTED.
+
+    LOOP AT mt_change ASSIGNING <ls_change>
+    WHERE failed = iv_failed.
+      ls_node-node = <ls_change>-node_key.
+      ls_node-key  = <ls_change>-key.
+      INSERT ls_node INTO TABLE et_changed_node.
+    ENDLOOP.
+    LOOP AT mt_change_load ASSIGNING <ls_change>
+    WHERE failed = iv_failed.
+      ls_node-node = <ls_change>-node_key.
+      ls_node-key  = <ls_change>-key.
+      INSERT ls_node INTO TABLE et_changed_node.
+    ENDLOOP.
+    LOOP AT mt_change_load_key ASSIGNING <ls_change>
+    WHERE failed = iv_failed.
+      ls_node-node = <ls_change>-node_key.
+      ls_node-key  = <ls_change>-key.
+      INSERT ls_node INTO TABLE et_changed_node.
+    ENDLOOP.
+    DELETE ADJACENT DUPLICATES FROM et_changed_node.
+    RETURN.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for all changed keys of node
+  IF iv_change_mode  IS INITIAL       AND
+     is_change_mode  IS INITIAL       AND
+     iv_node_key     IS NOT INITIAL   AND
+     et_changed_key  IS REQUESTED     AND
+     et_changed_node IS NOT REQUESTED AND
+     et_change       IS NOT REQUESTED.
+
+*   LOAD changes in separate table
+    LOOP AT mt_change_load ASSIGNING <ls_change>
+    WHERE node_key = iv_node_key
+    AND   failed   = iv_failed.
+      ls_key-key = <ls_change>-key.
+      APPEND ls_key TO et_changed_key.
+    ENDLOOP.
+    LOOP AT mt_change_load_key ASSIGNING <ls_change>
+    WHERE node_key = iv_node_key
+    AND   failed   = iv_failed.
+      ls_key-key = <ls_change>-key.
+      APPEND ls_key TO et_changed_key.
+    ENDLOOP.
+
+    IF mv_sorted = /bobf/if_frw_c=>sc_change_unsorted.
+      LOOP AT mt_change ASSIGNING <ls_change>
+        WHERE node_key = iv_node_key
+          AND failed   = iv_failed.
+        ls_key-key = <ls_change>-key.
+        APPEND ls_key TO et_changed_key.
+      ENDLOOP.
+      SORT et_changed_key.
+      DELETE ADJACENT DUPLICATES FROM et_changed_key.
+    ELSE.
+      READ TABLE mt_change BINARY SEARCH
+      WITH KEY node_key = iv_node_key
+      TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0.
+        lv_tabix = sy-tabix.
+        CLEAR lv_flag.
+        IF et_changed_key IS NOT INITIAL.
+          lv_flag = abap_true.
+        ENDIF.
+        LOOP AT mt_change ASSIGNING <ls_change> FROM lv_tabix
+          WHERE failed EQ iv_failed.
+          IF <ls_change>-node_key <> iv_node_key.
+            EXIT.
+          ENDIF.
+          ls_key-key = <ls_change>-key.
+          APPEND ls_key TO et_changed_key.
+        ENDLOOP.
+        IF et_changed_key IS NOT INITIAL.
+          IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_key
+          OR lv_flag = abap_true.
+            SORT et_changed_key BY key.
+          ENDIF.
+          DELETE ADJACENT DUPLICATES FROM et_changed_key.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+* --------------------------------------------------------------------
+* common coding  for all other use cases
+* --------------------------------------------------------------------
+  CLEAR lv_flag.
+  LOOP AT mt_change ASSIGNING <ls_change>
+  WHERE failed = iv_failed.
+    IF ( iv_node_key IS INITIAL OR
+         iv_node_key = <ls_change>-node_key )
+       AND
+       ( iv_change_mode IS INITIAL AND
+         is_change_mode IS INITIAL
+         OR
+         iv_change_mode = <ls_change>-change_mode
+         OR
+         is_change_mode IS NOT INITIAL AND
+         ( is_change_mode-create = abap_true AND
+           <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_create            OR
+           is_change_mode-update = abap_true AND
+           <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_update            OR
+           is_change_mode-delete = abap_true AND
+           <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_delete            OR
+           is_change_mode-load = abap_true AND
+           ( <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_reload_int OR
+             <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_reload_int_delete ) OR
+           is_change_mode-check = abap_true AND
+           <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_check             OR
+           is_change_mode-lock = abap_true AND
+           <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_lock     ) ).
+
+*     found one
+      IF et_changed_key IS REQUESTED AND
+         iv_node_key IS NOT INITIAL.
+        ls_key-key = <ls_change>-key.
+        APPEND ls_key TO et_changed_key.
+      ENDIF.
+      IF et_changed_node IS REQUESTED.
+        ls_node-node = <ls_change>-node_key.
+        ls_node-key  = <ls_change>-key.
+        INSERT ls_node INTO TABLE et_changed_node.
+      ENDIF.
+      IF et_change IS REQUESTED.
+        INSERT <ls_change> INTO TABLE et_change.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  IF ( iv_change_mode IS INITIAL AND
+       is_change_mode IS INITIAL )
+  OR iv_change_mode = /bobf/if_frw_c=>sc_modify_load
+  OR is_change_mode-load = abap_true.
+    LOOP AT mt_change_load ASSIGNING <ls_change>
+    WHERE failed = iv_failed.
+      IF iv_node_key IS INITIAL OR
+         iv_node_key = <ls_change>-node_key.
+*       found one
+        IF et_changed_key IS REQUESTED AND
+           iv_node_key IS NOT INITIAL.
+          ls_key-key = <ls_change>-key.
+          APPEND ls_key TO et_changed_key.
+          lv_flag = abap_true.
+        ENDIF.
+        IF et_changed_node IS REQUESTED.
+          ls_node-node = <ls_change>-node_key.
+          ls_node-key  = <ls_change>-key.
+          INSERT ls_node INTO TABLE et_changed_node.
+        ENDIF.
+        IF et_change IS REQUESTED.
+          INSERT <ls_change> INTO TABLE et_change.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+* delete duprecs
+  IF et_changed_key IS NOT INITIAL.
+    IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_key
+    OR lv_flag = abap_true.
+      SORT et_changed_key BY key.
+    ENDIF.
+    DELETE ADJACENT DUPLICATES FROM et_changed_key.
+  ENDIF.
+
+  IF et_change IS NOT INITIAL.
+    sort( CHANGING ct_change = et_change ).
+  ENDIF.
+
+  IF et_changed_node IS NOT INITIAL.
+    DELETE ADJACENT DUPLICATES FROM et_changed_node.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD /bobf/if_frw_change~has_changes.
+
+  ev_exist = abap_false.
+
+  CHECK mt_change          IS NOT INITIAL
+     OR mt_change_load     IS NOT INITIAL
+     OR mt_change_load_key IS NOT INITIAL
+     OR mt_content_change  IS NOT INITIAL.
+
+  CASE iv_change_mode.
+
+    WHEN space.
+      ev_exist = abap_true.
+      RETURN.
+
+    WHEN /bobf/if_frw_c=>sc_modify_property             OR
+         /bobf/if_frw_c=>sc_modify_property_action      OR
+         /bobf/if_frw_c=>sc_modify_property_association OR
+         /bobf/if_frw_c=>sc_modify_property_node        OR
+         /bobf/if_frw_c=>sc_modify_property_node_attr   OR
+         /bobf/if_frw_c=>sc_modify_association.
+
+      READ TABLE mt_content_change TRANSPORTING NO FIELDS
+           WITH KEY change_mode = iv_change_mode.
+
+    WHEN /bobf/if_frw_c=>sc_modify_load.
+      CHECK mt_change_load IS NOT INITIAL.
+      CASE iv_selection.
+        WHEN /bobf/if_frw_c=>sc_change_all.
+          ev_exist = abap_true.
+          RETURN.
+
+        WHEN /bobf/if_frw_c=>sc_change_failed_only.
+          READ TABLE mt_change_load TRANSPORTING NO FIELDS
+            WITH KEY failed = abap_true.
+
+        WHEN /bobf/if_frw_c=>sc_change_succ_only.
+          READ TABLE mt_change_load TRANSPORTING NO FIELDS
+            WITH KEY failed = abap_false.
+      ENDCASE.
+
+    WHEN /bobf/if_frw_c=>sc_modify_load_key.
+      CHECK mt_change_load_key IS NOT INITIAL.
+      CASE iv_selection.
+        WHEN /bobf/if_frw_c=>sc_change_all.
+          ev_exist = abap_true.
+          RETURN.
+
+        WHEN /bobf/if_frw_c=>sc_change_failed_only.
+          READ TABLE mt_change_load_key TRANSPORTING NO FIELDS
+            WITH KEY failed = abap_true.
+
+        WHEN /bobf/if_frw_c=>sc_change_succ_only.
+          READ TABLE mt_change_load_key TRANSPORTING NO FIELDS
+            WITH KEY failed = abap_false.
+      ENDCASE.
+
+    WHEN /bobf/if_frw_c=>sc_modify_reload_int.
+      CHECK mv_reload_int NE abap_false.
+      CASE iv_selection.
+        WHEN /bobf/if_frw_c=>sc_change_all.
+          IF mv_reload_int = abap_true.
+            ev_exist = abap_true.
+            RETURN.
+          ELSE.   "unknown case
+            READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode.
+          ENDIF.
+
+        WHEN /bobf/if_frw_c=>sc_change_failed_only.
+          READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode
+                     failed      = abap_true.
+
+        WHEN /bobf/if_frw_c=>sc_change_succ_only.
+          READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode
+                     failed      = abap_false.
+      ENDCASE.
+      IF sy-subrc = 0.
+        mv_reload_int = abap_true.
+      ENDIF.
+
+    WHEN /bobf/if_frw_c=>sc_modify_reload_int_delete.
+      CHECK mv_reload_del NE abap_false.
+      CASE iv_selection.
+        WHEN /bobf/if_frw_c=>sc_change_all.
+          IF mv_reload_del = abap_true.
+            ev_exist = abap_true.
+            RETURN.
+          ELSE.   "unknown case
+            READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode.
+          ENDIF.
+
+        WHEN /bobf/if_frw_c=>sc_change_failed_only.
+          READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode
+                     failed      = abap_true.
+
+        WHEN /bobf/if_frw_c=>sc_change_succ_only.
+          READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode
+                     failed      = abap_false.
+      ENDCASE.
+      IF sy-subrc = 0.
+        mv_reload_del = abap_true.
+      ENDIF.
+
+    WHEN /bobf/if_frw_c=>sc_modify.
+      " check if there content changes or changes
+      " (used by service manager)
+      IF lines( mt_change ) = 0 AND lines( mt_content_change ) = 0.
+        ev_exist = abap_false.
+      ELSE.
+        ev_exist = abap_true.
+      ENDIF.
+      RETURN.
+
+    WHEN /bobf/if_frw_c=>sc_modify_c_u_d.
+      CONSTANTS lc_CREATE_UPDATE_DELETE TYPE string VALUE 'CUD'. "#EC NOTEXT
+      " check if changes (creates, updates or deletes) do exist
+      CASE iv_selection.
+        WHEN /bobf/if_frw_c=>sc_change_all.
+          LOOP AT mt_change TRANSPORTING NO FIELDS WHERE change_mode CA lc_create_update_delete.
+            ev_exist = abap_true. RETURN.
+          ENDLOOP.
+        WHEN /bobf/if_frw_c=>sc_change_failed_only.
+          LOOP AT mt_change TRANSPORTING NO FIELDS WHERE change_mode CA lc_create_update_delete AND failed = abap_true.
+            ev_exist = abap_true. RETURN.
+          ENDLOOP.
+        WHEN /bobf/if_frw_c=>sc_change_succ_only.
+          LOOP AT mt_change TRANSPORTING NO FIELDS WHERE change_mode CA lc_create_update_delete AND failed = abap_false.
+            ev_exist = abap_true. RETURN.
+          ENDLOOP.
+      ENDCASE.
+
+    WHEN OTHERS.
+      CASE iv_selection.
+        WHEN /bobf/if_frw_c=>sc_change_all.
+          READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode.
+
+        WHEN /bobf/if_frw_c=>sc_change_failed_only.
+          READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode
+                     failed      = abap_true.
+
+        WHEN /bobf/if_frw_c=>sc_change_succ_only.
+          READ TABLE mt_change TRANSPORTING NO FIELDS
+            WITH KEY change_mode = iv_change_mode
+                     failed      = abap_false.
+      ENDCASE.
+
+  ENDCASE.
+
+  IF sy-subrc = 0.
+    ev_exist = abap_true.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD /bobf/if_frw_change~merge.
+
+  DATA: lv_sorted             TYPE /bobf/frw_change_sort,
+        lt_change             TYPE /bobf/t_frw_change,
+        lt_change_load        TYPE /bobf/t_frw_change,
+        lt_change_load_key    TYPE /bobf/t_frw_change,
+        lt_content_change     TYPE /bobf/t_frw_change_content,
+        lt_association_source TYPE /bobf/if_frw_change=>tt_association_source,
+        lv_reload_del         TYPE boole_d,
+        lv_reload_int         TYPE boole_d.
+
+  CHECK io_change IS BOUND AND
+        io_change <> me.
+
+  io_change->get(
+    EXPORTING iv_sorted             = /bobf/if_frw_c=>sc_change_unsorted
+    IMPORTING et_change             = lt_change
+              et_change_load        = lt_change_load
+              et_change_load_key    = lt_change_load_key
+              et_content_change     = lt_content_change
+              et_association_source = lt_association_source
+              ev_sorted             = lv_sorted
+              ev_reload_int         = lv_reload_int
+              ev_reload_del         = lv_reload_del ).
+
+  IF lt_change IS NOT INITIAL.
+    IF mt_change IS INITIAL.
+      mt_change = lt_change.
+      mv_sorted = lv_sorted.
+    ELSE.
+      APPEND LINES OF lt_change TO mt_change.
+      mv_sorted = /bobf/if_frw_c=>sc_change_unsorted.
+      optimize_mem_new_changes( iv_number_of_changes_added = lines( lt_change ) ).
+    ENDIF.
+  ENDIF.
+
+  IF lt_content_change IS NOT INITIAL.
+    APPEND LINES OF lt_content_change TO mt_content_change.
+    optimize_mem_new_notifications( iv_number_of_changes_added = lines( lt_content_change ) ).
+  ENDIF.
+
+  IF mt_association_source IS INITIAL.
+    mt_association_source = lt_association_source.
+  ELSE.
+    LOOP AT lt_association_source ASSIGNING FIELD-SYMBOL(<ls_association_source>).
+      INSERT <ls_association_source> INTO TABLE mt_association_source.
+    ENDLOOP.
+  ENDIF.
+
+  IF lt_change_load IS NOT INITIAL.
+    APPEND LINES OF lt_change_load TO mt_change_load.
+  ENDIF.
+
+  IF lt_change_load_key IS NOT INITIAL.
+    APPEND LINES OF lt_change_load_key TO mt_change_load_key.
+  ENDIF.
+
+  set_reload( EXPORTING iv_reload = lv_reload_int
+              CHANGING  cv_reload = mv_reload_int ).
+  set_reload( EXPORTING iv_reload = lv_reload_del
+              CHANGING  cv_reload = mv_reload_del ).
+
+ENDMETHOD.
+
+
+method /BOBF/IF_TRA_CLONE~CLONE.
+SYSTEM-CALL OBJMGR CLONE me TO eo_clone.
+endmethod.
+
+
+method /BOBF/IF_TRA_CLONE~DESTROY_CLONE.
+" No Implementation Required
+endmethod.
+
+
+method /BOBF/IF_TRA_CLONE~RESTORE_FROM_CLONE.
+"No Implementation Required
+endmethod.
+
+
+  METHOD check_save_memory.
+
+    CONSTANTS:
+      co_preserve_memory_limit_total TYPE i VALUE 10000, "min. total number of changes before trying to reduce memory
+      co_preserve_memory_limit_delta TYPE i VALUE  1000. "min. merged number of changes before trying to reduce memory
+
+    rv_do_condense = boolc(   iv_number_of_changes_before
+                            + iv_number_of_changes_added > co_preserve_memory_limit_total AND
+                            iv_number_of_changes_before  > co_preserve_memory_limit_delta AND
+                            iv_number_of_changes_added   > co_preserve_memory_limit_delta ).
+
+  ENDMETHOD.
+
+
+METHOD cleanup.
+
+  FIELD-SYMBOLS <ls_change> TYPE /bobf/s_frw_change.
+
+  CHECK mt_change             IS NOT INITIAL
+     OR mt_change_load        IS NOT INITIAL
+     OR mt_change_load_key    IS NOT INITIAL
+     OR mt_association_source IS NOT INITIAL
+     OR mt_content_change     IS NOT INITIAL.
+
+  IF iv_change_mode IS INITIAL.
+*   cleanup all
+    CLEAR: mt_change,
+           mt_change_load,
+           mt_change_load_key,
+           mt_content_change,
+           mt_association_source,
+           mv_sorted,
+           mv_external,
+           /bobf/if_frw_change~mv_external,
+           mv_reload_del,
+           mv_reload_int.
+
+  ELSE.
+    CASE iv_change_mode.
+      WHEN /bobf/if_frw_c=>sc_modify_load.
+        CLEAR mt_change_load.
+        IF mv_reload_int NE abap_false
+        OR mv_reload_del NE abap_false.
+          LOOP AT mt_change ASSIGNING <ls_change>
+          WHERE change_mode = /bobf/if_frw_c=>sc_modify_reload_int
+          OR    change_mode = /bobf/if_frw_c=>sc_modify_reload_int_delete.
+            IF <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_reload_int.
+              <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_reload. "for SP
+            ELSE.
+              <ls_change>-change_mode = /bobf/if_frw_c=>sc_modify_reload_delete. "for SP
+            ENDIF.
+          ENDLOOP.
+          IF sy-subrc = 0.
+            IF mv_sorted > /bobf/if_frw_c=>sc_change_sort_key.
+              mv_sorted = /bobf/if_frw_c=>sc_change_sort_key.
+            ENDIF.
+          ENDIF.
+          CLEAR: mv_reload_int,
+                 mv_reload_del.
+        ENDIF.
+
+      WHEN /bobf/if_frw_c=>sc_modify_load_key.
+        CLEAR mt_change_load_key.
+
+      WHEN OTHERS.
+*       not supported for properties
+        ASSERT ID /bobf/frw CONDITION
+          ( iv_change_mode NE /bobf/if_frw_c=>sc_modify_property             AND
+            iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_action      AND
+            iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_association AND
+            iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_node_attr   AND
+            iv_change_mode NE /bobf/if_frw_c=>sc_modify_property_node ).
+        DELETE mt_change WHERE change_mode = iv_change_mode.
+    ENDCASE.
+
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD CLEAR_EXTERNAL.
+* Clear external flag
+
+  TYPES:
+    BEGIN OF ty_ls_sortkey,  "different to DDIC structure
+      node_key               TYPE /BOBF/OBM_NODE_KEY,
+      key	                   TYPE /BOBF/CONF_KEY,
+      change_mode	           TYPE /BOBF/CONF_CHANGE_MODE,
+      external               TYPE boole_d, "after failed in structure
+      failed                 TYPE boole_d,
+    END OF ty_ls_sortkey.
+
+  DATA:
+    ls_sortkey               TYPE ty_ls_sortkey,
+    ls_sortkey2              TYPE ty_ls_sortkey,
+    ls_sortkey_last          TYPE ty_ls_sortkey,
+    lv_exit                  TYPE boole_d,
+    lv_tabix                 TYPE i.
+
+  FIELD-SYMBOLS:
+    <ls_change>              TYPE /BOBF/S_FRW_CHANGE,
+    <ls_change2>             TYPE /BOBF/S_FRW_CHANGE.
+
+  IF it_change IS INITIAL.
+*   clear for all changes
+*   PERF remark: LOOP AT WHERE faster than MODIFY FROM TRANSPORTING WHERE
+    LOOP AT mt_change ASSIGNING <ls_change>
+      WHERE external <> abap_false.
+      <ls_change>-external = abap_false.
+    ENDLOOP.
+    IF sy-subrc = 0.
+*     reduce sort level
+      IF mv_sorted > /BOBF/IF_FRW_C=>SC_CHANGE_SORT_EXTERNAL.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_EXTERNAL.
+      ENDIF.
+    ENDIF.
+
+  ELSE.
+*   clear only for defined input changes
+*   logic based on IT_CHANGE sorted completely
+*   using parallel LOOP and READ index
+
+*   sort according sortkey first 5 fields
+    IF mv_sorted < /BOBF/IF_FRW_C=>SC_CHANGE_SORT_FAILED.
+      sort( iv_sort = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_FAILED ).
+    ENDIF.
+
+    lv_tabix = 1.
+    LOOP AT it_change ASSIGNING <ls_change>.
+
+      MOVE-CORRESPONDING <ls_change> TO ls_sortkey.
+      CHECK ls_sortkey > ls_sortkey_last.  "already processed
+      ls_sortkey_last = ls_sortkey.
+
+      DO.
+        IF sy-index > 1 OR <ls_change2> IS NOT ASSIGNED.
+          READ TABLE mt_change ASSIGNING <ls_change2> INDEX lv_tabix.
+          IF sy-subrc NE 0.
+            lv_exit = abap_true.
+            EXIT.
+          ENDIF.
+
+          MOVE-CORRESPONDING <ls_change2> TO ls_sortkey2.
+        ENDIF.
+
+        IF ls_sortkey2 = ls_sortkey.
+*         matching change -> CLEAR, duplicates possible now
+          <ls_change2>-external = abap_false.
+        ENDIF.
+
+        IF ls_sortkey2 > ls_sortkey.
+*         group change -> next input
+          EXIT.
+        ENDIF.
+
+*       next one
+        ADD 1 TO lv_tabix.
+      ENDDO.
+
+      IF lv_exit = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_EXTERNAL.
+
+  ENDIF.
+
+* invalidate property changes, no revival
+**  CLEAR mt_content_change.
+
+* sort and delete duplicate entries
+  sort( ).
+
+ENDMETHOD.
+
+
+METHOD CONSTRUCTOR.
+
+  /bobf/if_frw_change~mv_external = mv_external = iv_external.
+  mt_change          = it_change.
+  mt_change_load     = it_change_load.
+  mt_change_load_key = it_change_load_key.
+  mt_content_change  = it_content_change.
+  mv_reload_int      = iv_reload_int.
+  mv_reload_del      = iv_reload_del.
+
+ENDMETHOD.
+
+
+  METHOD delete_duplicate_notifications.
+
+    " delete duplicate notifications as UI consumers don't handle this efficiently
+    " (batchjobs shall deactivate content_changes completly)
+    SORT mt_content_change BY node_key key change_mode content_key.
+    DELETE ADJACENT DUPLICATES FROM mt_content_change.
+
+  ENDMETHOD.
+
+
+METHOD DELETE_FAILED.
+
+  DELETE mt_change          WHERE failed = abap_true.
+  DELETE mt_change_load     WHERE failed = abap_true.
+  DELETE mt_change_load_key WHERE failed = abap_true.
+
+ENDMETHOD.
+
+
+METHOD EXPORT_CHANGES_FOR_NOTIFY.
+
+  DATA: lt_change         TYPE /BOBF/T_FRW_CHANGE.
+
+  FIELD-SYMBOLS:
+        <ls_change> TYPE /BOBF/S_FRW_CHANGE.
+
+  CREATE OBJECT eo_change TYPE /BOBF/CL_FRW_CHANGE.
+
+* Get all external changes for export
+  LOOP AT mt_change ASSIGNING <ls_change>
+    WHERE external = abap_true
+      AND ( change_mode = /BOBF/IF_FRW_C=>SC_MODIFY_CREATE OR
+            change_mode = /BOBF/IF_FRW_C=>SC_MODIFY_UPDATE OR
+            change_mode = /BOBF/IF_FRW_C=>SC_MODIFY_DELETE ).
+    APPEND <ls_change> TO lt_change.
+    <ls_change>-external = abap_false.
+  ENDLOOP.
+
+* Adjust sorting information
+  IF sy-subrc = 0 AND mv_sorted >= /BOBF/IF_FRW_C=>SC_CHANGE_SORT_EXTERNAL.
+    mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_EXTERNAL.
+  ENDIF.
+
+* Export changes to new change object for notification and cleanup content
+* change as it is no longer needed
+  eo_change->add( it_change             = lt_change
+                  it_content_change     = mt_content_change
+                  it_association_source = mt_association_source ).
+  CLEAR: mt_content_change,
+         mt_association_source.
+
+ENDMETHOD.
+
+
+METHOD failed_modifications.
+
+  ASSERT it_node_mod IS SUPPLIED OR ( iv_change_mode IS SUPPLIED AND is_node IS SUPPLIED ).
+
+* set modifications as failed
+
+  DATA: ls_node_mod     TYPE /bobf/s_frw_node_mod,
+        lt_node_mod     TYPE /bobf/t_frw_node_mod,
+        lt_index_failed TYPE STANDARD TABLE OF sytabix,
+        lv_index_failed TYPE sytabix,
+        ls_change       TYPE /bobf/s_frw_change.
+
+  FIELD-SYMBOLS: <ls_change> TYPE /bobf/s_frw_change.
+
+  IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_failed AND it_node_mod IS SUPPLIED.
+    sort( /bobf/if_frw_c=>sc_change_sort_failed ).
+  ENDIF.
+
+  lt_node_mod = it_node_mod.
+  IF iv_change_mode IS SUPPLIED AND is_node IS SUPPLIED.
+    ls_node_mod-node        = is_node-node.
+    ls_node_mod-key         = is_node-key.
+    ls_node_mod-change_mode = iv_change_mode.
+    INSERT ls_node_mod INTO TABLE lt_node_mod.
+  ENDIF.
+
+  LOOP AT lt_node_mod INTO ls_node_mod.
+    IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_failed.
+      READ TABLE mt_change ASSIGNING <ls_change>
+        WITH KEY node_key    = ls_node_mod-node
+                 key         = ls_node_mod-key
+                 change_mode = ls_node_mod-change_mode
+                 external    = abap_true
+                 failed      = abap_false.
+      IF sy-subrc = 0.
+        <ls_change>-failed = abap_true.
+        IF mv_sorted > /bobf/if_frw_c=>sc_change_sort_external.
+          mv_sorted = /bobf/if_frw_c=>sc_change_sort_external.
+        ENDIF.
+      ENDIF.
+    ELSE.
+      READ TABLE mt_change BINARY SEARCH TRANSPORTING NO FIELDS
+        WITH KEY node_key    = ls_node_mod-node
+                 key         = ls_node_mod-key
+                 change_mode = ls_node_mod-change_mode
+                 external    = abap_true
+                 failed      = abap_false.
+      IF sy-subrc = 0.
+*       Remeber changes for which failed flag needs to be set
+        INSERT sy-tabix INTO TABLE lt_index_failed.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+* Set failed flags in mass process (to keep sorting order stable in above loop).
+  ls_change-failed = abap_true.
+  LOOP AT lt_index_failed INTO lv_index_failed.
+    MODIFY mt_change FROM ls_change INDEX lv_index_failed TRANSPORTING failed.
+  ENDLOOP.
+  IF sy-subrc = 0.
+    IF mv_sorted > /bobf/if_frw_c=>sc_change_sort_external.
+      mv_sorted = /bobf/if_frw_c=>sc_change_sort_external.
+    ENDIF.
+  ENDIF.
+
+ENDMETHOD.
+
+
+  METHOD get_n_drop_association_sources.
+
+    rt_association_source = mt_association_source.
+    CLEAR mt_association_source.
+
+  ENDMETHOD.
+
+
+METHOD get_trigger.
+
+  DATA:
+    lv_flag                  TYPE boole_d,
+    ls_change_mode           TYPE /bobf/s_confro_chg_mode,
+    ls_key                   TYPE /bobf/s_frw_key,
+    lv_key                   TYPE /bobf/conf_key,
+    lv_load_change           TYPE boole_d,
+    lv_tabix                 TYPE i,
+    lv_create                TYPE i,
+    lv_update                TYPE i,
+    lv_delete                TYPE i,
+    lv_load                  TYPE i,
+    lv_lock                  TYPE i,
+    lv_check                 TYPE i.
+
+  FIELD-SYMBOLS:
+    <ls_change>              TYPE /bobf/s_frw_change.
+
+  CLEAR: et_changed_key.
+
+* ____________________________________________________________________ *
+* check for changes after loading
+  IF iv_change_mode = /bobf/if_frw_c=>sc_modify_load.
+    LOOP AT mt_change_load ASSIGNING <ls_change>
+    WHERE node_key = iv_node_key
+    AND   failed   = abap_false.
+      ls_key-key = <ls_change>-key.
+      APPEND ls_key TO et_changed_key.
+    ENDLOOP.
+
+    IF mv_reload_int NE abap_false
+    OR mv_reload_del NE abap_false.
+      IF mv_sorted NE /bobf/if_frw_c=>sc_change_unsorted.
+        READ TABLE mt_change BINARY SEARCH
+          WITH KEY node_key = iv_node_key
+          TRANSPORTING NO FIELDS.
+        IF sy-subrc = 0.
+          IF et_changed_key IS NOT INITIAL.
+            lv_flag = abap_true.
+          ENDIF.
+          lv_tabix = sy-tabix.
+          LOOP AT mt_change ASSIGNING <ls_change> FROM lv_tabix
+            WHERE failed      = abap_false
+            AND   change_mode = /bobf/if_frw_c=>sc_modify_reload_int.
+            IF <ls_change>-node_key <> iv_node_key.
+              EXIT.
+            ENDIF.
+            ls_key-key = <ls_change>-key.
+            APPEND ls_key TO et_changed_key.
+          ENDLOOP.
+          IF mv_sorted = /bobf/if_frw_c=>sc_change_sort_node_key
+          OR lv_flag = abap_true.
+            SORT et_changed_key BY key.
+            DELETE ADJACENT DUPLICATES FROM et_changed_key.
+          ENDIF.
+        ENDIF.
+
+      ELSE.
+        LOOP AT mt_change ASSIGNING <ls_change>
+        WHERE node_key    = iv_node_key
+        AND   failed      = abap_false
+        AND   change_mode = /bobf/if_frw_c=>sc_modify_reload_int.
+          IF ls_key-key NE <ls_change>-key.
+            ls_key-key = <ls_change>-key.
+            APPEND ls_key TO et_changed_key.
+          ENDIF.
+        ENDLOOP.
+        SORT et_changed_key BY key.
+        DELETE ADJACENT DUPLICATES FROM et_changed_key.
+      ENDIF.
+    ELSE.
+      SORT et_changed_key BY key.
+      DELETE ADJACENT DUPLICATES FROM et_changed_key.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for key changes after loading
+  IF iv_change_mode = /bobf/if_frw_c=>sc_modify_load_key.
+    LOOP AT mt_change_load_key ASSIGNING <ls_change>
+      WHERE node_key = iv_node_key
+        AND failed   = abap_false.
+      ls_key-key = <ls_change>-key.
+      APPEND ls_key TO et_changed_key.
+    ENDLOOP.
+  ENDIF.
+
+* ____________________________________________________________________ *
+* check for given change modes and node key
+  IF is_change_mode IS NOT INITIAL.
+    ls_change_mode = is_change_mode.
+    CLEAR ls_change_mode-load.
+
+    IF is_change_mode-load = abap_true.
+      LOOP AT mt_change_load ASSIGNING <ls_change>
+      WHERE node_key = iv_node_key
+      AND   failed   = abap_false.
+        ls_key-key = <ls_change>-key.
+        APPEND ls_key TO et_changed_key.
+      ENDLOOP.
+      IF et_changed_key IS NOT INITIAL.
+        lv_load_change = abap_true.
+      ENDIF.
+    ENDIF.
+
+    IF ls_change_mode IS INITIAL       "only LOAD
+    AND mv_reload_int = abap_false     "no reloads in MT_CHANGE
+    AND mv_reload_del = abap_false.
+      IF et_changed_key IS NOT INITIAL.
+        SORT et_changed_key BY key.
+        DELETE ADJACENT DUPLICATES FROM et_changed_key.
+      ENDIF.
+*     no other changes in normal change table required
+      RETURN.
+    ENDIF.
+
+*   sort by node_key key for AT END OF KEY logic
+    IF mv_sorted < /bobf/if_frw_c=>sc_change_sort_key.
+      sort( iv_sort = /bobf/if_frw_c=>sc_change_sort_key ).
+    ENDIF.
+
+*   search in change table
+    READ TABLE mt_change BINARY SEARCH
+      WITH KEY node_key = iv_node_key
+      TRANSPORTING NO FIELDS.
+    lv_tabix = sy-tabix.
+    IF sy-subrc = 0.
+      LOOP AT mt_change ASSIGNING <ls_change> FROM lv_tabix.
+        IF <ls_change>-node_key <> iv_node_key.
+          EXIT.
+        ENDIF.
+
+        CHECK <ls_change>-failed = abap_false.
+
+        CASE iv_exectime.
+          WHEN /bobf/if_conf_c=>sc_time_after_modify.
+            CHECK <ls_change>-det_processed = abap_false.
+          WHEN /bobf/if_conf_c=>sc_time_after_validation.
+            CHECK <ls_change>-val_processed = abap_false.
+        ENDCASE.
+
+*       group change KEY ( own faster AT END OF KEY coding)
+        IF lv_key <> <ls_change>-key AND lv_key IS NOT INITIAL.
+          IF lv_create > 0 OR lv_delete > 0.
+            CLEAR lv_update.
+          ENDIF.
+          IF lv_create > 0 AND lv_delete > 0.
+            CLEAR lv_create.
+          ENDIF.
+          IF is_change_mode-create = abap_true AND lv_create > 0
+          OR is_change_mode-update = abap_true AND lv_update > 0
+          OR is_change_mode-delete = abap_true AND lv_delete > 0
+          OR is_change_mode-load   = abap_true AND lv_load   > 0
+          OR is_change_mode-check  = abap_true AND lv_check  > 0
+          OR is_change_mode-lock   = abap_true AND lv_lock   > 0.
+            ls_key-key = lv_key.
+            APPEND ls_key TO et_changed_key.
+          ENDIF.
+          CLEAR: lv_create, lv_update, lv_delete, lv_load, lv_check, lv_lock.
+        ENDIF.
+
+        lv_key = <ls_change>-key.
+
+        CASE <ls_change>-change_mode.
+          WHEN /bobf/if_frw_c=>sc_modify_create.
+            lv_create = sy-tabix.
+          WHEN /bobf/if_frw_c=>sc_modify_update.
+            lv_update = sy-tabix.
+          WHEN /bobf/if_frw_c=>sc_modify_delete.
+            lv_delete = sy-tabix.
+          WHEN /bobf/if_frw_c=>sc_modify_reload_int.
+            lv_load = sy-tabix.
+          WHEN /bobf/if_frw_c=>sc_modify_check.
+            lv_check = sy-tabix.
+          WHEN /bobf/if_frw_c=>sc_modify_lock.
+            lv_lock = sy-tabix.
+        ENDCASE.
+
+      ENDLOOP.
+
+*     group change KEY: last record
+      IF lv_key IS NOT INITIAL.
+        IF lv_create > 0 OR lv_delete > 0.
+          CLEAR lv_update.
+        ENDIF.
+        IF lv_create > 0 AND lv_delete > 0.
+          CLEAR lv_create.
+        ENDIF.
+        IF is_change_mode-create = abap_true AND lv_create > 0
+        OR is_change_mode-update = abap_true AND lv_update > 0
+        OR is_change_mode-delete = abap_true AND lv_delete > 0
+        OR is_change_mode-load   = abap_true AND lv_load   > 0
+        OR is_change_mode-check  = abap_true AND lv_check  > 0
+        OR is_change_mode-lock   = abap_true AND lv_lock   > 0.
+          ls_key-key = lv_key.
+          APPEND ls_key TO et_changed_key.
+        ENDIF.
+      ENDIF.
+
+      IF lv_load_change = abap_true.
+*       sort/delete necessary if load changes exist
+        SORT et_changed_key BY key.
+        DELETE ADJACENT DUPLICATES FROM et_changed_key.
+      ENDIF.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+* not supported import parameter combination.
+  ASSERT ID /bobf/frw CONDITION 1 = 0.                     "#EC BOOL_OK
+
+ENDMETHOD.
+
+
+METHOD HAS_FAILED_CHANGES.
+
+  ev_failed = abap_false.
+
+  READ TABLE mt_change TRANSPORTING NO FIELDS
+      WITH KEY failed = abap_true.
+  IF sy-subrc = 0.
+    ev_failed = abap_true.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD HAS_UNPROCESSED_CHANGES.
+* not for LOAD and LOAD_KEY
+
+  ev_change = abap_true.
+
+  IF iv_det_processed IS SUPPLIED.
+    READ TABLE mt_change TRANSPORTING NO FIELDS
+      WITH KEY det_processed = iv_det_processed.
+    IF sy-subrc <> 0.
+      ev_change = abap_false.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+  IF iv_val_processed IS SUPPLIED.
+    READ TABLE mt_change TRANSPORTING NO FIELDS
+      WITH KEY val_processed = iv_val_processed.
+    IF sy-subrc <> 0.
+      ev_change = abap_false.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+ENDMETHOD.
+
+
+  METHOD optimize_mem_new_changes.
+
+    IF check_save_memory( iv_number_of_changes_added  = iv_number_of_changes_added
+                          iv_number_of_changes_before = lines( mt_change ) - iv_number_of_changes_added ).
+      sort( ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD optimize_mem_new_notifications.
+
+    IF check_save_memory( iv_number_of_changes_added  = iv_number_of_changes_added
+                          iv_number_of_changes_before = lines( mt_content_change ) - iv_number_of_changes_added ).
+      delete_duplicate_notifications( ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+METHOD prepare_for_export.
+
+  DATA:
+    lv_create                 TYPE i,
+    lv_delete                 TYPE i.
+
+  FIELD-SYMBOLS:
+    <ls_change>               TYPE /bobf/s_frw_change,
+    <ls_change_create>        TYPE /bobf/s_frw_change.
+
+  CHECK mt_change IS NOT INITIAL.
+
+  IF mv_sorted NE /bobf/if_frw_c=>sc_change_sort_complete.
+    sort( ).
+  ENDIF.
+
+* prerequisite: keep sort sequence of change modes
+* CREATE < DELETE < UPDATE    < RELOADs
+*                 < PROPERTYs
+  ASSERT ID /bobf/frw
+    CONDITION /bobf/if_frw_c=>sc_modify_create < /bobf/if_frw_c=>sc_modify_delete.
+  ASSERT ID /bobf/frw
+    CONDITION /bobf/if_frw_c=>sc_modify_delete < /bobf/if_frw_c=>sc_modify_update.
+  ASSERT ID /bobf/frw
+    CONDITION /bobf/if_frw_c=>sc_modify_update < /bobf/if_frw_c=>sc_modify_reload.
+  ASSERT ID /bobf/frw
+    CONDITION /bobf/if_frw_c=>sc_modify_update < /bobf/if_frw_c=>sc_modify_reload_delete.
+  ASSERT ID /bobf/frw
+    CONDITION /bobf/if_frw_c=>sc_modify_delete < /bobf/if_frw_c=>sc_modify_property_node.
+
+  LOOP AT mt_change ASSIGNING <ls_change>.
+
+    AT NEW key.
+      CLEAR: lv_create, lv_delete.
+    ENDAT.
+
+    IF <ls_change>-external = abap_false.
+      DELETE mt_change.
+
+    ELSE.
+      CASE <ls_change>-change_mode.
+
+*       delete unnecessary entries
+        WHEN /bobf/if_frw_c=>sc_modify
+          OR /bobf/if_frw_c=>sc_modify_check .
+          DELETE mt_change.
+
+        WHEN /bobf/if_frw_c=>sc_modify_create.
+          if <ls_change>-failed = abap_false.
+            lv_create = sy-tabix.
+          endif.
+
+        WHEN /bobf/if_frw_c=>sc_modify_delete.
+          IF <ls_change>-failed = abap_false.
+*         merge succ create and succ delete to a failed create
+            IF lv_create > 0.
+              DELETE mt_change.
+              READ TABLE mt_change INDEX lv_create ASSIGNING <ls_change_create>.
+              <ls_change_create>-failed = abap_true.
+            ELSE.
+              lv_delete = sy-tabix.
+            ENDIF.
+          ENDIF.
+
+        WHEN /bobf/if_frw_c=>sc_modify_update.
+          IF <ls_change>-failed = abap_false.
+*           delete update entries if a create or delete entry exists
+            IF lv_create > 0 OR lv_delete > 0.
+              DELETE mt_change.
+            ENDIF.
+          ENDIF.
+
+      ENDCASE.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDMETHOD.
+
+
+METHOD SET_ATTRIBUTES_REQUESTED.
+
+  /BOBF/IF_FRW_CHANGE~MV_ATTRIBUTES_REQUESTED = iv_attributes_requested.
+
+ENDMETHOD.
+
+
+METHOD SET_PROCESSED.
+* set processed flags for all changes
+
+* PERF remark: LOOP AT WHERE faster than MODIFY FROM TRANSPORTING WHERE
+
+  FIELD-SYMBOLS:
+    <ls_change>              TYPE /BOBF/S_FRW_CHANGE.
+
+  IF iv_det_processed IS SUPPLIED AND
+     iv_val_processed IS SUPPLIED.
+    LOOP AT mt_change ASSIGNING <ls_change>
+      WHERE det_processed <> iv_det_processed
+         OR val_processed <> iv_val_processed.
+      <ls_change>-det_processed = iv_det_processed.
+      <ls_change>-val_processed = iv_val_processed.
+    ENDLOOP.
+    IF sy-subrc = 0.
+*     reduce sort level
+      IF mv_sorted > /BOBF/IF_FRW_C=>SC_CHANGE_SORT_DET_PROCESSED.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_DET_PROCESSED.
+      ENDIF.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+  IF iv_det_processed IS SUPPLIED.
+    LOOP AT mt_change ASSIGNING <ls_change>
+      WHERE det_processed <> iv_det_processed.
+      <ls_change>-det_processed = iv_det_processed.
+    ENDLOOP.
+    IF sy-subrc = 0.
+*     reduce sort level
+      IF mv_sorted > /BOBF/IF_FRW_C=>SC_CHANGE_SORT_DET_PROCESSED.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_DET_PROCESSED.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  IF iv_val_processed IS SUPPLIED.
+    LOOP AT mt_change ASSIGNING <ls_change>
+      WHERE val_processed <> iv_val_processed.
+      <ls_change>-val_processed = iv_val_processed.
+    ENDLOOP.
+    IF sy-subrc = 0.
+*     reduce sort level
+      IF mv_sorted > /BOBF/IF_FRW_C=>SC_CHANGE_SORT_VAL_PROCESSED.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_VAL_PROCESSED.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD SET_RELOAD.
+* set reload flags to true, false or unknown
+*    | ? _ X
+* ---|--------
+*  ? | ? ? X
+*  _ | ? _ X
+*  X | X X X
+
+  IF cv_reload NE abap_true.
+    IF cv_reload = abap_false.
+      cv_reload = iv_reload.
+    ELSE.
+      IF iv_reload = abap_true.
+        cv_reload = abap_true.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD SORT.
+* sort and delete duprecs (table component attributes is ignored by ABAP)
+* compatible corr without adding DDIC table primary key fields (node_key key change_mode)
+
+  IF ct_change IS NOT SUPPLIED.
+*   sort my change table according sort level
+    CASE iv_sort.
+      WHEN /BOBF/IF_FRW_C=>SC_CHANGE_SORT_NODE_KEY.
+        SORT mt_change BY node_key.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_NODE_KEY.
+      WHEN /BOBF/IF_FRW_C=>SC_CHANGE_SORT_KEY.
+        SORT mt_change BY node_key key.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_KEY.
+      WHEN /BOBF/IF_FRW_C=>SC_CHANGE_SORT_CHANGE_MODE.
+        SORT mt_change BY node_key key change_mode.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_CHANGE_MODE.
+      WHEN /BOBF/IF_FRW_C=>SC_CHANGE_SORT_EXTERNAL.
+        SORT mt_change BY node_key key change_mode external.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_EXTERNAL.
+      WHEN /BOBF/IF_FRW_C=>SC_CHANGE_SORT_FAILED.
+        SORT mt_change BY node_key key change_mode external failed.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_FAILED.
+      WHEN /BOBF/IF_FRW_C=>SC_CHANGE_SORT_DET_PROCESSED.
+        SORT mt_change BY node_key key change_mode external failed det_processed.
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_DET_PROCESSED.
+
+      WHEN OTHERS.
+*       DEFAULT: sort by all fields and delete duprecs
+        SORT mt_change BY
+          node_key key change_mode external    "<< used for binary search and AT END OF KEY
+          failed det_processed val_processed.  "<< only to delete duprecs
+
+        DELETE ADJACENT DUPLICATES FROM mt_change COMPARING
+          node_key key change_mode external
+          failed det_processed val_processed.
+
+        mv_sorted = /BOBF/IF_FRW_C=>SC_CHANGE_SORT_COMPLETE.
+    ENDCASE.
+
+  ELSE.
+*   sort changing change table called from get_changes accordingly
+    SORT ct_change BY
+      node_key key change_mode external               "<< used for binary search and AT END OF KEY
+      failed det_processed val_processed.             "<< only to delete duprecs
+
+    DELETE ADJACENT DUPLICATES FROM ct_change COMPARING
+      node_key key change_mode external
+      failed det_processed val_processed.
+
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD TRACE_EXTERNAL_CHANGES.
+
+  /bobf/if_frw_change~mv_external = mv_external = iv_external_change.
+
+ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,169 @@
+"! <p class="shorttext synchronized" lang="en">Delegates to the concrete draft class impl. of a node</p>
+CLASS /bobf/cl_lib_drft_cls_mediator DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PRIVATE.
+
+  PUBLIC SECTION.
+    INTERFACES /bobf/if_lib_draft_class.
+
+    CLASS-METHODS:
+      get_instance IMPORTING iv_bo_key          TYPE /bobf/obm_bo_key
+                             iv_node_key        TYPE /bobf/obm_node_key
+                   RETURNING VALUE(ro_instance) TYPE REF TO /bobf/if_lib_draft_class.
+
+
+  PROTECTED SECTION.
+
+
+  PRIVATE SECTION.
+
+    TYPES:
+      BEGIN OF ty_instance,
+        bo_key   TYPE /bobf/obm_bo_key,
+        node_key TYPE /bobf/obm_node_key,
+        instance TYPE REF TO /bobf/if_lib_draft_class,
+      END OF ty_instance,
+      tt_instance TYPE SORTED TABLE OF ty_instance WITH UNIQUE KEY bo_key node_key.
+
+    CLASS-DATA:
+      gt_instance TYPE tt_instance.
+
+    CLASS-METHODS:
+      create  IMPORTING iv_bo_key          TYPE /bobf/obm_bo_key
+                        iv_node_key        TYPE /bobf/obm_node_key
+              RETURNING VALUE(ro_instance) TYPE REF TO /bobf/if_lib_draft_class,
+      get_draft_class_name IMPORTING iv_bo_key                  TYPE /bobf/obm_bo_key
+                                     iv_node_key                TYPE /bobf/obm_node_key
+                           RETURNING VALUE(rv_draft_class_name) TYPE string.
+
+    DATA:
+      mo_draft_class TYPE REF TO /bobf/if_frw_draft.
+
+    METHODS:
+      constructor IMPORTING iv_draft_class_name TYPE string
+                  RAISING   cx_sy_create_object_error,
+      register_unknown_active_keys IMPORTING is_ctx        TYPE /bobf/s_frw_ctx_draft
+                                             it_active_key TYPE /bobf/t_frw_key.
+
+
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_LIB_DRFT_CLS_MEDIATOR IMPLEMENTATION.
+
+
+  METHOD /bobf/if_lib_draft_class~copy_draft_to_active_entity.
+    DATA lv_active_key TYPE /bobf/conf_key.
+
+    CLEAR: eo_message.
+    mo_draft_class->copy_draft_to_active_entity( EXPORTING is_ctx              = is_ctx
+                                                           it_draft_key        = VALUE #( ( key = iv_draft_key ) )
+                                                           io_read             = io_read
+                                                           io_modify           = io_modify
+                                                 IMPORTING eo_message          = eo_message
+                                                           et_key_link         = DATA(lt_key_link)
+                                                           et_failed_draft_key = DATA(lt_failed_draft_key) ).
+
+    " In a Draft-Enabled scenario with UUID keys, BOPF might not know about the active keys,
+    " and may not even be able to retrieve them before they have been committed to DB.
+    " Therefore, we have to register them, so we know how to deal with them.
+    register_unknown_active_keys( is_ctx        = is_ctx
+                                  it_active_key = CORRESPONDING #( lt_key_link MAPPING key = active ) ).
+
+    rv_success = xsdbool( lt_failed_draft_key IS INITIAL ).
+
+    IF rv_success = abap_true.
+      lv_active_key = lt_key_link[ 1 ]-active.
+    ENDIF.
+
+    eo_active_entity_key = /bobf/cl_frw_act_ent_k_factory=>get_factory( is_ctx-bo_key )->for_node( is_ctx-node_key
+                                                        )->create_from_bopf_key( lv_active_key ).
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_lib_draft_class~create_draft_for_active_entity.
+    " Check contract
+    ASSERT iv_draft_key IS NOT INITIAL.
+    mo_draft_class->create_draft_for_active_entity( EXPORTING is_ctx               = is_ctx
+                                                              it_key_link          = VALUE #( ( active = io_active_entity_key->get_bopf_key( )
+                                                                                                draft  = iv_draft_key ) )
+                                                              io_read              = io_read
+                                                              io_modify            = io_modify
+                                                    IMPORTING eo_message           = eo_message
+                                                              et_failed_active_key = DATA(lt_failed_active_key) ).
+    rv_success = xsdbool( lt_failed_active_key IS INITIAL ).
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_lib_draft_class~resume.
+    CLEAR: et_failed_key, eo_message.
+    mo_draft_class->resume( EXPORTING is_ctx        = is_ctx
+                                      it_key        = it_key
+                                      io_read       = io_read
+                                      io_check      = io_check
+                            IMPORTING eo_message    = eo_message
+                                      et_failed_key = et_failed_key ).
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    CREATE OBJECT mo_draft_class TYPE (iv_draft_class_name).
+  ENDMETHOD.
+
+
+  METHOD create.
+    DATA(lv_draft_class_name) = get_draft_class_name( iv_bo_key   = iv_bo_key
+                                                      iv_node_key = iv_node_key ).
+    TRY.
+        ro_instance = NEW /bobf/cl_lib_drft_cls_mediator( lv_draft_class_name ).
+      CATCH cx_sy_create_object_error ##NO_HANDLER.
+        ASSERT 1 = 2. " Draft class doesn't implement the expected IF /BOBF/IF_FRW_DRAFT
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD get_draft_class_name.
+    TRY.
+        DATA(lo_conf) = /bobf/cl_frw_factory=>get_configuration( iv_bo_key = iv_bo_key ).
+      CATCH /bobf/cx_frw.
+        ASSERT 1 = 2. " Must not happen! BO is inconsistent
+    ENDTRY.
+    lo_conf->get_node( EXPORTING iv_node_key = iv_node_key
+                       IMPORTING es_node     = DATA(ls_node_conf)  ).
+    rv_draft_class_name = ls_node_conf-draft_class.
+  ENDMETHOD.
+
+
+  METHOD get_instance.
+    READ TABLE gt_instance INTO DATA(ls_cached_instance) WITH KEY bo_key   = iv_bo_key
+                                                                  node_key = iv_node_key.
+    IF ls_cached_instance IS NOT INITIAL.
+      ro_instance = ls_cached_instance-instance.
+    ELSE.
+      ro_instance = create( iv_bo_key   = iv_bo_key
+                            iv_node_key = iv_node_key ).
+      INSERT VALUE #( bo_key   = iv_bo_key
+                      node_key = iv_node_key
+                      instance = ro_instance ) INTO TABLE gt_instance.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD register_unknown_active_keys.
+
+    DATA(lo_union_key_writer) = /bobf/cl_dac_union_key=>get_write_instance( iv_bo_key   = is_ctx-bo_key
+                                                                            iv_node_key = is_ctx-node_key ).
+    IF lo_union_key_writer->keys_can_be_unknown( ).
+      /bobf/cl_dac_union_key=>get_instance( iv_bo_key   = is_ctx-bo_key
+                                            iv_node_key = is_ctx-node_key
+                           )->separate_keys( EXPORTING it_key         = it_active_key
+                                             IMPORTING et_unknown_key = DATA(lt_unknown_key) ).
+      LOOP AT lt_unknown_key INTO DATA(ls_unknown_key).
+        lo_union_key_writer->set_active_key( ls_unknown_key-key ).
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,106 @@
+*----------------------------------------------------------------------*
+*       CLASS /UIF/CL_LREP_HTTP_HANDLER DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+class /UIF/CL_LREP_HTTP_HANDLER definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_HTTP_EXTENSION .
+  protected section.
+  private section.
+ENDCLASS.
+
+
+
+CLASS /UIF/CL_LREP_HTTP_HANDLER IMPLEMENTATION.
+
+
+  method if_http_extension~handle_request.
+
+    data: lo_rest_handler     type ref to /uif/cl_lrep_http_rest_hndlr,
+          lv_xsrf_token       type string,
+          lv_xsrf_token_lower type string,
+          lv_xsrf_success     type boole_d value abap_false,
+          lv_accept_encoding  type string,
+          lv_status_code      type i,
+          lv_start            type int4,
+          lv_stop             type int4,
+          lv_duration         type int4,
+          lv_duration_str     type string,
+          lo_abap_runtime     type ref to if_abap_runtime,
+          lv_http_method      type string.
+
+    if /uif/if_lrep_connectivity_c=>perf_resp_header_enabled eq abap_true.
+      lo_abap_runtime = cl_abap_runtime=>create_lr_timer( ).
+      lv_start = lo_abap_runtime->get_runtime( ).
+    endif.
+
+    lv_xsrf_token = server->request->get_header_field( name = /uif/if_lrep_connectivity_c=>header_csrf_token ).
+    lv_http_method = server->request->get_method( ).
+
+    if lv_http_method eq 'GET' or lv_http_method eq 'HEAD'. "#EC NOTEXT
+      lv_xsrf_success = abap_true.
+      lv_xsrf_token_lower = lv_xsrf_token.
+      translate lv_xsrf_token_lower to lower case.
+      if lv_xsrf_token_lower eq /uif/if_lrep_connectivity_c=>csrf_token_fetch.
+        server->get_xsrf_token(
+          importing
+            token = lv_xsrf_token ).
+        server->response->set_header_field( name = /uif/if_lrep_connectivity_c=>header_csrf_token value = lv_xsrf_token ).
+      endif.
+    else.
+      if lv_xsrf_token is not initial.
+        server->validate_xsrf_token(
+           exporting
+             token      = lv_xsrf_token
+           importing
+             successful = lv_xsrf_success ).
+      endif.
+    endif.
+
+    if lv_xsrf_success eq abap_true.
+      try.
+          create object lo_rest_handler.
+          lo_rest_handler->if_http_extension~handle_request( server = server ).
+        catch cx_rest_handler_exception into data(lx_error).
+          server->response->set_status(
+            exporting
+              code   = 500
+              reason = lx_error->if_message~get_text( ) ).
+      endtry.
+*     set compression
+      lv_accept_encoding = server->request->get_header_field( if_http_header_fields=>accept_encoding ).
+      server->response->get_status( importing code = lv_status_code ).
+      if  server->request->get_method( ) eq if_http_request=>co_request_method_get
+      and lv_accept_encoding cs /uif/if_lrep_connectivity_c=>encoding_gzip
+      and lv_status_code eq 200.
+        server->set_compression(
+          exporting
+            options = if_http_request=>co_compress_in_all_cases
+          exceptions
+            compression_not_possible = 1 ).
+        if sy-subrc <> 0.
+          clear lv_status_code.
+        endif.
+      endif.
+    else.
+      server->response->set_status(
+        exporting
+          code   = 403    " forbidden
+          reason = 'xsrf token validation failed' ).           "#EC NOTEXT
+    endif.
+
+    if /uif/if_lrep_connectivity_c=>perf_resp_header_enabled eq abap_true.
+      lv_stop = lo_abap_runtime->get_runtime( ).
+      lv_duration = ( lv_stop - lv_start ) / 1000.
+      lv_duration_str = lv_duration && 'ms'.                "#EC NOTEXT
+      server->response->set_header_field( name = /uif/if_lrep_connectivity_c=>resp_hdr_server_time value = lv_duration_str ).
+    endif.
+
+  endmethod.                    "if_http_extension~handle_request
+ENDCLASS.

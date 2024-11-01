@@ -1,0 +1,693 @@
+CLASS /bobf/cl_sadl_batch_handler DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    METHODS constructor IMPORTING iv_entity_type                 TYPE sadl_entity_type
+                                  io_message_handler             TYPE REF TO if_sadl_message_handler OPTIONAL
+                                  io_sadl_etty_transact_provider TYPE REF TO if_sadl_entity_transact_prov.
+
+    METHODS execute IMPORTING it_create TYPE if_sadl_batch=>tt_create OPTIONAL
+                              it_update TYPE if_sadl_batch=>tt_update OPTIONAL
+                              it_delete TYPE if_sadl_batch=>tt_delete OPTIONAL
+                              it_action TYPE if_sadl_batch=>tt_action OPTIONAL
+                    EXPORTING ev_failed TYPE abap_bool
+                    RAISING   cx_sadl_static.
+
+    METHODS execute_preparation_f_activate IMPORTING it_action_activation           TYPE if_sadl_batch=>tt_action
+                                           RETURNING VALUE(rv_preparation_executed) TYPE abap_bool
+                                           RAISING   cx_sadl_static.
+
+    METHODS execute_activation IMPORTING it_action_activation TYPE if_sadl_batch=>tt_action
+                               EXPORTING ev_failed            TYPE abap_bool
+                               RAISING   cx_sadl_static.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+    TYPES: BEGIN OF ty_modification,
+             bo_key         TYPE /bobf/obm_bo_key,
+             entity_id      TYPE sadl_entity_id,
+             change_mode    TYPE /bobf/conf_change_mode,
+             create         TYPE if_sadl_batch=>ty_create,
+             update         TYPE if_sadl_batch=>ty_update,
+             delete         TYPE if_sadl_batch=>ty_delete,
+             original_tabix TYPE syst_tabix,
+           END OF ty_modification.
+    TYPES tt_modification TYPE STANDARD TABLE OF ty_modification WITH DEFAULT KEY.
+
+    TYPES: BEGIN OF ty_tabix_key_map,
+             tabix TYPE syst_tabix,
+             key   TYPE /bobf/conf_key,
+           END OF ty_tabix_key_map.
+    TYPES tt_tabix_key_map TYPE SORTED TABLE OF ty_tabix_key_map WITH UNIQUE KEY tabix.
+
+    TYPES: BEGIN OF ty_action_activation,
+             entity_id     TYPE sadl_entity_id,
+             rt_key_values TYPE REF TO data,
+           END OF ty_action_activation.
+    TYPES tt_action_activation TYPE STANDARD TABLE OF ty_action_activation WITH DEFAULT KEY.
+
+    DATA mv_entity_type             TYPE sadl_entity_type.
+    DATA mt_modification            TYPE tt_modification.
+    DATA mo_message_handler         TYPE REF TO /bobf/cl_sadl_message_handler.
+    DATA mo_transaction_manager     TYPE REF TO if_sadl_transaction_manager.
+    DATA mt_source_key_handle       TYPE tt_tabix_key_map.
+    DATA mo_sadl_etty_transact_provider  TYPE REF TO if_sadl_entity_transact_prov.
+
+    METHODS collect_modifications IMPORTING it_create TYPE if_sadl_batch=>tt_create
+                                            it_update TYPE if_sadl_batch=>tt_update
+                                            it_delete TYPE if_sadl_batch=>tt_delete
+                                  RAISING   cx_sadl_static.
+
+    METHODS get_sadl_entity_transactional IMPORTING iv_entity_type                 TYPE sadl_entity_type DEFAULT /bobf/if_sadl_c=>gc_entity_type
+                                                    iv_entity_id                   TYPE sadl_entity_id
+                                          RETURNING value(ro_sadl_entity_transact) TYPE REF TO /bobf/cl_sadl_entity_transact
+                                          RAISING   cx_sadl_static.
+
+
+
+
+    "! Note that ES_BOPF_MODIFICATION can be initial. This does not mean that it "failed" but that there is nothing to do
+    "! because none of the modified fields could be mapped to BOPF
+    METHODS create_bopf_modification IMPORTING is_batch_modification   TYPE ty_modification
+                                               io_sadl_entity_transact TYPE REF TO /bobf/cl_sadl_entity_transact
+                                               io_mapper               TYPE REF TO lcl_data_mapper
+                                     EXPORTING ev_failed               TYPE abap_bool
+                                               es_bopf_modification    TYPE /bobf/s_frw_modification
+                                               et_active_values_2_del  TYPE ANY TABLE
+                                     RAISING   cx_sadl_static.
+
+    METHODS fill_root_keys_for_bopf_mods IMPORTING iv_entity_id             TYPE sadl_entity_id
+                                                   it_bopf_modifications_bo TYPE /bobf/t_frw_modification
+                                         CHANGING  ct_bopf_modifications    TYPE /bobf/t_frw_modification
+                                         RAISING   cx_sadl_static.
+
+    METHODS add_message IMPORTING io_message TYPE REF TO /bobf/if_frw_message.
+
+    METHODS prepare_activation IMPORTING it_activation                        TYPE if_sadl_batch=>tt_action
+                               RETURNING VALUE(rv_prepare_enabling_bo_exists) TYPE abap_bool
+                                RAISING   cx_sadl_static.
+
+    METHODS implicit_preparation_enabled IMPORTING iv_entity_id      TYPE sadl_entity_id
+                                         RETURNING VALUE(rv_enabled) TYPE abap_bool
+                                         RAISING   cx_sadl_contract_violation
+                                                   cx_sadl_static.
+    METHODS process_batch_modifications EXPORTING ev_failed              TYPE abap_bool
+                                                  et_bopf_modification   TYPE /bobf/t_frw_modification  "for test reason
+                                                  et_active_entity_2_del TYPE if_sadl_batch=>tt_delete
+                                        RAISING   cx_sadl_static.
+
+    METHODS process_batch_actions IMPORTING it_action TYPE if_sadl_batch=>tt_action
+                                  EXPORTING ev_failed TYPE abap_bool
+                                  RAISING   cx_sadl_static.
+
+    METHODS execute_action IMPORTING it_action TYPE if_sadl_batch=>tt_action
+                           EXPORTING ev_failed TYPE abap_bool
+                           RAISING   cx_sadl_static.
+
+    METHODS explicit_prepare_exists IMPORTING it_action                         TYPE if_sadl_batch=>tt_action
+                                              is_activation                     TYPE if_sadl_batch=>ty_action
+                                    RETURNING VALUE(rv_explicit_prepare_exists) TYPE abap_bool.
+
+    METHODS assert_only_activation_exists IMPORTING it_action TYPE if_sadl_batch=>tt_action.
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_SADL_BATCH_HANDLER IMPLEMENTATION.
+
+
+  METHOD add_message.
+    IF io_message IS BOUND.
+      mo_message_handler->add_bopf_messages( io_message ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD assert_only_activation_exists.
+    LOOP AT it_action TRANSPORTING NO FIELDS WHERE name <> /bobf/if_conf_cds_link_c=>gc_action_name-draft-activation.
+      ASSERT 1 = 0.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD collect_modifications.
+    DATA: ls_modification TYPE ty_modification,
+          lo_rt_access    TYPE REF TO /bobf/cl_sadl_entity_rt_access.
+
+    CLEAR mt_modification.
+
+    " add create, update and delete to global modification table
+    LOOP AT it_create ASSIGNING FIELD-SYMBOL(<ls_create>)
+         GROUP BY ( entity_id = <ls_create>-entity_id ) INTO DATA(ls_group_by_id).
+
+      lo_rt_access = /bobf/cl_sadl_entity_rt_access=>get( iv_type = mv_entity_type
+                                                          iv_id   = ls_group_by_id-entity_id ).
+      CLEAR ls_modification.
+      ls_modification-bo_key    = lo_rt_access->get_bo_key( ).
+      ls_modification-entity_id = ls_group_by_id-entity_id.
+      LOOP AT GROUP ls_group_by_id ASSIGNING <ls_create>.
+        ls_modification-original_tabix = sy-tabix.  " remember the index in the original table from SADL
+        ls_modification-create = <ls_create>.
+        ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+        APPEND ls_modification TO mt_modification.
+      ENDLOOP.
+    ENDLOOP.
+
+    LOOP AT it_update ASSIGNING FIELD-SYMBOL(<ls_update>)
+         GROUP BY ( entity_id = <ls_update>-entity_id ) INTO ls_group_by_id.
+
+      lo_rt_access = /bobf/cl_sadl_entity_rt_access=>get( iv_type = mv_entity_type
+                                                          iv_id   = ls_group_by_id-entity_id ).
+      CLEAR ls_modification.
+      ls_modification-bo_key    = lo_rt_access->get_bo_key( ).
+      ls_modification-entity_id = ls_group_by_id-entity_id.
+      LOOP AT GROUP ls_group_by_id ASSIGNING <ls_update>.
+        ls_modification-original_tabix = sy-tabix.  " remember the index in the original table from SADL
+        ls_modification-update      = <ls_update>.
+        ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_update.
+        APPEND ls_modification TO mt_modification.
+      ENDLOOP.
+    ENDLOOP.
+
+    LOOP AT it_delete ASSIGNING FIELD-SYMBOL(<ls_delete>)
+         GROUP BY ( entity_id = <ls_delete>-entity_id ) INTO ls_group_by_id.
+
+      lo_rt_access = /bobf/cl_sadl_entity_rt_access=>get( iv_type = mv_entity_type
+                                                          iv_id   = ls_group_by_id-entity_id ).
+      CLEAR ls_modification.
+      ls_modification-bo_key    = lo_rt_access->get_bo_key( ).
+      ls_modification-entity_id = ls_group_by_id-entity_id.
+      LOOP AT GROUP ls_group_by_id ASSIGNING <ls_delete>.
+        ls_modification-original_tabix = sy-tabix.  " remember the index in the original table from SADL
+        ls_modification-delete               = <ls_delete>.
+        ls_modification-change_mode          = /bobf/if_frw_c=>sc_modify_delete.
+        APPEND ls_modification TO mt_modification.
+      ENDLOOP.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    mv_entity_type = iv_entity_type.
+    mo_message_handler            ?= io_message_handler.
+    mo_sadl_etty_transact_provider = io_sadl_etty_transact_provider.
+  ENDMETHOD.
+
+
+  METHOD create_bopf_modification.
+    DATA: lt_bopf_modification TYPE /bobf/t_frw_modification,
+          lrt_bopf_data        TYPE REF TO data,
+          lrt_entity_data      TYPE REF TO data,
+          lt_bopf_source_keys  TYPE /bobf/t_frw_key.
+    FIELD-SYMBOLS: <ls_entity_data>        TYPE data,
+                   <ls_source_entity_data> TYPE data,
+                   <lt_bopf_data>          TYPE STANDARD TABLE,
+                   <lt_entity_data>        TYPE STANDARD TABLE.
+
+    CLEAR es_bopf_modification.
+
+    ev_failed = abap_false.
+    CASE is_batch_modification-change_mode.
+
+      WHEN /bobf/if_frw_c=>sc_modify_create.
+        lrt_bopf_data = io_mapper->get_bopf_table_for_entity_ref( is_batch_modification-create-rs_entity_data ).
+        ASSIGN lrt_bopf_data->* TO <lt_bopf_data>.
+
+        IF is_batch_modification-create-source-entity_id IS INITIAL. "normal CREATE
+          io_sadl_entity_transact->prepare_create( IMPORTING et_bopf_modifications = lt_bopf_modification
+                                                   CHANGING  ct_bopf_data          = <lt_bopf_data> ).
+        ELSE. "CREATE BY ASSOCIATION
+          "PREPARE_CREATE must be called at the run time of the SOURCE node
+          DATA(lo_sadl_source_entity_transact) = get_sadl_entity_transactional( iv_entity_type = mv_entity_type
+                                                                                iv_entity_id   = is_batch_modification-create-source-entity_id ).
+          IF is_batch_modification-create-source-tabix IS INITIAL.
+            ASSIGN is_batch_modification-create-source-rs_key_values->* TO <ls_source_entity_data>.
+            lo_sadl_source_entity_transact->get_existing_bopf_keys( EXPORTING is_source_key_values           = <ls_source_entity_data>
+                                                                              iv_source_alternative_key_name = is_batch_modification-create-source-alternative_key_name
+                                                                              iv_force_existence_check       = abap_true
+                                                                    IMPORTING et_bopf_source_keys            = lt_bopf_source_keys ).
+            if lt_bopf_source_keys IS INITIAL.
+              ev_failed = abap_true.
+              RETURN.
+            ENDIF.
+            lo_sadl_source_entity_transact->prepare_create_by_association( EXPORTING iv_association_name            = is_batch_modification-create-source-association_name
+                                                                                     it_bopf_source_keys            = lt_bopf_source_keys
+                                                                           IMPORTING et_bopf_modifications          = lt_bopf_modification
+                                                                           CHANGING  ct_target_bopf_data            = <lt_bopf_data> ).
+          ELSE.
+            DATA(lv_bopf_source_key_handle) = mt_source_key_handle[ tabix = is_batch_modification-create-source-tabix ]-key.
+            APPEND VALUE #( key = lv_bopf_source_key_handle ) TO lt_bopf_source_keys.
+
+            lo_sadl_source_entity_transact->prepare_create_by_association( EXPORTING iv_association_name            = is_batch_modification-create-source-association_name
+                                                                                     it_bopf_source_keys            = lt_bopf_source_keys
+                                                                           IMPORTING et_bopf_modifications          = lt_bopf_modification
+                                                                           CHANGING  ct_target_bopf_data            = <lt_bopf_data> ).
+          ENDIF.
+        ENDIF.
+
+      WHEN /bobf/if_frw_c=>sc_modify_delete.
+        ASSIGN is_batch_modification-delete-rs_key_values->* TO <ls_entity_data>.
+        CREATE DATA lrt_entity_data LIKE STANDARD TABLE OF <ls_entity_data>.
+        ASSIGN lrt_entity_data->* TO <lt_entity_data>.
+        INSERT <ls_entity_data> INTO TABLE <lt_entity_data>.
+
+        io_sadl_entity_transact->prepare_delete( EXPORTING it_entity_key_values        = <lt_entity_data>
+                                                           iv_alternative_key_name     = is_batch_modification-delete-alternative_key_name
+                                                 IMPORTING et_bopf_modifications       = lt_bopf_modification
+                                                           et_failed_converted         = DATA(lt_failed_converted) ).
+        IF lt_failed_converted IS NOT INITIAL.
+          ev_failed = abap_true.
+        ENDIF.
+
+      WHEN /bobf/if_frw_c=>sc_modify_update.
+        ASSIGN is_batch_modification-update-rs_entity_data->* TO <ls_entity_data>.
+        CREATE DATA lrt_entity_data LIKE STANDARD TABLE OF <ls_entity_data>.
+        ASSIGN lrt_entity_data->* TO <lt_entity_data>.
+        INSERT <ls_entity_data> INTO TABLE <lt_entity_data>.
+        io_sadl_entity_transact->prepare_update( EXPORTING it_entity_data                = <lt_entity_data>
+                                                           iv_alternative_key_name       = is_batch_modification-update-alternative_key_name
+                                                           it_updated_elements_per_tabix = VALUE #( ( tabix = 1
+                                                                                                      elements = is_batch_modification-update-updated_elements ) )
+                                                 IMPORTING et_bopf_modifications         = lt_bopf_modification
+                                                           et_failed_converted           = lt_failed_converted ).
+        IF lt_failed_converted IS NOT INITIAL.
+          ev_failed = abap_true.
+        ENDIF.
+
+    ENDCASE.
+
+    IF ev_failed = abap_false.
+      IF lt_bopf_modification IS NOT INITIAL. "lt_bopf_modification can be initial when none of the updated elements could be mapped to BOPF changed fields
+        ASSERT lines( lt_bopf_modification ) = 1.
+        es_bopf_modification = lt_bopf_modification[ 1 ].
+        IF is_batch_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+          INSERT VALUE #( tabix = is_batch_modification-original_tabix key = es_bopf_modification-key ) INTO TABLE mt_source_key_handle.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD execute.
+    ASSERT it_create IS NOT INITIAL OR
+           it_update IS NOT INITIAL OR
+           it_delete IS NOT INITIAL OR
+           it_action IS NOT INITIAL.
+
+    CLEAR: ev_failed, mt_modification, mt_source_key_handle.
+
+
+    collect_modifications(  it_create = it_create
+                            it_update = it_update
+                            it_delete = it_delete ).
+
+    " Group BOPF modifications by BO and Node and execute BOPF modify
+    process_batch_modifications( IMPORTING ev_failed = ev_failed ).
+
+    IF ev_failed = abap_false AND it_action IS NOT INITIAL.
+      process_batch_actions( EXPORTING it_action    = it_action
+                      IMPORTING ev_failed = ev_failed ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD execute_action.
+    DATA: lo_sadl_entity_transact TYPE REF TO            /bobf/cl_sadl_entity_transact,
+          lt_char1                TYPE STANDARD TABLE OF char1 WITH DEFAULT KEY,
+          lt_failed               TYPE if_sadl_entity_transactional=>tt_tabix,
+          lv_static_action_failed TYPE abap_bool.
+
+    FIELD-SYMBOLS: <lt_key_values> TYPE ANY TABLE,
+                   <lt_data>       TYPE ANY TABLE,
+                   <ls_action>     TYPE if_sadl_batch=>ty_action.
+
+    ev_failed = abap_false.
+
+    LOOP AT it_action ASSIGNING <ls_action>
+      GROUP BY ( entity_id  = <ls_action>-entity_id ) INTO DATA(ls_group).
+
+      lo_sadl_entity_transact = get_sadl_entity_transactional( iv_entity_type = mv_entity_type
+                                                               iv_entity_id   = ls_group-entity_id ).
+
+      DATA(lo_msg_handler) = lo_sadl_entity_transact->if_sadl_entity_transactional~get_message_handler( ).
+      lo_msg_handler->clear( ).
+
+      LOOP AT GROUP ls_group ASSIGNING <ls_action>.
+        ASSIGN <ls_action>-rt_key_values->* TO <lt_key_values>.
+        IF <ls_action>-r_returning_parameters IS BOUND.
+          ASSIGN <ls_action>-r_returning_parameters->* TO <lt_data>.
+        ELSE.
+          ASSIGN lt_char1 TO <lt_data>.
+        ENDIF.
+
+        IF <ls_action>-rs_importing_parameters IS BOUND.
+          ASSIGN <ls_action>-rs_importing_parameters->* TO FIELD-SYMBOL(<ls_action_parameters>).
+          lo_sadl_entity_transact->if_sadl_entity_transactional~execute(
+            EXPORTING iv_action_name          = <ls_action>-name
+                      i_action_parameters     = <ls_action_parameters>
+                      iv_alternative_key_name = <ls_action>-alternative_key_name
+                      it_key_values           = <lt_key_values>
+            IMPORTING et_failed               = lt_failed
+                      ev_static_action_failed = lv_static_action_failed
+                      et_data                 = <lt_data> ).
+        ELSE.
+          lo_sadl_entity_transact->if_sadl_entity_transactional~execute(
+            EXPORTING iv_action_name          = <ls_action>-name
+                      iv_alternative_key_name = <ls_action>-alternative_key_name
+                      it_key_values           = <lt_key_values>
+            IMPORTING et_failed               = lt_failed
+                      ev_static_action_failed = lv_static_action_failed
+                      et_data                 = <lt_data> ).
+        ENDIF.
+
+        ev_failed = boolc( lt_failed IS NOT INITIAL OR lv_static_action_failed = abap_true ).
+        IF ev_failed = abap_true.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+
+      " It's not necessary to add the messages to the SADL message handler (it's a singletion) because
+      " this was done already by the execute on the sadl entity transactional instances
+      "lo_msg_handler->get_messages( IMPORTING et_messages = DATA(lt_sadl_messages) ).
+      "_get_message_handler( )->add_messages( lt_sadl_messages ).
+
+      IF ev_failed = abap_true.
+        EXIT.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD execute_activation.
+    assert_only_activation_exists( it_action_activation ).
+    execute_action( EXPORTING it_action = it_action_activation
+                    IMPORTING ev_failed = ev_failed ).
+  ENDMETHOD.
+
+
+  METHOD execute_preparation_f_activate.
+    assert_only_activation_exists( it_action_activation ).
+    rv_preparation_executed = prepare_activation( it_action_activation ).
+  ENDMETHOD.
+
+
+  METHOD explicit_prepare_exists.
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<ls_preparation>) WHERE entity_id = is_activation-entity_id AND
+                                                                     name      = /bobf/if_conf_cds_link_c=>gc_action_name-draft-preparation.
+      FIELD-SYMBOLS: <lt_activation>  TYPE STANDARD TABLE,
+                     <lt_preparation> TYPE STANDARD TABLE.
+
+      ASSIGN: is_activation-rt_key_values->*    TO <lt_activation>,
+              <ls_preparation>-rt_key_values->* TO <lt_preparation>.
+
+      " Sofar, we only have one line in the rt_key_value table
+      IF <lt_activation>[ 1 ] = <lt_preparation>[ 1 ].
+        rv_explicit_prepare_exists = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD fill_root_keys_for_bopf_mods.
+    DATA: lt_source_key_created  TYPE /bobf/t_frw_key,
+          lt_key_existing        TYPE /bobf/t_frw_key,
+          ls_key                 TYPE /bobf/s_frw_key,
+          lt_key_link_source     TYPE /bobf/t_frw_key_link,
+          lt_key_link_existing   TYPE /bobf/t_frw_key_link,
+          lv_association_to_root TYPE /bobf/obm_assoc_key.
+
+    DATA(lo_rt_access) = /bobf/cl_sadl_entity_rt_access=>get( iv_type = mv_entity_type
+                                                              iv_id   = iv_entity_id ).
+    DATA(lv_bopf_node_key) = lo_rt_access->get_bopf_node_key( ).
+    "get information of the given node
+    IF lv_bopf_node_key = lo_rt_access->ms_bopf_node-root_node_key.
+      "the given node is a root node
+      LOOP AT ct_bopf_modifications ASSIGNING FIELD-SYMBOL(<ls_bopf_modification>).
+        <ls_bopf_modification>-root_key = <ls_bopf_modification>-key.
+      ENDLOOP.
+    ELSE.
+      "node is NOT the root node
+
+      "collect key links for EXISTING instances
+      LOOP AT ct_bopf_modifications ASSIGNING <ls_bopf_modification>
+                                    WHERE change_mode <> /bobf/if_frw_c=>sc_modify_create ##PRIMKEY[CHANGE].
+        ls_key-key = <ls_bopf_modification>-key.
+        APPEND ls_key TO lt_key_existing.
+      ENDLOOP.
+      IF lt_key_existing IS NOT INITIAL.
+        lo_rt_access->get_assoc_to_root( EXPORTING iv_node_key            = lv_bopf_node_key
+                                         IMPORTING ev_association_to_root = lv_association_to_root ).
+        lo_rt_access->get_bopf_service_manager( )->retrieve_by_association( EXPORTING iv_node_key    = lv_bopf_node_key
+                                                                                      it_key         = lt_key_existing
+                                                                                      iv_association = lv_association_to_root
+                                                                            IMPORTING et_key_link    = lt_key_link_existing ).
+        LOOP AT ct_bopf_modifications ASSIGNING <ls_bopf_modification>
+                                      WHERE change_mode <> /bobf/if_frw_c=>sc_modify_create ##PRIMKEY[CHANGE].
+          <ls_bopf_modification>-root_key = VALUE #( lt_key_link_existing[ source_key = <ls_bopf_modification>-key ]-target_key OPTIONAL ).
+        ENDLOOP.
+      ENDIF.
+
+      "collect key links for TO-BE-CREATED instances (remember: it's not the ROOT, so it must be a create WITH SOURCE.)
+      LOOP AT ct_bopf_modifications ASSIGNING <ls_bopf_modification>
+                                    WHERE change_mode = /bobf/if_frw_c=>sc_modify_create ##PRIMKEY[CHANGE]
+                                    GROUP BY ( source_node = <ls_bopf_modification>-source_node ) INTO DATA(ls_group).
+
+        IF ls_group-source_node = lo_rt_access->ms_bopf_node-root_node_key.
+          "Source node is the root node. Easy.
+          LOOP AT GROUP ls_group ASSIGNING <ls_bopf_modification>.
+            <ls_bopf_modification>-root_key = <ls_bopf_modification>-source_key.
+          ENDLOOP.
+        ELSE.
+
+
+
+          "source node is NOT the root node
+          CLEAR lt_source_key_created.
+          LOOP AT GROUP ls_group ASSIGNING <ls_bopf_modification>.
+            READ TABLE it_bopf_modifications_bo INTO DATA(ls_parent_mod) WITH KEY change COMPONENTS change_mode = /bobf/if_frw_c=>sc_modify_create
+                                                                                                    node        = <ls_bopf_modification>-source_node
+                                                                                                    key         = <ls_bopf_modification>-source_key.
+            IF ls_parent_mod-root_key IS NOT INITIAL.
+              <ls_bopf_modification>-root_key = ls_parent_mod-root_key.
+            ELSE.
+              ls_key-key = <ls_bopf_modification>-source_key.
+              APPEND ls_key TO lt_source_key_created.
+            ENDIF.
+          ENDLOOP.
+
+          IF lt_source_key_created IS NOT INITIAL.
+            SORT lt_source_key_created.
+            DELETE ADJACENT DUPLICATES FROM lt_source_key_created.
+
+            lo_rt_access->get_assoc_to_root( EXPORTING iv_node_key            = ls_group-source_node
+                                             IMPORTING ev_association_to_root = lv_association_to_root ).
+            lo_rt_access->get_bopf_service_manager( )->retrieve_by_association( EXPORTING iv_node_key    = ls_group-source_node
+                                                                                          it_key         = lt_source_key_created
+                                                                                          iv_association = lv_association_to_root
+                                                                                IMPORTING et_key_link    = lt_key_link_source ).
+            LOOP AT GROUP ls_group ASSIGNING <ls_bopf_modification>.
+              <ls_bopf_modification>-root_key = VALUE #( lt_key_link_source[ source_key = <ls_bopf_modification>-source_key ]-target_key OPTIONAL ).
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_sadl_entity_transactional.
+    ro_sadl_entity_transact ?=
+      mo_sadl_etty_transact_provider->get_transactional_runtime( EXPORTING iv_type = iv_entity_type
+                                                                           iv_id   = iv_entity_id ).
+  ENDMETHOD.
+
+
+  METHOD implicit_preparation_enabled.
+    DATA(lo_rt_access) = /bobf/cl_sadl_entity_rt_access=>get( iv_type = mv_entity_type
+                                                              iv_id   = iv_entity_id ).
+    TRY.
+        DATA(lo_conf) = /bobf/cl_frw_factory=>get_configuration( lo_rt_access->get_bo_key( ) ).
+      CATCH /bobf/cx_frw.
+        ASSERT 1 = 2. " Must not happen. BO inconsistent or it doesn't exist
+    ENDTRY.
+
+    lo_conf->get_bo( IMPORTING es_obj = DATA(ls_bo_conf) ).
+
+    rv_enabled = boolc( ls_bo_conf-status_class = /bobf/if_conf_def_classes_c=>gc_cl_draft_status_adapter ).
+  ENDMETHOD.
+
+
+  METHOD prepare_activation.
+    DATA lt_action_preparation TYPE if_sadl_batch=>tt_action.
+
+    LOOP AT it_activation INTO DATA(ls_activation).
+
+      IF implicit_preparation_enabled( iv_entity_id = ls_activation-entity_id ).
+
+        ls_activation-name = /bobf/if_conf_cds_link_c=>gc_action_name-draft-preparation.
+        APPEND ls_activation TO lt_action_preparation.
+      ENDIF.
+    ENDLOOP.
+
+    execute_action( EXPORTING it_action = lt_action_preparation ).
+    " It doesn't matter whether they are success or not, we are activating those anyway afterwards
+
+    rv_prepare_enabling_bo_exists = boolc( lt_action_preparation IS NOT INITIAL ).
+  ENDMETHOD.
+
+
+  METHOD process_batch_actions.
+    CLEAR ev_failed.
+
+    " Respect the order of it_action, execute separately: Loop over every action and determine what to do
+    LOOP AT it_action ASSIGNING FIELD-SYMBOL(<ls_action>). " Todo: Performance optimization (Grouping all preparations / activations / non-activations)
+
+      IF <ls_action>-name = /bobf/if_conf_cds_link_c=>gc_action_name-draft-activation
+        AND NOT explicit_prepare_exists( it_action     = it_action
+                                         is_activation = <ls_action> ).
+
+        prepare_activation( VALUE #( ( <ls_action> ) ) ).
+      ENDIF.
+
+      execute_action( EXPORTING it_action = VALUE #( ( <ls_action> ) )
+                      IMPORTING ev_failed = ev_failed ).
+
+      IF ev_failed = abap_true.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+METHOD process_batch_modifications.
+    TYPES: ty_ref_to_mapper TYPE REF TO lcl_data_mapper.
+    DATA: lt_bopf_modifications_for_bo TYPE /bobf/t_frw_modification,
+          lt_bopf_modif_for_entity     TYPE /bobf/t_frw_modification,
+          lt_bopf_modif_for_root_key   TYPE /bobf/t_frw_modification,
+          lo_change                    TYPE REF TO /bobf/if_tra_change,
+          lo_message                   TYPE REF TO /bobf/if_frw_message,
+          lt_data_mapper               TYPE STANDARD TABLE OF ty_ref_to_mapper WITH DEFAULT KEY,
+          lt_source_key_handle         TYPE tt_tabix_key_map.
+
+    CLEAR et_bopf_modification.
+    ev_failed = abap_false.
+
+    CHECK mt_modification IS NOT INITIAL.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+
+    TRY.
+        LOOP AT mt_modification ASSIGNING FIELD-SYMBOL(<ls_batch_modification>)
+             GROUP BY ( bo_key = <ls_batch_modification>-bo_key ) INTO DATA(ls_group_bo).
+
+          CLEAR lt_bopf_modifications_for_bo.
+
+          " *** Collect all modifications for the current BO:
+
+          " Data mapping and merging of modifications depends on the entity ID.
+          " So, do this GROUPed BY entity_id:
+          LOOP AT GROUP ls_group_bo ASSIGNING <ls_batch_modification>
+               GROUP BY ( entity_id = <ls_batch_modification>-entity_id ) INTO DATA(ls_group_entity_id).
+
+            DATA(lo_sadl_entity_transact) = get_sadl_entity_transactional( iv_entity_type = mv_entity_type
+                                                                           iv_entity_id   = ls_group_entity_id-entity_id ).
+            DATA(lo_mapper) = NEW lcl_data_mapper( iv_entity_type = mv_entity_type
+                                                   iv_entity_id   = ls_group_entity_id-entity_id ).
+            INSERT lo_mapper INTO TABLE lt_data_mapper.
+            DATA(lo_merger) = NEW lcl_modification_merger( iv_entity_type = mv_entity_type
+                                                           iv_entity_id   = ls_group_entity_id-entity_id ).
+
+            "all entities for which changes have to be mapped back after MODIFY have to be managed by lo_mapper:
+            LOOP AT GROUP ls_group_entity_id ASSIGNING <ls_batch_modification> WHERE change_mode = /bobf/if_frw_c=>sc_modify_create.
+              lo_mapper->add_entity_ref( irs_entity_data      = <ls_batch_modification>-create-rs_entity_data
+                                         iv_requested_alt_key = <ls_batch_modification>-create-requested_alternative_key ).
+            ENDLOOP.
+            lo_mapper->prepare_bopf_data( ).
+
+            CLEAR lt_bopf_modif_for_entity.
+            LOOP AT GROUP ls_group_entity_id ASSIGNING <ls_batch_modification>.
+
+              create_bopf_modification( EXPORTING is_batch_modification   = <ls_batch_modification>
+                                                  io_sadl_entity_transact = lo_sadl_entity_transact
+                                                  io_mapper               = lo_mapper
+                                        IMPORTING ev_failed               = ev_failed
+                                                  es_bopf_modification    = DATA(ls_bopf_modification) ).
+              IF ev_failed = abap_true.
+                /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+                RETURN.
+              ENDIF.
+
+              IF ls_bopf_modification IS NOT INITIAL.
+                lo_merger->merge_bopf_modification( EXPORTING is_bopf_modification        = ls_bopf_modification
+                                                    CHANGING ct_bopf_modifications_for_bo = lt_bopf_modif_for_entity ).
+              ENDIF.
+            ENDLOOP.
+            " Get the root keys. This is required for 'GROUP BY root_key' below.
+            " TODO: check if the BO supports drafts and do not fill root keys otherwise.
+            fill_root_keys_for_bopf_mods( EXPORTING iv_entity_id             = ls_group_entity_id-entity_id
+                                                    it_bopf_modifications_bo = lt_bopf_modifications_for_bo
+                                          CHANGING  ct_bopf_modifications    = lt_bopf_modif_for_entity ).
+
+
+            INSERT LINES OF lt_bopf_modif_for_entity INTO TABLE lt_bopf_modifications_for_bo.
+          ENDLOOP.
+
+
+          DATA(lo_service_manager) = /bobf/cl_tra_serv_mgr_factory=>get_service_manager( ls_group_bo-bo_key ).
+
+          " *** Separate the BOPF modify call for every root instance.
+          " *** This is necessary for Drafts because each draft instance has to run within its own enqueue context.
+          LOOP AT lt_bopf_modifications_for_bo ASSIGNING FIELD-SYMBOL(<ls_bopf_modification>)
+               GROUP BY ( root_key = <ls_bopf_modification>-root_key ) INTO DATA(ls_group_root_key).
+
+            CLEAR lt_bopf_modif_for_root_key.
+
+            LOOP AT GROUP ls_group_root_key ASSIGNING <ls_bopf_modification>.
+              INSERT <ls_bopf_modification> INTO TABLE lt_bopf_modif_for_root_key.
+            ENDLOOP.
+
+            /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+            lo_service_manager->modify( EXPORTING it_modification = lt_bopf_modif_for_root_key
+                                        IMPORTING eo_message      = lo_message
+                                                  eo_change       = lo_change ).
+            lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+
+            add_message( io_message = lo_message ).
+
+            IF lo_change IS BOUND.
+              IF lo_change->has_failed_changes( ) = abap_true.
+                ev_failed = abap_true.
+                /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+                RETURN.
+              ELSE.
+                ev_failed = abap_false.
+              ENDIF.
+            ENDIF.
+          ENDLOOP. "... GROUP BY root_key
+
+        ENDLOOP. "... GROUP BY bo_key
+
+        LOOP AT lt_data_mapper INTO lo_mapper.
+          lo_mapper->map_back_to_sadl( ).  """ !!!! mapper is entity-specific!!!
+        ENDLOOP.
+
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+    ENDTRY.
+
+  ENDMETHOD.
+ENDCLASS.

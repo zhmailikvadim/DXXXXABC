@@ -1,0 +1,128 @@
+FUNCTION ZFI_ADD_LINES
+  TABLES
+    T_ACCHD LIKE ACCHD
+    T_ACCIT LIKE ACCIT
+    T_ACCCR LIKE ACCCR
+    T_AUSZ3 LIKE AUSZ_CLR OPTIONAL
+    T_NEWLINES LIKE FIPOEXT.
+
+
+
+* Описание : СОЗДАНИЕ ДОКУМЕНТА АВТОМАТИЧЕСКОГО ПЕРЕРАСЧЕТА МЕЖДУ ФУНКЦИОНАЛЬНЫМИ СФЕРАМИ
+* Код ТС : DEV.030- УУ.06.E-010
+* Разработчик : Бондарь Я.С.
+* Постановка задачи: Сиренко А.А.
+* Redmine #11550
+
+  DATA:
+    lt_hkont  TYPE SORTED TABLE OF zfkber_hkont WITH UNIQUE KEY fkber,
+    lv_def_hk TYPE bseg-hkont,
+    lt_new    TYPE STANDARD TABLE OF  fipoext,
+    ls_last   TYPE fipoext,
+    lv_dmbtr  TYPE bseg-dmbtr,
+    lv_wrbtr  TYPE bseg-wrbtr,
+    lv_bschl  TYPE bseg-bschl.
+  FIELD-SYMBOLS:
+    <ls_hkont> TYPE zfkber_hkont.
+
+*  проверяем - активно ли замещение
+  SELECT low up to 1 rows
+    INTO @DATA(lv_low)
+    FROM tvarvc
+    WHERE name = 'ZSWITCH_ CO010'.
+   endselect.
+  IF lv_low IS INITIAL.
+    RETURN.
+  ENDIF.
+  SORT t_acccr BY posnr curtp.
+* формируется набор строк по которым нужны сводные проводки по ФС(функциональным сферам)
+  LOOP AT t_accit ASSIGNING FIELD-SYMBOL(<ls_accit>)
+    WHERE gvtyp = '30' AND fkber <> space.
+    IF <ls_accit>-shkzg = 'S'.
+      lv_bschl = '40'.
+    ELSE.
+      lv_bschl = '50'.
+    ENDIF.
+    READ TABLE lt_new ASSIGNING FIELD-SYMBOL(<ls_line>) WITH KEY bukrs = <ls_accit>-bukrs
+                                     fkber = <ls_accit>-fkber
+                                     bschl = lv_bschl
+                                     BINARY SEARCH.
+    IF sy-subrc <> 0.
+      INSERT INITIAL LINE INTO lt_new INDEX sy-tabix ASSIGNING <ls_line>.
+      <ls_line>-bukrs = <ls_accit>-bukrs.
+      <ls_line>-vorgn = <ls_accit>-vorgn.
+      <ls_line>-gsber = <ls_accit>-gsber.
+      <ls_line>-pargb = <ls_accit>-pargb.
+      <ls_line>-vbund = <ls_accit>-vbund.
+      <ls_line>-hkont = <ls_accit>-hkont.
+      <ls_line>-ktosl = <ls_accit>-ktosl.
+      <ls_line>-bschl = <ls_accit>-bschl.
+      <ls_line>-fkber = <ls_accit>-fkber.
+      <ls_line>-bschl = lv_bschl.
+    ENDIF.
+    READ TABLE t_acccr TRANSPORTING NO FIELDS
+      WITH KEY posnr = <ls_accit>-posnr BINARY SEARCH.
+    IF sy-subrc = 0.
+      LOOP AT t_acccr ASSIGNING FIELD-SYMBOL(<ls_cr>) FROM sy-tabix.
+        IF <ls_cr>-posnr <> <ls_accit>-posnr.
+          EXIT.
+        ENDIF.
+        CASE <ls_cr>-curtp.
+          WHEN '00'. ADD <ls_cr>-wrbtr TO <ls_line>-wrbtr.
+          WHEN '10'. ADD <ls_cr>-wrbtr TO <ls_line>-dmbtr.
+        ENDCASE.
+      ENDLOOP.
+    ENDIF.
+  ENDLOOP.
+  UNASSIGN <ls_accit>.
+  IF lt_new[] IS INITIAL.
+    RETURN.
+  ENDIF.
+*  выборка счетов для доп строк
+  SELECT *
+    FROM zfkber_hkont
+    INTO TABLE lt_hkont
+    FOR ALL ENTRIES IN t_newlines
+    WHERE fkber = t_newlines-fkber
+      OR fkber = space.
+*    определется счет для балансирования
+  READ TABLE lt_hkont ASSIGNING <ls_hkont>
+        WITH TABLE KEY fkber = space.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+  lv_def_hk = <ls_hkont>-hkont.
+  SORT t_newlines BY bschl bukrs.
+*  дополняются строки для каждой ФС
+  LOOP AT   lt_new ASSIGNING <ls_line>.
+    DATA(lv_tabix) = sy-tabix + 1.
+    READ TABLE lt_hkont ASSIGNING <ls_hkont>
+      WITH KEY fkber = <ls_line>-fkber.
+    CHECK sy-subrc = 0.
+
+    <ls_line>-hkont = <ls_hkont>-hkont.
+    CLEAR: <ls_line>-fkber.
+*    накапливаем суммы для балансирующей проводки
+    APPEND <ls_line> TO t_newlines.
+    ADD <ls_line>-dmbtr TO lv_dmbtr.
+    ADD <ls_line>-wrbtr TO lv_wrbtr.
+
+*   at end of shkzg
+    READ TABLE lt_new ASSIGNING FIELD-SYMBOL(<ls_next>) INDEX lv_tabix.
+    IF sy-subrc <> 0 OR <ls_line>-bschl <> <ls_next>-bschl
+                     OR <ls_line>-bukrs <> <ls_next>-bukrs.
+      ls_last = <ls_line>.
+      ls_last-hkont = lv_def_hk.
+      IF <ls_line>-bschl = '40'.
+        ls_last-bschl = '50'.
+      ELSE.
+        ls_last-bschl = '40'.
+      ENDIF.
+      ls_last-dmbtr = lv_dmbtr.
+      ls_last-wrbtr = lv_wrbtr.
+      APPEND ls_last TO t_newlines.
+      CLEAR:
+        lv_dmbtr, lv_wrbtr.
+    ENDIF.
+  ENDLOOP.
+ENDFUNCTION.

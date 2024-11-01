@@ -1,0 +1,1103 @@
+CLASS /bobf/cl_confrt_complete DEFINITION
+  PUBLIC
+  CREATE PUBLIC
+  SHARED MEMORY ENABLED
+
+  GLOBAL FRIENDS /bobf/cl_frw_factory
+                 /bobf/cl_lib_delegation_bopf .
+
+  PUBLIC SECTION.
+    TYPE-POOLS abap .
+
+    INTERFACES /bobf/if_frw_configuration .
+
+    ALIASES ms_last_action
+      FOR /bobf/if_frw_configuration~ms_last_action .
+    ALIASES ms_last_altkey
+      FOR /bobf/if_frw_configuration~ms_last_altkey .
+    ALIASES ms_last_assoc
+      FOR /bobf/if_frw_configuration~ms_last_assoc .
+    ALIASES ms_last_group
+      FOR /bobf/if_frw_configuration~ms_last_group .
+    ALIASES ms_last_node
+      FOR /bobf/if_frw_configuration~ms_last_node .
+    ALIASES ms_last_query
+      FOR /bobf/if_frw_configuration~ms_last_query .
+    ALIASES ms_last_sta_deriv
+      FOR /bobf/if_frw_configuration~ms_last_sta_deriv .
+    ALIASES ms_last_sta_var
+      FOR /bobf/if_frw_configuration~ms_last_sta_var .
+    ALIASES ms_last_vset
+      FOR /bobf/if_frw_configuration~ms_last_vset .
+    ALIASES ms_obj
+      FOR /bobf/if_frw_configuration~ms_obj .
+
+    DATA mv_cloned TYPE boole_d READ-ONLY .
+    DATA mv_bo_key TYPE /bobf/obm_bo_key READ-ONLY .
+
+    METHODS constructor
+      IMPORTING
+        !iv_bo_key TYPE /bobf/conf_key
+      RAISING
+        /bobf/cx_frw .
+    METHODS initialize_data
+      IMPORTING
+        !io_instance TYPE REF TO /bobf/cl_conf_readonly
+        !is_context  TYPE /bobf/s_frw_context OPTIONAL
+        !iv_cloned   TYPE boole_d OPTIONAL
+      RAISING
+        /bobf/cx_frw .
+    METHODS update_data
+      IMPORTING
+        !is_context TYPE /bobf/s_frw_context
+      RAISING
+        /bobf/cx_frw .
+    METHODS get_build_timestamp
+      RETURNING
+        VALUE(rv_build_timestamp) TYPE timestampl .
+    "! Returns LAST_CHANGE_TIME from table /BOBF/OBM_OBJ and all referenced DOs:
+    "! Date on which the BO-settings Were Changed Last
+    METHODS get_last_change_time
+      RETURNING
+        VALUE(rv_last_change_time) TYPE timestampl .
+  PROTECTED SECTION.
+
+    TYPES:
+*"* protected components of class /BOBF/CL_CONFRT_COMPLETE
+*"* do not include other source files here!!!
+      BEGIN OF ts_bo ,
+        bo_key        TYPE /bobf/obm_bo_key,
+        bo_name       TYPE /bobf/obm_name,
+        bo_proxy_name TYPE /bobf/obm_esr_name,
+        test          TYPE boole_d,
+      END OF ts_bo .
+    TYPES:
+      tt_bo TYPE HASHED TABLE OF ts_bo WITH UNIQUE KEY bo_key
+                   WITH NON-UNIQUE SORTED KEY proxy_name    COMPONENTS bo_proxy_name test
+                   WITH UNIQUE     SORTED KEY internal_name COMPONENTS bo_name .
+    TYPES:
+      BEGIN OF ts_rt_assocb_cache .
+    TYPES   r_assocb TYPE REF TO /bobf/t_confro_assocb.
+    TYPES   runtime_assoc_binding TYPE /bobf/if_frw_configuration=>gtt_runtime_assoc_binding.
+    TYPES END OF ts_rt_assocb_cache .
+    TYPES:
+      tt_rt_assocb_cache TYPE SORTED TABLE OF ts_rt_assocb_cache WITH NON-UNIQUE KEY r_assocb .
+
+    DATA mt_assocb_cache TYPE tt_rt_assocb_cache .
+    DATA mo_conf_sh TYPE REF TO /bobf/if_confrt_complete .
+    DATA mr_root_node TYPE REF TO /bobf/s_confro_node .
+  PRIVATE SECTION.
+*"* private components of class /BOBF/CL_CONFRT_COMPLETE
+*"* do not include other source files here!!!
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_CONFRT_COMPLETE IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_configuration~convert_runtime_assoc_binding.
+
+    DATA ls_runtime_assocb TYPE /bobf/if_frw_configuration=>gty_runtime_assoc_binding.
+
+    IF NOT ir_assocb IS BOUND OR ir_assocb->* IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    READ TABLE mt_assocb_cache ASSIGNING FIELD-SYMBOL(<ls_assocb_cache>) WITH TABLE KEY
+       r_assocb = ir_assocb.
+    IF sy-subrc <> 0.
+      INSERT VALUE #( r_assocb = ir_assocb ) INTO TABLE mt_assocb_cache ASSIGNING <ls_assocb_cache>.
+      LOOP AT ir_assocb->* INTO ls_runtime_assocb-assocbinding.
+        IF ls_runtime_assocb-constant IS INITIAL.
+          CLEAR ls_runtime_assocb-constant_value.
+        ELSE.
+          ASSIGN (ls_runtime_assocb-constant) TO FIELD-SYMBOL(<lv_constant_value>).
+          IF sy-subrc <> 0.
+            /bobf/if_frw_configuration~get_assoc(
+              EXPORTING
+                iv_assoc_key  = iv_assoc_key
+              IMPORTING
+                es_assoc      = DATA(ls_assoc)
+            ).
+            lcl_error_handler=>raise_faulty_const_assoc_bind(
+              EXPORTING
+                iv_constant_name    = ls_runtime_assocb-constant
+                iv_bo_name          = ms_obj-bo_name
+                iv_node_name        = ls_assoc-source_node->node_name
+                iv_association_name = ls_assoc-assoc_name
+            ).
+          ELSE.
+            GET REFERENCE OF <lv_constant_value> INTO ls_runtime_assocb-constant_value.
+          ENDIF.
+        ENDIF.
+        APPEND ls_runtime_assocb TO <ls_assocb_cache>-runtime_assoc_binding.
+      ENDLOOP.
+    ENDIF.
+    rt_runtime_assocb = <ls_assocb_cache>-runtime_assoc_binding.
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_act.
+
+    CLEAR es_action.
+
+    IF iv_act_key IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_act
+        WITH TABLE KEY act_key = iv_act_key
+        INTO es_action.
+*   unknown action
+      IF sy-subrc IS NOT INITIAL.
+        lcl_error_handler=>raise_act_error(
+            iv_act_key               = iv_act_key
+            iv_bo_name               = mo_conf_sh->ms_obj-bo_name
+        ).
+
+      ENDIF.
+      ms_last_action = es_action.
+
+    ELSEIF iv_node_key IS NOT INITIAL
+       AND iv_act_cat  IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_act WITH KEY key3
+        COMPONENTS node_key = iv_node_key
+                   act_cat  = iv_act_cat
+        INTO es_action.
+      IF sy-subrc = 0.
+        ms_last_action = es_action.
+      ELSE.
+        CLEAR ms_last_action.
+      ENDIF.
+
+    ELSE.
+*   invalid importing parameter values
+      lcl_error_handler=>raise_invalid_parameters_error( ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_act_tab.
+
+    et_action = mo_conf_sh->mt_act.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_altkey.
+
+    IF iv_altkey_key IS NOT INITIAL.
+*   using altkey key
+      READ TABLE mo_conf_sh->mt_altkey INTO ms_last_altkey
+           WITH TABLE KEY altkey_key = iv_altkey_key.
+      IF sy-subrc IS NOT INITIAL.
+        lcl_error_handler=>raise_altkey_error( iv_altkey_key = iv_altkey_key
+                                               iv_bo_name    = mo_conf_sh->ms_obj-bo_name ).
+      ENDIF.
+
+    ELSEIF iv_node_key    IS NOT INITIAL AND
+           iv_altkey_name IS NOT INITIAL.
+*   with node and name
+      CLEAR ms_last_altkey.
+      READ TABLE mo_conf_sh->mt_altkey INTO ms_last_altkey
+           WITH KEY key2 COMPONENTS node_key    = iv_node_key
+                                    altkey_name = iv_altkey_name.
+
+    ELSE.
+*   importing parameters wrongly filled
+      ASSERT 0 = 1.
+    ENDIF.
+
+    IF es_altkey IS SUPPLIED.
+      es_altkey = ms_last_altkey.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_altkey_tab.
+
+    FIELD-SYMBOLS:
+      <ls_altkey> TYPE /bobf/s_confro_altkey.
+
+    IF iv_node_key IS INITIAL.
+      et_altkey = mo_conf_sh->mt_altkey.
+    ELSE.
+      CLEAR et_altkey.
+      LOOP AT mo_conf_sh->mt_altkey ASSIGNING <ls_altkey> USING KEY key2
+           WHERE node_key = iv_node_key.
+        INSERT <ls_altkey> INTO TABLE et_altkey.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_assoc.
+
+    CLEAR es_assoc.
+
+    IF iv_assoc_key IS NOT INITIAL.
+*   using assoc key
+      READ TABLE mo_conf_sh->mt_assoc
+        WITH TABLE KEY assoc_key = iv_assoc_key
+        INTO es_assoc.
+      IF sy-subrc IS NOT INITIAL.
+        lcl_error_handler=>raise_assoc_error(
+            iv_assoc_key             = iv_assoc_key
+            iv_bo_name               = mo_conf_sh->ms_obj-bo_name
+        ).
+      ENDIF.
+      ms_last_assoc = es_assoc.
+
+    ELSEIF iv_node_key   IS NOT INITIAL AND
+           iv_assoc_cat  IS NOT INITIAL AND
+           iv_assoc_type IS INITIAL.
+*   using source node and assoc cat
+      READ TABLE mo_conf_sh->mt_assoc WITH KEY key3
+        COMPONENTS source_node_key = iv_node_key
+                   assoc_cat       = iv_assoc_cat
+        INTO es_assoc.
+      IF sy-subrc = 0.
+        ms_last_assoc = es_assoc.
+      ELSE.
+        CLEAR ms_last_assoc.
+      ENDIF.
+
+    ELSEIF iv_node_key   IS NOT INITIAL AND
+           iv_assoc_cat  IS NOT INITIAL AND
+           iv_assoc_type IS NOT INITIAL.
+*   using source node, cat and type of association
+      READ TABLE mo_conf_sh->mt_assoc WITH KEY key3
+        COMPONENTS source_node_key = iv_node_key
+                   assoc_cat       = iv_assoc_cat
+                   assoc_type      = iv_assoc_type
+        INTO es_assoc.
+      IF sy-subrc = 0.
+        ms_last_assoc = es_assoc.
+      ELSE.
+        CLEAR ms_last_assoc.
+      ENDIF.
+
+    ELSE.
+*   importing parameters wrongly filled
+      lcl_error_handler=>raise_invalid_parameters_error( ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_assoc_change.
+
+    DATA: ls_assoc_change TYPE /bobf/s_confro_assoc_chg.
+
+    READ TABLE mo_conf_sh->mt_assoc_change
+      WITH TABLE KEY node_key = iv_node_key
+      INTO ls_assoc_change.
+    IF sy-subrc = 0.
+      et_association_change_trigger = ls_assoc_change-trigger->*.
+    ELSE.
+      CLEAR et_association_change_trigger.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_assoc_tab.
+
+    IF et_assoc IS REQUESTED.
+      et_assoc = mo_conf_sh->mt_assoc.
+    ENDIF.
+
+    IF et_comp IS REQUESTED.
+      et_comp  = mo_conf_sh->mt_comp.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_authority_field_mapping.
+
+    DATA lo_conf_readonly        TYPE REF TO /bobf/cl_conf_readonly.
+    DATA lv_target_node_key      TYPE /bobf/obm_node_key.
+
+    FIELD-SYMBOLS <ls_node> TYPE /bobf/s_confro_node.
+    FIELD-SYMBOLS <ls_request_attributes> TYPE /bobf/if_frw_configuration=>gty_request_attributes.
+
+    CLEAR et_auth_field_map.
+    CLEAR et_auth_field_id.
+    CLEAR et_assoc_key.
+    CLEAR et_request_attributes.
+    CLEAR ev_map_exists_for_node.
+
+    READ TABLE mo_conf_sh->mt_node WITH TABLE KEY node_key = iv_node_key ASSIGNING <ls_node>.
+    IF sy-subrc <> 0.
+      lo_conf_readonly ?= mo_conf_sh.
+      lo_conf_readonly->check_consistency( ).
+      lcl_error_handler=>raise_node_error(
+        iv_node_key = iv_node_key
+        iv_bo_name  = mo_conf_sh->ms_obj-bo_name ).
+    ENDIF.
+
+    CHECK <ls_node>-acf_mapping IS BOUND.
+
+    DATA ls_auth_field_map TYPE /bobf/if_frw_configuration=>gty_auth_field_map.
+    DATA ls_assoc_key TYPE /bobf/s_frw_key.
+    FIELD-SYMBOLS <ls_acf_mapping> TYPE /bobf/s_confro_acf_mapping.
+    LOOP AT <ls_node>-acf_mapping->* ASSIGNING <ls_acf_mapping>.
+      ls_auth_field_map-authority_object = <ls_acf_mapping>-auth_obj_name.
+      ls_auth_field_map-authority_field = <ls_acf_mapping>-acf.
+      ls_auth_field_map-association = <ls_acf_mapping>-assoc_key.
+      ls_auth_field_map-node_element = <ls_acf_mapping>-target_field_name.
+      INSERT ls_auth_field_map INTO TABLE et_auth_field_map.
+      IF NOT <ls_acf_mapping>-assoc_key IS INITIAL.
+        READ TABLE et_assoc_key WITH TABLE KEY key_sort COMPONENTS key = <ls_acf_mapping>-assoc_key
+            TRANSPORTING NO FIELDS.
+        IF sy-subrc <> 0.
+          ls_assoc_key-key = <ls_acf_mapping>-assoc_key.
+          INSERT ls_assoc_key INTO TABLE et_assoc_key.
+        ENDIF.
+      ENDIF.
+
+      IF ev_map_exists_for_node = abap_false.
+        ev_map_exists_for_node = boolc( ls_auth_field_map-association IS INITIAL ).
+      ENDIF.
+
+      "determine target node key
+      CLEAR lv_target_node_key.
+      IF ls_auth_field_map-association IS INITIAL.
+        lv_target_node_key = iv_node_key.
+      ELSE.
+        READ TABLE mo_conf_sh->mt_assoc WITH TABLE KEY assoc_key = ls_auth_field_map-association ASSIGNING FIELD-SYMBOL(<ls_assoc>).
+        IF sy-subrc = 0.
+          lv_target_node_key = <ls_assoc>-target_node_key.
+        ENDIF.
+      ENDIF.
+
+      "provide request attributes for target node key
+      READ TABLE et_request_attributes ASSIGNING <ls_request_attributes>
+          WITH TABLE KEY node_key = lv_target_node_key.
+      IF sy-subrc <> 0.
+        INSERT VALUE #( node_key = lv_target_node_key ) INTO TABLE
+            et_request_attributes ASSIGNING <ls_request_attributes>.
+      ENDIF.
+
+      INSERT CONV #( <ls_acf_mapping>-target_field_name ) INTO TABLE <ls_request_attributes>-t_request_attributes.
+
+    ENDLOOP.
+
+    " sorted table by auth object and auth field...
+    DATA ls_auth_field_id TYPE /bobf/if_frw_configuration=>gty_auth_field_id.
+    DATA lv_idx TYPE i.
+    FIELD-SYMBOLS <ls_auth_field_map> TYPE /bobf/if_frw_configuration=>gty_auth_field_map.
+    LOOP AT et_auth_field_map ASSIGNING <ls_auth_field_map>.
+      IF <ls_auth_field_map>-authority_object <> ls_auth_field_id-authority_object.
+        IF ls_auth_field_id-authority_object IS NOT INITIAL.
+          INSERT ls_auth_field_id INTO TABLE et_auth_field_id.
+        ENDIF.
+        lv_idx = 1.
+        CLEAR ls_auth_field_id.
+        ls_auth_field_id-authority_object = <ls_auth_field_map>-authority_object.
+      ELSE.
+        lv_idx = lv_idx + 1.
+      ENDIF.
+      CASE lv_idx.
+        WHEN 1. ls_auth_field_id-id1 = <ls_auth_field_map>-authority_field.
+        WHEN 2. ls_auth_field_id-id2 = <ls_auth_field_map>-authority_field.
+        WHEN 3. ls_auth_field_id-id3 = <ls_auth_field_map>-authority_field.
+        WHEN 4. ls_auth_field_id-id4 = <ls_auth_field_map>-authority_field.
+        WHEN 5. ls_auth_field_id-id5 = <ls_auth_field_map>-authority_field.
+        WHEN 6. ls_auth_field_id-id6 = <ls_auth_field_map>-authority_field.
+        WHEN 7. ls_auth_field_id-id7 = <ls_auth_field_map>-authority_field.
+        WHEN 8. ls_auth_field_id-id8 = <ls_auth_field_map>-authority_field.
+      ENDCASE.
+    ENDLOOP.
+    IF ls_auth_field_id-authority_object IS NOT INITIAL.
+      INSERT ls_auth_field_id INTO TABLE et_auth_field_id.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_authority_objects.
+
+    CLEAR et_authority_object.
+
+    FIELD-SYMBOLS <ls_node> TYPE /bobf/s_confro_node.
+    READ TABLE mo_conf_sh->mt_node WITH TABLE KEY node_key = iv_node_key ASSIGNING <ls_node>.
+    IF sy-subrc <> 0.
+      DATA lo_conf_readonly TYPE REF TO /bobf/cl_conf_readonly.
+      lo_conf_readonly ?= mo_conf_sh.
+      lo_conf_readonly->check_consistency( ).
+      lcl_error_handler=>raise_node_error(
+        iv_node_key = iv_node_key
+        iv_bo_name  = mo_conf_sh->ms_obj-bo_name ).
+    ENDIF.
+
+    CHECK <ls_node>-auth_obj_names IS BOUND.
+
+    FIELD-SYMBOLS <lv_auth_obj_name> TYPE xuobject.
+    LOOP AT <ls_node>-auth_obj_names->* ASSIGNING <lv_auth_obj_name>.
+      INSERT <lv_auth_obj_name> INTO TABLE et_authority_object.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_bo.
+
+    es_obj = ms_obj.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_content_key_mapping.
+
+    DATA: ls_content_key_map TYPE /bobf/s_confro_content_key_map.
+
+    IF iv_host_content_key IS NOT INITIAL.    " map from Host to DO
+      READ TABLE mo_conf_sh->mt_content_key_map INTO ls_content_key_map
+        WITH KEY content_cat      = iv_content_cat
+                 host_content_key = iv_host_content_key.
+      IF sy-subrc = 0.
+        ev_content_key = ls_content_key_map-do_content_key.
+      ELSE.
+        CLEAR ev_content_key. " object not known in the DO
+      ENDIF.
+
+    ELSEIF iv_do_content_key   IS NOT INITIAL " map from DO to Host (has to work always)
+       AND iv_do_root_node_key IS NOT INITIAL.
+
+      READ TABLE mo_conf_sh->mt_content_key_map INTO ls_content_key_map
+        WITH KEY do2host
+        COMPONENTS content_cat      = iv_content_cat
+                   do_content_key   = iv_do_content_key
+                   do_root_node_key = iv_do_root_node_key.
+      IF sy-subrc NE 0.
+        ASSERT sy-subrc = 0.
+      ENDIF.
+      ev_content_key = ls_content_key_map-host_content_key.
+
+    ELSE.
+*   importing parameters wrongly filled
+      ASSERT 0 = 1.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_determination.
+
+    READ TABLE mo_conf_sh->mt_exectime
+      WITH TABLE KEY exectime = iv_exectime
+      REFERENCE INTO es_data.
+    IF sy-subrc IS NOT INITIAL.
+      lcl_error_handler=>raise_determination_error(
+          iv_exectime = iv_exectime
+          iv_bo_name  = mo_conf_sh->ms_obj-bo_name
+      ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_fieldmapping.
+
+    et_fieldmapping = mo_conf_sh->mt_fieldmapping.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_group.
+
+    CLEAR es_group.
+
+    READ TABLE mo_conf_sh->mt_group INTO es_group
+      WITH KEY group_key COMPONENTS group_key = iv_group_key.
+    IF sy-subrc IS NOT INITIAL.
+      lcl_error_handler=>raise_group_error(
+          iv_group_key             = iv_group_key
+          iv_bo_name               = mo_conf_sh->ms_obj-bo_name
+      ).
+    ENDIF.
+    ms_last_group = es_group.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_group_tab.
+
+    et_group = mo_conf_sh->mt_group.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_node.
+
+    "The structure of MS_LAST_NODE is complex. Therefore, we avoid unnecessary assignments as much as possible.
+
+    "The most efficient way of calling this method is:
+    "  mo_conf->get_node( lv_node_key ).
+    "  ASSIGN mo_conf->ms_last_node TO <ls_node_conf>.
+    "But this is VERY DANGEROUS because the contents of the field symbol <ls_node_conf> may change unexpectedly
+    "when there are any method calls between the ASSIGN statement and accessing the field symbol.
+
+    IF ms_last_node-node_key <> iv_node_key.
+      READ TABLE mo_conf_sh->mt_node INTO ms_last_node WITH TABLE KEY node_key = iv_node_key.
+      IF sy-subrc IS NOT INITIAL.
+        CAST /bobf/cl_conf_readonly( mo_conf_sh )->check_consistency( ).
+        lcl_error_handler=>raise_node_error( iv_node_key = iv_node_key
+                                             iv_bo_name  = mo_conf_sh->ms_obj-bo_name ).
+      ENDIF.
+    ENDIF.
+    IF es_node IS SUPPLIED.
+      es_node = ms_last_node.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_node_tab.
+
+    et_node = mo_conf_sh->mt_node.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_property.
+
+    DATA: ls_property TYPE /bobf/s_confro_property.
+
+    READ TABLE mo_conf_sh->mt_property
+      WITH TABLE KEY node_cat_key = iv_node_cat_key
+      INTO ls_property.
+    IF sy-subrc IS NOT INITIAL.
+      lcl_error_handler=>raise_property_error(
+          iv_node_cat_key = iv_node_cat_key
+          iv_bo_name      = mo_conf_sh->ms_obj-bo_name
+      ).
+    ENDIF.
+    et_property = ls_property-property->*.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_property_change.
+
+    DATA: ls_property_change TYPE /bobf/s_confro_prop_chg.
+
+    READ TABLE mo_conf_sh->mt_property_change
+      WITH KEY node_key = iv_node_key
+      INTO ls_property_change.
+    IF sy-subrc = 0.
+      et_property_change_trigger = ls_property_change-trigger->*.
+    ELSE.
+*   no hard assert here, because the table does only
+*   contain entries to nodes that have property changes
+*   maintained
+      CLEAR et_property_change_trigger.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_property_prx.
+
+    DATA: ls_property TYPE /bobf/s_confro_property_prx.
+
+    CLEAR et_property.
+
+    READ TABLE mo_conf_sh->mt_property_prx
+      WITH KEY node_key = iv_node_key
+      INTO ls_property.
+
+    IF sy-subrc = 0.
+      et_property = ls_property-property->*.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_query.
+
+    READ TABLE mo_conf_sh->mt_query
+      WITH TABLE KEY query_key = iv_query_key
+      INTO es_query.
+    IF sy-subrc IS NOT INITIAL.
+      lcl_error_handler=>raise_query_error(
+          iv_query_key             = iv_query_key
+          iv_bo_name               = mo_conf_sh->ms_obj-bo_name
+      ).
+    ENDIF.
+    ms_last_query = es_query.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_query_tab.
+
+    et_query = mo_conf_sh->mt_query.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_root_node.
+    rs_root_node = mr_root_node->*.
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_status_associations.
+
+    et_sta_assoc = mo_conf_sh->mt_sta_assoc.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_status_derivator.
+
+    READ TABLE mo_conf_sh->mt_sta_deriv INTO es_sta_deriv
+      WITH KEY sta_deriv_key = iv_sta_deriv_key.
+    IF sy-subrc IS NOT INITIAL.
+      lcl_error_handler=>raise_status_derivator_error(
+          iv_sta_deriv_key = iv_sta_deriv_key
+          iv_bo_name       = mo_conf_sh->ms_obj-bo_name
+      ).
+    ENDIF.
+    ms_last_sta_deriv = es_sta_deriv.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_status_derivator_tab.
+
+    et_sta_deriv = mo_conf_sh->mt_sta_deriv.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_status_variable.
+
+    READ TABLE mo_conf_sh->mt_sta_var INTO es_sta_var
+     WITH KEY sta_var_key = iv_sta_var_key.
+    IF sy-subrc IS NOT INITIAL.
+      lcl_error_handler=>raise_status_variable_error(
+          iv_stat_var_key = iv_sta_var_key
+          iv_bo_name      = mo_conf_sh->ms_obj-bo_name
+      ).
+    ENDIF.
+    ms_last_sta_var = es_sta_var.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_status_variables.
+
+    et_sta_var = mo_conf_sh->mt_sta_var.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_validation.
+
+    FIELD-SYMBOLS: <ls_val> TYPE /bobf/s_confro_val_list.
+
+    et_val_list = mo_conf_sh->mt_validation.
+
+    IF iv_group_key IS NOT INITIAL.
+      LOOP AT et_val_list ASSIGNING <ls_val>.
+        READ TABLE mo_conf_sh->mt_groupc TRANSPORTING NO FIELDS
+          WITH KEY group_key   = iv_group_key
+                   content_key = <ls_val>-val_key
+                   content_cat = /bobf/if_conf_c=>sc_content_val.
+*     not in requested group -> remove validation
+        IF sy-subrc <> 0.
+          DELETE et_val_list.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_value_set.
+
+    READ TABLE mo_conf_sh->mt_vset
+      WITH KEY vset_key = iv_vset_key
+      INTO es_vset.
+    IF sy-subrc IS NOT INITIAL.
+      lcl_error_handler=>raise_value_set_error(
+          iv_value_set_key = iv_vset_key
+          iv_bo_name       = mo_conf_sh->ms_obj-bo_name
+      ).
+    ENDIF.
+    ms_last_vset = es_vset.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~get_value_set_tab.
+    FIELD-SYMBOLS:
+    <ls_vset> TYPE /bobf/s_confro_value_set.
+
+    IF iv_content_key IS INITIAL.
+      et_vset = mo_conf_sh->mt_vset.
+    ELSE.
+      CLEAR et_vset.
+      LOOP AT mo_conf_sh->mt_vset ASSIGNING <ls_vset> USING KEY key
+           WHERE content_key = iv_content_key
+             AND content_cat = iv_content_cat.
+        INSERT <ls_vset> INTO TABLE et_vset.
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~identify_scenario.
+
+    " ignore hand-crafted BOs...
+    CHECK mr_root_node->object_model_cds_view_name IS NOT INITIAL.
+
+    " identify the scenario (_quadrant_)...
+    rv_scenario = /bobf/cl_conf_cds_link_static=>identify_bo_scenario( iv_object_category         = ms_obj-objcat
+                                                                       iv_feature_annotations     = CONV #( ms_obj-feature_annotation )
+                                                                       iv_root_active_persistence = CONV #( mr_root_node->object_mdl_active_persistence ) ).
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_action.
+
+    DATA: ls_act  TYPE /bobf/s_confro_act_list.
+
+    CLEAR ev_act_key.
+
+    IF iv_proxy_act_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_act INTO ls_act WITH KEY key_proxy
+        COMPONENTS node_key     = iv_node_key
+                   act_esr_name = iv_proxy_act_name.
+
+    ELSEIF iv_genil_act_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_act INTO ls_act WITH KEY key_genil
+        COMPONENTS act_genil_name = iv_genil_act_name.
+
+    ELSEIF iv_act_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_act INTO ls_act WITH KEY key2
+        COMPONENTS node_key = iv_node_key
+                   act_name = iv_act_name.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      ev_act_key     = ls_act-act_key.
+      ms_last_action = ls_act.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_altkey.
+
+    DATA: ls_altkey  TYPE /bobf/s_confro_altkey.
+
+    CLEAR ev_altkey_key.
+
+    IF iv_proxy_altkey_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_altkey INTO ls_altkey WITH KEY key_proxy
+        COMPONENTS node_key        = iv_node_key
+                   altkey_esr_name = iv_proxy_altkey_name.
+    ELSEIF iv_altkey_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_altkey INTO ls_altkey WITH KEY key2
+        COMPONENTS node_key    = iv_node_key
+                   altkey_name = iv_altkey_name.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      ev_altkey_key  = ls_altkey-altkey_key.
+      ms_last_altkey = ls_altkey.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_assoc.
+
+    DATA: ls_assoc  TYPE /bobf/s_confro_assoc.
+
+    CLEAR ev_assoc_key.
+
+    IF iv_proxy_assoc_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_assoc INTO ls_assoc WITH KEY key_proxy
+        COMPONENTS source_node_key = iv_node_key
+                   assoc_esr_name  = iv_proxy_assoc_name.
+
+    ELSEIF iv_genil_assoc_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_assoc INTO ls_assoc WITH KEY key_genil
+        COMPONENTS assoc_genil_name = iv_genil_assoc_name.
+
+    ELSEIF iv_assoc_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_assoc INTO ls_assoc WITH KEY key2
+        COMPONENTS source_node_key = iv_node_key
+                   assoc_name      = iv_assoc_name.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      ev_assoc_key  = ls_assoc-assoc_key.
+      ms_last_assoc = ls_assoc.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_node.
+
+    DATA: ls_node_key TYPE /bobf/s_frw_key,
+          lt_node_key TYPE /bobf/t_frw_key,
+          ls_node     TYPE /bobf/s_confro_node.
+
+    CLEAR ev_node_key.
+
+    IF iv_proxy_node_name IS NOT INITIAL.
+      IF ms_last_node-node_esr_name NE iv_proxy_node_name.
+        READ TABLE mo_conf_sh->mt_node INTO ls_node WITH KEY key_proxy
+          COMPONENTS node_esr_name = iv_proxy_node_name.
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+        ms_last_node = ls_node.
+      ENDIF.
+
+      IF ms_last_node-node_esr_name_unique = abap_true.
+        ev_node_key = ms_last_node-node_key.
+      ELSE.
+        /bobf/if_frw_configuration~query_nodes(
+          EXPORTING
+            iv_proxy_node_name = iv_proxy_node_name
+          IMPORTING
+            et_node_key        = lt_node_key ).
+        READ TABLE lt_node_key INDEX 1 INTO ls_node_key.
+        ev_node_key = ls_node_key-key.
+      ENDIF.
+
+    ELSEIF iv_genil_node_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_node INTO ls_node WITH KEY key_genil
+          COMPONENTS node_genil_name = iv_genil_node_name.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+      ms_last_node = ls_node.
+      ev_node_key  = ms_last_node-node_key.
+
+    ELSEIF iv_node_name IS NOT INITIAL.
+      IF ms_last_node-node_name       <> iv_node_name OR
+         ms_last_node-node_esr_prefix <> iv_prefix.
+        READ TABLE mo_conf_sh->mt_node INTO ls_node WITH KEY key2
+          COMPONENTS node_name       = iv_node_name
+                     node_esr_prefix = iv_prefix.
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+        ms_last_node = ls_node.
+      ENDIF.
+      ev_node_key  = ms_last_node-node_key.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_nodes.
+
+    DATA: ls_node TYPE /bobf/s_confro_node,
+          ls_key  TYPE /bobf/s_frw_key,
+          lv_pos  TYPE i.
+
+    CLEAR et_node_key.
+
+    LOOP AT mo_conf_sh->mt_node INTO ls_node USING KEY key_proxy
+         WHERE node_esr_name = iv_proxy_node_name.
+      IF iv_node_type IS SUPPLIED.
+        CHECK ls_node-node_type = iv_node_type.
+      ELSE.
+        CHECK ls_node-node_type <> /bobf/if_conf_c=>sc_node_type_bo.
+      ENDIF.
+*   sort nodes according to their tree structure
+      ls_key-key = ls_node-node_key.
+      READ TABLE et_node_key
+        WITH TABLE KEY key = ls_node-parent_node_key
+        TRANSPORTING NO FIELDS.                          "#EC CI_STDSEQ
+      IF sy-subrc <> 0.
+        INSERT ls_key INTO et_node_key INDEX 1.
+      ELSE.
+*     found parent -> insert behind
+        lv_pos = sy-tabix + 1.
+        INSERT ls_key INTO et_node_key INDEX lv_pos.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_query.
+
+    DATA: ls_query  TYPE /bobf/s_confro_query.
+
+    CLEAR ev_query_key.
+
+    IF iv_proxy_query_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_query INTO ls_query WITH KEY key_proxy
+        COMPONENTS node_key       = iv_node_key
+                   query_esr_name = iv_proxy_query_name.
+
+    ELSEIF iv_genil_query_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_query INTO ls_query WITH KEY key_genil
+        COMPONENTS query_genil_name = iv_genil_query_name.
+
+    ELSEIF iv_query_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_query INTO ls_query WITH KEY key2
+        COMPONENTS node_key   = iv_node_key
+                   query_name = iv_query_name.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      ev_query_key  = ls_query-query_key.
+      ms_last_query = ls_query.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_status_derivator.
+
+    CLEAR es_sta_deriv.
+
+    IF iv_deriv_esr_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_sta_deriv INTO es_sta_deriv
+        WITH KEY esr_name COMPONENTS deriv_esr_name = iv_deriv_esr_name.
+
+    ELSEIF iv_deriv_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_sta_deriv INTO es_sta_deriv
+        WITH KEY name COMPONENTS deriv_name = iv_deriv_name.
+
+    ENDIF.
+
+    ms_last_sta_deriv = es_sta_deriv.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~query_value_set.
+
+    DATA: ls_vset  TYPE /bobf/s_confro_value_set.
+
+    CLEAR ev_vset_key.
+
+    IF iv_proxy_vset_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_vset INTO ls_vset WITH KEY proxy_key
+        COMPONENTS content_cat     = iv_content_cat
+                   content_key     = iv_content_key
+                   vset_esr_name   = iv_proxy_vset_name.
+    ELSEIF iv_vset_name IS NOT INITIAL.
+      READ TABLE mo_conf_sh->mt_vset INTO ls_vset WITH KEY key
+        COMPONENTS content_cat     = iv_content_cat
+                   content_key     = iv_content_key
+                   vset_name       = iv_vset_name.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    IF sy-subrc = 0.
+      ev_vset_key  = ls_vset-vset_key.
+      ms_last_vset = ls_vset.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_configuration~supports_feature.
+
+    rv_feature_is_supported = xsdbool( ms_obj-feature_annotation CS iv_feature_annotation ).
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+
+    mv_bo_key  = iv_bo_key.
+
+  ENDMETHOD.
+
+
+  METHOD get_build_timestamp.
+    DATA: lo_conf_readonly TYPE REF TO /bobf/cl_conf_readonly.
+
+    lo_conf_readonly ?= mo_conf_sh.
+    rv_build_timestamp = lo_conf_readonly->mv_build_timestamp.
+  ENDMETHOD.
+
+
+  METHOD get_last_change_time.
+    DATA: lo_conf_readonly TYPE REF TO /bobf/cl_conf_readonly.
+
+    lo_conf_readonly ?= mo_conf_sh.
+    rv_last_change_time = lo_conf_readonly->mv_last_change_time.
+  ENDMETHOD.
+
+
+  METHOD initialize_data.
+
+    BREAK-POINT ID /bobf/conf.
+
+    CLEAR mt_assocb_cache.
+
+* check if bo_key is correct
+    IF io_instance->ms_obj IS INITIAL OR
+       io_instance->ms_obj-bo_key <> mv_bo_key .
+*   application error -> no configuration available
+      ASSERT ID /bobf/conf CONDITION 0 = 1.
+      RAISE EXCEPTION TYPE /bobf/cx_conf
+        EXPORTING
+          textid = /bobf/cx_conf=>/bobf/cx_frw.
+
+    ELSE.
+      mo_conf_sh = io_instance.
+      mv_cloned  = iv_cloned.
+      ms_obj     = io_instance->ms_obj. "redundant to avoid call methods
+    ENDIF.
+
+    IF is_context-cleanup_mode IS NOT INITIAL.
+      ms_obj-cleanup_mode = is_context-cleanup_mode.
+    ENDIF.
+    IF is_context-enqueue_scope IS NOT INITIAL.
+      ms_obj-enqueue_scope = is_context-enqueue_scope.
+    ENDIF.
+
+    mr_root_node = REF #( mo_conf_sh->mt_node[ node_key = ms_obj-root_node_key ] ).
+
+  ENDMETHOD.
+
+
+  METHOD update_data.
+
+    BREAK-POINT ID /bobf/conf.
+    ASSERT ID /bobf/conf CONDITION mo_conf_sh IS BOUND.
+
+* actualize redundant data after ADDON manupulation of cloned data
+    ms_obj = mo_conf_sh->ms_obj.
+
+* no overwrite by ADDONS allowed
+    IF is_context-cleanup_mode IS NOT INITIAL.
+      ms_obj-cleanup_mode = is_context-cleanup_mode.
+    ENDIF.
+    IF is_context-enqueue_scope IS NOT INITIAL.
+      ms_obj-enqueue_scope = is_context-enqueue_scope.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.

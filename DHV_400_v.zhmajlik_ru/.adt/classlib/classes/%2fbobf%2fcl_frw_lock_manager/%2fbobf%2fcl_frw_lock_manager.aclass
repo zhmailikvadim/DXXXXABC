@@ -1,0 +1,1995 @@
+CLASS /bobf/cl_frw_lock_manager DEFINITION
+  PUBLIC
+  ABSTRACT
+  CREATE PROTECTED.
+
+  PUBLIC SECTION.
+
+    CLASS-METHODS create IMPORTING io_bopf                TYPE REF TO /bobf/cl_frw
+                         RETURNING VALUE(ro_new_instance) TYPE REF TO /bobf/cl_frw_lock_manager
+                         RAISING   /bobf/cm_frw.
+
+    METHODS lock
+      IMPORTING
+        iv_edit_mode                  TYPE /bobf/conf_edit_mode
+        it_node                       TYPE /bobf/t_frw_node
+        iv_generic                    TYPE boole_d DEFAULT abap_false
+        iv_scope                      TYPE /bobf/conf_enqueue_scope OPTIONAL
+        iv_all_none                   TYPE boole_d DEFAULT abap_false
+        iv_check_only                 TYPE boole_d DEFAULT abap_false
+        io_change                     TYPE REF TO /bobf/if_frw_change
+        it_node_locked_for_delete     TYPE /bobf/t_frw_node OPTIONAL
+      EXPORTING
+        eo_message                    TYPE REF TO /bobf/if_frw_message
+        et_failed_node                TYPE /bobf/t_frw_node
+        et_node_not_locked            TYPE /bobf/t_frw_node
+        et_lockable_node_newly_locked TYPE /bobf/t_frw_node
+        et_loaded_node                TYPE /bobf/t_frw_node
+      CHANGING
+        ct_mod                        TYPE /bobf/t_frw_modification OPTIONAL.
+    METHODS unlock
+      IMPORTING
+        it_node                       TYPE /bobf/t_frw_node
+        iv_generic                    TYPE boole_d DEFAULT abap_false
+        iv_scope                      TYPE /bobf/conf_enqueue_scope OPTIONAL
+        iv_all_none                   TYPE boole_d DEFAULT abap_false
+        io_change                     TYPE REF TO /bobf/if_frw_change
+      EXPORTING
+        eo_message                    TYPE REF TO /bobf/if_frw_message
+        et_failed_node                TYPE /bobf/t_frw_node
+        et_node_not_locked            TYPE /bobf/t_frw_node
+        et_lockable_node_newly_locked TYPE /bobf/t_frw_node
+        et_loaded_node                TYPE /bobf/t_frw_node
+      CHANGING
+        ct_mod                        TYPE /bobf/t_frw_modification OPTIONAL.
+    METHODS unlock_all IMPORTING it_root_key TYPE /bobf/t_frw_key OPTIONAL
+                       EXPORTING eo_change   TYPE REF TO /bobf/if_frw_change
+                                 eo_message  TYPE REF TO /bobf/if_frw_message.
+    METHODS after_successful_save IMPORTING iv_cleanup_mode TYPE /bobf/conf_cleanup_mode
+                                  EXPORTING eo_message      TYPE REF TO /bobf/if_frw_message
+                                            eo_change       TYPE REF TO /bobf/if_frw_change.
+
+  PROTECTED SECTION.
+    TYPES:
+      "! this structure supports MOVE-CORRESPONDING for /BOBF/S_FRW_LOCK_NODE
+      BEGIN OF ty_lock_info,
+        lock_node        TYPE /bobf/obm_node_key,
+        lockable_node    TYPE /bobf/obm_node_key,
+        key              TYPE /bobf/conf_key,
+        generic          TYPE /bobf/s_frw_lock_node-generic,
+        edit_mode        TYPE /bobf/s_frw_lock_node-edit_mode,
+        edit_mode_update TYPE /bobf/s_frw_lock_node-edit_mode_update,
+        edit_mode_dialog TYPE /bobf/s_frw_lock_node-edit_mode_dialog,
+        is_deleted       TYPE abap_bool,
+      END OF ty_lock_info.
+    TYPES tt_lock_info TYPE SORTED TABLE OF ty_lock_info WITH NON-UNIQUE KEY lockable_node key.
+
+    DATA mo_bopf TYPE REF TO /bobf/cl_frw.
+    DATA mo_buffer TYPE REF TO /bobf/if_frw_buffer.
+    DATA mo_conf TYPE REF TO /bobf/if_frw_configuration.
+    DATA mv_enqueue_scope TYPE /bobf/conf_enqueue_scope.
+
+    METHODS constructor IMPORTING io_bopf TYPE REF TO /bobf/cl_frw.
+
+    METHODS clear_lock_buffer EXPORTING eo_change  TYPE REF TO /bobf/if_frw_change
+                                        eo_message TYPE REF TO /bobf/if_frw_message.
+    METHODS build_lock_info EXPORTING et_lock_info TYPE tt_lock_info.
+
+
+    METHODS delete_locks_from_buffer IMPORTING it_lock_node_keys TYPE /bobf/t_frw_node
+                                               io_change         TYPE REF TO /bobf/if_frw_change.
+    METHODS del_update_locks_from_buffer IMPORTING io_change    TYPE REF TO /bobf/if_frw_change
+                                         CHANGING  ct_lock_info TYPE tt_lock_info.
+    METHODS lock_bypassing_buffer IMPORTING iv_edit_mode          TYPE /bobf/conf_edit_mode
+                                            iv_scope              TYPE /bobf/conf_enqueue_scope
+                                            it_lockable_node_keys TYPE /bobf/t_frw_node
+                                            io_change             TYPE REF TO /bobf/if_frw_change
+                                  EXPORTING eo_message            TYPE REF TO /bobf/if_frw_message
+                                            et_failed_node        TYPE /bobf/t_frw_node.
+    METHODS unlock_bypassing_buffer IMPORTING iv_edit_mode          TYPE /bobf/conf_edit_mode
+                                              it_lockable_node_keys TYPE /bobf/t_frw_node
+                                              iv_generic            TYPE abap_bool
+                                              io_change             TYPE REF TO /bobf/if_frw_change.
+    METHODS unlock_deleted_instances IMPORTING io_change    TYPE REF TO /bobf/if_frw_change
+                                     CHANGING  ct_lock_info TYPE /bobf/cl_frw_lock_manager=>tt_lock_info.
+    "! Convert generic locks into non-generic and optimistic locks<br/>
+    "! Assumption: there are no UPDATE locks (yet)
+    METHODS convert_generic_dialog_locks IMPORTING io_change    TYPE REF TO /bobf/if_frw_change
+                                         EXPORTING eo_message   TYPE REF TO /bobf/if_frw_message
+                                         CHANGING  ct_lock_info TYPE /bobf/cl_frw_lock_manager=>tt_lock_info.
+    "! Re-acquire lost update locks after commit and notify property changes
+    METHODS reacquire_locks ABSTRACT IMPORTING io_change    TYPE REF TO /bobf/if_frw_change
+                                               it_lock_info TYPE /bobf/cl_frw_lock_manager=>tt_lock_info
+                                     EXPORTING eo_message   TYPE REF TO /bobf/if_frw_message.
+    METHODS keep_exclusive_locks ABSTRACT RETURNING VALUE(rv_keep_exclusive_locks) TYPE abap_bool.
+    METHODS content_changes_for_node_keys IMPORTING it_node          TYPE /bobf/t_frw_node
+                                          RETURNING VALUE(ro_change) TYPE REF TO /bobf/if_frw_change.
+
+    CLASS-METHODS remove_failed_nodes IMPORTING it_failed TYPE /bobf/t_frw_node
+                                      CHANGING  ct_all    TYPE /bobf/t_frw_node.
+
+**********************************************************************
+* Methods common with /BOBF/CL_FRW
+    CLASS-METHODS collect_messages IMPORTING io_message TYPE REF TO /bobf/if_frw_message
+                                   CHANGING  co_message TYPE REF TO /bobf/if_frw_message.
+
+**********************************************************************
+
+  PRIVATE SECTION.
+    METHODS _unlock
+      IMPORTING
+        iv_generic                   TYPE boole_d
+        iv_scope                     TYPE /bobf/conf_enqueue_scope
+        iv_all_none                  TYPE boole_d
+        io_change                    TYPE REF TO /bobf/if_frw_change
+        it_node                      TYPE /bobf/t_frw_node
+        it_node_link                 TYPE /bobf/t_frw_node_key_link
+        io_lock_param_buffer         TYPE REF TO /bobf/cl_frw_lock_param_buffer
+      EXPORTING
+        et_lock_buffer_modifications TYPE /bobf/t_frw_modification
+        et_node_not_locked           TYPE /bobf/t_frw_node
+      CHANGING
+        co_message                   TYPE REF TO /bobf/if_frw_message.
+
+    METHODS _lock
+      IMPORTING
+        iv_edit_mode                  TYPE /bobf/conf_edit_mode
+        iv_generic                    TYPE boole_d
+        iv_scope                      TYPE /bobf/conf_enqueue_scope
+        iv_all_none                   TYPE boole_d
+        iv_check_only                 TYPE boole_d
+        io_change                     TYPE REF TO /bobf/if_frw_change
+        it_node                       TYPE /bobf/t_frw_node
+        it_node_link                  TYPE /bobf/t_frw_node_key_link
+        io_lock_param_buffer          TYPE REF TO /bobf/cl_frw_lock_param_buffer
+        it_node_locked_for_delete     TYPE /bobf/t_frw_node
+      EXPORTING
+        et_node_not_locked            TYPE /bobf/t_frw_node
+        et_lockable_node_newly_locked TYPE /bobf/t_frw_node
+        et_lock_buffer_modifications  TYPE /bobf/t_frw_modification
+      CHANGING
+        ct_mod                        TYPE /bobf/t_frw_modification
+        co_message                    TYPE REF TO /bobf/if_frw_message.
+
+    "! Note that this method should not lock and cannot unlock non-existing (deleted) instances.
+    "! As the buffer must not be modified, there is no instance of /BOBF/CL_FRW_LOCK_PARAM_BUFFER
+    "! passed to the action.
+    METHODS call_lock_action_for_node_keys
+      IMPORTING iv_action             TYPE /bobf/act_cat
+                io_change             TYPE REF TO /bobf/if_frw_change
+                it_lockable_node_keys TYPE /bobf/t_frw_node
+                iv_edit_mode          TYPE /bobf/conf_edit_mode
+                iv_scope              TYPE /bobf/conf_enqueue_scope
+                iv_generic            TYPE abap_bool
+      EXPORTING eo_message            TYPE REF TO /bobf/if_frw_message
+                et_failed_node        TYPE /bobf/t_frw_node.
+
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_FRW_LOCK_MANAGER IMPLEMENTATION.
+
+
+  METHOD after_successful_save.
+    DATA: lo_message TYPE REF TO /bobf/if_frw_message.
+
+    "NOTE that this method is redefined in LCL_UPDATE as that scope is much more simple to handle.
+
+    CLEAR eo_message.
+    CLEAR eo_change.
+
+    CHECK mo_conf->ms_obj-no_lock = abap_false.
+
+    CASE iv_cleanup_mode.
+      WHEN /bobf/if_conf_c=>sc_cleanup_keep.
+        "keep buffer content but discard locks
+        unlock_all( IMPORTING eo_message = eo_message
+                              eo_change  = eo_change ).
+        mo_bopf->notify_property_changes( eo_change ).
+
+      WHEN /bobf/if_conf_c=>sc_cleanup_keep_lock.
+        eo_change = /bobf/cl_frw_factory=>get_change( ).
+
+        " 1. delete lost (update) locks from lock buffer
+        "    - (can optionally be optimized for the active enqueue scope)
+        " 2. (not always possible): remove locks for deleted instances
+        "    - consider GENERIC flag when unlocking
+        "    - use state_last_validated(?) for DO_LOCKING
+        "    - clean-up any remaining lock-buffer entries for deleted keys
+        "      (just to be sure they are not considered in steps below)
+        " 3. turn generic locks into non-generic locks:
+        "    - find generically locked instances
+        "    - lock them non-generically
+        "    - unlock them generically
+        " 4. re-lock after save
+        "    - EXCDIAUPD: turn exclusive dialog locks into optimistic locks
+        "    - OPTDIAUPD: promote (optimistic) dialog locks to update task
+
+        build_lock_info( IMPORTING et_lock_info = DATA(lt_lock_info) ).
+        del_update_locks_from_buffer( EXPORTING io_change    = eo_change
+                                      CHANGING  ct_lock_info = lt_lock_info ).
+        unlock_deleted_instances( EXPORTING io_change    = eo_change
+                                  CHANGING  ct_lock_info = lt_lock_info ).
+        convert_generic_dialog_locks( EXPORTING io_change    = eo_change
+                                      IMPORTING eo_message   = eo_message
+                                      CHANGING  ct_lock_info = lt_lock_info ).
+        reacquire_locks( EXPORTING io_change     = eo_change
+                                   it_lock_info  = lt_lock_info
+                         IMPORTING eo_message    = lo_message ).
+
+        collect_messages( EXPORTING io_message = lo_message
+                          CHANGING co_message  = eo_message ).
+
+      WHEN /bobf/if_conf_c=>sc_cleanup_refresh.
+        "This is a one-shot transaction. We don't bother cleaning up the locks
+        RETURN.
+
+    ENDCASE.
+
+  ENDMETHOD.
+
+
+  METHOD build_lock_info.
+    DATA: lt_node_conf         TYPE /bobf/t_confro_node,
+          lt_assoc             TYPE /bobf/t_confro_assoc,
+          lv_lockable_node_key TYPE /bobf/s_confro_assoc-target_node_key,
+          lt_locknode_keys     TYPE /bobf/t_frw_key,
+          lt_lock_node_data    TYPE /bobf/t_frw_lock_node,
+          ls_lock_info         TYPE ty_lock_info,
+          lt_deleted_keys      TYPE /bobf/t_frw_key,
+          lx_root              TYPE REF TO cx_root.
+    FIELD-SYMBOLS: <ls_locknode_conf>  TYPE /bobf/s_confro_node,
+                   <ls_lock_node_data> LIKE LINE OF lt_lock_node_data.
+
+    "Collects condensed information about existing locks by reading the contents of the lock buffer
+    "and checking for deleted instances (which are still locked).
+
+    CLEAR et_lock_info.
+    TRY.
+        mo_conf->get_node_tab( IMPORTING et_node = lt_node_conf ).
+        mo_conf->get_assoc_tab( IMPORTING et_assoc = lt_assoc ).
+        LOOP AT lt_node_conf ASSIGNING <ls_locknode_conf> WHERE node_type = /bobf/if_conf_c=>sc_node_type_lock. "#EC CI_SORTSEQ
+          mo_buffer->get_keys( EXPORTING iv_node_key = <ls_locknode_conf>-node_key
+                                         iv_state    = /bobf/if_conf_c=>sc_state_current
+                               IMPORTING et_key      = lt_locknode_keys ).
+          mo_bopf->retrieve( EXPORTING iv_node_key = <ls_locknode_conf>-node_key
+                                       it_key      = lt_locknode_keys
+                                       iv_state    = /bobf/if_conf_c=>sc_state_current
+                             IMPORTING et_data     = lt_lock_node_data ).
+          lv_lockable_node_key = lt_assoc[ KEY key3 COMPONENTS source_node_key = <ls_locknode_conf>-node_key
+                                                               assoc_cat       = /bobf/if_conf_c=>sc_assoccat_parent
+                                                               assoc_type      = /bobf/if_conf_c=>sc_assoctype_std ]-target_node_key.
+          mo_bopf->retrieve( EXPORTING iv_node_key   = lv_lockable_node_key
+                                       it_key        = lt_locknode_keys "keys of lockable node are identical to keys of lock node
+                                       iv_state      = /bobf/if_conf_c=>sc_state_current
+                                       iv_fill_data  = abap_false
+                             IMPORTING et_failed_key = lt_deleted_keys ).
+
+          ls_lock_info-lock_node = <ls_locknode_conf>-node_key.
+          ls_lock_info-lockable_node = lv_lockable_node_key.
+          LOOP AT lt_lock_node_data ASSIGNING <ls_lock_node_data>.
+            MOVE-CORRESPONDING <ls_lock_node_data> TO ls_lock_info.
+            ls_lock_info-is_deleted = boolc( line_exists( lt_deleted_keys[ KEY key_sort COMPONENTS key = <ls_lock_node_data>-key ] ) ).
+            "EDIT_MODE_DIALOG and EDIT_MODE_UPDATE in the buffer are only set for enqueue scopes EXCDIAUPD and OPTDIAUPD.
+            "However, in the lock info, we would like these fields to be set correctly for ALL scopes:
+            IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_dialog
+            OR mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+              ls_lock_info-edit_mode_dialog = ls_lock_info-edit_mode.
+              " Update locks are lost after commit and in DIALOG or DIAGUPD mode the buffer
+              " does not distinguish between DIALOG and UPDATE locks.
+              " Setting EDIT_MODE_UPDATE to READ_ONLY prevents unnecessary changes to the
+              " buffer in DEL_UPDATE_LOCKS_FROM_BUFFER.
+              ls_lock_info-edit_mode_update = /bobf/if_conf_c=>sc_edit_read_only.
+            ENDIF.
+            INSERT ls_lock_info INTO TABLE et_lock_info.
+          ENDLOOP.
+        ENDLOOP.
+      CATCH cx_root INTO lx_root ##catch_all.
+        mo_bopf->set_application_error( lx_root ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD call_lock_action_for_node_keys.
+    DATA: ls_lockable_node  TYPE /bobf/s_frw_node,
+          ls_failed_node    TYPE /bobf/s_frw_node,
+          ls_action_conf    TYPE /bobf/s_confro_act_list,
+          ls_lock_parameter TYPE /bobf/s_frw_lock_parameters,
+          ls_action_context TYPE /bobf/s_frw_ctx_act,
+          ls_key            TYPE /bobf/s_frw_key,
+          lt_key            TYPE /bobf/t_frw_key,
+          lo_message        TYPE REF TO /bobf/if_frw_message,
+          lt_failed_key     TYPE /bobf/t_frw_key,
+          ls_failed_key     TYPE /bobf/s_frw_key.
+
+    CLEAR: eo_message,
+           et_failed_node.
+
+    CHECK it_lockable_node_keys IS NOT INITIAL.
+
+    ls_lock_parameter = VALUE #( generic   = iv_generic
+                                 edit_mode = iv_edit_mode
+                                 scope     = iv_scope ).
+    ls_action_context = VALUE #( bo_key        = mo_conf->ms_obj-bo_key
+                                 root_node_key = mo_conf->ms_obj-root_node_key
+                                 act_cat       = iv_action ).
+
+    LOOP AT it_lockable_node_keys INTO ls_lockable_node.
+
+      AT NEW node.
+        CLEAR lt_key.
+        mo_conf->get_act( EXPORTING iv_node_key = ls_lockable_node-node
+                                    iv_act_cat  = /bobf/if_conf_c=>sc_action_unlock
+                          IMPORTING es_action   = ls_action_conf ).
+        ls_action_context-act_key  = ls_action_conf-act_key.
+        ls_action_context-node_key = ls_lockable_node-node.
+      ENDAT.
+
+      ls_key-key = ls_lockable_node-key.
+      INSERT ls_key INTO TABLE lt_key.
+
+      AT END OF node.
+        mo_bopf->do_lock_action( EXPORTING is_lock_param = REF #( ls_lock_parameter )
+                                           is_context    = ls_action_context
+                                           iv_act_class  = ls_action_conf-act_class
+                                           io_change     = io_change
+                                 IMPORTING eo_message    = lo_message
+                                           et_failed_key = lt_failed_key
+                                 CHANGING  ct_key        = lt_key ).
+        collect_messages( EXPORTING io_message = lo_message
+                          CHANGING  co_message = eo_message ).
+        ls_failed_node-node = ls_action_context-node_key.
+        LOOP AT lt_failed_key INTO ls_failed_key.
+          ls_failed_node-key = ls_failed_key-key.
+          INSERT ls_failed_node INTO TABLE et_failed_node.
+        ENDLOOP.
+      ENDAT.
+
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD clear_lock_buffer.
+    DATA: lt_nodeconf TYPE /bobf/t_confro_node,
+          lt_key      TYPE /bobf/t_frw_key,
+          ls_key      TYPE /bobf/s_frw_key,
+          lt_mod      TYPE /bobf/t_frw_modification,
+          ls_mod      TYPE /bobf/s_frw_modification,
+          lo_message  TYPE REF TO /bobf/if_frw_message,
+          lx_root     TYPE REF TO cx_root.
+
+    FIELD-SYMBOLS: <ls_locknode_conf> TYPE /bobf/s_confro_node.
+
+    CLEAR eo_message.
+    CLEAR eo_change.
+
+    CHECK mo_conf->ms_obj-no_lock = abap_false.
+
+    mo_conf->get_node_tab(  IMPORTING et_node  = lt_nodeconf ).
+
+    LOOP AT lt_nodeconf ASSIGNING <ls_locknode_conf> WHERE node_type = /bobf/if_conf_c=>sc_node_type_lock. "#EC CI_SORTSEQ
+      TRY.
+          mo_buffer->get_keys( EXPORTING iv_node_key = <ls_locknode_conf>-node_key
+                                         iv_state    = /bobf/if_conf_c=>sc_state_current
+                               IMPORTING et_key       = lt_key ).
+        CATCH cx_root INTO lx_root.                      "#EC CATCH_ALL
+          mo_bopf->set_application_error( lx_root ).
+      ENDTRY.
+
+      ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+      ls_mod-node        = <ls_locknode_conf>-node_key.
+      LOOP AT lt_key INTO ls_key.
+        ls_mod-key = ls_key-key.
+        APPEND ls_mod TO lt_mod.
+      ENDLOOP.
+    ENDLOOP.
+
+    IF lt_mod IS NOT INITIAL.
+      eo_change = /bobf/cl_frw_factory=>get_change( ).
+      TRY.
+          mo_buffer->modify( EXPORTING it_modification   = lt_mod
+                                       iv_state          = /bobf/if_conf_c=>sc_state_current
+                                       io_change         = eo_change
+                                       iv_only_transient = abap_true
+                             IMPORTING eo_message        = lo_message ).
+          collect_messages( EXPORTING io_message = lo_message
+                            CHANGING  co_message = eo_message ).
+        CATCH cx_root INTO lx_root.                      "#EC CATCH_ALL
+          mo_bopf->set_application_error( lx_root ).
+      ENDTRY.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD collect_messages.
+    IF io_message IS BOUND.
+      IF co_message IS BOUND.
+        co_message->add( io_message ).
+      ELSE.
+        co_message = io_message.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    mo_bopf = io_bopf.
+    mo_buffer = mo_bopf->mo_buffer.
+    mo_conf = mo_bopf->mo_conf.
+    mv_enqueue_scope = mo_bopf->mv_enqueue_scope.
+  ENDMETHOD.
+
+
+  METHOD content_changes_for_node_keys.
+
+    DATA ls_failed_lock TYPE /bobf/s_frw_node.
+
+    ro_change = /bobf/cl_frw_factory=>get_change( ).
+    LOOP AT it_node INTO ls_failed_lock.
+      ro_change->add_content_change( iv_node_key    = ls_failed_lock-node
+                                            iv_change_mode = /bobf/if_conf_c=>sc_content_nod
+                                            iv_key         = ls_failed_lock-key ).
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD convert_generic_dialog_locks.
+    DATA: ls_node                        TYPE /bobf/s_frw_node,
+          lt_delete_from_lock_buffer     TYPE /bobf/t_frw_node,
+          lt_lock_non_generic_optimistic TYPE /bobf/t_frw_node,
+          lt_lock_non_generic_exclusive  TYPE /bobf/t_frw_node,
+          lt_unlock_generic_optimistic   TYPE /bobf/t_frw_node,
+          lt_unlock_generic_exclusive    TYPE /bobf/t_frw_node,
+          lt_failed                      TYPE /bobf/t_frw_node.
+    FIELD-SYMBOLS: <ls_lock_info> LIKE LINE OF ct_lock_info.
+
+    "NOTE: Although all generic locks acquired by BOPF are EXCLUSIVE,
+    "the DIALOG part of these locks may still be OPTIMISTIC.
+
+    CLEAR eo_message.
+
+    DATA(lv_keep_exclusive_locks) = keep_exclusive_locks( ).
+    LOOP AT ct_lock_info ASSIGNING <ls_lock_info> WHERE generic = abap_true
+                                                    AND is_deleted = abap_false
+                                                    AND edit_mode_dialog <> /bobf/if_conf_c=>sc_edit_read_only. "#EC CI_SORTSEQ
+      "collect node keys for un-/locking below:
+      ls_node-key = <ls_lock_info>-key.
+
+      ls_node-node = <ls_lock_info>-lock_node.
+      INSERT ls_node INTO TABLE lt_delete_from_lock_buffer.
+
+      ls_node-node = <ls_lock_info>-lockable_node.
+      CASE <ls_lock_info>-edit_mode_dialog.
+        WHEN /bobf/if_conf_c=>sc_edit_optimistic.
+          INSERT ls_node INTO TABLE lt_unlock_generic_optimistic.
+          INSERT ls_node INTO TABLE lt_lock_non_generic_optimistic.
+        WHEN /bobf/if_conf_c=>sc_edit_exclusive.
+          INSERT ls_node INTO TABLE lt_unlock_generic_exclusive.
+          IF lv_keep_exclusive_locks = abap_true.
+            INSERT ls_node INTO TABLE lt_lock_non_generic_exclusive.
+          ELSE.
+            INSERT ls_node INTO TABLE lt_lock_non_generic_optimistic.
+          ENDIF.
+      ENDCASE.
+
+      "We can delete the entry from the lock info since we acquire a full-featured lock
+      "(i.e. including UPDATE part if required by the active enqueue scope)
+      DELETE ct_lock_info.
+    ENDLOOP.
+
+    "node keys to be re-locked have to be deleted from lock buffer, otherwise re-locking will not work:
+    delete_locks_from_buffer( it_lock_node_keys = lt_delete_from_lock_buffer
+                              io_change         = io_change ).
+    "Get non-generic exclusive locks. This cannot fail as we still have the generic locks:
+    lock( it_node      = lt_lock_non_generic_exclusive
+          iv_edit_mode = /bobf/if_conf_c=>sc_edit_exclusive
+          io_change    = io_change ).
+    "Get non-generic optimistic locks. This may fail:
+    lock( EXPORTING it_node        = lt_lock_non_generic_optimistic
+                    iv_edit_mode   = /bobf/if_conf_c=>sc_edit_optimistic
+                    io_change      = io_change
+          IMPORTING eo_message     = eo_message
+                    et_failed_node = lt_failed ).
+    IF  lt_failed IS NOT INITIAL
+    AND mo_bopf->mv_no_content_changes = abap_false.
+      DATA(lo_failed_content_change) = content_changes_for_node_keys( lt_failed ).
+      mo_bopf->notify_property_changes( lo_failed_content_change ).
+      io_change->merge( lo_failed_content_change ).
+    ENDIF.
+
+    "release the generic locks:
+    unlock_bypassing_buffer( it_lockable_node_keys = lt_unlock_generic_optimistic
+                             iv_edit_mode          = /bobf/if_conf_c=>sc_edit_optimistic
+                             iv_generic            = abap_true "important!
+                             io_change             = io_change ).
+    unlock_bypassing_buffer( it_lockable_node_keys = lt_unlock_generic_exclusive
+                             iv_edit_mode          = /bobf/if_conf_c=>sc_edit_exclusive
+                             iv_generic            = abap_true "important!
+                             io_change             = io_change ).
+  ENDMETHOD.
+
+
+  METHOD create.
+    "This raises a message exception if an inconsistent combination is detected:
+    /bobf/cl_conf_v_lock_mode=>runtime_check( iv_enqueue_scope = io_bopf->mv_enqueue_scope
+                                              iv_cleanup_mode  = io_bopf->mv_cleanup_mode ).
+
+    CASE io_bopf->mv_enqueue_scope.
+      WHEN /bobf/if_conf_c=>sc_enqueue_scope_update.     ro_new_instance = NEW lcl_update( io_bopf ).
+      WHEN /bobf/if_conf_c=>sc_enqueue_scope_dialog.     ro_new_instance = NEW lcl_dialog( io_bopf ).
+      WHEN /bobf/if_conf_c=>sc_enqueue_scope_diaupd.     ro_new_instance = NEW lcl_diagupd( io_bopf ).
+      WHEN /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.  ro_new_instance = NEW lcl_optimistic_dialog_n_update( io_bopf ).
+      WHEN /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.  ro_new_instance = NEW lcl_exclusive_dialog_n_update( io_bopf ).
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD delete_locks_from_buffer.
+    DATA: lt_mod TYPE /bobf/t_frw_modification,
+          ls_mod TYPE /bobf/s_frw_modification.
+
+    CHECK it_lock_node_keys IS NOT INITIAL.
+
+    ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+    LOOP AT it_lock_node_keys INTO DATA(ls_node).
+      MOVE-CORRESPONDING ls_node TO ls_mod.
+      INSERT ls_mod INTO TABLE lt_mod.
+    ENDLOOP.
+    TRY.
+        mo_buffer->modify( it_modification   = lt_mod
+                           iv_state          = /bobf/if_conf_c=>sc_state_current
+                           iv_only_transient = abap_false
+                           io_change         = io_change ).
+      CATCH /bobf/cx_frw INTO DATA(lx_frw).
+        mo_bopf->set_application_error( lx_frw ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD del_update_locks_from_buffer.
+    DATA: lx_root                 TYPE REF TO cx_root,
+          lt_mod                  TYPE /bobf/t_frw_modification,
+          ls_mod_update           TYPE /bobf/s_frw_modification,
+          ls_mod_delete           TYPE /bobf/s_frw_modification,
+          ls_lock_data_optimistic TYPE /bobf/s_frw_lock_node,
+          ls_lock_data_exclusive  TYPE /bobf/s_frw_lock_node.
+    FIELD-SYMBOLS: <ls_lock_info> LIKE LINE OF ct_lock_info.
+
+    "After COMMIT WORK, all locks of the UPDATE task have been released.
+    "This method adjusts the contents of the lock buffer to that fact.
+
+    "NOTE that this method is redefined (as empty) in LCL_DIAGUPD and LCL_DIALOG and not used in LCL_UPDATE,
+    "so it is effective only for modes OPTDIAGUPD and EXCDIAGUPD
+
+    ls_lock_data_optimistic = VALUE #( edit_mode        = /bobf/if_conf_c=>sc_edit_optimistic
+                                       edit_mode_update = /bobf/if_conf_c=>sc_edit_read_only ). " = INITIAL
+    ls_lock_data_exclusive = VALUE #( edit_mode         = /bobf/if_conf_c=>sc_edit_exclusive
+                                      edit_mode_update  = /bobf/if_conf_c=>sc_edit_read_only ). " = INITIAL
+
+    ls_mod_update-change_mode = /bobf/if_frw_c=>sc_modify_update.
+    ls_mod_update-changed_fields = VALUE #( ( `EDIT_MODE` ) ( `EDIT_MODE_UPDATE` ) ).
+
+    ls_mod_delete-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+
+    LOOP AT ct_lock_info ASSIGNING <ls_lock_info> WHERE edit_mode_update <> /bobf/if_conf_c=>sc_edit_read_only. "#EC CI_SORTSEQ
+
+      CASE <ls_lock_info>-edit_mode_dialog.
+        WHEN /bobf/if_conf_c=>sc_edit_read_only.
+          "no dialog lock exists -> entry can be removed
+          ls_mod_delete-node = <ls_lock_info>-lock_node.
+          ls_mod_delete-key  = <ls_lock_info>-key.
+          INSERT ls_mod_delete INTO TABLE lt_mod.
+          DELETE ct_lock_info.
+
+        WHEN /bobf/if_conf_c=>sc_edit_optimistic.
+          "dialog part needs to be preserved -> modify entry
+          ls_mod_update-node = <ls_lock_info>-lock_node.
+          ls_mod_update-key  = <ls_lock_info>-key.
+          ls_mod_update-data = REF #( ls_lock_data_optimistic ).
+          INSERT ls_mod_update INTO TABLE lt_mod.
+          <ls_lock_info>-edit_mode_update = /bobf/if_conf_c=>sc_edit_read_only.
+
+        WHEN /bobf/if_conf_c=>sc_edit_exclusive.
+          "dialog part needs to be preserved -> modify entry
+          ls_mod_update-node = <ls_lock_info>-lock_node.
+          ls_mod_update-key  = <ls_lock_info>-key.
+          ls_mod_update-data = REF #( ls_lock_data_exclusive ).
+          INSERT ls_mod_update INTO TABLE lt_mod.
+          <ls_lock_info>-edit_mode_update = /bobf/if_conf_c=>sc_edit_read_only.
+
+      ENDCASE.
+    ENDLOOP.
+
+    TRY.
+        mo_buffer->modify( it_modification   = lt_mod
+                           iv_state          = /bobf/if_conf_c=>sc_state_current
+                           iv_only_transient = abap_false
+                           io_change         = io_change ).
+      CATCH cx_root INTO lx_root ##catch_all.
+        mo_bopf->set_application_error( lx_root ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD lock.
+    DATA: lt_node                      TYPE /bobf/t_frw_node,
+          lt_lock_buffer_modifications TYPE /bobf/t_frw_modification,
+          lo_message                   TYPE REF TO /bobf/if_frw_message,
+          lt_node_link                 TYPE /bobf/t_frw_node_key_link,
+          lx_root                      TYPE REF TO cx_root,
+          lo_lock_param_buffer         TYPE REF TO /bobf/cl_frw_lock_param_buffer.
+
+    ASSERT ID /bobf/frw CONDITION eo_message IS REQUESTED.
+
+    CLEAR: eo_message,
+           et_failed_node,
+           et_loaded_node,
+           et_lockable_node_newly_locked,
+           et_node_not_locked.
+
+    CHECK it_node IS NOT INITIAL.
+    CHECK iv_edit_mode <> /bobf/if_conf_c=>sc_edit_read_only.
+
+    IF mo_conf->ms_obj-no_lock = abap_true.
+      IF iv_check_only = abap_true.
+        et_node_not_locked = it_node.
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    mo_bopf->get_lockable_node( EXPORTING it_node        = it_node
+                                IMPORTING et_failed_node = et_failed_node
+                                          et_loaded_node = et_loaded_node
+                                          et_node        = lt_node
+                                          et_node_link   = lt_node_link
+                                          eo_message     = eo_message ).
+
+    lo_lock_param_buffer = NEW #( mo_buffer ).
+    _lock( EXPORTING iv_edit_mode              = iv_edit_mode
+                     iv_generic                = iv_generic
+                     iv_scope                  = iv_scope
+                     iv_all_none               = iv_all_none
+                     iv_check_only             = iv_check_only
+                     io_change                 = io_change
+                     it_node                   = lt_node
+                     it_node_link              = lt_node_link
+                     io_lock_param_buffer      = lo_lock_param_buffer
+                     it_node_locked_for_delete = it_node_locked_for_delete
+           IMPORTING et_node_not_locked            = et_node_not_locked
+                     et_lockable_node_newly_locked = et_lockable_node_newly_locked
+                     et_lock_buffer_modifications  = lt_lock_buffer_modifications
+           CHANGING  co_message                    = eo_message
+                     ct_mod                        = ct_mod ).
+
+    IF lt_lock_buffer_modifications IS NOT INITIAL.
+      lo_lock_param_buffer->add_params_to_modifications( CHANGING ct_mod = lt_lock_buffer_modifications ).
+      TRY.
+          mo_buffer->modify( EXPORTING it_modification   = lt_lock_buffer_modifications
+                                       iv_state          = /bobf/if_conf_c=>sc_state_current
+                                       io_change         = io_change
+                                       iv_only_transient = abap_true
+                             IMPORTING eo_message        = lo_message ).
+        CATCH cx_root INTO lx_root.                      "#EC CATCH_ALL
+          mo_bopf->set_application_error( lx_root ).
+      ENDTRY.
+      collect_messages( EXPORTING io_message = lo_message
+                        CHANGING  co_message = eo_message ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD lock_bypassing_buffer.
+    call_lock_action_for_node_keys( EXPORTING iv_action             = /bobf/if_conf_c=>sc_action_lock
+                                              it_lockable_node_keys = it_lockable_node_keys
+                                              iv_edit_mode          = iv_edit_mode
+                                              iv_scope              = iv_scope
+                                              iv_generic            = abap_false
+                                              io_change             = io_change
+                                    IMPORTING eo_message            = eo_message
+                                              et_failed_node        = et_failed_node ).
+  ENDMETHOD.
+
+
+  METHOD remove_failed_nodes.
+    DATA ls_failed LIKE LINE OF it_failed.
+
+    LOOP AT it_failed INTO ls_failed.
+      DELETE TABLE ct_all WITH TABLE KEY node = ls_failed-node  key = ls_failed-key.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD unlock.
+    DATA: lt_node                      TYPE /bobf/t_frw_node,
+          lt_lock_buffer_modifications TYPE /bobf/t_frw_modification,
+          lo_message                   TYPE REF TO /bobf/if_frw_message,
+          lt_node_link                 TYPE /bobf/t_frw_node_key_link,
+          lx_root                      TYPE REF TO cx_root,
+          lo_lock_param_buffer         TYPE REF TO /bobf/cl_frw_lock_param_buffer.
+
+    CLEAR: eo_message,
+           et_failed_node,
+           et_loaded_node,
+           et_lockable_node_newly_locked,
+           et_node_not_locked.
+
+    CHECK it_node IS NOT INITIAL.
+    CHECK mo_conf->ms_obj-no_lock = abap_false.
+
+    mo_bopf->get_lockable_node( EXPORTING it_node        = it_node
+                                IMPORTING et_failed_node = et_failed_node
+                                          et_loaded_node = et_loaded_node
+                                          et_node        = lt_node
+                                          et_node_link   = lt_node_link
+                                          eo_message     = eo_message ).
+
+    lo_lock_param_buffer = NEW #( mo_buffer ).
+    _unlock( EXPORTING iv_generic           = iv_generic
+                       iv_scope             = iv_scope
+                       iv_all_none          = iv_all_none
+                       io_change            = io_change
+                       it_node              = lt_node
+                       it_node_link         = lt_node_link
+                       io_lock_param_buffer = lo_lock_param_buffer
+             IMPORTING et_lock_buffer_modifications = lt_lock_buffer_modifications
+                       et_node_not_locked           = et_node_not_locked
+             CHANGING  co_message = eo_message ).
+
+    IF lt_lock_buffer_modifications IS NOT INITIAL.
+      TRY.
+          mo_buffer->modify( EXPORTING it_modification   = lt_lock_buffer_modifications
+                                       iv_state          = /bobf/if_conf_c=>sc_state_current
+                                       io_change         = io_change
+                                       iv_only_transient = abap_true
+                             IMPORTING eo_message        = lo_message ).
+        CATCH cx_root INTO lx_root.                      "#EC CATCH_ALL
+          mo_bopf->set_application_error( lx_root ).
+      ENDTRY.
+      collect_messages( EXPORTING io_message = lo_message
+                        CHANGING  co_message = eo_message ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD unlock_all.
+    DATA: lt_nodeconf          TYPE /bobf/t_confro_node,
+          lt_assoc             TYPE /bobf/t_confro_assoc,
+          lt_lock_data         TYPE /bobf/t_frw_lock_node,
+          lt_key               TYPE /bobf/t_frw_key,
+          ls_node              TYPE /bobf/s_frw_node,
+          lt_node_generic      TYPE /bobf/t_frw_node,
+          lt_node_non_generic  TYPE /bobf/t_frw_node,
+          lo_message           TYPE REF TO /bobf/if_frw_message,
+          lx_root              TYPE REF TO cx_root,
+          lv_lockable_node_key TYPE /bobf/s_confro_assoc-target_node_key.
+
+    FIELD-SYMBOLS:
+      <ls_locknode_conf> TYPE /bobf/s_confro_node,
+      <ls_lock_data>     TYPE /bobf/s_frw_lock_node.
+
+    ASSERT ID /bobf/frw CONDITION eo_message IS REQUESTED.
+
+    CLEAR eo_message.
+    CLEAR eo_change.
+
+    CHECK mo_conf->ms_obj-no_lock = abap_false.
+
+    mo_conf->get_node_tab(  IMPORTING et_node  = lt_nodeconf ).
+    mo_conf->get_assoc_tab( IMPORTING et_assoc = lt_assoc ).
+
+    LOOP AT lt_nodeconf ASSIGNING <ls_locknode_conf> WHERE node_type = /bobf/if_conf_c=>sc_node_type_lock. "#EC CI_SORTSEQ
+      TRY.
+          mo_buffer->get_keys( EXPORTING iv_node_key = <ls_locknode_conf>-node_key
+                                         iv_state    = /bobf/if_conf_c=>sc_state_current
+                                         it_root_key = it_root_key
+                               IMPORTING et_key      = lt_key ).
+        CATCH cx_root INTO lx_root.                      "#EC CATCH_ALL
+          mo_bopf->set_application_error( lx_root ).
+      ENDTRY.
+
+      TRY.
+          mo_buffer->retrieve( EXPORTING iv_node_key       = <ls_locknode_conf>-node_key
+                                         it_key            = lt_key
+                                         iv_state          = /bobf/if_conf_c=>sc_state_current
+                                         iv_fill_data      = abap_true
+                                         iv_buffer_only    = abap_true
+                                         io_change         = /bobf/cl_frw_factory=>get_change( )
+                               IMPORTING et_data           = lt_lock_data ).
+        CATCH cx_root INTO lx_root.                      "#EC CATCH_ALL
+          mo_bopf->set_application_error( lx_root ).
+      ENDTRY.
+
+      "separate generically locked from non-generically locked instances
+      "by making use of key equality between locknode and lockable node
+      lv_lockable_node_key = lt_assoc[ KEY key3 COMPONENTS
+                                           source_node_key = <ls_locknode_conf>-node_key
+                                           assoc_type      = /bobf/if_conf_c=>sc_assoctype_std
+                                           assoc_cat       = /bobf/if_conf_c=>sc_assoccat_parent ]-target_node_key.
+      ls_node-node = lv_lockable_node_key.
+      "collect generically locked keys:
+      LOOP AT lt_lock_data ASSIGNING <ls_lock_data> WHERE generic = abap_true. "#EC CI_STDSEQ
+        ls_node-key = <ls_lock_data>-key.
+        INSERT ls_node INTO TABLE lt_node_generic.
+      ENDLOOP.
+      "collect non-generically locked keys:
+      LOOP AT lt_lock_data ASSIGNING <ls_lock_data> WHERE generic = abap_false. "#EC CI_STDSEQ
+        ls_node-key = <ls_lock_data>-key.
+        INSERT ls_node INTO TABLE lt_node_non_generic.
+      ENDLOOP.
+    ENDLOOP.
+
+    eo_change = /bobf/cl_frw_factory=>get_change( ).
+    unlock( EXPORTING it_node    = lt_node_generic
+                      iv_generic = abap_true
+                      io_change  = eo_change
+            IMPORTING eo_message = lo_message ).
+    collect_messages( EXPORTING io_message = lo_message
+                      CHANGING  co_message = eo_message ).
+    unlock( EXPORTING it_node    = lt_node_non_generic
+                      iv_generic = abap_false
+                      io_change  = eo_change
+            IMPORTING eo_message = lo_message ).
+    collect_messages( EXPORTING io_message = lo_message
+                      CHANGING  co_message = eo_message ).
+  ENDMETHOD.
+
+
+  METHOD unlock_bypassing_buffer.
+    call_lock_action_for_node_keys( iv_action             = /bobf/if_conf_c=>sc_action_unlock
+                                    it_lockable_node_keys = it_lockable_node_keys
+                                    iv_edit_mode          = iv_edit_mode
+                                    "scope 3 releases both DIA and UPDATE locks:
+                                    iv_scope              = /bobf/if_conf_c=>sc_enqueue_scope_diaupd
+                                    iv_generic            = iv_generic
+                                    io_change             = io_change ).
+  ENDMETHOD.
+
+
+  METHOD unlock_deleted_instances.
+    DATA: lt_node    TYPE /bobf/t_frw_node,
+          ls_node    TYPE /bobf/s_frw_node,
+          lv_generic TYPE abap_bool.
+    FIELD-SYMBOLS: <ls_lock_info>   LIKE LINE OF ct_lock_info.
+
+    LOOP AT VALUE /bobf/t_frw_boolean( ( abap_false )
+                                       ( abap_true ) ) INTO lv_generic.
+
+      "collect node keys to unlock and remove them from CT_LOCK_INFO:
+      CLEAR lt_node.
+      LOOP AT ct_lock_info ASSIGNING <ls_lock_info> WHERE is_deleted = abap_true
+                                                    AND   generic    = lv_generic. "#EC CI_SORTSEQ "#EC CI_STDSEQ
+        ls_node-node = <ls_lock_info>-lockable_node.
+        ls_node-key = <ls_lock_info>-key.
+        INSERT ls_node INTO TABLE lt_node.
+
+        DELETE ct_lock_info.
+      ENDLOOP.
+
+      unlock( iv_generic = lv_generic
+              it_node    = lt_node
+              io_change  = io_change ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _lock.
+
+    DATA ls_actconf TYPE /bobf/s_confro_act_list.
+    DATA ls_nodeconf TYPE /bobf/s_confro_node.
+    DATA ls_context TYPE /bobf/s_frw_ctx_act.
+    DATA ls_failed_node TYPE /bobf/s_frw_node.
+    DATA ls_node_load TYPE /bobf/s_frw_node.
+    DATA ls_node TYPE /bobf/s_frw_node.
+    DATA lt_failed_key TYPE /bobf/t_frw_key.
+    DATA lt_failed_propagate_key TYPE /bobf/t_frw_key.
+    DATA lt_propagate_key TYPE /bobf/t_frw_key.
+    DATA lt_key TYPE /bobf/t_frw_key.
+    DATA lt_lock_key TYPE /bobf/t_frw_key.
+    DATA lt_check_o_lock_key TYPE /bobf/t_frw_key.
+    DATA ls_key TYPE /bobf/s_frw_key.
+    DATA lt_lock_node TYPE /bobf/t_frw_lock_node.
+    DATA ls_lock_node TYPE /bobf/s_frw_lock_node.
+    DATA lr_lock_node TYPE REF TO /bobf/s_frw_lock_node.
+    DATA lr_lock_param TYPE REF TO /bobf/s_frw_lock_parameters.
+    DATA ls_mod TYPE /bobf/s_frw_modification.
+    DATA lo_message TYPE REF TO /bobf/if_frw_message.
+    DATA ls_node_link TYPE /bobf/s_frw_node_key_link.
+    DATA lt_message TYPE /bobf/t_frw_message_k.
+    DATA ls_message TYPE /bobf/s_frw_message_k.
+    DATA ls_location TYPE /bobf/s_frw_location.
+    DATA lm_bopf TYPE REF TO /bobf/cm_frw.
+    DATA lm_common_esi TYPE REF TO /bobf/cm_frw_common_esi.
+    DATA lt_check_dialog_o_lock TYPE /bobf/t_frw_key.
+    DATA lt_check_diaupd_o_lock TYPE /bobf/t_frw_key.
+    DATA lt_tmp_failed_key TYPE /bobf/t_frw_key.
+    DATA lt_add_update_lock TYPE /bobf/t_frw_key.
+    DATA lt_add_optimistic_update TYPE /bobf/t_frw_key.
+    DATA ls_node_unlock TYPE /bobf/s_frw_node.
+    DATA lt_unlock_nongen_optimistic TYPE /bobf/t_frw_node.
+    DATA lt_unlock_nongen_exclusive TYPE /bobf/t_frw_node.
+
+    CLEAR: et_lockable_node_newly_locked,
+           et_lock_buffer_modifications,
+           et_node_not_locked.
+
+*  ____________________________________________________________________ *
+*  fill global settings
+    CREATE DATA lr_lock_param.
+    IF iv_scope IS NOT INITIAL.
+      lr_lock_param->scope = iv_scope.
+    ELSE.
+      "Set default enqueue scope (1..3), depending on mv_enqueue_scope (1..5).
+      "This is being overwritten below in most cases, anyway.
+      CASE mv_enqueue_scope.
+        WHEN /bobf/if_conf_c=>sc_enqueue_scope_dialog
+        OR   /bobf/if_conf_c=>sc_enqueue_scope_update
+        OR   /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+          lr_lock_param->scope = mv_enqueue_scope.
+        WHEN /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+          lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_dialog.
+        WHEN /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+          lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+      ENDCASE.
+      ASSERT ID /bobf/frw CONDITION lr_lock_param->scope IS NOT INITIAL.
+    ENDIF.
+    lr_lock_param->all_none  = iv_all_none.
+    lr_lock_param->generic   = iv_generic.
+    lr_lock_param->edit_mode = iv_edit_mode.
+    lr_lock_param->lock_parameter_buffer = io_lock_param_buffer.
+    ls_context-bo_key        = mo_conf->ms_obj-bo_key.
+    ls_context-root_node_key = mo_conf->ms_obj-root_node_key.
+
+    CASE lr_lock_param->edit_mode.
+*  ____________________________________________________________________ *
+*     optimistic lock required
+      WHEN: /bobf/if_conf_c=>sc_edit_optimistic.
+        LOOP AT it_node INTO ls_node.
+          ls_key-key = ls_node-key.
+          APPEND ls_key TO lt_key.
+          AT END OF node.
+
+            "collect node-specific keys for deletion:
+            lr_lock_param->t_key_locked_for_delete = VALUE #( FOR node_locked_for_delete
+                                                              IN it_node_locked_for_delete
+                                                              WHERE ( node = ls_node-node )
+                                                              ( key = node_locked_for_delete-key ) ).
+
+*            get configuration
+            mo_conf->get_act( EXPORTING iv_node_key = ls_node-node
+                                        iv_act_cat  = /bobf/if_conf_c=>sc_action_lock
+                              IMPORTING es_action   = ls_actconf ).
+
+            IF mo_conf->ms_last_node-node_key = ls_node-node.
+              ls_nodeconf = mo_conf->ms_last_node.
+            ELSE.
+              mo_conf->get_node( EXPORTING iv_node_key = ls_node-node
+                                 IMPORTING es_node     = ls_nodeconf ).
+            ENDIF.
+
+            "Tell the lock parameter buffer to use the lock node of the current node:
+            io_lock_param_buffer->set_locknode_key( ls_nodeconf-lock_node_key ).
+
+*            check local buffer
+            mo_bopf->retrieve(
+              EXPORTING
+                iv_node_key         = ls_nodeconf-lock_node_key
+                it_key              = lt_key
+                iv_state            = /bobf/if_conf_c=>sc_state_current
+                iv_invalidate_cache = abap_false
+                iv_fill_data        = abap_true
+              IMPORTING
+                et_data             = lt_lock_node
+                et_failed_key       = lt_lock_key
+                eo_message          = lo_message ).
+
+            ASSERT ID /bobf/frw CONDITION
+                /bobf/cl_tool_assert=>is_key_subset(
+                    it_key_set    = lt_key
+                    it_key_subset = lt_lock_key ) = abap_true.
+
+            collect_messages( EXPORTING io_message = lo_message
+                              CHANGING  co_message = co_message ).
+
+            IF iv_generic = abap_false.
+              LOOP AT lt_lock_node INTO ls_lock_node USING KEY edit_mode WHERE
+                  edit_mode = /bobf/if_conf_c=>sc_edit_read_only.
+                ls_key-key = ls_lock_node-key.
+                APPEND ls_key TO lt_lock_key.
+              ENDLOOP.
+              LOOP AT lt_lock_node INTO ls_lock_node USING KEY edit_mode WHERE
+                  edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+                ls_key-key = ls_lock_node-key.
+                APPEND ls_key TO lt_check_o_lock_key.
+
+                IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                  IF    ls_lock_node-edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic
+                    AND ls_lock_node-edit_mode_update IS INITIAL.
+                    " this instance is only dialog locked
+                    APPEND ls_key TO lt_check_dialog_o_lock.
+                  ELSEIF ls_lock_node-edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic
+                    AND  ls_lock_node-edit_mode_update = /bobf/if_conf_c=>sc_edit_optimistic.
+                    " this instance is dialog and update locked
+                    APPEND ls_key TO lt_check_diaupd_o_lock.
+                  ENDIF.
+                ENDIF.
+
+              ENDLOOP.
+            ELSE.
+              " iv_generic = abap_true
+              LOOP AT lt_lock_node INTO ls_lock_node WHERE
+                  edit_mode = /bobf/if_conf_c=>sc_edit_read_only  OR
+                  edit_mode = /bobf/if_conf_c=>sc_edit_optimistic OR
+                  generic   = abap_false.
+                ls_key-key = ls_lock_node-key.
+                IF ls_lock_node-generic    = abap_false OR
+                    ls_lock_node-edit_mode = /bobf/if_conf_c=>sc_edit_read_only.
+                  APPEND ls_key TO lt_lock_key.
+                ELSE.
+                  APPEND ls_key TO lt_check_o_lock_key.
+                  IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                    IF    ls_lock_node-edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic
+                      AND ls_lock_node-edit_mode_update IS INITIAL.
+                      " this instance is only dialog locked
+                      APPEND ls_key TO lt_check_dialog_o_lock.
+                    ELSEIF ls_lock_node-edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic
+                      AND  ls_lock_node-edit_mode_update = /bobf/if_conf_c=>sc_edit_optimistic.
+                      " this instance is dialog and update locked
+                      APPEND ls_key TO lt_check_diaupd_o_lock.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDLOOP.
+            ENDIF.
+
+*            check existing O-Locks
+            IF lt_check_o_lock_key IS NOT INITIAL.
+              ls_context-node_key = ls_node-node.
+              ls_context-act_key  = ls_actconf-act_key.
+              ls_context-act_cat  = ls_actconf-act_cat.
+
+              lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_check_optimistic.
+
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_set(
+                     it_key_set = lt_check_o_lock_key ) = abap_true.
+
+              IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+
+                " check only the dialog lock
+                "  - Failed_Key: Dialog Lock (and implicitly Update Lock) is lost, relock with scope 3
+                "  - Not Failed: Dialog Lock still exists, but update part is missing: add update lock
+*                 DATA lt_tmp_failed_key TYPE /bobf/t_frw_key.
+                IF lt_check_dialog_o_lock IS NOT INITIAL.
+                  lr_lock_param->scope     = /bobf/if_conf_c=>sc_enqueue_scope_dialog.
+                  lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_check_optimistic.
+                  mo_bopf->do_lock_action(
+                     EXPORTING
+                       is_lock_param = lr_lock_param
+                       is_context    = ls_context
+                       iv_act_class  = ls_actconf-act_class
+                       io_change     = io_change
+                     IMPORTING
+                       et_failed_key = lt_tmp_failed_key
+                       eo_message    = lo_message
+                     CHANGING
+                       ct_key        =  lt_check_dialog_o_lock ).
+                  APPEND LINES OF lt_tmp_failed_key TO lt_failed_key.
+
+                  " add update lock
+*                   DATA lt_add_update_lock TYPE /bobf/t_frw_key.
+                  LOOP AT lt_check_dialog_o_lock INTO ls_key.
+                    READ TABLE lt_tmp_failed_key WITH KEY key_sort COMPONENTS key = ls_key-key TRANSPORTING NO FIELDS.
+                    IF sy-subrc <> 0.
+                      " dialog part exists, but update part is missing
+                      APPEND ls_key TO lt_add_update_lock.
+                    ENDIF.
+                  ENDLOOP.
+                  IF lt_add_update_lock IS NOT INITIAL.
+                    lr_lock_param->scope     = /bobf/if_conf_c=>sc_enqueue_scope_update.
+                    lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+                    mo_bopf->do_lock_action(
+                       EXPORTING
+                         is_lock_param = lr_lock_param
+                         is_context    = ls_context
+                         iv_act_class  = ls_actconf-act_class
+                         io_change     = io_change
+                       CHANGING
+                         ct_key        =  lt_add_update_lock ).
+
+                    CLEAR ls_mod.
+                    ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_create.
+                    ls_mod-node        = ls_nodeconf-lock_node_key.
+                    ls_mod-source_node = ls_nodeconf-node_key.
+                    ls_node_load-node  = ls_node-node.
+                    LOOP AT lt_add_update_lock INTO ls_key.
+                      READ TABLE lt_failed_key WITH KEY key_sort
+                        COMPONENTS key = ls_key-key
+                        TRANSPORTING NO FIELDS.
+                      IF sy-subrc <> 0.
+*                        lock successfull
+                        CREATE DATA lr_lock_node.
+                        lr_lock_node->edit_mode_update = /bobf/if_conf_c=>sc_edit_optimistic.
+                        lr_lock_node->edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic.
+                        lr_lock_node->generic    = lr_lock_param->generic.
+                        lr_lock_node->edit_mode  = /bobf/if_conf_c=>sc_edit_optimistic.
+                        lr_lock_node->key        = ls_key-key.
+                        lr_lock_node->parent_key = ls_key-key.
+                        ls_mod-key        = ls_key-key.
+                        ls_mod-source_key = ls_key-key.
+                        ls_mod-data       = lr_lock_node.
+                        APPEND ls_mod TO et_lock_buffer_modifications.
+                      ENDIF.
+                    ENDLOOP.
+                  ENDIF.
+
+                ENDIF.
+
+                " check dialog and update lock
+                "  - Failed_Key: Relock with scope 3
+                "  - Not Failed: Everything fine
+                IF lt_check_diaupd_o_lock IS NOT INITIAL.
+                  lr_lock_param->scope     = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+                  lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_check_optimistic.
+                  mo_bopf->do_lock_action(
+                     EXPORTING
+                       is_lock_param = lr_lock_param
+                       is_context    = ls_context
+                       iv_act_class  = ls_actconf-act_class
+                       io_change     = io_change
+                     IMPORTING
+                       et_failed_key = lt_failed_key
+                       eo_message    = lo_message
+                     CHANGING
+                       ct_key        =  lt_check_diaupd_o_lock ).
+                  APPEND LINES OF lt_tmp_failed_key TO lt_failed_key.
+                ENDIF.
+
+              ELSE.
+
+                IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                  lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_dialog.
+                ENDIF.
+
+                mo_bopf->do_lock_action(
+                  EXPORTING
+                    is_lock_param = lr_lock_param
+                    is_context    = ls_context
+                    iv_act_class  = ls_actconf-act_class
+                    io_change     = io_change
+                  IMPORTING
+                    et_failed_key = lt_failed_key
+                    eo_message    = lo_message
+                  CHANGING
+                    ct_key        = lt_check_o_lock_key ).
+
+              ENDIF.
+
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_check(
+                     it_key_subset = lt_failed_key ) = abap_true.
+
+              APPEND LINES OF lt_failed_key TO lt_lock_key.
+
+*              update lock buffer
+              IF iv_check_only = abap_true AND
+                  lt_failed_key IS NOT INITIAL.
+                CLEAR ls_mod.
+                ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+                ls_mod-node        = ls_nodeconf-lock_node_key.
+                LOOP AT lt_failed_key INTO ls_key.
+                  ls_mod-key  = ls_key-key.
+                  APPEND ls_mod TO et_lock_buffer_modifications.
+                ENDLOOP.
+              ENDIF.
+
+            ENDIF.
+
+            lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+
+*            check only => return not locked nodes
+            IF iv_check_only = abap_true.
+              LOOP AT lt_lock_key INTO ls_key.
+                LOOP AT it_node_link INTO ls_node_link WHERE
+                    target_node = ls_nodeconf-node_key AND
+                    target_key  = ls_key-key.
+                  ls_node-node = ls_node_link-source_node.
+                  ls_node-key  = ls_node_link-source_key.
+                  INSERT ls_node INTO TABLE et_node_not_locked.
+                ENDLOOP.
+              ENDLOOP.
+              CONTINUE.
+            ENDIF.
+
+*            lock not locked nodes
+            IF lt_lock_key IS NOT INITIAL.
+              ls_context-node_key = ls_node-node.
+              ls_context-act_key  = ls_actconf-act_key.
+              ls_context-act_cat  = ls_actconf-act_cat.
+
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_set(
+                     it_key_set = lt_lock_key ) = abap_true.
+
+              IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                " for instances, for which no optimistic o-lock exists, lock both - optimistic dialog and update (scope 3)
+                lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+              ENDIF.
+
+              IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_dialog.
+              ENDIF.
+
+              mo_bopf->do_lock_action(
+                EXPORTING
+                  is_lock_param = lr_lock_param
+                  is_context    = ls_context
+                  iv_act_class  = ls_actconf-act_class
+                  io_change     = io_change
+                IMPORTING
+                  et_failed_key = lt_failed_key
+                  eo_message    = lo_message
+                CHANGING
+                  ct_key        = lt_lock_key ).
+
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_check(
+                     it_key_subset = lt_failed_key ) = abap_true.
+
+              IF lo_message IS BOUND.
+                lo_message->get_messages( IMPORTING et_message = lt_message ).
+                LOOP AT lt_message INTO ls_message.
+                  lm_bopf = ls_message-message.
+                  LOOP AT it_node_link INTO ls_node_link WHERE
+                      target_node = ls_context-node_key AND
+                      target_key  = ls_message-parent_key.
+                    ls_location-key      = ls_node_link-source_key.
+                    ls_location-node_key = ls_node_link-source_node.
+                    lm_bopf->add_environment_location( ls_location ).
+                  ENDLOOP.
+                ENDLOOP.
+                collect_messages( EXPORTING io_message = lo_message
+                                  CHANGING  co_message = co_message ).
+              ENDIF.
+
+              CLEAR ls_mod.
+              ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+              ls_mod-node        = ls_nodeconf-lock_node_key.
+              LOOP AT lt_failed_key INTO ls_key.
+                LOOP AT it_node_link INTO ls_node_link WHERE
+                     target_node = ls_node-node AND
+                     target_key  = ls_key-key.
+                  ls_failed_node-node = ls_node_link-source_node.
+                  ls_failed_node-key  = ls_node_link-source_key.
+                  INSERT ls_failed_node INTO TABLE et_node_not_locked.
+                ENDLOOP.
+                READ TABLE lt_check_o_lock_key WITH KEY
+                    key_sort COMPONENTS key = ls_key-key
+                    TRANSPORTING NO FIELDS.
+                IF sy-subrc = 0.
+                  ls_mod-key  = ls_key-key.
+                  APPEND ls_mod TO et_lock_buffer_modifications.
+                ENDIF.
+              ENDLOOP.
+
+*              update lock buffer
+              CLEAR ls_mod.
+              ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_create.
+              ls_mod-node        = ls_nodeconf-lock_node_key.
+              ls_mod-source_node = ls_nodeconf-node_key.
+              ls_node_load-node  = ls_node-node.
+              LOOP AT lt_lock_key INTO ls_key.
+                READ TABLE lt_failed_key WITH KEY key_sort
+                  COMPONENTS key = ls_key-key
+                  TRANSPORTING NO FIELDS.
+                IF sy-subrc <> 0.
+*                  lock successful
+                  CREATE DATA lr_lock_node.
+                  IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                    lr_lock_node->edit_mode_update = /bobf/if_conf_c=>sc_edit_optimistic.
+                    lr_lock_node->edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic.
+                  ENDIF.
+
+                  IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                    lr_lock_node->edit_mode_update = /bobf/if_conf_c=>sc_edit_read_only.
+                    lr_lock_node->edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic.
+                  ENDIF.
+
+                  lr_lock_node->generic    = lr_lock_param->generic.
+                  lr_lock_node->edit_mode  = /bobf/if_conf_c=>sc_edit_optimistic.
+                  lr_lock_node->key        = ls_key-key.
+                  lr_lock_node->parent_key = ls_key-key.
+                  ls_mod-key        = ls_key-key.
+                  ls_mod-source_key = ls_key-key.
+                  ls_mod-data       = lr_lock_node.
+                  APPEND ls_mod TO et_lock_buffer_modifications.
+*                  mark nodes for reloading
+                  IF iv_generic = abap_true.
+                    READ TABLE lt_lock_node WITH KEY parent_key COMPONENTS
+                       parent_key = ls_key-key
+                       edit_mode  = /bobf/if_conf_c=>sc_edit_optimistic
+                       generic    = abap_false
+                       TRANSPORTING NO FIELDS.
+                    CHECK sy-subrc <> 0.
+                    READ TABLE lt_lock_node WITH KEY parent_key COMPONENTS
+                       parent_key = ls_key-key
+                       edit_mode  = /bobf/if_conf_c=>sc_edit_exclusive
+                       generic    = abap_false
+                       TRANSPORTING NO FIELDS.
+                    CHECK sy-subrc <> 0.
+                  ENDIF.
+                  ls_node_load-key = ls_key-key.
+                  INSERT ls_node_load INTO TABLE et_lockable_node_newly_locked.
+                ENDIF.
+              ENDLOOP.
+            ENDIF.
+
+            CLEAR:
+                lt_key,
+                lt_check_o_lock_key,
+                lt_check_dialog_o_lock,
+                lt_check_diaupd_o_lock,
+                lt_add_update_lock.
+          ENDAT.
+        ENDLOOP.
+
+*  ____________________________________________________________________ *
+*      exclusive lock required
+      WHEN: /bobf/if_conf_c=>sc_edit_exclusive.
+
+        LOOP AT it_node INTO ls_node.
+          ls_key-key = ls_node-key.
+          APPEND ls_key TO lt_key.
+          AT END OF node.
+
+            "collect node-specific keys for deletion:
+            lr_lock_param->t_key_locked_for_delete = VALUE #( FOR node_locked_for_delete
+                                                              IN it_node_locked_for_delete
+                                                              WHERE ( node = ls_node-node )
+                                                              ( key = node_locked_for_delete-key ) ).
+
+*            get configuration
+            mo_conf->get_act( EXPORTING iv_node_key = ls_node-node
+                                        iv_act_cat  = /bobf/if_conf_c=>sc_action_lock
+                              IMPORTING es_action   = ls_actconf ).
+            IF mo_conf->ms_last_node-node_key = ls_node-node.
+              ls_nodeconf = mo_conf->ms_last_node.
+            ELSE.
+              mo_conf->get_node( EXPORTING iv_node_key = ls_node-node
+                                 IMPORTING es_node     = ls_nodeconf ).
+            ENDIF.
+
+            "Tell the lock parameter buffer to use the lock node of the current node:
+            io_lock_param_buffer->set_locknode_key( ls_nodeconf-lock_node_key ).
+
+*            check local buffer
+            mo_bopf->retrieve( EXPORTING iv_node_key         = ls_nodeconf-lock_node_key
+                                         it_key              = lt_key
+                                         iv_state            = /bobf/if_conf_c=>sc_state_current
+                                         iv_invalidate_cache = abap_false
+                                         iv_fill_data        = abap_true
+                               IMPORTING et_data             = lt_lock_node
+                                         et_failed_key       = lt_lock_key
+                                         eo_message          = lo_message ).
+            collect_messages( EXPORTING io_message = lo_message
+                              CHANGING  co_message = co_message ).
+
+*            check only => return not locked nodes
+            IF iv_check_only = abap_true.
+              ls_node-node = ls_nodeconf-node_key.
+              IF iv_generic = abap_false.
+                LOOP AT lt_lock_node INTO ls_lock_node
+                    WHERE edit_mode <> /bobf/if_conf_c=>sc_edit_exclusive. "#EC CI_STDSEQ
+                  LOOP AT it_node_link INTO ls_node_link WHERE
+                      target_node = ls_nodeconf-node_key AND
+                      target_key  = ls_lock_node-parent_key.
+                    ls_node-node = ls_node_link-source_node.
+                    ls_node-key  = ls_node_link-source_key.
+                    INSERT ls_node INTO TABLE et_node_not_locked.
+                  ENDLOOP.
+                ENDLOOP.
+
+              ELSE.
+                " iv_generic = abap_true
+                LOOP AT lt_lock_node INTO ls_lock_node
+                  WHERE edit_mode <> /bobf/if_conf_c=>sc_edit_exclusive
+                     OR generic   =  abap_false.         "#EC CI_STDSEQ
+                  LOOP AT it_node_link INTO ls_node_link WHERE
+                      target_node = ls_nodeconf-node_key AND
+                      target_key  = ls_lock_node-parent_key.
+                    ls_node-node = ls_node_link-source_node.
+                    ls_node-key  = ls_node_link-source_key.
+                    INSERT ls_node INTO TABLE et_node_not_locked.
+                  ENDLOOP.
+                ENDLOOP.
+              ENDIF.
+
+              LOOP AT lt_lock_key INTO ls_key.
+                LOOP AT it_node_link INTO ls_node_link
+                  WHERE target_node = ls_nodeconf-node_key
+                    AND target_key  = ls_key-key.
+                  ls_node-node = ls_node_link-source_node.
+                  ls_node-key  = ls_node_link-source_key.
+                  INSERT ls_node INTO TABLE et_node_not_locked.
+                ENDLOOP.
+              ENDLOOP.
+              CONTINUE.
+            ENDIF. "iv_check_only = abap_true
+
+            CLEAR lt_propagate_key.
+            CLEAR lt_add_optimistic_update.
+
+            IF iv_generic = abap_false.
+              LOOP AT lt_lock_node INTO ls_lock_node
+                WHERE edit_mode <> /bobf/if_conf_c=>sc_edit_exclusive. "#EC CI_STDSEQ
+                ls_key-key = ls_lock_node-key.
+                IF ls_lock_node-edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+                  APPEND ls_key TO lt_propagate_key.
+                  IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd
+                  OR mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                    IF ls_lock_node-edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic AND ls_lock_node-edit_mode_update IS INITIAL.
+                      APPEND ls_key TO lt_add_optimistic_update.
+                    ENDIF.
+                  ENDIF.
+                ELSE.
+                  APPEND ls_key TO lt_lock_key.
+                ENDIF.
+              ENDLOOP.
+            ELSE.
+              " iv_generic = abap_true
+              ls_node_unlock-node = ls_node-node.
+              LOOP AT lt_lock_node INTO ls_lock_node
+                WHERE edit_mode <> /bobf/if_conf_c=>sc_edit_exclusive
+                   OR generic   =  abap_false.           "#EC CI_STDSEQ
+                ls_key-key = ls_lock_node-key.
+                IF ls_lock_node-edit_mode = /bobf/if_conf_c=>sc_edit_optimistic AND
+                   ls_lock_node-generic   = abap_true.
+                  APPEND ls_key TO lt_propagate_key.
+                  IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd
+                  OR mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                    IF ls_lock_node-edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic AND ls_lock_node-edit_mode_update IS INITIAL.
+                      APPEND ls_key TO lt_add_optimistic_update.
+                    ENDIF.
+                  ENDIF.
+                ELSE.
+                  APPEND ls_key TO lt_lock_key.
+                  IF ls_lock_node-generic = abap_false. "existing lock is not generic
+                    ls_node_unlock-key = ls_lock_node-key.
+                    IF ls_lock_node-edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+                      INSERT ls_node_unlock INTO TABLE lt_unlock_nongen_optimistic.
+                    ELSEIF ls_lock_node-edit_mode = /bobf/if_conf_c=>sc_edit_exclusive.
+                      INSERT ls_node_unlock INTO TABLE lt_unlock_nongen_exclusive.
+                      IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                        "an optimistic dialog lock exists in addition to the exclusive update lock
+                        INSERT ls_node_unlock INTO TABLE lt_unlock_nongen_optimistic.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDLOOP.
+            ENDIF.
+
+            ls_context-node_key = ls_node-node.
+            ls_context-act_key  = ls_actconf-act_key.
+            ls_context-act_cat  = ls_actconf-act_cat.
+
+*            propagate optimistic locks
+            IF lt_propagate_key IS NOT INITIAL.
+
+              IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd
+              OR mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                " set scope update, as only the update program owns the exclusive lock on this mode
+                lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_update.
+
+                IF lt_add_optimistic_update IS NOT INITIAL.
+                  " request optimistic lock with scope 2 (update)
+                  lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+                  lr_lock_param->scope     = /bobf/if_conf_c=>sc_enqueue_scope_update.
+                  mo_bopf->do_lock_action(
+                    EXPORTING
+                      is_lock_param = lr_lock_param
+                      is_context    = ls_context
+                      iv_act_class  = ls_actconf-act_class
+                      io_change     = io_change
+                    IMPORTING
+                      et_failed_key = DATA(lt_failed_scope_2_o_lock)
+                    CHANGING
+                      ct_key        = lt_add_optimistic_update ).
+                  ASSERT ID /bobf/frw CONDITION
+                     /bobf/cl_tool_assert=>is_key_subset_stack_check(
+                         it_key_subset = lt_failed_scope_2_o_lock ) = abap_true.
+                  lt_propagate_key = FILTER #( lt_propagate_key EXCEPT IN lt_failed_scope_2_o_lock
+                                                                       USING KEY key_sort WHERE key = key ).
+                ENDIF.
+
+              ENDIF.
+
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_set(
+                     it_key_set = lt_propagate_key ) = abap_true.
+
+              lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_promote.
+
+              IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+              ENDIF.
+
+              IF lt_propagate_key IS NOT INITIAL.
+                mo_bopf->do_lock_action(
+                EXPORTING
+                  is_lock_param = lr_lock_param
+                  is_context    = ls_context
+                  iv_act_class  = ls_actconf-act_class
+                  io_change     = io_change
+                IMPORTING
+                  "eo_message    = lo_message    " do not process messages, because the lock is retried below
+                  et_failed_key = lt_failed_propagate_key
+                CHANGING
+                  ct_key        = lt_propagate_key ).
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_check(
+                     it_key_subset = lt_failed_propagate_key ) = abap_true.
+              ENDIF.
+              INSERT LINES OF lt_failed_scope_2_o_lock INTO TABLE lt_failed_propagate_key.
+
+*              update lock buffer
+              CLEAR ls_mod.
+              ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_create.
+              ls_mod-node        = ls_nodeconf-lock_node_key.
+              ls_mod-source_node = ls_nodeconf-node_key.
+              LOOP AT lt_propagate_key INTO ls_key.
+                CHECK NOT line_exists( lt_failed_propagate_key[ KEY key_sort  key = ls_key-key ] ).
+                " lock successful
+                CREATE DATA lr_lock_node.
+                IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                  lr_lock_node->edit_mode_update = /bobf/if_conf_c=>sc_edit_exclusive.
+                  lr_lock_node->edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic.
+                ENDIF.
+                IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                  lr_lock_node->edit_mode_update = /bobf/if_conf_c=>sc_edit_exclusive.
+                  lr_lock_node->edit_mode_dialog = /bobf/if_conf_c=>sc_edit_exclusive.
+                ENDIF.
+
+                lr_lock_node->generic    = lr_lock_param->generic.
+                lr_lock_node->edit_mode  = /bobf/if_conf_c=>sc_edit_exclusive.
+                lr_lock_node->key        = ls_key-key.
+                lr_lock_node->parent_key = ls_key-key.
+                ls_mod-key        = ls_key-key.
+                ls_mod-source_key = ls_key-key.
+                ls_mod-data       = lr_lock_node.
+                APPEND ls_mod TO et_lock_buffer_modifications.
+              ENDLOOP.
+
+*              Cleanup lock buffer for instances that failed to promote
+              IF lt_failed_propagate_key IS NOT INITIAL.
+                CLEAR ls_mod.
+                ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+                ls_mod-node        = ls_nodeconf-lock_node_key.
+                LOOP AT lt_failed_propagate_key INTO ls_key.
+                  ls_mod-key = ls_key-key.
+                  APPEND ls_mod TO et_lock_buffer_modifications.
+                ENDLOOP.
+*              add not promotable nodes for retry via new o-lock and promote
+                APPEND LINES OF lt_failed_propagate_key TO lt_lock_key.
+              ENDIF.
+            ENDIF.
+
+*            lock'em all ("no lock" to "o lock" to "e lock")
+            IF lt_lock_key IS NOT INITIAL.
+              lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_set(
+                     it_key_set = lt_lock_key ) = abap_true.
+
+              " get a O[1,1] lock
+              IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+              ENDIF.
+              IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+              ENDIF.
+
+              mo_bopf->do_lock_action(
+                EXPORTING
+                  is_lock_param = lr_lock_param
+                  is_context    = ls_context
+                  iv_act_class  = ls_actconf-act_class
+                  io_change     = io_change
+                IMPORTING
+                  eo_message    = lo_message
+                  et_failed_key = lt_failed_key
+                CHANGING
+                  ct_mod        = ct_mod
+                  ct_key        = lt_lock_key ).
+              ASSERT ID /bobf/frw CONDITION
+                 /bobf/cl_tool_assert=>is_key_subset_stack_check(
+                     it_key_subset = lt_failed_key ) = abap_true.
+
+              IF lo_message IS BOUND.
+                lo_message->get_messages( IMPORTING et_message = lt_message ).
+                LOOP AT lt_message INTO ls_message.
+                  lm_bopf = ls_message-message.
+                  LOOP AT it_node_link INTO ls_node_link
+                    WHERE target_node = ls_context-node_key
+                      AND target_key  = ls_message-parent_key.
+                    ls_location-key      = ls_node_link-source_key.
+                    ls_location-node_key = ls_node_link-source_node.
+                    lm_bopf->add_environment_location( ls_location ).
+                  ENDLOOP.
+                ENDLOOP.
+                collect_messages( EXPORTING io_message = lo_message
+                                  CHANGING  co_message = co_message ).
+              ENDIF.
+
+              LOOP AT lt_failed_key INTO ls_key.
+                DELETE lt_lock_key USING KEY key_sort WHERE key = ls_key-key.
+                DELETE TABLE lt_unlock_nongen_optimistic WITH TABLE KEY node = ls_node-node  key = ls_key-key.
+                DELETE TABLE lt_unlock_nongen_exclusive  WITH TABLE KEY node = ls_node-node  key = ls_key-key.
+                LOOP AT it_node_link INTO ls_node_link
+                  WHERE target_node = ls_node-node
+                    AND target_key  = ls_key-key.
+                  ls_failed_node-node = ls_node_link-source_node.
+                  ls_failed_node-key  = ls_node_link-source_key.
+                  INSERT ls_failed_node INTO TABLE et_node_not_locked.
+                  IF lt_failed_propagate_key IS NOT INITIAL.
+                    DELETE lt_failed_propagate_key WHERE key = ls_key-key.
+                  ENDIF.
+                ENDLOOP.
+              ENDLOOP.
+
+*              promote O-lock
+              IF lt_lock_key IS NOT INITIAL.
+                lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_promote.
+
+                ASSERT ID /bobf/frw CONDITION
+                   /bobf/cl_tool_assert=>is_key_subset_stack_set(
+                       it_key_set = lt_lock_key ) = abap_true.
+
+                " promote only update part (keep O[1,0] and add E[0,1])
+                IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                  lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_update.
+                ENDIF.
+                IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                  lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd.
+                ENDIF.
+
+                mo_bopf->do_lock_action(
+                  EXPORTING
+                    is_lock_param = lr_lock_param
+                    is_context    = ls_context
+                    iv_act_class  = ls_actconf-act_class
+                    io_change     = io_change
+                  IMPORTING
+                    eo_message    = lo_message
+                    et_failed_key = lt_failed_key
+                  CHANGING
+                    ct_mod        = ct_mod
+                    ct_key        = lt_lock_key ).
+
+                ASSERT ID /bobf/frw CONDITION
+                   /bobf/cl_tool_assert=>is_key_subset_stack_check(
+                       it_key_subset = lt_failed_key ) = abap_true.
+
+                IF lo_message IS BOUND.
+                  lo_message->get_messages( IMPORTING et_message = lt_message ).
+                  LOOP AT lt_message INTO ls_message.
+                    lm_bopf = ls_message-message.
+                    LOOP AT it_node_link INTO ls_node_link
+                      WHERE target_node = ls_context-node_key
+                        AND target_key  = ls_message-parent_key.
+                      ls_location-key      = ls_node_link-source_key.
+                      ls_location-node_key = ls_node_link-source_node.
+                      lm_bopf->add_environment_location( ls_location ).
+                    ENDLOOP.
+                  ENDLOOP.
+                  collect_messages( EXPORTING io_message = lo_message
+                                    CHANGING  co_message = co_message ).
+                ENDIF.
+
+                LOOP AT lt_failed_key INTO ls_key.
+                  DELETE TABLE lt_unlock_nongen_optimistic WITH TABLE KEY node = ls_node-node  key = ls_key-key.
+                  DELETE TABLE lt_unlock_nongen_exclusive  WITH TABLE KEY node = ls_node-node  key = ls_key-key.
+                  LOOP AT it_node_link INTO ls_node_link
+                    WHERE target_node = ls_node-node
+                      AND target_key  = ls_key-key.
+                    ls_failed_node-node = ls_node_link-source_node.
+                    ls_failed_node-key  = ls_node_link-source_key.
+                    INSERT ls_failed_node INTO TABLE et_node_not_locked.
+                    IF lt_failed_propagate_key IS NOT INITIAL.
+                      DELETE lt_failed_propagate_key WHERE key = ls_key-key.
+                    ENDIF.
+                  ENDLOOP.
+                ENDLOOP.
+
+*                update lock buffer
+                CLEAR ls_mod.
+                "Note that change_mode=CREATE also works for UPDATES of existing lock buffer entries.
+                "(see /BOBF/CL_LIB_B_LOCK->MODIFY)
+                ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_create.
+                ls_mod-node        = ls_nodeconf-lock_node_key.
+                ls_mod-source_node = ls_nodeconf-node_key.
+                ls_node_load-node  = ls_node-node.
+                LOOP AT lt_lock_key INTO ls_key.
+                  READ TABLE lt_failed_key WITH KEY key_sort
+                    COMPONENTS key = ls_key-key
+                    TRANSPORTING NO FIELDS.
+                  CHECK sy-subrc <> 0.
+                  " locked successfully
+                  CREATE DATA lr_lock_node.
+                  IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+                    lr_lock_node->edit_mode_update = /bobf/if_conf_c=>sc_edit_exclusive.
+                    lr_lock_node->edit_mode_dialog = /bobf/if_conf_c=>sc_edit_optimistic.
+                  ENDIF.
+                  IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_excdiaupd.
+                    lr_lock_node->edit_mode_update = /bobf/if_conf_c=>sc_edit_exclusive.
+                    lr_lock_node->edit_mode_dialog = /bobf/if_conf_c=>sc_edit_exclusive.
+                  ENDIF.
+
+                  lr_lock_node->generic    = lr_lock_param->generic.
+                  lr_lock_node->edit_mode  = /bobf/if_conf_c=>sc_edit_exclusive.
+                  lr_lock_node->key        = ls_key-key.
+                  lr_lock_node->parent_key = ls_key-key.
+                  ls_mod-key        = ls_key-key.
+                  ls_mod-source_key = ls_key-key.
+                  ls_mod-data       = lr_lock_node.
+                  APPEND ls_mod TO et_lock_buffer_modifications.
+
+                  " mark nodes for reloading:
+                  IF iv_generic = abap_false
+                  OR NOT line_exists( lt_lock_node[ KEY parent_key
+                                                    COMPONENTS parent_key = ls_key-key
+                                                               edit_mode  = /bobf/if_conf_c=>sc_edit_exclusive
+                                                               generic    = abap_false ] ).
+                    ls_node_load-key = ls_key-key.
+                    INSERT ls_node_load INTO TABLE et_lockable_node_newly_locked.
+                  ENDIF.
+                ENDLOOP.
+              ENDIF.
+            ENDIF.
+
+*            generate warning messages if promotion failed and no lock error occured
+            IF lt_failed_propagate_key IS NOT INITIAL.
+              IF co_message IS NOT BOUND.
+                co_message = /bobf/cl_frw_factory=>get_message( ).
+              ENDIF.
+              LOOP AT lt_failed_propagate_key INTO ls_key.
+                ls_location-node_key = ls_context-node_key.
+                ls_location-key      = ls_key-key.
+
+                CREATE OBJECT lm_common_esi
+                  EXPORTING
+                    textid             = /bobf/cm_frw_common_esi=>cm_data_changed_concurrently
+                    severity           = /bobf/cm_frw_common_esi=>co_severity_warning
+                    symptom            = /bobf/if_frw_message_symptoms=>co_bo_inconsistency
+                    ms_origin_location = ls_location.
+
+                LOOP AT it_node_link INTO ls_node_link
+                  WHERE target_node = ls_context-node_key
+                    AND target_key  = ls_key-key.
+                  ls_location-key      = ls_node_link-source_key.
+                  ls_location-node_key = ls_node_link-source_node.
+                  lm_common_esi->add_environment_location( ls_location ).
+                ENDLOOP.
+
+                co_message->add_cm( lm_common_esi ).
+              ENDLOOP.
+              CLEAR lt_failed_propagate_key.
+            ENDIF.
+
+            CLEAR lt_key.
+          ENDAT.
+        ENDLOOP.
+
+        IF lt_unlock_nongen_optimistic IS NOT INITIAL.
+          unlock_bypassing_buffer( iv_edit_mode          = /bobf/if_conf_c=>sc_edit_optimistic
+                                   it_lockable_node_keys = lt_unlock_nongen_optimistic
+                                   iv_generic            = abap_false
+                                   io_change             = /bobf/cl_frw_factory=>get_change( ) ).
+        ENDIF.
+        IF lt_unlock_nongen_exclusive IS NOT INITIAL.
+          unlock_bypassing_buffer( iv_edit_mode          = /bobf/if_conf_c=>sc_edit_exclusive
+                                   it_lockable_node_keys = lt_unlock_nongen_exclusive
+                                   iv_generic            = abap_false
+                                   io_change             = /bobf/cl_frw_factory=>get_change( ) ).
+        ENDIF.
+
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD _unlock.
+    DATA: ls_context     TYPE /bobf/s_frw_ctx_act,
+          ls_failed_node TYPE /bobf/s_frw_node,
+          lt_failed_key  TYPE /bobf/t_frw_key,
+          lt_key         TYPE /bobf/t_frw_key,
+          lt_lock_key    TYPE /bobf/t_frw_key,
+          ls_key         TYPE /bobf/s_frw_key,
+          lt_lock_node   TYPE /bobf/t_frw_lock_node,
+          lt_message     TYPE /bobf/t_frw_message_k,
+          ls_location    TYPE /bobf/s_frw_location,
+          ls_actconf     TYPE /bobf/s_confro_act_list,
+          ls_nodeconf    TYPE /bobf/s_confro_node,
+          ls_node        TYPE /bobf/s_frw_node,
+          lt_lock_key_o  TYPE /bobf/t_frw_key,
+          lt_lock_key_e  TYPE /bobf/t_frw_key,
+          ls_lock_node   TYPE /bobf/s_frw_lock_node,
+          lr_lock_param  TYPE REF TO /bobf/s_frw_lock_parameters,
+          ls_mod         TYPE /bobf/s_frw_modification,
+          lo_message     TYPE REF TO /bobf/if_frw_message,
+          ls_node_link   TYPE /bobf/s_frw_node_key_link,
+          ls_message     TYPE /bobf/s_frw_message_k,
+          lm_bopf        TYPE REF TO /bobf/cm_frw.
+
+    CLEAR: et_lock_buffer_modifications, et_node_not_locked.
+
+*  ____________________________________________________________________ *
+*  fill global settings
+    CREATE DATA lr_lock_param.
+    IF iv_scope IS INITIAL.
+      lr_lock_param->scope = /bobf/if_conf_c=>sc_enqueue_scope_diaupd. "scope 3 releases both DIA and UPDATE locks
+    ELSE.
+      lr_lock_param->scope = iv_scope.
+    ENDIF.
+    lr_lock_param->all_none  = iv_all_none.
+    lr_lock_param->generic   = iv_generic.
+    lr_lock_param->lock_parameter_buffer = io_lock_param_buffer.
+    ls_context-bo_key        = mo_conf->ms_obj-bo_key.
+    ls_context-root_node_key = mo_conf->ms_obj-root_node_key.
+
+    LOOP AT it_node INTO ls_node.
+
+      ls_key-key = ls_node-key.
+      APPEND ls_key TO lt_key.
+
+      AT END OF node.
+*        get configuration
+        mo_conf->get_act( EXPORTING iv_node_key = ls_node-node
+                                    iv_act_cat  = /bobf/if_conf_c=>sc_action_unlock
+                          IMPORTING es_action = ls_actconf ).
+
+        IF mo_conf->ms_last_node-node_key = ls_node-node.
+          ls_nodeconf = mo_conf->ms_last_node.
+        ELSE.
+          mo_conf->get_node( EXPORTING iv_node_key = ls_node-node
+                             IMPORTING es_node     = ls_nodeconf ).
+        ENDIF.
+
+        "Tell the lock parameter buffer to use the lock node of the current node:
+        io_lock_param_buffer->set_locknode_key( ls_nodeconf-lock_node_key ).
+
+*        check lock buffer
+        mo_bopf->retrieve( EXPORTING iv_node_key         = ls_nodeconf-lock_node_key
+                                     it_key              = lt_key
+                                     iv_state            = /bobf/if_conf_c=>sc_state_current
+                                     iv_invalidate_cache = abap_false
+                                     iv_fill_data        = abap_true
+                           IMPORTING et_data             = lt_lock_node
+                                     eo_message          = lo_message ).
+        collect_messages( EXPORTING io_message = lo_message
+                          CHANGING  co_message = co_message ).
+
+        CLEAR lt_lock_key.
+        LOOP AT lt_lock_node INTO ls_lock_node WHERE edit_mode <> /bobf/if_conf_c=>sc_edit_read_only. "#EC CI_STDSEQ
+          ls_key-key = ls_lock_node-key.
+          IF ls_lock_node-edit_mode = /bobf/if_conf_c=>sc_edit_exclusive.
+            INSERT ls_key INTO TABLE lt_lock_key_e.
+            " in optdiaupd always a dialog optimistic lock exists if an exclusive lock exists
+            " (which is not noted in the BOPF lock buffer but also needs to be removed)
+            IF mv_enqueue_scope = /bobf/if_conf_c=>sc_enqueue_scope_optdiaupd.
+              INSERT ls_key INTO TABLE lt_lock_key_o.
+            ENDIF.
+          ELSEIF ls_lock_node-edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+            INSERT ls_key INTO TABLE lt_lock_key_o.
+          ENDIF.
+        ENDLOOP.
+
+*        unlock exclusively locked nodes
+        IF lt_lock_key_e IS NOT INITIAL.
+          ls_context-node_key = ls_node-node.
+          ls_context-act_key  = ls_actconf-act_key.
+          ls_context-act_cat  = ls_actconf-act_cat.
+          lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_exclusive.
+
+          ASSERT ID /bobf/frw CONDITION /bobf/cl_tool_assert=>is_key_subset_stack_set( lt_lock_key ) = abap_true.
+
+          mo_bopf->do_lock_action( EXPORTING is_lock_param = lr_lock_param
+                                             is_context    = ls_context
+                                             iv_act_class  = ls_actconf-act_class
+                                             io_change     = io_change
+                                   IMPORTING eo_message    = lo_message
+                                             et_failed_key = lt_failed_key
+                                   CHANGING  ct_key        = lt_lock_key_e ).
+          collect_messages( EXPORTING io_message = lo_message
+                            CHANGING  co_message = co_message ).
+          INSERT LINES OF lt_lock_key_e INTO TABLE lt_lock_key.
+
+          IF lo_message IS BOUND.
+            lo_message->get_messages( IMPORTING et_message = lt_message ).
+            LOOP AT lt_message INTO ls_message.
+              lm_bopf = ls_message-message.
+              LOOP AT it_node_link INTO ls_node_link WHERE target_node = ls_context-node_key
+                                                     AND   target_key  = ls_message-parent_key.
+                ls_location-key      = ls_node_link-source_key.
+                ls_location-node_key = ls_node_link-source_node.
+                lm_bopf->add_environment_location( ls_location ).
+              ENDLOOP.
+            ENDLOOP.
+          ENDIF.
+
+          ASSERT ID /bobf/frw CONDITION /bobf/cl_tool_assert=>is_key_subset_stack_check( lt_failed_key ) = abap_true.
+          LOOP AT lt_failed_key INTO ls_key.
+            LOOP AT it_node_link INTO ls_node_link WHERE target_node = ls_node-node
+                                                   AND   target_key  = ls_key-key.
+              ls_failed_node-node = ls_node_link-source_node.
+              ls_failed_node-key  = ls_node_link-source_key.
+              INSERT ls_failed_node INTO TABLE et_node_not_locked.
+            ENDLOOP.
+          ENDLOOP.
+
+        ENDIF.
+
+*        unlock optimistically locked nodes
+        IF lt_lock_key_o IS NOT INITIAL.
+          ls_context-node_key = ls_node-node.
+          ls_context-act_key  = ls_actconf-act_key.
+          ls_context-act_cat  = ls_actconf-act_cat.
+          lr_lock_param->edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+
+          ASSERT ID /bobf/frw CONDITION /bobf/cl_tool_assert=>is_key_subset_stack_set( lt_lock_key ) = abap_true.
+
+          mo_bopf->do_lock_action( EXPORTING is_lock_param = lr_lock_param
+                                             is_context    = ls_context
+                                             iv_act_class  = ls_actconf-act_class
+                                             io_change     = io_change
+                                   IMPORTING eo_message    = lo_message
+                                             et_failed_key = lt_failed_key
+                                   CHANGING  ct_key        = lt_lock_key_o ).
+          collect_messages( EXPORTING io_message = lo_message
+                            CHANGING  co_message = co_message ).
+          INSERT LINES OF lt_lock_key_o INTO TABLE lt_lock_key.
+
+          IF lo_message IS BOUND.
+            lo_message->get_messages( IMPORTING et_message = lt_message ).
+            LOOP AT lt_message INTO ls_message.
+              lm_bopf = ls_message-message.
+              LOOP AT it_node_link INTO ls_node_link WHERE target_node = ls_context-node_key
+                                                     AND   target_key  = ls_message-parent_key.
+                ls_location-key      = ls_node_link-source_key.
+                ls_location-node_key = ls_node_link-source_node.
+                lm_bopf->add_environment_location( ls_location ).
+              ENDLOOP.
+            ENDLOOP.
+          ENDIF.
+
+          ASSERT ID /bobf/frw CONDITION /bobf/cl_tool_assert=>is_key_subset_stack_check( lt_failed_key ) = abap_true.
+          LOOP AT lt_failed_key INTO ls_key.
+            LOOP AT it_node_link INTO ls_node_link WHERE target_node = ls_node-node
+                                                   AND   target_key  = ls_key-key.
+              ls_failed_node-node = ls_node_link-source_node.
+              ls_failed_node-key  = ls_node_link-source_key.
+              INSERT ls_failed_node INTO TABLE et_node_not_locked.
+            ENDLOOP.
+          ENDLOOP.
+
+        ENDIF.
+
+        "update lock buffer (delete all entries that have not failed):
+        IF lt_lock_key IS NOT INITIAL.
+          ls_mod-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+          ls_mod-node        = ls_nodeconf-lock_node_key.
+          LOOP AT lt_lock_key INTO ls_key.
+            IF NOT line_exists( lt_failed_key[ KEY key_sort COMPONENTS key = ls_key-key ] ).
+              ls_mod-key = ls_key-key.
+              APPEND ls_mod TO et_lock_buffer_modifications.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        CLEAR lt_key.
+      ENDAT.
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

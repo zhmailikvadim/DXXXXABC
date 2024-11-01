@@ -1,0 +1,542 @@
+*&---------------------------------------------------------------------*
+*& Исполнитель          : ООО «Атлантконсалт»                          *
+*& Дата создания        : 03/09/2014                                   *
+*& Автор                : Радкевич В.В. (DEVELOPER4)                   *
+*& Функциональная спец. :                                              *
+*& Техническая спец.    :                                              *
+*& Redmine              :                                              *
+*& Описание             :                                              *
+*& Отчёт по вакансиям в центр занятости                                *
+*&---------------------------------------------------------------------*
+
+REPORT zhr_r_rep043.
+
+TABLES: hrp5122,                            " таблицы для работы с инфо-типами.
+        hrp1001,
+        pa0001,
+        hrp5125.
+
+DATA:   gv_dats              TYPE datum,                                              " период, заданный пользователем
+        gv_tmp_data1         TYPE datum,                                              " первое число месяца
+        gv_tmp_data2         TYPE datum,                                              " второе число месяца
+        ok_code              TYPE sy-ucomm,                                           " ок код
+        lv_avl_cont_name(50) VALUE 'CONTROL',                                         " контейнер для размещения АЛВ
+        gt_fieldcat          TYPE lvc_t_fcat.
+
+*---------------------------------------------------------------------*
+*                    SELECTION-SCREEN
+*---------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME.
+
+SELECT-OPTIONS st_datas FOR gv_dats OBLIGATORY.               " даты начала и конца периода отчётнасти
+*PARAMETERS     sv_werks TYPE pa0001-werks OBLIGATORY.         " запрашиваем раздел персонала для отчёта
+*PARAMETERS pv_objid TYPE pd_objid_r OBLIGATORY.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(31) text-001 FOR FIELD pv_objid.
+PARAMETERS pv_objid TYPE objid OBLIGATORY.                                   "функциональная сфера
+SELECTION-SCREEN COMMENT 44(1) FOR FIELD p_name1.                           "наименование функциональной сферы
+PARAMETERS p_name1 TYPE stext.
+SELECTION-SCREEN END OF LINE.
+
+
+SELECTION-SCREEN END OF BLOCK b1.
+
+
+*---------------------------------------------------------------------*
+*                   CLASS DEFINITION
+*---------------------------------------------------------------------*
+CLASS lcl_appl DEFINITION.
+  PUBLIC SECTION.
+    class-data:
+      mv_filled,                                                      " поле для проверки запрета ввода
+      mv_profl TYPE profl.
+    CLASS-METHODS:
+      init,                                                           " метод заполнения поля экрана выбора в соответствии с полномочиями
+      f4_shelp CHANGING cv_obj TYPE any,                              " метод запуска справки по полю экрана запуска
+      sel_out,                                                        " метод изменения свойств ввода поля экрана
+      main,                                                           " метод запуска приложения
+      have_data RETURNING VALUE(rv_bool) TYPE boolean,                " метод проверяет наличие данных для отчёта
+      print_doc,                                                      " метод формирования отчёта в формате MS Exel.
+      show_alv,                                                       " public метод для отображение ALV
+      value_request_pv_objid,
+      pbo,                                                            " метод PBO логики
+      pai.
+
+  PRIVATE SECTION.
+
+    CONSTANTS:
+      lc_structure_load TYPE dd02l-tabname
+                          VALUE 'zhr_s_report_employment_center',       " структура для отображения полей в ALV
+      lc_struc          TYPE str VALUE 'ms_data',                     " имя структуры данных для формирования файла .docx
+      gc_forme          TYPE w3objid VALUE 'ZHR_RECR_REP043'.         " имя шаблона для отчёта
+
+
+    CLASS-METHODS:
+      get_data_db,
+      alv_container_build,                                            " создание ALV контейнера с данными
+      build_fieldcat,                                                 " метод составления каталога
+      collect_gen_data RETURNING VALUE(rt_data) TYPE zhr_s_rep043.
+
+    CLASS-DATA:
+      lt_load_data     TYPE TABLE OF zhr_s_report_employment_center,
+*--------------------------объекты-----------------------*
+      lo_bal_log       TYPE REF TO zcl_hr_bc_appl_log,                " объект лог. ошибок
+      lo_alv_grid      TYPE REF TO cl_gui_alv_grid,                   " объект AVL GRID
+      lo_alv_container TYPE REF TO cl_gui_custom_container,           " объект AVL контейнера
+      lo_selection     TYPE REF TO zcl_hr_rep043.                " объект глобального класса zcl_hr_rep043 для выборки данных
+ENDCLASS.
+
+*---------------------------------------------------------------------*
+*                   CLASS IMPLEMENTATION
+*---------------------------------------------------------------------*
+CLASS lcl_appl IMPLEMENTATION.
+
+*---------------------------------------------------------------------*
+*                   method main
+*---------------------------------------------------------------------*
+* метод запуска приложения
+*---------------------------------------------------------------------*
+  METHOD main.
+*   считываем данные по сотрудникам
+    get_data_db( ).
+  ENDMETHOD.
+*---------------------------------------------------------------------*
+*     Метод  get_data_db
+*---------------------------------------------------------------------*
+*  Считываем данные по призывникам
+*---------------------------------------------------------------------*
+  METHOD get_data_db.
+*   создаём объект класса для выборки
+    CREATE OBJECT lo_selection
+      EXPORTING
+        iv_begda = st_datas-low                                        " дата отчета
+        iv_objid = conv pd_objid_r( pv_objid ).                                           " Орг. единица
+*   получаем результат выборки
+
+    lt_load_data = lo_selection->get_data( ).
+  ENDMETHOD.
+*-------------------------------------------------------------------------------*
+*     Метод have_data                                                           *
+*-------------------------------------------------------------------------------*
+*Метод проверяет наличие данных для отчёта                                      *
+*-------------------------------------------------------------------------------*
+  METHOD have_data.
+*    DATA lv_count TYPE n.
+*    DESCRIBE TABLE lt_load_data LINES lv_count.
+*    IF lv_count > 0.
+*      rv_bool = abap_true.
+*    ELSE.
+*      rv_bool = abap_false.
+*    ENDIF.
+  ENDMETHOD.
+
+*-------------------------------------------------------------------------------*
+*     Метод alv_container_bild                                                  *
+*-------------------------------------------------------------------------------*
+*Создание контейнера ALV таблицы и отображение данных                           *
+*-------------------------------------------------------------------------------*
+  METHOD alv_container_build.
+    DATA: ls_alv_layout       TYPE lvc_s_layo,
+          lt_alv_toolbar_excl TYPE ui_functions,
+          ls_variant TYPE disvariant.
+
+    ls_variant-REPORT = sy-repid.
+
+    IF lo_alv_container IS NOT BOUND.
+*     Инициализация АЛВ-контейнера
+      CREATE OBJECT lo_alv_container
+        EXPORTING
+          container_name = lv_avl_cont_name.
+
+*     Создаём АЛВ-грид на только что созданном контейнере
+      CREATE OBJECT lo_alv_grid
+        EXPORTING
+          i_parent = lo_alv_container.
+
+      build_fieldcat( ).                                      "составляем коталог
+
+*     Основные настройки АЛВ
+      ls_alv_layout-no_keyfix  = abap_true.
+      ls_alv_layout-no_rowmark = abap_true.
+      ls_alv_layout-no_rowins  = abap_true.
+      ls_alv_layout-cwidth_opt = abap_true.
+      ls_alv_layout-stylefname = 'ALV_STYLE'.
+      ls_alv_layout-detailinit = abap_true.
+      ls_alv_layout-zebra      = abap_true.
+
+*     Набор кнопок, не отображаемых в данном отчёте.
+      APPEND cl_gui_alv_grid=>mc_fc_graph   TO lt_alv_toolbar_excl.
+      APPEND cl_gui_alv_grid=>mc_fc_info    TO lt_alv_toolbar_excl.
+      APPEND cl_gui_alv_grid=>mc_fc_average TO lt_alv_toolbar_excl.
+      APPEND cl_gui_alv_grid=>mc_fc_maximum TO lt_alv_toolbar_excl.
+      APPEND cl_gui_alv_grid=>mc_fc_minimum TO lt_alv_toolbar_excl.
+      APPEND cl_gui_alv_grid=>mc_fc_subtot  TO lt_alv_toolbar_excl.
+      APPEND cl_gui_alv_grid=>mc_fc_sum     TO lt_alv_toolbar_excl.
+
+*     Отображение АЛВ-грида
+      lo_alv_grid->set_table_for_first_display(
+        EXPORTING
+          is_layout                     = ls_alv_layout
+          i_save                       = 'A'
+          is_variant                    = ls_variant
+        CHANGING
+          it_outtab                     = lt_load_data
+          it_fieldcatalog               = gt_fieldcat[]
+        EXCEPTIONS
+          invalid_parameter_combination = 1
+          program_error                 = 2
+          too_many_lines                = 3
+          OTHERS                        = 4
+          ).
+
+      ASSERT sy-subrc EQ 0.
+
+      CALL METHOD lo_alv_grid->set_toolbar_interactive.
+    ENDIF.
+
+  ENDMETHOD.
+
+*-------------------------------------------------------------------------------*
+*                       method show_alv                                   *
+*-------------------------------------------------------------------------------*
+*Метод отоборажения ALV                                                     *
+*-------------------------------------------------------------------------------*
+  METHOD show_alv.
+    IF lt_load_data IS INITIAL.
+*     если данных нет, выводим сообщение
+      MESSAGE i024(zhr_pa).
+      RETURN.
+    ENDIF.
+*   иначе, вызываем 2000 экран, на котором будет расположен ALV
+    CALL SCREEN 2000.
+  ENDMETHOD.
+
+*-------------------------------------------------------------------------------*
+*                       method build_fieldcat                                   *
+*-------------------------------------------------------------------------------*
+*Метод составления каталога                                                     *
+*-------------------------------------------------------------------------------*
+  METHOD build_fieldcat.
+    CLEAR gt_fieldcat.
+
+    CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+      EXPORTING
+        i_structure_name = lc_structure_load
+      CHANGING
+        ct_fieldcat      = gt_fieldcat[].
+  ENDMETHOD.
+
+*---------------------------------------------------------------------*
+*     Метод PAI
+*---------------------------------------------------------------------*
+*  Метод pai логики
+*---------------------------------------------------------------------*
+  METHOD pai.
+    DATA: lv_ucomm TYPE sy-ucomm.
+
+    lv_ucomm = ok_code.                                         " считываем команду из ok-code
+    CLEAR ok_code.
+
+    CASE sy-ucomm.
+      WHEN 'PRINT'.
+        lcl_appl=>print_doc( ).                                 " печать отчёта в файл
+      WHEN 'CANC' OR 'EXIT'.
+        LEAVE PROGRAM.                                          " выход из програмы
+      WHEN 'BACK'.
+        LEAVE TO SCREEN 0.                                      " возврат на первый экран
+    ENDCASE.
+  ENDMETHOD.
+
+*---------------------------------------------------------------------*
+*     Метод PBO
+*---------------------------------------------------------------------*
+*  Метод pbo логики
+*---------------------------------------------------------------------*
+  METHOD pbo.
+    alv_container_build( ).
+    SET PF-STATUS 'S1001'.        "назначаем экрану статус S1001
+  ENDMETHOD.
+
+
+*---------------------------------------------------------------------*
+*     Метод print_doc
+*---------------------------------------------------------------------*
+*  Метод формирования отчёта в формате MS Word
+*---------------------------------------------------------------------*
+  METHOD print_doc.
+    DATA:       lv_field_t TYPE string,
+                ms_data    TYPE zhr_s_rep043,
+                lt_comp    TYPE cl_abap_structdescr=>component_table,
+                lo_table   TYPE REF TO cl_abap_tabledescr,
+                lo_struct  TYPE REF TO cl_abap_structdescr,
+                lt_values  TYPE zwww_values_t,
+                lv_p_name  TYPE zwww_values-var_name.
+
+    ms_data = collect_gen_data( ).                                            " собираем общие данные
+
+    ASSIGN (lc_struc) TO FIELD-SYMBOL(<fs_struc>).
+*   Опрееляем список полей структуры
+    TRY .
+        lo_struct ?= cl_abap_structdescr=>describe_by_data( <fs_struc> ).
+        lt_comp    = lo_struct->get_components( ).
+      CATCH cx_root INTO DATA(lx_root).
+        MESSAGE e002(zhr_work_infty) WITH lx_root->get_text( ).
+    ENDTRY.
+
+    LOOP AT lt_comp ASSIGNING FIELD-SYMBOL(<ls_comp>).
+
+      CONCATENATE lc_struc '-' <ls_comp>-name INTO lv_field_t.
+
+      CASE <ls_comp>-type->kind.                                              " Проверяем тип элемента
+        WHEN <ls_comp>-type->kind_elem.                                       " Если элементарный тип
+          APPEND INITIAL LINE TO lt_values ASSIGNING FIELD-SYMBOL(<ls_val>).  " Добавляем строку в таблицу значений
+          ASSIGN (lv_field_t) TO FIELD-SYMBOL(<lv_field>).                    " Создаем ссылку на поле
+          CONCATENATE '&' <ls_comp>-name '&' INTO lv_p_name.                  " Формируем название параметра в документе
+          <ls_val>-find_text = lv_p_name.                                     " Передаем название параметра
+          <ls_val>-value = <lv_field>.                                        " Передаем значение поля
+        WHEN <ls_comp>-type->kind_table.                                      " Если таблица
+          FIELD-SYMBOLS <lt_tab> TYPE STANDARD TABLE.
+          ASSIGN (lv_field_t) TO <lt_tab>.
+
+          lv_p_name = <ls_comp>-name.
+          CALL FUNCTION 'ZWWW_PREPARE_TABLE'                                  " подготовка таблицы
+            EXPORTING
+              line_name    = lv_p_name
+            TABLES
+              it_any_table = <lt_tab>
+              it_values    = lt_values.
+      ENDCASE.
+    ENDLOOP.
+
+*   Открываем на просмотр
+    CALL FUNCTION 'ZWWW_OPENFORM'
+      EXPORTING
+        form_name   = gc_forme
+        printdialog = abap_false
+        protect     = abap_false
+      TABLES
+        it_values   = lt_values.
+  ENDMETHOD.
+
+*---------------------------------------------------------------------*
+*     Метод collect_gen_data
+*---------------------------------------------------------------------*
+*  Собираем общие данные для отчёта
+*---------------------------------------------------------------------*
+  METHOD collect_gen_data.
+    DATA: lv_tmp  TYPE text10,
+          mo_empl TYPE REF TO zcl_hr_employee,
+          lo_om_o type ref to zcl_hr_om_o.
+
+    CALL FUNCTION 'FORMAT_DATE_4_OUTPUT'
+      EXPORTING
+        datin  = st_datas-low
+        format = 'DD.MM.YYYY'
+      IMPORTING
+        datex  = lv_tmp.
+    rt_data-begda = lv_tmp.
+
+    TRY.
+        CREATE OBJECT lo_om_o
+          EXPORTING
+            iv_objid = conv pd_objid_r( pv_objid )                           " Идентификатор объекта
+            iv_plvar = zif_hr_om_con=>gc_active_plvar.    " Вариант плана
+
+        zcl_hr_om_o=>get_boss(                        " находим код соответствующей ОЕ
+           EXPORTING
+             iv_objid  = conv pd_objid_r( pv_objid )                          " Раздел персонала
+             iv_begda  = sy-datum                          " Начало срока действия
+             iv_endda  = sy-datum                          " Начало срока действия
+           IMPORTING
+             ev_full_name = rt_data-bossname
+             ev_pernr = rt_data-pernr ).            " ФИО начальника ОЕ
+*Получаем адрес орг.единицы
+        lo_om_o->get_adress(  EXPORTING iv_date = st_datas-low
+                                        iv_subty = ''
+                              IMPORTING ev_adres = rt_data-adress ).
+*Получаем название орг.единицы
+        rt_data-depname = lo_om_o->get_description( iv_date = st_datas-low ).
+
+*Получаем код вида экономической деятельности
+        lo_om_o->get_9150( EXPORTING iv_data = st_datas-low
+                           IMPORTING ev_economic_type = rt_data-econtype ).
+
+
+      CATCH zcx_hr_om.
+    ENDTRY.
+
+*Ответственный и его рабочие телефоны
+    DATA: lt_user TYPE pernr_us_tab,
+          ls_user TYPE LINE OF pernr_us_tab.
+
+    CALL FUNCTION 'HR_GET_EMPLOYEES_FROM_USER'    " получаем лицо по логину
+      EXPORTING
+        user   = sy-uname
+      TABLES
+        ee_tab = lt_user.
+
+    LOOP AT lt_user INTO ls_user.
+*     создаём объект для считывания данных пользователя
+      CREATE OBJECT mo_empl
+        EXPORTING
+          iv_pernr = ls_user-pernr
+          iv_begda = sy-datum
+          iv_endda = sy-datum.
+
+
+      rt_data-usname = mo_empl->get_ename( ).     " получаем полное имя пользователя
+      EXIT.
+    ENDLOOP.
+
+    rt_data-empl = lt_load_data.
+
+  ENDMETHOD.
+
+  METHOD f4_shelp.
+    TYPES:
+      BEGIN OF ty_hrp1000,
+        objid TYPE hrp1000-objid,
+        stext TYPE hrp1000-stext,
+      END OF ty_hrp1000.
+
+    DATA:
+      ls_hrp1000      TYPE ty_hrp1000,
+      lt_hrp1000      TYPE TABLE OF ty_hrp1000,
+      lt_fields       TYPE TABLE OF dfies,
+      lt_return       TYPE TABLE OF ddshretval,
+      lt_result_objec TYPE TABLE OF objec.
+
+    CHECK lcl_appl=>mv_filled = ''.
+
+    SELECT * FROM hrp1000 INTO CORRESPONDING FIELDS OF TABLE lt_hrp1000
+      WHERE otype = zif_hr_om_con=>gc_object_type-fn
+        AND plvar = zif_hr_om_con=>gc_active_plvar
+        AND langu = 'R'
+        AND begda <= sy-datum
+        AND endda >= sy-datum.
+
+    CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+      EXPORTING
+        retfield   = 'OBJID'
+        value_org  = 'S'
+      TABLES
+        value_tab  = lt_hrp1000
+        return_tab = lt_return
+      EXCEPTIONS
+        OTHERS     = 3.
+
+    CHECK sy-subrc = 0 AND lt_return IS NOT INITIAL.
+    cv_obj = lt_return[ 1 ]-fieldval.
+    READ TABLE lt_hrp1000 WITH KEY objid = cv_obj INTO ls_hrp1000.
+    p_name1 = ls_hrp1000-stext.
+  ENDMETHOD.
+
+  METHOD init.
+    DATA:
+      lv_objid TYPE objektid.
+
+    SELECT SINGLE a~profl objid FROM t77pr AS a
+                  INNER JOIN t77ua AS b ON b~profl = a~profl
+      INTO (mv_profl, lv_objid)
+      WHERE b~uname =  sy-uname AND
+            b~begda <= sy-datum  AND
+            b~endda >= sy-datum  AND
+            a~plvar = zif_hr_om_con=>gc_active_plvar AND
+            a~otype = zif_hr_om_con=>gc_object_type-o.
+    IF lv_objid IS NOT INITIAL and mv_profl ne 'ZHR_BN_ALL'.
+      pv_objid = lv_objid.
+      lcl_appl=>mv_filled = 'X'.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD sel_out.
+    IF pv_objid IS NOT INITIAL.
+      SELECT SINGLE stext FROM hrp1000 INTO p_name1
+        WHERE otype = zif_hr_om_con=>gc_object_type-o
+          AND objid = pv_objid
+          AND plvar = zif_hr_om_con=>gc_active_plvar
+          AND langu = 'R'
+          AND begda <= sy-datum
+          AND endda >= sy-datum.
+    ENDIF.
+    LOOP AT SCREEN.
+      IF screen-name = 'PV_OBJID' AND lcl_appl=>mv_filled IS NOT INITIAL.
+        screen-input  = '0'.
+        screen-value_help = '0'.
+        MODIFY SCREEN.
+      ELSEIF screen-name = 'P_NAME1'.
+        screen-input = '0'.
+        screen-display_3d = '0'.
+        MODIFY SCREEN.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD value_request_pv_objid.
+    DATA ms_objec TYPE objec.
+    CALL FUNCTION 'RH_OBJID_REQUEST'
+      EXPORTING
+        plvar           = zif_hr_om_con=>gc_active_plvar
+        otype           = zif_hr_om_con=>gc_object_type-o
+      IMPORTING
+        sel_object      = ms_objec
+      EXCEPTIONS
+        cancelled       = 1
+        wrong_condition = 2
+        nothing_found   = 3
+        internal_error  = 4
+        illegal_mode    = 5.
+    IF sy-subrc = 0.
+      pv_objid = ms_objec-objid.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_2000  OUTPUT
+*&---------------------------------------------------------------------*
+*       присваиваем статус
+*----------------------------------------------------------------------*
+MODULE status_2000 OUTPUT.
+  lcl_appl=>pbo( ).
+ENDMODULE.                                    " STATUS_2000  OUTPUT
+
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_2000  INPUT
+*&---------------------------------------------------------------------*
+*       обрабатываем команды кнопок статуса
+*----------------------------------------------------------------------*
+MODULE user_command_2000 INPUT.
+  lcl_appl=>pai( ).
+ENDMODULE.                                    " USER_COMMAND_2000  INPUT
+
+*---------------------------------------------------------------------*
+*                   INITIALIZATION
+*---------------------------------------------------------------------*
+INITIALIZATION.
+  lcl_appl=>init( ).
+
+* Вычисление даты по умолчанию
+  st_datas-low = sy-datum.
+  st_datas-high = sy-datum.
+  st_datas-option = 'EQ'.
+  st_datas-sign = 'I'.
+  APPEND st_datas.
+
+
+*---------------------------------------------------------------------*
+*                   START-OF-SELECTION
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+  lcl_appl=>main( ).                          " запуск главного метода инициализирует сбор данных
+
+AT SELECTION-SCREEN OUTPUT.
+  lcl_appl=>sel_out( ).
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR pv_objid.
+  lcl_appl=>value_request_pv_objid( ).
+*---------------------------------------------------------------------*
+*                   END-OF-SELECTION
+*---------------------------------------------------------------------*
+END-OF-SELECTION.
+  lcl_appl=>show_alv( ).                      " создание ALV

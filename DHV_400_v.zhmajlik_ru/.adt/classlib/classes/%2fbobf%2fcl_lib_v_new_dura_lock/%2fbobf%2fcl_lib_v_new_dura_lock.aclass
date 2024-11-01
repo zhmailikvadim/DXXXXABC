@@ -1,0 +1,104 @@
+"! <p class="shorttext synchronized" lang="en">Create enqueue context for a new draft instance</p>
+CLASS /bobf/cl_lib_v_new_dura_lock DEFINITION
+  PUBLIC
+  INHERITING FROM /bobf/cl_lib_a_d_v_draft_super
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    INTERFACES /bobf/if_frw_validation .
+
+
+  PROTECTED SECTION.
+
+    METHODS initialize REDEFINITION.
+
+
+  PRIVATE SECTION.
+
+    DATA mo_lock_manager TYPE REF TO /bobf/cl_lib_durable_lock_mngr.
+
+
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_LIB_V_NEW_DURA_LOCK IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_validation~check.
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_validation~check_delta.
+  ENDMETHOD.
+
+
+  METHOD /bobf/if_frw_validation~execute.
+
+    " >>>>> this implementation belongs to a *generated action validation* for Draft Objects.
+    " >>>>> the action validation is generated for ROOT node and triggers on *create* only...
+
+    CLEAR eo_message.
+    CLEAR et_failed_key.
+
+    initialize( iv_bo_key      = is_ctx-bo_key
+                iv_node_key    = is_ctx-node_key
+                iv_content_key = is_ctx-val_key ).
+
+    " this is limited to BOs with at least feature set 'Refactored Lib'...
+    CHECK mo_configuration->supports_feature( /bobf/if_conf_c=>sc_feature-draft_refactored_lib ).
+
+    " work on draft instances and not on active instances...
+    mo_draft_active->separate_keys( EXPORTING iv_node_key   = is_ctx-node_key
+                                              it_key        = it_key
+                                    IMPORTING et_draft_key  = DATA(lt_draft_key) ).
+
+    LOOP AT lt_draft_key ASSIGNING FIELD-SYMBOL(<ls_draft_key>).
+
+      " work on NEW draft instances and not on EDIT draft instances...
+      mo_draft_helper->read_draft( EXPORTING iv_node_key   = is_ctx-node_key
+                                             iv_key        = <ls_draft_key>-key
+                                             io_read       = io_read
+                                   IMPORTING er_draft_data = DATA(lr_draft_data) ).
+      CHECK lr_draft_data IS BOUND.
+      ASSIGN lr_draft_data->* TO FIELD-SYMBOL(<ls_draft_data>).
+      CHECK NOT mo_draft_helper->is_edit_draft( <ls_draft_data> ).
+
+      " create, detach (KEEP=TRUE) and register enqueue context for the new draft instance...
+      DATA(ls_draft_admin_key) = VALUE sdraft_admin_key( draft_entity = mo_configuration->ms_obj-bo_name
+                                                         draft_key    = <ls_draft_key>-key ).
+      DATA(lv_success) = mo_lock_manager->create_enqueue_context_for_new( ls_draft_admin_key ).
+      IF lv_success = abap_false.
+
+        " error handling...
+        INSERT <ls_draft_key> INTO TABLE et_failed_key.
+        IF eo_message IS NOT BOUND.
+          eo_message = /bobf/cl_frw_message_factory=>create_container( ).
+        ENDIF.
+        eo_message->add_cm( NEW /bobf/cm_lib(
+                                  textid             = /bobf/cm_lib=>lock_system_failure
+                                  severity           = /bobf/cm_lib=>co_severity_error
+                                  symptom            = /bobf/if_frw_message_symptoms=>co_foreign_lock
+                                  lifetime           = /bobf/cm_lib=>co_lifetime_transition
+                                  ms_origin_location = VALUE #( bo_key   = is_ctx-bo_key
+                                                                node_key = is_ctx-node_key
+                                                                key      = <ls_draft_key>-key ) ) ).
+
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD initialize.
+
+    super->initialize( iv_bo_key      = iv_bo_key
+                       iv_node_key    = iv_node_key
+                       iv_content_key = iv_content_key ).
+    mo_lock_manager = /bobf/cl_lib_durable_lock_mngr=>get_instance( mo_configuration ).
+
+  ENDMETHOD.
+ENDCLASS.

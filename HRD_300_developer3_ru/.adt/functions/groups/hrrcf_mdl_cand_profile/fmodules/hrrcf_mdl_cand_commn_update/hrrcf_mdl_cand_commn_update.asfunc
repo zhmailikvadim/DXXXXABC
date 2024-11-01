@@ -1,0 +1,365 @@
+FUNCTION HRRCF_MDL_CAND_COMMN_UPDATE
+  IMPORTING
+    VALUE(CAND_HROBJECT) TYPE HROBJECT OPTIONAL
+    VALUE(PHONE_DATA) TYPE RCF_T_MDL_CAND_COMMN_TELEPHONE OPTIONAL
+    VALUE(ADDRESS_DATA) TYPE RCF_T_MDL_CAND_COMMN_ADDRESS OPTIONAL
+    VALUE(PREFERRED_PHONE_CHANNEL) TYPE RCF_COMM_CHANNEL OPTIONAL
+    VALUE(PREFERRED_ADDRESS_CHANNEL) TYPE RCF_COMM_CHANNEL OPTIONAL
+    VALUE(EMAIL) TYPE AD_SMTPADR OPTIONAL
+  EXPORTING
+    VALUE(MESSAGES) TYPE BAPIRETTAB.
+
+
+
+*
+  DATA: lo_cand_bupa_bl   TYPE REF TO cl_hrrcf_candidate_bupa_bl,
+        ls_cand_hrobject  TYPE hrobject,
+        lt_phonedata      TYPE rcf_t_telefondata_bp,
+        lt_addressdata    TYPE rcf_t_addressdata_bp,
+        ls_phone          TYPE rcf_s_mdl_cand_commn_telephone,
+        ls_phone_new      TYPE rcf_s_telefondata_bp,
+        ls_phonedata      TYPE rcf_s_telefondata_bp,
+        ls_address        TYPE rcf_s_mdl_cand_commn_address,
+        ls_address_new    TYPE rcf_s_addressdata_bp,
+        ls_addressdata    TYPE rcf_s_addressdata_bp,
+        ls_emaildata      TYPE rcf_s_emaildata_bp,
+        lv_operation      TYPE rcf_opera,
+        lo_cand_info      TYPE REF TO cl_hrrcf_candidate_info,
+        lo_candidate      TYPE REF TO cl_hrrcf_candidate,
+        lv_is_emp         TYPE boole_d.
+
+  DATA: lo_ex             TYPE REF TO cx_root,
+        lt_return         TYPE bapirettab,
+        ls_message        TYPE bapiret2.
+
+  CONSTANTS: delete_operation TYPE rcf_opera VALUE 'D'  ,
+             insert_operation TYPE rcf_opera VALUE 'I'  ,
+             modify_operation TYPE rcf_opera VALUE 'U'  .
+
+* clear returning parameters
+  REFRESH messages.
+
+  TRY.
+*     get candidate hrobject for user, if necessary
+      IF NOT cand_hrobject IS SUPPLIED.
+        CALL METHOD cl_hrrcf_candidate_admin_bl=>get_candidate
+          EXPORTING
+            p_user          = sy-uname
+          IMPORTING
+            p_cand_hrobject = ls_cand_hrobject.
+      ELSE.
+*     Check whether imported candidate object belongs to user
+        IF cl_hrrcf_candidate_admin_bl=>is_cand_of_current_user( is_cand = cand_hrobject ) = abap_true.
+          ls_cand_hrobject = cand_hrobject.
+        ELSE.
+          RAISE EXCEPTION TYPE cx_hrrcf_authority
+            EXPORTING
+              message_class  = 'HRRCF0002'
+              message_number = '300'
+              message_type   = 'A'.
+        ENDIF.
+      ENDIF.
+*
+*     get instance of business logic facade
+      CALL METHOD cl_hrrcf_candidate_bupa_bl=>get_instance
+        RECEIVING
+          return = lo_cand_bupa_bl.
+*
+      CHECK lo_cand_bupa_bl IS BOUND.
+
+*     set LUW mode
+      cl_hrrcf_simple_main_object=>set_luw_mode( ).
+      SET UPDATE TASK LOCAL.
+
+*************************************************************
+*    EMAIL
+*************************************************************
+      IF email IS NOT INITIAL.
+*       check email format
+        CALL METHOD cl_hrrcf_candidate_bupa_bl=>check_email_format
+          EXPORTING
+            p_email = email
+          IMPORTING
+            return  = lt_return.
+
+        LOOP AT lt_return TRANSPORTING NO FIELDS WHERE type = 'E' OR type = 'A'.
+          APPEND LINES OF lt_return TO messages.
+          RETURN.
+        ENDLOOP.
+
+        CALL METHOD lo_cand_bupa_bl->get_preferred_contact_data
+          EXPORTING
+            ps_cand_hrobject = ls_cand_hrobject
+          IMPORTING
+            ps_emaildata     = ls_emaildata.
+
+        IF ls_emaildata-e_mail <> email.  "update only if required
+        ls_emaildata-e_mail = email.
+*       update email address
+        CALL METHOD lo_cand_bupa_bl->maintain_email_data
+          EXPORTING
+            ps_emaildata     = ls_emaildata
+            ps_cand_hrobject = ls_cand_hrobject
+          IMPORTING
+            pt_return        = lt_return.
+
+        LOOP AT lt_return TRANSPORTING NO FIELDS WHERE type = 'E' OR type = 'A'.
+          APPEND LINES OF lt_return TO messages.
+          RETURN.
+        ENDLOOP.
+        ENDIF.
+
+        IF messages IS INITIAL.                                     "N1783912
+        TRY.                                                   "N2045128
+         CALL METHOD cl_hrrcf_candidate=>get
+           EXPORTING
+             id         =  ls_cand_hrobject-objid
+           IMPORTING
+             candidate  =  lo_candidate.
+          CATCH cx_hrrcf.
+         ENDTRY.
+
+         CALL METHOD lo_candidate->is_employee
+           RECEIVING
+            return = lv_is_emp.
+
+         IF lv_is_emp eq abap_false.                            "N2045128
+          CALL METHOD cl_hrrcf_candidate_info=>get_instance
+           EXPORTING
+             hrobject = ls_cand_hrobject
+           IMPORTING
+             instance = lo_cand_info.
+
+         CALL METHOD lo_cand_info->update_private_email
+           EXPORTING
+             ps_email         = email
+           IMPORTING
+             pt_return        = lt_return.
+         ENDIF.                                                "N2045128
+
+         LOOP AT lt_return TRANSPORTING NO FIELDS WHERE type = 'E' OR type = 'A'.
+          APPEND LINES OF lt_return TO messages.
+          RETURN.
+         ENDLOOP.
+        ENDIF.                                                      "N1783912
+      ENDIF.
+
+
+*     read data needed for addresses and phones
+      CALL METHOD lo_cand_bupa_bl->get_contact_data
+        EXPORTING
+          ps_cand_hrobject = ls_cand_hrobject
+        IMPORTING
+          pt_addressdata   = lt_addressdata
+          pt_telefondata   = lt_phonedata.
+
+
+*************************************************************
+*    ADDRESSES
+*************************************************************
+      IF address_data IS SUPPLIED.
+
+*       process preferred address at first
+        READ TABLE address_data INTO ls_address WITH KEY channel = preferred_address_channel.
+
+        IF sy-subrc EQ 0.
+
+          ls_address_new-standardaddress = abap_true.
+          ls_address_new-street = ls_address-street.
+          ls_address_new-str_suppl3 = ls_address-street2.
+          ls_address_new-country = ls_address-country.
+          ls_address_new-region = ls_address-region.
+          ls_address_new-city = ls_address-city.
+          ls_address_new-postl_cod1 = ls_address-postcode.
+
+          READ TABLE lt_addressdata INTO ls_addressdata WITH KEY channel = ls_address-channel.
+          IF sy-subrc EQ 0.
+            IF ls_address_new IS INITIAL.
+              lv_operation = delete_operation.
+              CLEAR ls_address_new.
+              MOVE ls_addressdata TO ls_address_new.
+            ELSEIF ls_addressdata EQ ls_address_new.
+              lv_operation = space.
+            ELSE.
+              MOVE ls_addressdata-addrnr TO ls_address_new-addrnr.
+              lv_operation = modify_operation.
+            ENDIF.
+          ELSE.
+            IF ls_address_new IS INITIAL.
+              lv_operation = space.
+            ELSE.
+              lv_operation = insert_operation.
+            ENDIF.
+          ENDIF.
+
+          ls_address_new-channel = ls_address-channel.
+
+          IF lv_operation NE space.
+            CALL METHOD lo_cand_bupa_bl->maintain_address_data
+              EXPORTING
+                ps_cand_hrobject = ls_cand_hrobject
+                ps_addressdata   = ls_address_new
+                p_operation      = lv_operation
+              IMPORTING
+                pt_return        = lt_return.
+            LOOP AT lt_return TRANSPORTING NO FIELDS WHERE type = 'E' OR type = 'A'.
+              APPEND LINES OF lt_return TO messages.
+              RETURN.
+            ENDLOOP.
+*           read data needed for addresses and phones
+            CALL METHOD lo_cand_bupa_bl->get_contact_data
+              EXPORTING
+                ps_cand_hrobject = ls_cand_hrobject
+              IMPORTING
+                pt_addressdata   = lt_addressdata.
+          ENDIF.
+
+          CLEAR: ls_address.
+
+        ENDIF.
+
+*       process all other addresses
+        LOOP AT address_data INTO ls_address.
+
+          CLEAR: ls_address_new.
+
+*         preferred address has already been processed
+          IF ls_address-channel = preferred_address_channel.
+            CONTINUE.
+          ENDIF.
+
+          ls_address_new-street = ls_address-street.
+          ls_address_new-str_suppl3 = ls_address-street2.
+          ls_address_new-country = ls_address-country.
+          ls_address_new-region = ls_address-region.
+          ls_address_new-city = ls_address-city.
+          ls_address_new-postl_cod1 = ls_address-postcode.
+
+          READ TABLE lt_addressdata INTO ls_addressdata WITH KEY channel = ls_address-channel.
+          IF sy-subrc EQ 0.
+            IF ls_address_new IS INITIAL.
+              lv_operation = delete_operation.
+              CLEAR ls_address_new.
+              MOVE ls_addressdata TO ls_address_new.
+            ELSEIF ls_addressdata EQ ls_address_new.
+              lv_operation = space.
+            ELSE.
+              MOVE ls_addressdata-addrnr TO ls_address_new-addrnr.
+              lv_operation = modify_operation.
+            ENDIF.
+          ELSE.
+            IF ls_address_new IS INITIAL.
+              lv_operation = space.
+              CONTINUE.
+            ELSE.
+              lv_operation = insert_operation.
+            ENDIF.
+          ENDIF.
+
+          ls_address_new-channel = ls_address-channel.
+
+          IF lv_operation NE space.
+            CALL METHOD lo_cand_bupa_bl->maintain_address_data
+              EXPORTING
+                ps_cand_hrobject = ls_cand_hrobject
+                ps_addressdata   = ls_address_new
+                p_operation      = lv_operation
+              IMPORTING
+                pt_return        = lt_return.
+            LOOP AT lt_return TRANSPORTING NO FIELDS WHERE type = 'E' OR type = 'A'.
+              APPEND LINES OF lt_return TO messages.
+              RETURN.
+            ENDLOOP.
+*           read data needed for addresses and phones
+            CALL METHOD lo_cand_bupa_bl->get_contact_data
+              EXPORTING
+                ps_cand_hrobject = ls_cand_hrobject
+              IMPORTING
+                pt_addressdata   = lt_addressdata.
+          ENDIF.
+
+          CLEAR: ls_address.
+
+        ENDLOOP.
+
+      ENDIF.
+
+*************************************************************
+*    PHONE
+*************************************************************
+      IF phone_data IS SUPPLIED.
+        LOOP AT phone_data INTO ls_phone.
+          CLEAR ls_phone_new.
+          ls_phone_new-telephone = ls_phone-telephone.
+          ls_phone_new-channel = ls_phone-channel.
+          IF ls_phone-channel = preferred_phone_channel.
+            ls_phone_new-std_no = abap_true.
+          ENDIF.
+
+         " This Parameter will save mobile phone number in Business Partner "1492532
+         "check for phone channel of type mobile and pass default parameter.
+          IF ls_phone-channel = '03'.
+            ls_phone_new-r_3_user = '2'.
+          ENDIF.
+
+
+          READ TABLE lt_phonedata INTO ls_phonedata WITH KEY channel = ls_phone-channel.
+          IF sy-subrc EQ 0.
+            IF ls_phone_new-telephone IS INITIAL.
+              lv_operation = delete_operation.
+              CLEAR ls_phone_new.
+              MOVE ls_phonedata TO ls_phone_new.
+            ELSEIF ( ls_phone-telephone EQ ls_phonedata-telephone ) AND
+                   ( ls_phone_new-std_no EQ ls_phonedata-std_no ).
+*             nothing changed
+              lv_operation = space.
+            ELSE.
+              MOVE ls_phonedata-consnumber TO ls_phone_new-consnumber.
+              lv_operation = modify_operation.
+            ENDIF.
+          ELSE.
+            IF ls_phone_new-telephone IS INITIAL.
+              lv_operation = space.
+            ELSE.
+              lv_operation = insert_operation.
+            ENDIF.
+          ENDIF.
+
+          IF lv_operation NE space.
+
+            CALL METHOD lo_cand_bupa_bl->maintain_telefon_data
+              EXPORTING
+                ps_cand_hrobject = ls_cand_hrobject
+                ps_telefondata   = ls_phone_new
+                p_operation      = lv_operation
+              IMPORTING
+                pt_return        = lt_return.
+            LOOP AT lt_return TRANSPORTING NO FIELDS WHERE type = 'E' OR type = 'A'.
+              APPEND LINES OF lt_return TO messages.
+              RETURN.
+            ENDLOOP.
+
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+
+    CATCH cx_root INTO lo_ex.
+*     write exception to slg1
+      cl_hrrcf_exception_handler=>write_exception_log( ex = lo_ex ).
+
+*--   Convert exception into BAPI return parameter
+      IF 1 = 0.
+        MESSAGE a802(hrrcf0002) WITH 'HRRCF_MDL_CAND_COMMN_UPDATE'.
+      ENDIF.
+      CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+        EXPORTING
+          type   = 'A'
+          cl     = 'HRRCF0002'
+          number = '802'
+          par1   = 'HRRCF_MDL_CAND_COMMN_UPDATE'
+        IMPORTING
+          return = ls_message.
+      APPEND ls_message TO messages.
+  ENDTRY.
+
+ENDFUNCTION.

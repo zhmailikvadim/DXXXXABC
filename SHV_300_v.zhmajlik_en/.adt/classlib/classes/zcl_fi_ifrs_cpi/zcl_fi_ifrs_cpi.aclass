@@ -1,0 +1,2368 @@
+class ZCL_FI_IFRS_CPI definition
+  public
+  final
+  create public .
+
+public section.
+  INTERFACES if_amdp_marker_hdb .
+
+  TYPES :  BEGIN OF ZMM_DCOST,
+           mandt      TYPE mandt,
+           werks      TYPE werks_d,
+           matnr      TYPE matnr,
+           bwtar      TYPE bwtar_d,
+           kschl      TYPE kschl,
+           budat      TYPE budat,
+           lv_step    TYPE integer,
+           prev_matnr TYPE matnr,
+           prev_bwtar TYPE bwtar_d,
+           END OF ZMM_DCOST,
+
+           lt_dcost TYPE STANDARD TABLE OF ZMM_DCOST WITH EMPTY KEY.
+
+  CLASS-METHODS:
+   ZT_FI_IFRS_CPI_REL   FOR TABLE FUNCTION ZT_FI_IFRS_CPI_REL,
+   ZT_FI_IFRS_CPI_BUDAT FOR TABLE FUNCTION ZT_FI_IFRS_CPI_BUDAT,
+   ZT_IFRS_WBS          FOR TABLE FUNCTION ZT_IFRS_WBS,
+   ZT_IFRS_WBS1         FOR TABLE FUNCTION ZT_IFRS_WBS1,
+   ZT_CPI_FIAA_00       FOR TABLE FUNCTION ZT_CPI_FIAA_00,
+   ZT_CPI_FIAA_01       FOR TABLE FUNCTION ZT_CPI_FIAA_01,
+   ZT_CPI_FIAA_02       FOR TABLE FUNCTION ZT_CPI_FIAA_02,
+   ZT_CPI_FIAA_03       FOR TABLE FUNCTION ZT_CPI_FIAA_03,      " AK_BUTVILOVS #26984 ZFI_IFRS_INF_OS - включить ОЗОС с классом 3*
+   ZT_MM_DCOST          FOR TABLE FUNCTION ZT_MM_DCOST,
+   ZT_IFRS_COND_WBS1    FOR TABLE FUNCTION ZT_IFRS_COND_WBS1,
+   ZT_IFRS_COND_SEL     FOR TABLE FUNCTION ZT_IFRS_COND_SEL,
+   ZT_IFRS_COND_SEL1    FOR TABLE FUNCTION ZT_IFRS_COND_SEL1,
+   ZT_IFRS_COND_SEL2    FOR TABLE FUNCTION ZT_IFRS_COND_SEL2,
+   ZT_IFRS_COND_SEL3    FOR TABLE FUNCTION ZT_IFRS_COND_SEL3,
+   ZT_IFRS_COND_SEL4    FOR TABLE FUNCTION ZT_IFRS_COND_SEL4,
+   ZT_IFRS_WBS_M308     FOR TABLE FUNCTION ZT_IFRS_WBS_M308,
+   ZT_IFRS_WBS_C803     FOR TABLE FUNCTION ZT_IFRS_WBS_C803,
+   ZT_IFRS_COND_SKA1    FOR TABLE FUNCTION ZT_IFRS_COND_SKA1,
+   ZT_MM01_00           FOR TABLE FUNCTION ZT_MM01_00,
+   ZT_MM_RULE           FOR TABLE FUNCTION ZT_MM_RULE.
+   "ZT_CPI_OS FOR TABLE FUNCTION ZT_CPI_OS,
+   "ZT_CPI_FIAA FOR TABLE FUNCTION ZT_CPI_FIAA.
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_IFRS_CPI IMPLEMENTATION.
+
+
+METHOD ZT_CPI_FIAA_00
+ BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA ANLA ZFI_IFRS_INF_D ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL TVARVC.
+
+        DECLARE lv_count integer := 0;
+        DECLARE lv_baseperiod NVARCHAR(7);
+        DECLARE lv_lastperiod NVARCHAR(7);
+        DECLARE lv_fiscyearper NVARCHAR(7);
+        DECLARE lv_gjahr NVARCHAR(4);
+        DECLARE lv_cpi FLOAT;
+
+        DECLARE lv_frst_date NVARCHAR(8);
+
+   lv_frst_date = CONCAT(p_year, '0101');
+
+    SELECT COUNT (*) INTO lv_count FROM ZFI_IFRS_INF_D WHERE mandt = p_clnt;
+
+   lv_baseperiod = ( P_year - 1 ) * 1000 + 12;
+   lv_lastperiod = ( P_year - 1 ) * 1000 + 16;
+   lv_fiscyearper = P_year * 1000 + P_period;
+
+   lt_cpi = SELECT * FROM "ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL"(
+                  P_Period => :lv_fiscyearper,
+                  P_clnt =>  :p_clnt
+                  ) ;
+   lv_count = 0;
+   SELECT COUNT (*) INTO lv_count FROM :lt_cpi WHERE fiscyearper = :lv_baseperiod;
+
+   IF lv_count = 0 OR :lv_fiscyearper < :lv_baseperiod THEN
+     lv_cpi = 1;
+   ELSE
+     SELECT TOP 1 cpi_fiaa INTO lv_cpi FROM :lt_cpi WHERE fiscyearper = :lv_baseperiod;
+   END IF;
+
+   lt_acdoca  = SELECT a1.rclnt           as mandt,
+                       a1.rbukrs          as bukrs,
+                       a1.anln1           as anln1,
+                       a1.anln2           as anln2,
+                       a1.afabe           as afabe,
+                       a1.belnr           as belnr,
+                       SUM(a1.hsl)        as hsl,
+                       a1.gjahr           as gjahr,
+                       a1.slalittype      as slalittype,
+                       a1.anbwa           as anbwa,
+                       a1.budat           as budat,
+                       a1.xreversing      as xreversing,
+                       a1.xreversed       as xreversed,
+                       left(a1.sgtxt, 10) as sgtxt
+                       FROM ACDOCA    as a1
+                       LEFT JOIN tvarvc as vmrk
+                                ON vmrk.mandt = a1.rclnt
+                                AND vmrk.name = 'ZIFRS_ARCH_MARK_OS'
+                       WHERE vmrk.low <> 'X' AND a1.fiscyearper <=:lv_lastperiod AND a1.anln1 <> '' AND a1.anln2 <> '' and a1.movcat <> '00'
+                         AND a1.rbukrs between :p_bukrs_low and :p_bukrs_high      /*AK_GUBAREVICH #36910 Работы по параметризации источников данных*/
+                       GROUP BY a1.rclnt, a1.rbukrs, a1.anln1, a1.anln2,
+                                a1.afabe, a1.gjahr, a1.belnr, a1.slalittype, a1.anbwa, a1.budat, a1.sgtxt, a1.xreversing, a1.xreversed;
+   RETURN SELECT
+    a1.mandt          as mandt,
+    a1.bukrs          as bukrs,
+    a1.anln1          as anln1,
+    a1.anln2          as anln2,
+    a1.afabe          as afabe,
+    a1.belnr          as belnr,
+    a1.slalittype     as slalittype,
+    v.name            as name,
+    a1.anbwa          as anbwa,
+    a1.budat          as budat,
+    CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' then a1.hsl
+    END               as kansw,
+    CASE WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year ) then a1.hsl
+    END               as knafa,
+    CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year then a1.hsl
+    END               as kaafa,
+    CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' then ROUND( a1.hsl * :lv_cpi,2 )
+    END               as kansw_infl,
+    CASE WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year ) then ROUND( a1.hsl * :lv_cpi,2 )
+    END               as knafa_infl,
+    CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year then ROUND( a1.hsl * :lv_cpi,2 )
+    END               as kaafa_infl,
+    CASE WHEN ((v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')) and a1.gjahr < :p_year ) then a1.hsl
+    END               as ksafa,
+    CASE WHEN ((v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')) and a1.gjahr < :p_year ) then ROUND( a1.hsl * :lv_cpi,2 )
+    END               as ksafa_infl,
+    :lv_baseperiod    as fiscyearper,
+    :lv_cpi           as cpi_fiaa,
+    a1.hsl            as hsl,
+    a1.xreversing     as xreversing,
+    a1.xreversed      as xreversed
+
+   FROM :lt_acdoca as a1
+
+    JOIN TVARVC as v
+        ON a1.mandt = v.mandt
+        AND a1.slalittype = v.low
+        AND (v.name = 'ZAA_SLALITTYPE_COST' OR v.name = 'ZAA_SLALITTYPE_DEPR_NG' OR (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' OR v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') OR
+            v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' OR v.name = 'ZAA_SLALITTYPE_SP_DEPR_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')
+--and a1.gjahr = :P_year and a1.poper = :P_period and a1.afabe = :P_afabe
+
+--<-Katkovskaya 08.11.2022
+    JOIN ANLA as an
+        on an.mandt = a1.mandt
+        and an.bukrs = a1.bukrs
+        and an.anln1 = a1.anln1
+        and an.anln2 = a1.anln2
+
+        and (an.deakt = '00000000' or an.deakt >= :lv_frst_date)
+--<-Katkovskaya 08.11.2022
+--;
+    LEFT JOIN tvarvc as vmrk
+              ON vmrk.mandt = a1.mandt
+             AND vmrk.name = 'ZIFRS_ARCH_MARK_OS'
+    WHERE vmrk.low <> 'X';
+
+/*   UNION ALL
+
+   SELECT
+    '300'             as mandt,
+    arh.companycode   as bukrs,
+    arh.masterfixedasset   as anln1,
+    arh.fixedasset     as anln2,
+    arh.cideprarea     as afabe,
+    ''                 as belnr,
+    arh.itemtype       as slalittype,
+    arh.setname        as name,
+    arh.assontype      as anbwa,
+    arh.budat_moderniz as budat,
+    arh."/BIC/ZKANSW"      as kansw,
+    arh."/BIC/ZKNAFA"      as knafa,
+    arh."/BIC/ZKAAFA"      as kaafa,
+    arh."/BIC/ZKANSW_IN"   as kansw_infl,
+    arh."/BIC/ZKNAFA_IN"   as knafa_infl,
+    arh."/BIC/ZKAAFA_IN"   as kaafa_infl,
+    arh."/BIC/ZKSAFA"      as ksafa,
+    arh."/BIC/ZKSAFA_IN"   as ksafa_infl,
+    arh.fiscalyearperiod   as fiscyearper,
+    arh.cpi_fiaa       as cpi_fiaa,
+    arh."/BIC/ZHSL"    as hsl,
+    arh.xreversing     as xreversing,
+    arh.xreversed      as xreversed
+
+   FROM "/BIC/AZ_AARC_AA2" AS arh
+   LEFT JOIN tvarvc as vmrk
+             ON vmrk.mandt = '300'
+             AND vmrk.name = 'ZIFRS_ARCH_MARK'
+   WHERE arh.budat_moderniz < :lv_frst_date AND vmrk.low = 'X'; */
+
+
+ ENDMETHOD.
+
+
+METHOD ZT_CPI_FIAA_01
+ BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA ANLA ZFI_IFRS_INF_D ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL TVARVC.
+
+        DECLARE lv_count integer := 0;
+        DECLARE lv_baseperiod NVARCHAR(7);
+        DECLARE lv_fiscyearper NVARCHAR(7);
+        DECLARE lv_gjahr NVARCHAR(4);
+        DECLARE lv_cpi FLOAT;
+
+        DECLARE lv_year NVARCHAR(4);
+        DECLARE lv_frst_mnth NVARCHAR(7);
+
+    lv_year = LEFT(P_period, 4);
+    lv_frst_mnth = CONCAT(lv_year, '001');
+
+    lv_fiscyearper = P_year * 1000 + P_period;
+
+    SELECT COUNT (*) INTO lv_count FROM ZFI_IFRS_INF_D WHERE mandt = p_clnt;
+
+    IF lv_count > 0 THEN
+      lv_tmsp = SELECT MAX(INFL_TS) AS infl_ts  FROM ZFI_IFRS_INF_D WHERE mandt = p_clnt;
+      lt_lastrun = SELECT ( a.gjahr * 1000 + a.perio ) AS fiscper FROM ZFI_IFRS_INF_D AS a
+                   JOIN :lv_tmsp AS b ON a.infl_ts = b.infl_ts
+                   WHERE a.mandt = p_clnt;
+      SELECT TOP 1 fiscper INTO lv_baseperiod FROM :lt_lastrun;
+    END IF;
+
+    IF lv_baseperiod = 0 OR lv_baseperiod IS NULL
+      THEN lv_baseperiod = ( P_year - 1 ) * 1000 + 12;
+    END IF;
+
+   lt_cpi = SELECT * FROM "ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL"(
+                  P_Period => :lv_fiscyearper,
+                  P_clnt =>  :p_clnt
+                  ) ;
+
+   lv_count = 0;
+   SELECT COUNT (*) INTO lv_count FROM :lt_cpi;
+
+   IF lv_count = 0 OR :lv_fiscyearper < :lv_baseperiod THEN
+    lv_cpi = 1;
+   ELSE
+     SELECT TOP 1 cpi_fiaa INTO lv_cpi FROM :lt_cpi WHERE fiscyearper = :lv_baseperiod;
+   END IF;
+
+   lt_acdoca  = SELECT a1.rclnt       as mandt,
+                       a1.rbukrs      as bukrs,
+                       a1.anln1       as anln1,
+                       a1.anln2       as anln2,
+                       a1.afabe       as afabe,
+                       SUM(a1.hsl)    as hsl,
+                       a1.gjahr       as gjahr,
+                       a1.slalittype  as slalittype,
+                       a1.anbwa       as anbwa,
+                       a1.budat       as budat
+                       FROM ACDOCA    as a1
+                       WHERE a1.budat <=:P_date AND a1.anln1 <> '' AND a1.anln2 <> '' and a1.movcat <> '00'
+                         AND a1.rbukrs between :p_bukrs_low and :p_bukrs_high      /*AK_GUBAREVICH #36910 Работы по параметризации источников данных*/
+                       GROUP BY a1.rclnt, a1.rbukrs, a1.anln1, a1.anln2,
+                                a1.afabe, a1.gjahr, a1.slalittype, a1.anbwa, a1.budat;
+   RETURN SELECT
+   a1.mandt         as mandt,
+   a1.bukrs         as bukrs,
+   a1.anln1         as anln1,
+   a1.anln2         as anln2,
+   a1.afabe         as afabe,
+   a1.slalittype    as slalittype,
+   v.name           as name,
+   a1.anbwa         as anbwa,
+   a1.budat         as budat,
+   CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' then a1.hsl
+   END              as kansw,
+   CASE WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr <= :p_year ) then a1.hsl
+   END              as knafa,
+   CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year then a1.hsl
+   END              as kaafa,
+   CASE WHEN ((v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')) and a1.gjahr < :p_year ) then a1.hsl
+   END              as ksafa,
+   CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' then a1.hsl * :lv_cpi
+   END              as kansw_infl,
+   CASE WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year ) then a1.hsl * :lv_cpi
+   END              as knafa_infl,
+   CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year then a1.hsl * :lv_cpi
+   END              as kaafa_infl,
+   CASE WHEN ((v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')) and a1.gjahr < :p_year ) then a1.hsl * :lv_cpi
+   END              as ksafa_infl,
+   :lv_baseperiod   as fiscyearper,
+   :lv_cpi          as cpi_fiaa,
+   a1.hsl           as hsl
+
+   FROM :lt_acdoca as a1
+
+  JOIN TVARVC as v
+    ON a1.mandt = v.mandt
+   AND a1.slalittype = v.low
+   AND (v.name = 'ZAA_SLALITTYPE_COST' OR v.name = 'ZAA_SLALITTYPE_DEPR_NG' OR (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' OR v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') OR
+        v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' OR v.name = 'ZAA_SLALITTYPE_SP_DEPR_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')
+--and a1.gjahr = :P_year and a1.poper = :P_period and a1.afabe = :P_afabe
+
+--<-Katkovskaya 08.11.2022
+ JOIN ANLA as an
+ on an.mandt = a1.mandt
+ and an.bukrs = a1.bukrs
+ and an.anln1 = a1.anln1
+ and an.anln2 = a1.anln2
+ and (an.deakt = '00000000' or an.deakt >= :P_date)
+--<-Katkovskaya 08.11.2022
+--;
+ WITH HINT(NO_INLINE) ;
+
+ ENDMETHOD.
+
+
+METHOD ZT_CPI_FIAA_02
+  BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA ANLA ZFI_IFRS_INF_D ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL TVARVC.
+
+        DECLARE lv_fiscyearper NVARCHAR(7);
+        DECLARE lv_count INTEGER:= 0;
+
+        DECLARE lv_year NVARCHAR(4);
+        DECLARE lv_frst_mnth NVARCHAR(7);
+
+   lv_year = LEFT(P_period, 4);
+   lv_frst_mnth = CONCAT(lv_year, '001');
+
+   lv_fiscyearper = P_year * 1000 + P_period;
+
+   lt_cpi = SELECT * FROM "ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL"(
+                  P_Period => :lv_fiscyearper,
+                  P_clnt =>  :p_clnt
+                  );
+SELECT COUNT (*) INTO lv_count FROM :lt_cpi;
+
+lt_inf = SELECT
+           mandt,
+           gjahr,
+           perio,
+           INFL_TS as ts1,
+           LEAD( INFL_TS ) OVER ( ORDER BY INFL_TS ) as ts2
+        FROM ZFI_IFRS_INF_D WHERE mandt = :p_clnt;
+
+   RETURN SELECT
+               a1.rclnt          AS mandt,
+               a1.rbukrs         AS bukrs,
+               a1.anln1          AS anln1,
+               a1.anln2          AS anln2,
+               a1.afabe          AS afabe,
+               a1.belnr          AS belnr,
+               a1.slalittype     AS slalittype,
+               v.name            AS name,
+               a1.anbwa          AS anbwa,
+               a1.budat          AS budat_last,
+               CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' THEN a1.hsl
+               END               AS kansw,
+               CASE WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year ) then a1.hsl
+               END            AS knafa,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year THEN a1.hsl
+               END               AS kaafa,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG') and a1.gjahr < :p_year ) then a1.hsl
+               END               AS ksafa,
+               CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' AND cpi_fiaa is null THEN  a1.hsl * 1
+                    WHEN v.name = 'ZAA_SLALITTYPE_COST' THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS kansw_infl,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year )) AND cpi_fiaa is null THEN  a1.hsl * 1
+                    WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year ) THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS knafa_infl,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year and cpi_fiaa is null THEN a1.hsl * 1
+                    WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS kaafa_infl,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG') and a1.gjahr < :p_year ) and cpi_fiaa is null THEN a1.hsl * 1
+                    WHEN (v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG') and a1.gjahr < :p_year ) THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS ksafa_infl,
+               :lv_fiscyearper   AS fiscyearper,
+               cpi.cpi_fiaa      AS cpi_fiaa,
+               a1.hsl            AS hsl,
+               a1.awtyp          AS awtyp,
+               a1.awsys          AS awsys,
+               a1.aworg          AS aworg,
+               a1.awref          AS awref,
+               a1.awitem         AS awitem,
+               a1.awitgrp        AS awitgrp,
+               a1.xreversing     AS xreversing,
+               a1.xreversed      AS xreversed
+
+
+               --FROM :lt_ts AS a1
+               FROM acdoca AS a1
+
+              JOIN TVARVC AS v
+                ON a1.rclnt = v.mandt
+               AND a1.slalittype = v.low
+               AND (v.name = 'ZAA_SLALITTYPE_COST' OR v.name = 'ZAA_SLALITTYPE_DEPR_NG' OR (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') OR
+                    v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' OR v.name = 'ZAA_SLALITTYPE_SP_DEPR_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')
+
+              JOIN :lt_inf AS inf ON ( inf.ts2 >= a1.TIMESTAMP OR inf.ts2 is null) AND inf.ts1 < a1.TIMESTAMP
+
+              LEFT JOIN :lt_cpi AS cpi
+                ON a1.rclnt = cpi.rclnt
+               AND ( (a1.anbwa not like 'MP%' AND cpi.gjahr = inf.gjahr AND cpi.poper = inf.perio)
+                   OR (a1.anbwa like 'MP%' AND cpi.gjahr = a1.gjahr AND cpi.poper = a1.poper) )
+            --and a1.gjahr = :P_year and a1.poper = :P_period and a1.afabe = :P_afabe
+*WHERE a1.budat BETWEEN P_fromdate AND P_todate AND a1.anln1 <> '' AND a1.anln2 <> '' and a1.movcat <> '00'
+
+--<-Katkovskaya 08.11.2022
+              JOIN ANLA as an
+                on an.anln1 = a1.anln1
+                and an.anln2 = a1.anln2
+                and (an.deakt = '00000000' or an.deakt >= :P_fromdate)
+                --<-Katkovskaya 08.11.2022
+                AND an.mandt = a1.rclnt        -- AK_BUTVILOVS #26984 ZFI_IFRS_INF_OS - включить ОЗОС с классом 3*
+              WHERE a1.rclnt = :p_clnt AND a1.budat BETWEEN P_fromdate AND P_todate
+                AND a1.anln1 <> '' AND a1.anln2 <> '' AND a1.movcat <> '00'
+                AND a1.rbukrs between :p_bukrs_low and :p_bukrs_high      /*AK_GUBAREVICH #36910 Работы по параметризации источников данных*/
+                 -- AND a1.XREVERSING = ' ' AND a1.XREVERSED = ' ' ;
+                 --GROUP BY a1.rclnt, a1.rbukrs, a1.anln1, a1.anln2, a1.afabe, a1.belnr, a1.slalittype, a1.anbwa, a1.vptnr, v.name, a1.awtyp, a1.awsys, a1.aworg, a1.awref, a1.awitem, a1.awitgrp, a1.sgtxt
+   WITH HINT(NO_INLINE) ;
+
+ ENDMETHOD.
+
+
+METHOD ZT_CPI_FIAA_03
+  BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA ANLA ZFI_IFRS_INF_D ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL TVARVC.
+
+        DECLARE lv_fiscyearper NVARCHAR(7);
+        DECLARE lv_count INTEGER:= 0;
+
+        DECLARE lv_year NVARCHAR(4);
+        DECLARE lv_frst_mnth NVARCHAR(7);
+
+   lv_year = LEFT(P_period, 4);
+   lv_frst_mnth = CONCAT(lv_year, '001');
+
+   lv_fiscyearper = P_year * 1000 + P_period;
+
+   lt_cpi = SELECT * FROM "ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL"(
+                  P_Period => :lv_fiscyearper,
+                  P_clnt =>  :p_clnt
+                  );
+SELECT COUNT (*) INTO lv_count FROM :lt_cpi;
+
+lt_inf = SELECT
+           mandt,
+           gjahr,
+           perio,
+           INFL_TS as ts1,
+           LEAD( INFL_TS ) OVER ( ORDER BY INFL_TS ) as ts2
+        FROM ZFI_IFRS_INF_D WHERE mandt = :p_clnt;
+
+   RETURN SELECT
+               a1.rclnt          AS mandt,
+               a1.rbukrs         AS bukrs,
+               a1.anln1          AS anln1,
+               a1.anln2          AS anln2,
+               a1.afabe          AS afabe,
+               a1.belnr          AS belnr,
+               a1.slalittype     AS slalittype,
+               v.name            AS name,
+               a1.anbwa          AS anbwa,
+               a1.budat          AS budat_last,
+               CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' THEN a1.hsl
+               END               AS kansw,
+               CASE WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year ) then a1.hsl
+               END            AS knafa,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year THEN a1.hsl
+               END               AS kaafa,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG') and a1.gjahr < :p_year ) then a1.hsl
+               END               AS ksafa,
+               CASE WHEN v.name = 'ZAA_SLALITTYPE_COST' AND cpi_fiaa is null THEN  a1.hsl * 1
+                    WHEN v.name = 'ZAA_SLALITTYPE_COST' THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS kansw_infl,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year )) AND cpi_fiaa is null THEN  a1.hsl * 1
+                    WHEN v.name = 'ZAA_SLALITTYPE_DEPR_NG' or ( (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr < :p_year ) THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS knafa_infl,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year and cpi_fiaa is null THEN a1.hsl * 1
+                    WHEN (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') and a1.gjahr = :p_year THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS kaafa_infl,
+               CASE WHEN (v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG') and a1.gjahr < :p_year ) and cpi_fiaa is null THEN a1.hsl * 1
+                    WHEN (v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' or (v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG') and a1.gjahr < :p_year ) THEN ROUND( a1.hsl * cpi_fiaa,2 )
+               END               AS ksafa_infl,
+               :lv_fiscyearper   AS fiscyearper,
+               cpi.cpi_fiaa      AS cpi_fiaa,
+               a1.hsl            AS hsl,
+               a1.awtyp          AS awtyp,
+               a1.awsys          AS awsys,
+               a1.aworg          AS aworg,
+               a1.awref          AS awref,
+               a1.awitem         AS awitem,
+               a1.awitgrp        AS awitgrp,
+               a1.xreversing     AS xreversing,
+               a1.xreversed      AS xreversed
+               FROM acdoca AS a1
+
+              JOIN TVARVC AS v
+                ON a1.rclnt = v.mandt
+               AND a1.slalittype = v.low
+               AND (v.name = 'ZAA_SLALITTYPE_COST' OR v.name = 'ZAA_SLALITTYPE_DEPR_NG' OR (v.name = 'ZAA_SLALITTYPE_DPR_MOVE_TG' or v.name = 'ZAA_SLALITTYPE_DPR_POST_TG') OR
+                    v.name = 'ZAA_SLALITTYPE_SP_DEPR_NG' OR v.name = 'ZAA_SLALITTYPE_SP_DEPR_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_MOVE_TG' OR v.name = 'ZAA_SLALITTYPE_SP_DPR_POST_TG')
+
+              JOIN :lt_inf AS inf ON ( inf.ts2 >= a1.TIMESTAMP OR inf.ts2 is null) AND inf.ts1 < a1.TIMESTAMP
+
+              LEFT JOIN :lt_cpi AS cpi
+                ON a1.rclnt = cpi.rclnt
+               AND ( (a1.anbwa not like 'MP%' AND cpi.gjahr = inf.gjahr AND cpi.poper = inf.perio)
+                   OR (a1.anbwa like 'MP%' AND cpi.gjahr = a1.gjahr AND cpi.poper = a1.poper) )
+              JOIN ANLA as an
+                on  an.anln1 = a1.anln1
+                and an.anln2 = a1.anln2
+                and (an.deakt = '00000000' or an.deakt >= :P_fromdate)
+                AND an.mandt = a1.rclnt
+              WHERE a1.rclnt = :p_clnt AND a1.budat BETWEEN P_fromdate AND P_todate
+                AND a1.anln1 = :p_anln1 AND a1.anln2 = :p_anln2 AND a1.movcat <> '00'
+   WITH HINT(NO_INLINE) ;
+
+ ENDMETHOD.
+
+
+METHOD ZT_FI_IFRS_CPI_BUDAT
+
+        BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ZFI_IFRS_CPI.
+
+  lt_cpi_rel = SELECT
+                    z1.mandt as rclnt,
+                    LEFT(z1.calday, 4) || '0' || SUBSTRING(z1.calday, 5, 2) as fiscyearper,
+                    LEFT(z1.calday, 4) as gjahr,
+                    LEFT(z1.calday, 6) as calmonth,
+                    SUBSTRING(z1.calday, 5, 2) as poper,
+                    z1.zcpicumm as zcpicumm,
+                    off2.zcpicumm as zcpicumm_prev,
+                    SQRT(z1.zcpicumm / off2.zcpicumm)  as koef_sqrt
+
+              FROM ZFI_IFRS_CPI as z1
+
+              JOIN ZFI_IFRS_CPI AS off2 --:offset z1
+                ON ( z1.calday - off2.calday ) = 100 OR ( z1.calday - off2.calday ) = 8900
+
+
+             WHERE off2.mandt = :P_Clnt;
+
+  RETURN SELECT
+                    z2.rclnt,
+                    z2.fiscyearper,
+                    z2.gjahr,
+                    z2.calmonth,
+                    z2.poper,
+                    z2.zcpicumm,
+                    z2.zcpicumm_prev,
+                    z2.koef_sqrt
+
+          FROM :lt_cpi_rel as z2;
+ENDMETHOD.
+
+
+METHOD ZT_FI_IFRS_CPI_REL
+
+        BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ZFI_IFRS_CPI.
+
+  DECLARE lv_count integer := 0;
+  DECLARE lv_date NVARCHAR(8);
+  DECLARE lv_calmonth NVARCHAR(6);
+  DECLARE lv_gjahr NVARCHAR(4) ;
+  DECLARE lv_max_calday NVARCHAR(8);
+
+  lv_date = LEFT(:p_period, 4) || RIGHT(:p_period, 2) || '01';
+
+  lv_calmonth = LEFT(:p_period, 4) || RIGHT(:p_period, 2);
+
+  SELECT MAX(calday) INTO lv_max_calday FROM ZFI_IFRS_CPI WHERE mandt = :P_clnt;
+
+  IF lv_max_calday <= lv_date
+    THEN lv_date = lv_max_calday;
+  END IF;
+
+  lt_tmp = SELECT TOP 1 DISTINCT
+                        z1.mandt AS rclnt,
+                        z2.calday,
+                        z2.zcpicumm as zcpicumm,
+                        off1.zcpicumm as zcpicumm_prev,
+                        SQRT(z2.zcpicumm / off1.zcpicumm) * z1.zcpicumm / z2.zcpicumm as cpi_rel,
+                        z1.zcpicumm / z2.zcpicumm as cpi_fiaa
+
+            FROM ZFI_IFRS_CPI as z1
+
+            JOIN ZFI_IFRS_CPI AS z2
+             ON z1.calday = lv_date AND z1.mandt = :P_clnt
+             AND z2.mandt = :P_clnt AND z2.calday <= z1.calday
+
+            JOIN ZFI_IFRS_CPI AS off1 --:lt_cpi_offset AS off1
+             ON ( z2.calday - off1.calday ) = 100 OR ( z2.calday - off1.calday ) = 8900
+            ORDER BY calday DESC;
+
+  lt_cpifuture = SELECT TOP 12 DISTINCT
+
+                        z1.mandt as rclnt,
+                        z2.calday,
+                        ((LEFT(z2.calday, 4) || '0' || SUBSTRING(z2.calday, 5, 2)))+1000 as fiscyearper,
+                        LEFT(z2.calday, 4)+1 as gjahr,
+                        LEFT(z2.calday, 6)+100 as calmonth,
+                        '0' || SUBSTRING(z2.calday, 5, 2) as poper,
+                        z3.zcpicumm as zcpicumm,
+                        z3.zcpicumm_prev as zcpicumm_prev,
+                        z3.cpi_rel as cpi_rel,
+                        z3.cpi_fiaa as cpi_fiaa
+
+                 FROM ZFI_IFRS_CPI as z1
+
+                 JOIN ZFI_IFRS_CPI AS z2
+                  ON z2.mandt = :P_clnt AND lv_date <= z1.calday
+
+                 RIGHT JOIN :lt_tmp AS z3
+                  ON z3.rclnt = :P_clnt AND  lv_date <= z3.calday
+
+                 ORDER BY fiscyearper DESC;
+
+  lt_cpi_rel = SELECT
+                    z1.mandt as rclnt,
+                    LEFT(z2.calday, 4) || '0' || SUBSTRING(z2.calday, 5, 2) as fiscyearper,
+                    LEFT(z2.calday, 4) as gjahr,
+                    LEFT(off1.calday, 4) as gjahr_prev,
+                    LEFT(z2.calday, 6) as calmonth,
+                    '0' || SUBSTRING(z2.calday, 5, 2) as poper,
+                    '0' || SUBSTRING(off1.calday, 5, 2) as poper_prev,
+                    z2.zcpicumm as zcpicumm,
+                    off1.zcpicumm as zcpicumm_prev,
+                    SQRT(z2.zcpicumm / off1.zcpicumm) * z1.zcpicumm / z2.zcpicumm as cpi_rel,
+                    z1.zcpicumm / z2.zcpicumm as cpi_fiaa
+
+               FROM ZFI_IFRS_CPI as z1
+
+               JOIN ZFI_IFRS_CPI AS z2
+                ON z1.calday = lv_date AND z1.mandt = :P_clnt
+                AND z2.mandt = :P_clnt AND z2.calday <= z1.calday
+
+               JOIN ZFI_IFRS_CPI AS off1 --:lt_cpi_offset AS off1
+                ON ( z2.calday - off1.calday ) = 100 OR ( z2.calday - off1.calday ) = 8900
+
+               WHERE off1.mandt = :P_Clnt;
+
+  RETURN SELECT DISTINCT
+
+            z1.rclnt,
+            z1.fiscyearper,
+            z1.gjahr,
+            case when z1.poper = '01' then z1.gjahr - 1
+                 else z1.gjahr end as gjahr_prev,
+            z1.calmonth,
+            z1.poper,
+            case when z1.poper = '01' then '012'
+                 else z1.poper - 1 end as poper_prev,
+            z1.zcpicumm,
+            z1.zcpicumm_prev,
+            z1.cpi_rel,
+            z1.cpi_fiaa
+
+          FROM :lt_cpifuture as z1
+          WHERE z1.calmonth <= lv_calmonth
+          UNION SELECT
+                    z2.rclnt,
+                    z2.fiscyearper,
+                    z2.gjahr,
+                    z2.gjahr_prev,
+                    z2.calmonth,
+                    z2.poper,
+                    z2.poper_prev,
+                    z2.zcpicumm,
+                    z2.zcpicumm_prev,
+                    z2.cpi_rel,
+                    z2.cpi_fiaa
+
+          FROM :lt_cpi_rel as z2 WITH HINT(NO_INLINE);
+
+ENDMETHOD.
+
+
+METHOD ZT_IFRS_COND_SEL
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using SKA1 TVARVC /BIC/PM_RULE.
+
+
+   lt_sel = SELECT
+           s.mandt,
+           r."/BIC/M_RULE" as rule,
+           t.name,
+           t.sign,
+           s.saknr as val
+
+          FROM "/BIC/PM_RULE" as r
+          JOIN tvarvc as t
+            ON t.mandt = :p_clnt
+           AND r."/BIC/M_SETNAME" = t.name
+          JOIN ska1 as s
+            ON s.mandt = t.mandt
+           AND (
+                 ( t.opti = 'CP' AND s.saknr like replace(replace(t.low,'*','%'),'+','_') )
+              OR ( t.opti = 'EQ' AND s.saknr = t.low )
+              OR ( t.opti = 'BT' AND s.saknr between t.low and t.high )
+            )
+          WHERE s.mandt = :p_clnt AND s.ktopl = 'BNFT' AND r."/BIC/M_SCOPE" = '0803'
+          GROUP BY s.mandt, r."/BIC/M_RULE", t.name, t.sign, s.saknr;
+
+   RETURN SELECT
+            i.mandt,
+            i.rule,
+            i.name,
+            i.val as racct
+
+            FROM :lt_sel AS i
+       LEFT JOIN :lt_sel AS e
+              ON i.sign = 'I' AND e.sign = 'E'
+             AND i.name = e.name AND i.rule = e.rule AND i.val = e.val
+           WHERE i.sign = 'I' AND e.name IS NULL
+
+          UNION ALL
+
+          SELECT
+            :p_clnt as mandt,
+            r."/BIC/M_RULE" as rule,
+            '' as name,
+            'SELECT_ALL' as racct
+            FROM "/BIC/PM_RULE" as r
+            WHERE r."/BIC/M_SCOPE" = '0803' AND r."/BIC/M_SETNAME" = '' WITH HINT(NO_INLINE);
+
+ENDMETHOD.
+
+
+METHOD ZT_IFRS_COND_SEL1
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using SKA1 TVARVC /BIC/PM_RULE.
+
+
+   lt_sel = SELECT
+           s.mandt,
+           r."/BIC/M_RULE" as rule,
+           t.name,
+           t.sign,
+           s.saknr as val,
+           r."/BIC/M_SCOPE" as scope
+
+          FROM "/BIC/PM_RULE" as r
+          JOIN tvarvc as t
+            ON t.mandt = :p_clnt
+           AND r."/BIC/MSETNAME1" = t.name
+          JOIN ska1 as s
+            ON s.mandt = t.mandt
+           AND (
+                 ( t.opti = 'CP' AND s.saknr like replace(replace(t.low,'*','%'),'+','_') )
+              OR ( t.opti = 'EQ' AND s.saknr = t.low )
+              OR ( t.opti = 'BT' AND s.saknr between t.low and t.high )
+            )
+          WHERE s.mandt = :p_clnt and s.ktopl = 'BNFT' AND r."/BIC/M_SCOPE" = :p_scope
+          GROUP BY s.mandt, r."/BIC/M_RULE", t.name, t.sign, s.saknr, r."/BIC/M_SCOPE" ;
+
+   RETURN SELECT
+            i.mandt,
+            i.rule,
+            i.name,
+            i.val as gkont,
+            i.scope as scope
+
+            FROM :lt_sel AS i
+       LEFT JOIN :lt_sel AS e
+              ON i.sign = 'I' AND e.sign = 'E'
+             AND i.name = e.name AND i.rule = e.rule AND i.val = e.val
+           WHERE i.sign = 'I' AND e.name IS NULL
+
+          UNION ALL
+
+          SELECT
+            :p_clnt as mandt,
+            r."/BIC/M_RULE" as rule,
+            '' as name,
+            'SELECT_ALL' as gkont,
+            r."/BIC/M_SCOPE" as scope
+            FROM "/BIC/PM_RULE" as r
+            WHERE  r."/BIC/M_SCOPE" = :p_scope AND r."/BIC/MSETNAME1" = '' WITH HINT(NO_INLINE);
+ENDMETHOD.
+
+
+METHOD ZT_IFRS_COND_SEL2
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using AUFK TVARVC /BIC/PM_RULE.
+
+
+   lt_sel = SELECT
+           s.mandt,
+           r."/BIC/M_RULE" as rule,
+           t.name,
+           t.sign,
+           s.aufnr as val,
+           r."/BIC/M_SCOPE" as scope
+
+          FROM "/BIC/PM_RULE" as r
+          JOIN tvarvc as t
+            ON t.mandt = :p_clnt
+           AND r."/BIC/MSETNAME2" = t.name
+          JOIN aufk as s
+            ON s.mandt = t.mandt
+           AND (
+                 ( t.opti = 'CP' AND s.aufnr like replace(replace(t.low,'*','%'),'+','_') )
+              OR ( t.opti = 'EQ' AND s.aufnr = t.low )
+              OR ( t.opti = 'BT' AND s.aufnr between t.low and t.high )
+            )
+          WHERE s.mandt = :p_clnt AND r."/BIC/M_SCOPE" = :p_scope
+          GROUP BY s.mandt, r."/BIC/M_RULE", t.name, t.sign, s.aufnr,  r."/BIC/M_SCOPE";
+
+   RETURN SELECT
+            i.mandt,
+            i.rule,
+            i.name,
+            i.val as aufnr
+
+
+            FROM :lt_sel AS i
+       LEFT JOIN :lt_sel AS e
+              ON i.sign = 'I' AND e.sign = 'E'
+             AND i.name = e.name AND i.rule = e.rule AND i.val = e.val
+           WHERE i.sign = 'I' AND e.name IS NULL
+
+          UNION ALL
+
+          SELECT
+            :p_clnt as mandt,
+            r."/BIC/M_RULE" as rule,
+            '' as name,
+            'SELECT_ALL' as aufnr
+            FROM "/BIC/PM_RULE" as r
+            WHERE r."/BIC/M_SCOPE" = :p_scope AND r."/BIC/MSETNAME2" = '' WITH HINT(NO_INLINE);
+
+ENDMETHOD.
+
+
+METHOD ZT_IFRS_COND_SEL3
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using T156 TVARVC /BIC/PM_RULE.
+
+
+   lt_sel = SELECT
+           s.mandt,
+           r."/BIC/M_RULE" as rule,
+           t.name,
+           t.sign,
+           s.bwart as val,
+           r."/BIC/M_SCOPE" as scope
+
+          FROM "/BIC/PM_RULE" as r
+          JOIN tvarvc as t
+            ON t.mandt = :p_clnt
+           AND r."/BIC/M_SETNAME" = t.name
+          JOIN T156 as s
+            ON s.mandt = t.mandt
+           AND (
+                 ( t.opti = 'CP' AND s.bwart like replace(replace(t.low,'*','%'),'+','_') )
+              OR ( t.opti = 'EQ' AND s.bwart = t.low )
+              OR ( t.opti = 'BT' AND s.bwart between t.low and t.high )
+            )
+          WHERE s.mandt = :p_clnt AND r."/BIC/M_SCOPE" = :p_scope
+          GROUP BY s.mandt, r."/BIC/M_RULE", t.name, t.sign, s.bwart,  r."/BIC/M_SCOPE";
+
+   RETURN SELECT
+            i.mandt,
+            i.rule,
+            i.name,
+            i.val as bwart
+
+
+            FROM :lt_sel AS i
+       LEFT JOIN :lt_sel AS e
+              ON i.sign = 'I' AND e.sign = 'E'
+             AND i.name = e.name AND i.rule = e.rule AND i.val = e.val
+           WHERE i.sign = 'I' AND e.name IS NULL
+
+          UNION ALL
+
+          SELECT
+            :p_clnt as mandt,
+            r."/BIC/M_RULE" as rule,
+            '' as name,
+            'ALL' as bwart
+            FROM "/BIC/PM_RULE" as r
+            WHERE r."/BIC/M_SCOPE" = :p_scope AND r."/BIC/M_SETNAME" = '' WITH HINT(NO_INLINE);
+
+ENDMETHOD.
+
+
+METHOD ZT_IFRS_COND_SEL4
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using T685 TVARVC /BIC/PM_RULE.
+
+
+   lt_sel = SELECT
+           s.mandt,
+           r."/BIC/M_RULE" as rule,
+           t.name,
+           t.sign,
+           s.kschl as val,
+           r."/BIC/M_SCOPE" as scope
+
+          FROM "/BIC/PM_RULE" as r
+          JOIN tvarvc as t
+            ON t.mandt = :p_clnt
+           AND r."/BIC/MSETNAME3" = t.name
+          JOIN T685 as s
+            ON s.mandt = t.mandt
+           AND s.kappl = 'M' AND s.kschl like 'Z%'  AND ( s.kvewe = 'A' OR s.kvewe = 'S' )
+           AND (
+                 ( t.opti = 'CP' AND s.kschl like replace(replace(t.low,'*','%'),'+','_') )
+              OR ( t.opti = 'EQ' AND s.kschl = t.low )
+              OR ( t.opti = 'BT' AND s.kschl between t.low and t.high )
+            )
+          WHERE s.mandt = :p_clnt AND r."/BIC/M_SCOPE" = :p_scope
+          GROUP BY s.mandt, r."/BIC/M_RULE", t.name, t.sign, s.kschl,  r."/BIC/M_SCOPE";
+
+   RETURN SELECT
+            i.mandt,
+            i.rule,
+            i.name,
+            i.val as kschl
+
+
+            FROM :lt_sel AS i
+       LEFT JOIN :lt_sel AS e
+              ON i.sign = 'I' AND e.sign = 'E'
+             AND i.name = e.name AND i.rule = e.rule AND i.val = e.val
+           WHERE i.sign = 'I' AND e.name IS NULL
+
+          UNION ALL
+
+          SELECT
+            :p_clnt as mandt,
+            r."/BIC/M_RULE" as rule,
+            '' as name,
+            'ALL' as kschl
+            FROM "/BIC/PM_RULE" as r
+            WHERE r."/BIC/M_SCOPE" = :p_scope AND r."/BIC/MSETNAME3" = '';
+
+ENDMETHOD.
+
+
+ METHOD ZT_IFRS_COND_SKA1
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using SKA1 TVARVC.
+
+        lt_sel = SELECT
+           s.mandt,
+           t.name,
+           t.sign,
+           s.saknr as val
+
+
+          FROM SKA1 as s
+
+          JOIN tvarvc as t
+            ON s.mandt = t.mandt
+          AND ( ( /*?*/ t.name = :p_var ))
+
+           AND (
+                 ( t.opti = 'CP' AND s.saknr like replace(replace(t.low,'*','%'),'+','_') )
+              OR ( t.opti = 'EQ' AND s.saknr = t.low )
+              OR ( t.opti = 'BT' AND s.saknr between t.low and t.high )
+            )
+          WHERE s.mandt = :p_clnt
+          GROUP BY s.mandt, t.name, t.sign, s.saknr;
+
+   RETURN SELECT
+            i.mandt,
+            i.name,
+            i.val
+
+            FROM :lt_sel AS i
+       LEFT JOIN :lt_sel AS e
+              ON i.sign = 'I' AND e.sign = 'E'
+             AND i.name = e.name AND i.val = e.val
+           WHERE i.sign = 'I' AND e.name IS NULL WITH HINT(NO_INLINE);
+
+        ENDMETHOD.
+
+
+METHOD ZT_IFRS_COND_WBS1
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using SKA1 TVARVC.
+
+        lt_sel = SELECT
+           s.mandt,
+           t.name,
+           t.sign,
+           s.saknr as val
+
+
+          FROM SKA1 as s
+
+          JOIN tvarvc as t
+            ON s.mandt = t.mandt
+          AND ( ( /*?*/ t.name = 'ZPS_MSFO_CJ88'  OR t.name = 'ZPS_EQUIPMENT' OR /*?*/ t.name = 'ZPS_MSFO_INIT' OR t.name = 'ZPS_PU_50_M308' ))
+
+           AND (
+                 ( t.opti = 'CP' AND s.saknr like replace(replace(t.low,'*','%'),'+','_') )
+              OR ( t.opti = 'EQ' AND s.saknr = t.low )
+              OR ( t.opti = 'BT' AND s.saknr between t.low and t.high )
+            )
+          WHERE s.mandt = :p_clnt
+          GROUP BY s.mandt, t.name, t.sign, s.saknr;
+
+   RETURN SELECT
+            i.mandt,
+            i.name,
+            i.val
+
+            FROM :lt_sel AS i
+       LEFT JOIN :lt_sel AS e
+              ON i.sign = 'I' AND e.sign = 'E'
+             AND i.name = e.name AND i.val = e.val
+           WHERE i.sign = 'I' AND e.name IS NULL WITH HINT(NO_INLINE);
+
+        ENDMETHOD.
+
+
+METHOD ZT_IFRS_WBS
+
+        BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA ZPS_MOVECOSTS ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL TVARVC.
+
+    lt_cpi = SELECT * FROM "ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL"(
+                  P_Period => :P_Period,
+                  P_clnt => :P_clnt );
+ lt_ps = SELECT
+    a1.rclnt               as mandt,
+    a1.objnr               as objnr,
+    a1.belnr               as belnr,
+    a1.bldat               as bldat,
+    a1.docln               as docln,
+    a1.racct               as racct,
+    a1.gkont               as gkont,
+    a1.co_belnr            as co_belnr,
+    a1.rbukrs              as rbukrs,
+    a1.ps_posid            as ps_posid,
+    a1.hsl                 as hsl,
+    a1.parob1              as parob1,
+    a1.dabrz               as dabrz,
+    a1.fiscyearper         as fiscyearper,
+    a2.budat               as budat,
+    a2.gkont               as gkont_infl,
+  CASE
+  WHEN v.name IS NULL THEN '19010101'
+  --when v.name = 'ZPS_MSFO_CJ88' then '19000101'
+  WHEN v.name = 'ZPS_EQUIPMENT' THEN a1.dabrz
+  WHEN v.name = 'ZPS_MSFO_INIT' OR v.name = 'ZPS_PU_50_M308' THEN a2.bldat
+  ELSE '19000101'
+  END                      as date_infl,
+    z1.belnr_first         as belnr_first,
+    z1.buzei_first         as buzei_first,
+    v.name                 as set_name
+
+  FROM ACDOCA AS a1
+
+  JOIN zps_movecosts AS z1
+    ON a1.rclnt= z1.mandt
+   AND a1.co_belnr = z1.belnr
+   AND a1.gkont = z1.kstar
+   AND a1.objnr = z1.parob1
+   AND a1.hsl = z1.wkgbtr
+
+  JOIN acdoca AS a2
+    ON z1.mandt = a2.rclnt
+   AND z1.buzei_first = a2.co_buzei
+   AND z1.belnr_first = a2.co_belnr
+
+  LEFT JOIN tvarvc AS v
+    ON a2.rclnt = v.mandt
+   AND a2.gkont = v.low
+   AND (a1.gkont = v.low AND ( v.name = 'ZPS_MSFO_CJ88' OR v.name = 'ZPS_EQUIPMENT' OR v.name = 'ZPS_MSFO_INIT'))
+   OR (a1.racct  = v.low AND ( v.name = 'ZPS_PU_50_M308' ))
+
+  WHERE a1.sgtxt LIKE 'DT%' and a1.rclnt =:p_clnt AND a1.fiscyearper <= :P_Period
+
+
+    UNION ALL
+
+   SELECT
+   a1.rclnt                as mandt,
+   a1.objnr                as objnr,
+   a1.belnr                as belnr,
+   a1.bldat                as bldat,
+   a1.docln                as docln,
+   a1.racct                as racct,
+   a1.gkont                as gkont,
+   a1.co_belnr             as co_belnr,
+   a1.rbukrs               as rbukrs,
+   a1.ps_posid             as ps_posid,
+   a1.hsl                  as hsl,
+   a1.parob1               as parob1,
+   a1.dabrz                as dabrz,
+   a1.fiscyearper          as fiscyearper,
+   a1.budat                as budat,
+   a1.gkont                as gkont_infl,
+   CASE
+    WHEN v.name IS NULL THEN '19010101'
+    --when v.name = 'ZPS_MSFO_CJ88' then '19000101'
+    WHEN v.name = 'ZPS_EQUIPMENT' THEN a1.dabrz
+    WHEN v.name = 'ZPS_MSFO_INIT' OR v.name = 'ZPS_PU_50_M308' THEN a1.bldat
+    ELSE '19000101'
+   END                     as date_infl,
+   a1.belnr                as belnr_first,
+   a1.buzei                as buzei_first,
+   v.name as set_name
+
+  FROM ACDOCA AS a1
+
+  LEFT JOIN tvarvc AS v
+    ON a1.rclnt = v.mandt
+   AND (a1.gkont = v.low AND ( v.name = 'ZPS_MSFO_CJ88' OR v.name = 'ZPS_EQUIPMENT' OR v.name = 'ZPS_MSFO_INIT'))
+   OR (a1.racct  = v.low AND ( v.name = 'ZPS_PU_50_M308' ))
+
+  WHERE a1.sgtxt NOT LIKE 'DT%' AND a1.rclnt =:p_clnt AND a1.fiscyearper <= :P_Period;
+
+  RETURN SELECT
+
+    ps.mandt                as mandt,
+    ps.objnr                as objnr,
+    ps.belnr                as belnr,
+    ps.bldat                as bldat,
+    ps.docln                as docln,
+    ps.racct                as racct,
+    ps.gkont                as gkont,
+    ps.co_belnr             as co_belnr,
+    ps.rbukrs               as rbukrs,
+    ps.ps_posid             as ps_posid,
+    ps.hsl                  as hsl,
+    ps.parob1               as parob1,
+    ps.dabrz                as dabrz,
+    ps.fiscyearper          as fiscyearper,
+    ps.budat                as budat,
+    ps.gkont                as gkont_infl,
+    ps.budat                as date_infl,
+    ps.belnr_first          as belnr_first,
+    ps.buzei_first          as buzei_first,
+    cpi.cpi_rel             as cpi,
+    ps.hsl * cpi.cpi_rel    as hsl_infl,
+    ps.set_name
+
+  FROM :lt_ps AS ps
+
+  LEFT JOIN :lt_cpi AS cpi
+    ON LEFT(ps.date_infl, 6) = cpi.calmonth
+
+ WHERE ps.mandt =:p_clnt AND ps.fiscyearper <= :P_Period AND ps.date_infl > '19000101';
+ENDMETHOD.
+
+
+METHOD ZT_IFRS_WBS1
+
+        BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA MATDOC J_3RK_CORR_ITEMS BKPF BSEG
+          ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL TVARVC ZPS_MOVECOSTS ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_WBS1.
+        DECLARE lv_count integer := 0;
+        DECLARE lv_date NVARCHAR(8);
+        DECLARE lv_datefrom NVARCHAR(8);
+        DECLARE lv_calmonth NVARCHAR(6);
+        DECLARE lv_yearper NVARCHAR(7);
+        DECLARE lv_year NVARCHAR(4);
+--> -- ins 02.04.2024 V.Lipskij #37379
+        DECLARE lv_step_lines INTEGER;
+        DECLARE lv_step_index INTEGER;
+        DECLARE lv_step_index2 INTEGER;
+        DECLARE lv_belnr VARCHAR(10);
+        DECLARE lv_match_wkgbtr DECIMAL(23,2);
+--< -- ins 02.04.2024 V.Lipskij #37379
+
+ lt_cpi = SELECT * FROM "ZCL_FI_IFRS_CPI=>ZT_FI_IFRS_CPI_REL"(
+                  P_Period => :P_Period,
+                  P_clnt => :P_clnt );
+
+ lt_cond = SELECT * FROM "ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_WBS1" (
+                    P_clnt => :P_clnt );
+
+ lv_calmonth = left(:P_Period, 4) || right(:P_Period, 2);
+
+ lv_date = lv_calmonth || '01';
+
+ lv_year = LEFT(P_period, 4);
+
+ lv_yearper = lv_year || '001';
+
+ lv_datefrom = lv_year || '0101';
+
+ lt_rev =
+
+ SELECT
+   a1.rldnr,
+   a1.rbukrs,
+   a1.gjahr,
+   a1.awref
+ FROM acdoca as a1
+ WHERE a1.rldnr = '0L' AND a1.xreversing = 'X' AND a1.racct like '308%' AND a1.fiscyearper > p_period AND a1.gjahr = :lv_year
+   AND a1.rbukrs between :p_bukrs_low and :p_bukrs_high     -- AK_GUBAREVICH #36910 Работы по параметризации источников данных
+ GROUP BY a1.rldnr, a1.gjahr, a1.rbukrs, a1.awref;
+
+ lt_acdoca_dt =
+ SELECT DISTINCT
+            a1.rclnt,
+            a1.belnr,
+            a1.bldat,
+            mod(a1.docln,2) as docln , --min(a1.docln)          as docln,
+            a1.racct,
+            a1.gkont,
+            a1.gjahr,
+            a1.ktopl,
+            a1.co_belnr,
+            a1.rbukrs,
+            a1.ps_posid,
+            a1.pps_posid,
+            a1.parob1,
+            a1.objnr,
+            a1.afabe,
+            a1.drcrk,
+            a1.hsl,
+            a1.awtyp,
+            a1.fiscyearper,
+            a1.bttype,
+            a1.anln1,
+            a1.anln2,
+            a1.budat,
+            a1.dabrz,
+            a1.vptnr,
+            a1.vrgng,
+            a1.xreversing,
+            a1.xreversed,
+            a1.awref_rev,
+            a1.aufnr,
+            a1.gkont as gkont2
+
+ FROM ACDOCA AS a1
+
+ WHERE (a1.objnr LIKE 'PR%' OR a1.parob1 LIKE 'PR%')
+ AND a1.sgtxt LIKE 'DT%' AND a1.rclnt =:p_clnt AND a1.fiscyearper <= :P_Period --and b1.belnr = a1.belnr
+ AND a1.rbukrs between :p_bukrs_low and :p_bukrs_high     -- AK_GUBAREVICH #36910 Работы по параметризации источников данных
+ GROUP BY rclnt, belnr, bldat, docln, racct, gkont, gjahr, ktopl, co_belnr, rbukrs, ps_posid, pps_posid, parob1, objnr, afabe,
+          drcrk, hsl, awtyp, fiscyearper, bttype, anln1, anln2, budat, dabrz, vptnr, vrgng, xreversing, xreversed, awref_rev, aufnr; --a1.sgtxt; -- раскоменчено, так как з-адваивались записи
+
+--> -- ins 02.04.2024 V.Lipskij #37379
+lt_movecost =
+SELECT DISTINCT
+  z1.mandt,
+  z1.kokrs,
+  z1.belnr,
+  '000' as buzei,
+  z1.objnr,
+  z1.kstar,
+  z1.parob1,
+  z1.belnr_first,
+  z1.buzei_first,
+  z1.budat_first,
+  z1.wkgbtr,
+  ABS( z1.wkgbtr ) as match_wkgbtr
+FROM zps_movecosts as z1
+ WHERE z1.mandt = :p_clnt
+ ORDER BY z1.belnr, match_wkgbtr, z1.budat_first
+;
+lt_acdoca_cr =
+SELECT DISTINCT
+   acdoca.rclnt,
+   acdoca.co_belnr,
+   acdoca.co_buzei,
+   ABS( acdoca.hsl ) as match_hsl
+FROM ACDOCA AS acdoca
+  JOIN :lt_movecost as movecost ON acdoca.rclnt    = movecost.mandt
+                               AND acdoca.co_belnr = movecost.belnr
+WHERE (acdoca.objnr LIKE 'PR%' OR acdoca.parob1 LIKE 'PR%')
+  AND acdoca.sgtxt NOT LIKE 'DT%' AND acdoca.rclnt =:p_clnt AND acdoca.fiscyearper <= :p_period
+  AND acdoca.rbukrs between :p_bukrs_low and :p_bukrs_high
+ORDER BY acdoca.co_belnr, match_hsl, acdoca.co_buzei
+;
+lv_step_index = 1;
+lv_step_lines = record_count( :lt_movecost );
+WHILE lv_step_index BETWEEN 1 AND lv_step_lines DO
+  IF lv_belnr = :lt_movecost.belnr [ :lv_step_index ] AND lv_match_wkgbtr = :lt_movecost.match_wkgbtr [ :lv_step_index ] THEN
+   ELSE
+    lv_belnr = :lt_movecost.belnr [ :lv_step_index ];
+    lv_match_wkgbtr = :lt_movecost.match_wkgbtr [ :lv_step_index ];
+    lt_acdoca_cr2 = SELECT * FROM :lt_acdoca_cr WHERE co_belnr  = :lv_belnr
+                                                  AND match_hsl = :lv_match_wkgbtr;
+    lv_step_index2 = 1;
+  END IF;
+  lt_movecost.buzei [ :lv_step_index ] = :lt_acdoca_cr2.co_buzei [ :lv_step_index2 ];
+  lv_step_index  = :lv_step_index + 1;
+  lv_step_index2 = :lv_step_index2 + 1;
+END WHILE;
+--< -- ins 02.04.2024 V.Lipskij #37379
+
+lt_ps =
+ SELECT
+ DISTINCT                             -- AK_BUTVILOVSK #24032 297 – Расшифровка движения НКС - некоторые затраты удвоились
+   a1.rclnt                as mandt,
+   a1.belnr                as belnr,
+   a1.bldat                as bldat,
+   a1.docln                as docln,
+   a1.racct                as racct,
+   case when j3.mandt is null then a1.gkont
+        when a1.buzei = j3.buzeid and j3_1.mandt is null and j3_2.mandt is null then j3.kredit
+        when a1.buzei = j3.buzeik and j3_1.mandt is null and j3_2.mandt is null then j3.debet
+        when j3_1.mandt is not null then j3_1.kredit
+        when j3_2.mandt is not null then j3_2.debet
+   end as gkont,
+   a1.gjahr                as gjahr,
+   a1.ktopl                as ktopl,
+   a1.co_belnr             as co_belnr,
+   a1.rbukrs               as rbukrs,
+   a1.ps_posid             as ps_posid,
+   a1.pps_posid            as pps_posid,
+   a1.parob1               as parob1,
+   a1.objnr                as objnr,
+   a1.afabe                as afabe,
+   a1.drcrk                as drcrk,
+   a1.hsl                  as hsl,
+   a1.awtyp                as awtyp,
+   a1.fiscyearper          as fiscyearper,
+   a1.gkont                as gkont_infl,
+  case
+     when v.name is null and a2.rclnt is not null then a2.budat
+     when v.name is null and a2.rclnt is null then a1.budat
+     when v.name = 'ZPS_MSFO_CJ88' then '19000101'
+     when v.name = 'ZPS_EQUIPMENT' AND a1.dabrz = '00000000' and a2.rclnt is not null then a2.budat --'20900101'
+     -- AK_BUTVILOVSK #24450 Инфлирование основных средств - расхождение в 50 / 52 области по виду затрат 3084020100
+     when v.name = 'ZPS_EQUIPMENT' AND a1.dabrz = '00000000' and a2.rclnt is null then a1.budat
+     when v.name = 'ZPS_EQUIPMENT' then a1.dabrz
+     --when (v.name = 'ZPS_MSFO_INIT' OR v.name = 'ZPS_PU_50_M308') AND left(a1.bldat,6) > :lv_calmonth then '20910101'
+     when (v.name = 'ZPS_MSFO_INIT' OR v.name = 'ZPS_PU_50_M308') then a1.bldat
+     else a1.budat end     as date_infl,
+   a1.belnr                as belnr_first,
+   a1.buzei                as buzei_first,
+   v.name,
+   a1.bttype,
+   a1.anln1,
+   a1.anln2,
+   a1.budat,
+   b2.vptnr,
+   a1.vrgng,
+   a1.xreversing,
+   a1.xreversed,
+   a1.awref_rev,
+   a1.sgtxt,
+   a1.aufnr,
+   b1.tcode,
+   a1.gkont as gkont2,
+   a1.aworg,
+   a1.awref,
+   a1.awitem,
+   case when j3.mandt is null then '000'
+        when a1.buzei = j3.buzeid then j3.buzeik
+        when a1.buzei = j3.buzeik then j3.buzeid
+   end as buzei_corr
+
+  FROM ACDOCA AS a1
+
+  JOIN bkpf as b1
+    ON a1.rclnt = b1.mandt
+   AND a1.rbukrs = b1.bukrs
+   AND a1.belnr = b1.belnr
+   AND a1.gjahr = b1.gjahr
+
+  -- LEFT JOIN zps_movecosts AS z1                                                                             -- del 02.04.2024 V.Lipskij #37379
+  LEFT JOIN :lt_movecost AS z1                                                                                 -- ins 02.04.2024 V.Lipskij #37379
+    ON a1.rclnt= z1.mandt
+   AND ( z1.belnr = a1.co_belnr OR ( z1.belnr = SUBSTRING(b1.bktxt, 6, 10) AND a1.gkont LIKE '78%' ) )
+   AND a1.co_buzei = z1.buzei                                                                                  -- ins 02.04.2024 V.Lipskij #37379
+   AND a1.racct = z1.kstar
+   AND ( (a1.objnr = z1.parob1 AND a1.parob1 = z1.objnr AND mod(a1.docln,2) = 0 AND a1.hsl = z1.wkgbtr )
+    OR (a1.objnr = z1.objnr AND a1.parob1 = z1.parob1 AND mod(a1.docln,2) = 1 AND a1.hsl = - z1.wkgbtr )
+    OR ( a1.gkont LIKE '78%' AND a1.hsl = z1.wkgbtr )
+    OR ( a1.gkont LIKE '78%' AND a1.hsl = - z1.wkgbtr) )
+
+  LEFT JOIN acdoca AS a2 --Первичный док
+    ON z1.mandt = a2.rclnt
+   AND z1.buzei_first = a2.co_buzei
+   AND z1.belnr_first = a2.co_belnr
+
+  LEFT JOIN J_3RK_CORR_ITEMS AS j3
+-- выбираем корр.счет из совковой таблицы только для определенных случаев
+     ON a1.buzei > 0
+    AND ( a1.objnr not like 'PR%' OR a1.parob1 not like 'PR%' )
+
+    AND ( a1.racct not like '08%100' OR a1.gkont not like '308%' )
+    AND ( a1.racct not like '08%100' OR a1.gkont not like 'M308%' )
+    AND ( a1.racct not like '972%' OR a1.gkont not like '308%' )
+    AND ( a1.racct not like '972%' OR a1.gkont not like 'M308%' )
+
+    AND ( a1.gkont not like '08%100' OR a1.racct not like '308%' )
+    AND ( a1.gkont not like '08%100' OR a1.racct not like 'M308%' )
+    AND ( a1.gkont not like '972%' OR a1.racct not like '308%' )
+    AND ( a1.gkont not like '972%' OR a1.racct not like 'M308%' )
+
+    AND j3.mandt = a1.rclnt
+    AND j3.bukrs = a1.rbukrs
+    AND j3.belnr = a1.belnr
+    AND j3.gjahr = a1.gjahr
+    AND ( ( j3.buzeid = a1.buzei AND j3.npddi <= 1 AND j3.debet = a1.racct ) OR
+          ( j3.buzeik = a1.buzei AND j3.npdki <= 1 AND j3.kredit = a1.racct )
+        )
+
+  LEFT JOIN J_3RK_CORR_ITEMS AS j3_1
+    ON j3.mandt = j3_1.mandt
+    AND j3.bukrs = j3_1.bukrs
+    AND j3.belnr = j3_1.belnr
+    AND j3.gjahr = j3_1.gjahr
+    AND j3.kredit = j3_1.debet
+    AND j3.dmbtr = j3_1.dmbtr
+    AND j3.kredit = 'M000000099'
+    AND j3.debet NOT LIKE 'M08%'
+
+  LEFT JOIN J_3RK_CORR_ITEMS AS j3_2
+    ON j3.mandt = j3_2.mandt
+    AND j3.bukrs = j3_2.bukrs
+    AND j3.belnr = j3_2.belnr
+    AND j3.gjahr = j3_2.gjahr
+    AND j3.debet = j3_2.kredit
+    AND j3.dmbtr = j3_2.dmbtr
+    AND j3.debet = 'M000000099'
+    AND j3_2.debet LIKE 'M08%'
+
+  LEFT JOIN :lt_cond AS v1
+    ON a1.rclnt = v1.mandt
+    AND a1.racct  = v1.val AND v1.name = 'ZPS_PU_50_M308'
+
+  LEFT JOIN :lt_cond AS v
+    ON a1.rclnt = v.mandt
+--   AND a1.gkont = v.val
+   AND (
+        (
+          ( ( a1.gkont = v.val AND j3.mandt is null ) OR ( j3.kredit = v.val AND a1.buzei = j3.buzeid ) OR ( j3.debet = v.val AND a1.buzei = j3.buzeik ) )
+          AND ( v.name = 'ZPS_MSFO_CJ88' OR
+          (v.name = 'ZPS_EQUIPMENT' and v1.val is Null) OR v.name = 'ZPS_MSFO_INIT' )
+        )
+
+   OR ( a1.racct  = v.val AND ( v.name = 'ZPS_PU_50_M308' ) )
+       )
+
+   LEFT JOIN bseg as b2
+    ON a1.rclnt = b2.mandt
+   AND a1.rbukrs = b2.bukrs
+   AND a1.belnr = b2.belnr
+   AND a1.gjahr = b2.gjahr
+   AND ( b2.hkont LIKE '91%' OR b2.hkont LIKE '47%')
+   LEFT JOIN tvarvc as vmrk
+              ON vmrk.mandt = a1.rclnt
+             AND vmrk.name = 'ZIFRS_ARCH_MARK_NKS'
+
+WHERE (a1.objnr LIKE 'PR%' OR a1.parob1 LIKE 'PR%')
+   AND a1.sgtxt NOT LIKE 'DT%' AND a1.rclnt =:p_clnt AND a1.fiscyearper <= :P_Period AND (( a1.fiscyearper >= lv_yearper AND vmrk.low = 'X') OR vmrk.low <> 'X')
+   AND a1.rbukrs between :p_bukrs_low and :p_bukrs_high     -- AK_GUBAREVICH #36910 Работы по параметризации источников данных
+
+ UNION ALL
+
+ SELECT
+ DISTINCT
+    a1.rclnt               as mandt,
+    a1.belnr               as belnr,
+    a1.bldat               as bldat,
+    a1.docln               as docln,
+    a1.racct               as racct,
+    case
+    when a1.belnr = '8000015721' and a1.racct = '3081090100' then '7800000013'
+    else a1.gkont
+    end as gkont,
+    a1.gjahr               as gjahr,
+    a1.ktopl               as ktopl,
+    a1.co_belnr            as co_belnr,
+    a1.rbukrs              as rbukrs,
+    a1.ps_posid            as ps_posid,
+    a1.pps_posid           as pps_posid,
+    a1.parob1              as parob1,
+    a1.objnr               as objnr,
+    a1.afabe               as afabe,
+    a1.drcrk               as drcrk,
+    a1.hsl                 as hsl,
+    a1.awtyp               as awtyp,
+    a1.fiscyearper         as fiscyearper,
+    a2.gkont               as gkont_infl,
+  case
+  when v.name is null and a2.rclnt is not null then a2.budat
+  when v.name is null and a2.rclnt is null then a1.budat
+  when v.name = 'ZPS_MSFO_CJ88' then '19000101'
+  when v.name = 'ZPS_EQUIPMENT' AND a1.dabrz = '00000000' and a2.rclnt is not null and a2.dabrz <> '00000000' then a2.dabrz --#25554 при перемещении с СПП на СПП Дата образования затрат с первичного документа
+  when v.name = 'ZPS_EQUIPMENT' AND a1.dabrz = '00000000' and a2.rclnt is not null then a2.budat --'20900101'
+  -- AK_BUTVILOVSK #24450 Инфлирование основных средств - расхождение в 50 / 52 области по виду затрат 3084020100
+  when v.name = 'ZPS_EQUIPMENT' AND a1.dabrz = '00000000' and a2.rclnt is null then a1.budat
+  when v.name = 'ZPS_EQUIPMENT' then a1.dabrz
+  --when (v.name = 'ZPS_MSFO_INIT' OR v.name = 'ZPS_PU_50_M308') AND left(a2.bldat,6) > :lv_calmonth then '20910101'
+  when (v.name = 'ZPS_MSFO_INIT' OR v.name = 'ZPS_PU_50_M308') then a2.bldat
+  else '19000101'
+  end                      as date_infl,
+    z1.belnr_first         as belnr_first,
+    z1.buzei_first         as buzei_first,
+    v.name,
+    a1.bttype,
+    a1.anln1,
+    a1.anln2,
+    a1.budat,
+    a1.vptnr,
+    a1.vrgng,
+    a1.xreversing,
+    a1.xreversed,
+    a1.awref_rev,
+    '' as sgtxt,
+    a1.aufnr,
+    b1.tcode,
+    a1.gkont2,
+    '' as aworg,
+    '' as awref,
+    '' as awitem,
+    '000' as buzei_corr
+
+  FROM :lt_acdoca_dt AS a1
+
+  JOIN bkpf as b1
+    ON a1.rclnt = b1.mandt
+   AND a1.rbukrs = b1.bukrs
+   AND a1.belnr = b1.belnr
+   AND a1.gjahr = b1.gjahr
+
+  JOIN zps_movecosts AS z1
+    ON a1.rclnt= z1.mandt
+   AND ( z1.belnr = a1.co_belnr OR ( z1.belnr = SUBSTRING(b1.bktxt, 6, 10) AND (a1.gkont LIKE '78%' OR (a1.gkont LIKE '308%' AND a1.belnr = '8000015721') ) ) )
+   AND a1.racct = z1.kstar
+   AND ( (a1.objnr = z1.parob1 AND a1.parob1 = z1.objnr AND mod(a1.docln,2) = 0 AND a1.hsl = z1.wkgbtr )
+    OR (a1.objnr = z1.objnr AND a1.parob1 = z1.parob1 AND mod(a1.docln,2) = 1 AND a1.hsl = - z1.wkgbtr )
+    OR ( ((a1.gkont LIKE '78%' AND a1.belnr <> '8000015721') OR
+    ( a1.gkont LIKE '308%' AND a1.belnr = '8000015721' ) OR (a1.gkont LIKE '78%' and a1.belnr = '8000015721' and z1.buzei_first <> '005')) AND a1.hsl = z1.wkgbtr )
+    OR ( a1.gkont LIKE '78%' AND a1.hsl = - z1.wkgbtr) )
+
+  JOIN acdoca AS a2 --Первичный док
+    ON z1.mandt = a2.rclnt
+   AND z1.buzei_first = a2.co_buzei
+   AND z1.belnr_first = a2.co_belnr
+
+  LEFT JOIN :lt_cond AS v
+    ON a2.rclnt = v.mandt
+--   AND a2.gkont = v.val
+   AND ((a2.gkont = v.val AND ( v.name = 'ZPS_MSFO_CJ88' OR (v.name = 'ZPS_EQUIPMENT' AND a1.gkont NOT LIKE 'M308%') OR v.name = 'ZPS_MSFO_INIT')) --RM25178 a1.gkont NOT LIKE 'M308%'
+   OR (a2.racct  = v.val AND ( v.name = 'ZPS_PU_50_M308' )))
+
+-- WHERE (a1.objnr LIKE 'PR%' OR a1.parob1 LIKE 'PR%')
+--   AND a1.sgtxt LIKE 'DT%' AND a1.rclnt =:p_clnt; --AND a1.fiscyearper <= :P_Period; --and b1.belnr = a1.belnr
+
+--<-Katkovskaya 03.01.2023
+/* JOIN ANLA as an
+ on  an.mandt = a1.rclnt
+ and an.bukrs = a1.rbukrs
+ and an.anln1 = a1.anln1
+ and an.anln2 = a1.anln2
+ and (an.deakt = '00000000' or an.deakt >= lv_datefrom) */
+
+ LEFT JOIN tvarvc as vmrk
+              ON vmrk.mandt = a1.rclnt
+             AND vmrk.name = 'ZIFRS_ARCH_MARK_NKS'
+    WHERE (( a1.fiscyearper >= lv_yearper AND vmrk.low = 'X') OR vmrk.low <> 'X')
+
+ ;
+--<-Katkovskaya 03.01.2023
+
+
+  RETURN SELECT
+    ps.mandt                as mandt,
+    ps.belnr                as belnr,
+    ps.bldat                as bldat,
+    ps.docln                as docln,
+    ps.racct                as racct,
+    ps.gkont                as gkont,
+    case when ps.racct like '308%' or ps.racct like 'M308%' then ps.racct
+         when v.name is null then ps.racct
+         else ps.gkont
+    end as gkont1,
+    ps.gjahr                as gjahr,
+    ps.ktopl                as ktopl,
+    ps.co_belnr             as co_belnr,
+    ps.rbukrs               as rbukrs,
+    ps.ps_posid             as ps_posid,
+    ps.pps_posid            as pps_posid,
+    ps.parob1               as parob1,
+    ps.objnr                as objnr,
+    ps.afabe                as afabe,
+    ps.drcrk                as drcrk,
+    ps.hsl                  as hsl,
+    ps.fiscyearper          as fiscyearper,
+    ps.gkont                as gkont_infl,
+    ps.awtyp                as awtyp,
+    ps.date_infl            as date_infl,
+    ps.belnr_first          as belnr_first,
+    ps.buzei_first          as buzei_first,
+    /*case when :lv_count = 0 then 1  else*/ cpi.cpi_rel  as cpi,
+    cpi.fiscyearper         as fiscyearper_infl,
+    /*case when :lv_count = 0 then ps.hsl  else */ round( ps.hsl * cpi.cpi_rel, 2)  as hsl_infl,
+    ps.name                 as set_name,
+    ps.bttype               as bttype,
+    ps.anln1                as anln1,
+    ps.anln2                as anln2,
+    ps.budat                as budat,
+    ps.vptnr                as vptnr,
+    ps.vrgng                as vrgng,
+    ps.xreversing,
+    case when ps.racct like '308%' and ( ps.gkont like '08%' or ps.gkont like '07%' or ps.gkont like '10%' )
+                                   and ps.tcode <> 'KB61' and mat.mandt is null
+         then ' '
+         when rev.awref is null
+         then ps.xreversed
+         else 'R'
+    end as xreversed,
+    ps.awref_rev,
+    ps.sgtxt,
+    ps.aufnr,
+    ps.tcode,
+    ps.gkont2,
+    ps.buzei_corr
+
+  FROM :lt_ps AS ps
+
+  LEFT JOIN :lt_cpi AS cpi
+    ON LEFT(ps.date_infl, 6) = cpi.calmonth
+
+  LEFT JOIN :lt_rev AS rev
+    ON ps.xreversed = 'X' AND ps.racct like '308%' AND ps.gjahr = :lv_year AND ps.fiscyearper <= :P_Period
+   AND ps.awref_rev = rev.awref AND ps.gjahr = rev.gjahr AND ps.rbukrs = rev.rbukrs
+
+  LEFT JOIN matdoc AS mat
+    ON ps.xreversed = 'X' AND ps.racct like '308%' AND ( ps.gkont like '08%' OR ps.gkont like '07%' OR ps.gkont like '10%' )
+   AND mat.smbln <> '' AND ps.mandt = mat.mandt AND ps.aworg = mat.sjahr AND ps.awref = mat.smbln AND right(ps.awitem, 4) = mat.smblp
+
+  LEFT JOIN tvarvc AS v
+    ON ps.mandt = v.mandt
+   AND ((ps.gkont >= v.low AND ps.gkont <= v.high) OR (v.high = '' AND ps.gkont = v.low))
+   AND v.name = 'ZPS_PU_CORR'
+
+   LEFT JOIN tvarvc as vmrk
+             ON vmrk.mandt = '300'
+             AND vmrk.name = 'ZIFRS_ARCH_MARK_NKS'
+
+ WHERE ps.mandt = :p_clnt AND ps.date_infl > '19000101' AND ps.fiscyearper <= :P_Period AND (( ps.fiscyearper >= lv_yearper AND vmrk.low = 'X') OR vmrk.low <> 'X')
+   AND ps.rbukrs between :p_bukrs_low and :p_bukrs_high     -- AK_GUBAREVICH #36910 Работы по параметризации источников данных
+WITH HINT(NO_INLINE);
+
+
+ENDMETHOD.
+
+
+METHOD ZT_IFRS_WBS_C803
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA /BIC/PM_RULE prps
+                                ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_SEL2
+                                ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_SEL1.
+
+ DECLARE lv_year NVARCHAR(4);
+
+ lv_year = LEFT(P_period, 4);
+
+RETURN
+
+ SELECT
+   a1.rclnt                as mandt,
+   r."/BIC/M_RULE"         as rule,
+   prps.posid,
+   prps.objnr
+
+  FROM ACDOCA AS a1
+
+  JOIN "ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_SEL1" ( P_clnt => :P_clnt, P_scope => '0803' ) AS s1
+    ON a1.rclnt =s1.mandt AND a1.racct = s1.gkont
+
+  JOIN "ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_SEL2" ( P_clnt => :P_clnt, P_scope => '0803' ) as s2
+    ON a1.rclnt = s2.mandt AND a1.aufnr = s2.aufnr
+
+  JOIN "/BIC/PM_RULE" as r
+    ON r.objvers = 'A' AND r."/BIC/MSETNAME2" <> ''
+   AND r."/BIC/M_RULE" = s1.rule and r."/BIC/M_RULE" = s2.rule
+
+  JOIN prps
+    ON a1.rclnt = prps.mandt AND a1.zuonr = prps.posid_edit
+
+ WHERE a1.rclnt =:p_clnt --AND a1.gkont LIKE '08%'
+   AND  a1.gjahr = :lv_year AND a1.fiscyearper <= :p_period AND a1.xreversed = ' ' AND a1.xreversing = ' '
+ GROUP BY a1.rclnt, r."/BIC/M_RULE", prps.posid, prps.objnr WITH HINT(NO_INLINE);
+
+   ENDMETHOD.
+
+
+METHOD ZT_IFRS_WBS_M308
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ACDOCA J_3RK_CORR_ITEMS ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_SKA1.
+
+ DECLARE lv_year NVARCHAR(4);
+
+ lv_year = LEFT(P_period, 4);
+
+RETURN
+
+ SELECT
+   a1.rclnt                as mandt,
+   a1.ps_posid             as posid,
+   a1.objnr                as objnr
+
+  FROM ACDOCA AS a1
+
+  JOIN "ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_SKA1" ( P_clnt => :P_clnt, P_var => 'ZPS_PU_50_NSK' ) as m308
+    ON a1.rclnt = m308.mandt AND  a1.racct = m308.val
+
+  LEFT JOIN J_3RK_CORR_ITEMS AS j3
+
+-- выбираем корр.счет из совковой таблицы только для определенных случаев
+     ON a1.buzei > 0
+    AND ( a1.objnr not like 'PR%' OR a1.parob1 not like 'PR%' )
+
+    AND ( a1.racct not like '08%100' OR a1.gkont not like '308%' )
+    AND ( a1.racct not like '08%100' OR a1.gkont not like 'M308%' )
+    AND ( a1.racct not like '972%' OR a1.gkont not like '308%' )
+    AND ( a1.racct not like '972%' OR a1.gkont not like 'M308%' )
+
+    AND ( a1.gkont not like '08%100' OR a1.racct not like '308%' )
+    AND ( a1.gkont not like '08%100' OR a1.racct not like 'M308%' )
+    AND ( a1.gkont not like '972%' OR a1.racct not like '308%' )
+    AND ( a1.gkont not like '972%' OR a1.racct not like 'M308%' )
+
+    AND j3.mandt = a1.rclnt
+    AND j3.bukrs = a1.rbukrs
+    AND j3.belnr = a1.belnr
+    AND j3.gjahr = a1.gjahr
+    AND ( ( j3.buzeid = a1.buzei AND j3.npddi <= 1 AND j3.debet = a1.racct ) OR
+          ( j3.buzeik = a1.buzei AND j3.npdki <= 1 AND j3.kredit = a1.racct )
+        )
+
+  LEFT JOIN "ZCL_FI_IFRS_CPI=>ZT_IFRS_COND_SKA1" ( P_clnt => :P_clnt, P_var => 'ZPS_PU_50_ISKL' ) AS v
+
+    ON a1.rclnt = v.mandt
+
+   AND  (
+          ( a1.gkont = v.val AND j3.mandt is null ) OR ( j3.kredit = v.val AND a1.buzei = j3.buzeid ) OR ( j3.debet = v.val AND a1.buzei = j3.buzeik )
+        )
+
+ WHERE a1.rclnt =:p_clnt AND a1.objnr LIKE 'PR%' AND  a1.gjahr = :lv_year AND a1.fiscyearper <= :p_period AND a1.xreversed = ' ' AND a1.xreversing = ' '
+ GROUP BY a1.rclnt, a1.ps_posid, a1.objnr;
+
+   ENDMETHOD.
+
+
+METHOD ZT_MM01_00
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using MATDOC TVARVC INOB AUSP CABN ACDOCA J_3RK_CORR_ITEMS MBEW QBEW T030 ZMSFO_MAT_CORR. -- /BIC/AZ_AARC_MM2 .
+
+
+   DECLARE lv_year NVARCHAR(4);
+   DECLARE lv_frst_mnth NVARCHAR(7);
+
+   lv_year = LEFT(P_period, 4);
+   lv_frst_mnth = CONCAT(lv_year, '001');
+
+
+  lt_stock =
+    SELECT matnr, charg, SUM( stock_qty ) as balance, MAX ( budat ) as last_posting
+      FROM matdoc
+     WHERE mandt = p_clnt AND ( (bwtar >= '0701000000' AND bwtar < '0708000000') OR ( bwtar >= '0803000000' AND bwtar < '0819000000' )) -- OR (bwtar LIKE '0841%'))  and cancelled = ' ' and smbln = ' '
+  GROUP BY matnr, charg; -- WITH HINT(NO_INLINE);
+
+   RETURN SELECT DISTINCT
+            m.mandt,
+            m.bukrs,
+            m.werks,
+            m.matnr,
+            m.bwtar,
+            m.charg,
+            m.bwart,
+            m.umcha,
+
+            m.shkzg,
+            CASE m.shkzg WHEN 'S' THEN m.lifnr
+                         ELSE m.kunnr
+            END AS vptnr,
+            CASE WHEN v.mandt IS NOT NULL THEN '2'
+                 WHEN v.mandt IS NULL AND ((m.lifnr <> ' ' AND m.shkzg = 'S') OR (m.kunnr <> ' ' AND m.shkzg = 'H' )) THEN '1'
+                 ELSE ' '
+            END AS rel_party,
+            m.dmbtr_stock,
+            m.waers,
+            m.stock_qty,
+            m.meins,
+            m.gjper,
+            m.budat,
+            m.mblnr,
+            m.smbln,
+            m.zeile,
+            m.gjahr,
+            CASE WHEN j3.mandt IS NULL THEN m.sakto --#25560
+                 WHEN a1.buzei = j3.buzeid and t030.mandt is null THEN j3.kredit
+                 WHEN a1.buzei = j3.buzeik and t030.mandt is null THEN j3.debet
+                 WHEN t030.mandt is not null then t030.konts --#25560
+            END AS sakto,
+            m.sobkz,
+            CASE WHEN m.bwart LIKE 'ZR%' THEN a1.aufnr
+                 ELSE m.aufnr
+            END  AS aufnr,
+            ( m.matnr || '                      ' || m.charg) AS objek,
+            (left(m.bwtar,4) || '000000') AS ktansw1,
+            ausp.date_from AS date_orig,
+            dats_add_months(ausp.date_from,60,'INITIAL') AS date_maturity5,
+            CASE WHEN stock.balance = 0 THEN stock.last_posting
+                 ELSE '99991231'
+            END AS last_posting,
+            CASE WHEN m.cancelled = 'X' THEN m2.budat
+                 ELSE '99991231'
+            END AS date_cancelled,
+            m.kunnr
+
+            FROM matdoc AS m
+
+            JOIN :lt_stock AS stock
+              ON stock.matnr = m.matnr
+             AND stock.charg = m.charg
+
+            JOIN inob
+              ON inob.mandt = m.mandt
+             AND inob.objek = ( m.matnr || '                      ' || m.charg )
+             AND inob.klart = '023' AND inob.obtab = 'MCH1'
+
+            JOIN ausp
+              ON ausp.mandt = inob.mandt
+             AND ausp.objek = inob.cuobj
+             AND ausp.klart = '023'
+
+            JOIN cabn
+              ON cabn.mandt = ausp.mandt
+             AND cabn.atinn = ausp.atinn
+             AND cabn.atnam = 'Z_DATA' AND cabn.adzhl = '0000' AND cabn.atfor = 'DATE'
+
+       LEFT JOIN tvarvc as v
+              ON v.mandt = m.mandt
+             AND (( m.shkzg = 'S' AND v.low = m.lifnr ) OR ( m.shkzg = 'H' AND v.low = m.kunnr ))
+             AND v.name = 'ZBU_REL_PARTY'
+
+       LEFT JOIN acdoca AS a1
+              ON ( m.sakto    = ' ' OR m.sakto like '91%' OR m.sakto like '90%' )
+             AND a1.rclnt   = m.mandt
+             AND a1.awref   = m.mblnr
+             AND a1.awitem  = ( '00' || m.zeile )
+             AND (
+                 ( m.sakto = '' AND (( m.shkzg = 'S' AND a1.hsl > 0 ) OR ( m.shkzg = 'H' AND a1.hsl < 0 )) )
+              OR ( ( m.sakto like '91%' OR m.sakto like '90%' ) AND a1.objnr like 'OR%' )
+                 )
+
+       LEFT JOIN J_3RK_CORR_ITEMS AS j3
+
+             ON a1.buzei > 0
+            AND m.sakto     = ' '
+
+            AND j3.mandt    = a1.rclnt
+            AND j3.bukrs    = a1.rbukrs
+            AND j3.belnr    = a1.belnr
+            AND j3.gjahr    = a1.gjahr
+            AND ( ( j3.buzeid = a1.buzei AND j3.npddi <= 1 AND j3.debet = a1.racct ) OR
+                  ( j3.buzeik = a1.buzei AND j3.npdki <= 1 AND j3.kredit = a1.racct )
+                )
+
+       LEFT JOIN MATDOC as mseg  --#25560
+            ON m.sakto = ' '
+            AND m.mandt = mseg.mandt
+            AND m.mblnr = mseg.mblnr
+            AND m.mjahr = mseg.mjahr
+            AND m.werks = mseg.werks
+            AND m.matnr = mseg.matnr
+            AND m.line_id = mseg.parent_id
+
+       LEFT JOIN MBEW as mbew  --#25560
+            ON mbew.mandt = mseg.mandt
+            AND mbew.matnr = mseg.matnr
+            AND mbew.bwkey = mseg.werks
+            AND mbew.bwtar = mseg.charg
+            AND mseg.sobkz <> 'Q'
+
+       LEFT JOIN QBEW as qbew  --#25560
+            ON qbew.mandt = mseg.mandt
+            AND qbew.matnr = mseg.matnr
+            AND qbew.bwkey = mseg.werks
+            AND qbew.bwtar = mseg.charg
+            AND mseg.sobkz = 'Q'
+
+       LEFT JOIN T030 as t030  --#25560
+            ON  t030.mandt = mseg.mandt
+            AND t030.ktopl = 'BNFT'
+            AND t030.ktosl = 'BSX'
+            AND t030.bwmod = 'ZZ10'
+            AND (t030.bklas = mbew.bklas or t030.bklas = qbew.bklas )
+
+
+       LEFT JOIN matdoc AS m2
+              ON m2.cancellation_type = '2' AND m.cancelled = 'X'
+             AND m2.mandt = m.mandt
+             AND m2.smbln = m.mblnr
+             AND m2.smblp = m.zeile
+             --AND m2.gjper <> m.gjper
+
+       LEFT JOIN matdoc AS m3
+              ON m.cancellation_type = '2' AND m3.cancelled = 'X'
+             AND m.mandt = m3.mandt
+             AND m.smbln = m3.mblnr
+             AND m.smblp = m3.zeile
+             --AND m2.gjper <> m.gjper
+
+       LEFT JOIN ZMSFO_MAT_CORR AS mat_corr
+              ON m.mandt = mat_corr.mandt
+             AND m.bukrs = mat_corr.bukrs
+             AND m.matnr = mat_corr.matnr
+             AND m.charg = mat_corr.charg
+             AND m.mblnr = mat_corr.mblnr
+             AND m.zeile = mat_corr.zeile
+             AND m.bwart = mat_corr.bwart
+             AND m.bwtar = mat_corr.bwtar
+
+       LEFT JOIN tvarvc as vmrk
+              ON vmrk.mandt = m.mandt
+             AND vmrk.name = 'ZIFRS_ARCH_MARK_MATNR'
+
+
+            WHERE m.mandt = p_clnt and mat_corr.mandt is null
+           and ( ((m.gjper >= :lv_frst_mnth) and (vmrk.low = 'X')) or ( vmrk.low <> 'X' ) )
+            and ((m2.gjper <> m.gjper and (m2.gjper > p_period or m.gjper > p_period))
+             or (m3.gjper <> m.gjper and (m3.gjper > p_period or m.gjper > p_period)) or (m.cancelled = ' ' and m.smbln = ' ')) --and m.cancelled = ' ' and m.smbln = ' ' m.cancellation_type <>'2' and m2.cancelled <> 'X'
+              AND ( (m.bwtar >= '0701000000' AND m.bwtar < '0708000000') OR (m.bwtar >= '0803000000' AND m.bwtar < '0819000000' )) -- OR (m.bwtar LIKE '0841%'))
+
+    UNION ALL
+
+    SELECT DISTINCT
+            m.mandt,
+            m.bukrs,
+            m.werks,
+            m.matnr,
+            m.bwtar,
+            m.charg,
+            m.bwart,
+            m.umcha,
+
+            m.shkzg,
+            CASE m.shkzg WHEN 'S' THEN m.lifnr
+                         ELSE m.kunnr
+            END AS vptnr,
+            CASE WHEN v.mandt IS NOT NULL THEN '2'
+                 WHEN v.mandt IS NULL AND ((m.lifnr <> ' ' AND m.shkzg = 'S') OR (m.kunnr <> ' ' AND m.shkzg = 'H' )) THEN '1'
+                 ELSE ' '
+            END AS rel_party,
+            mat_corr.dmbtr_stock as dmbtr_stock,
+            mat_corr.waers as waers,
+            m.stock_qty,
+            m.meins,
+            m.gjper,
+            m.budat,
+            m.mblnr,
+            m.smbln,
+            m.zeile,
+            m.gjahr,
+            CASE WHEN j3.mandt IS NULL THEN m.sakto --#25560
+                 WHEN a1.buzei = j3.buzeid and t030.mandt is null THEN j3.kredit
+                 WHEN a1.buzei = j3.buzeik and t030.mandt is null THEN j3.debet
+                 WHEN t030.mandt is not null then t030.konts --#25560
+            END AS sakto,
+            m.sobkz,
+            CASE WHEN m.bwart LIKE 'ZR%' THEN a1.aufnr
+                 ELSE m.aufnr
+            END  AS aufnr,
+            ( m.matnr || '                      ' || m.charg) AS objek,
+            (left(m.bwtar,4) || '000000') AS ktansw1,
+            ausp.date_from AS date_orig,
+            dats_add_months(ausp.date_from,60,'INITIAL') AS date_maturity5,
+            CASE WHEN stock.balance = 0 THEN stock.last_posting
+                 ELSE '99991231'
+            END AS last_posting,
+            CASE WHEN m.cancelled = 'X' THEN m2.budat
+                 ELSE '99991231'
+            END AS date_cancelled,
+            m.kunnr
+
+            FROM matdoc AS m
+
+            JOIN :lt_stock AS stock
+              ON stock.matnr = m.matnr
+             AND stock.charg = m.charg
+
+            JOIN inob
+              ON inob.mandt = m.mandt
+             AND inob.objek = ( m.matnr || '                      ' || m.charg )
+             AND inob.klart = '023' AND inob.obtab = 'MCH1'
+
+            JOIN ausp
+              ON ausp.mandt = inob.mandt
+             AND ausp.objek = inob.cuobj
+             AND ausp.klart = '023'
+
+            JOIN cabn
+              ON cabn.mandt = ausp.mandt
+             AND cabn.atinn = ausp.atinn
+             AND cabn.atnam = 'Z_DATA' AND cabn.adzhl = '0000' AND cabn.atfor = 'DATE'
+
+       LEFT JOIN tvarvc as v
+              ON v.mandt = m.mandt
+             AND (( m.shkzg = 'S' AND v.low = m.lifnr ) OR ( m.shkzg = 'H' AND v.low = m.kunnr ))
+             AND v.name = 'ZBU_REL_PARTY'
+
+       LEFT JOIN acdoca AS a1
+              ON ( m.sakto    = ' ' OR m.sakto like '91%' OR m.sakto like '90%' )
+             AND a1.rclnt   = m.mandt
+             AND a1.awref   = m.mblnr
+             AND a1.awitem  = ( '00' || m.zeile )
+             AND (
+                 ( m.sakto = '' AND (( m.shkzg = 'S' AND a1.hsl > 0 ) OR ( m.shkzg = 'H' AND a1.hsl < 0 )) )
+              OR ( ( m.sakto like '91%' OR m.sakto like '90%' ) AND a1.objnr like 'OR%' )
+                 )
+
+       LEFT JOIN J_3RK_CORR_ITEMS AS j3
+
+             ON a1.buzei > 0
+            AND m.sakto     = ' '
+
+            AND j3.mandt    = a1.rclnt
+            AND j3.bukrs    = a1.rbukrs
+            AND j3.belnr    = a1.belnr
+            AND j3.gjahr    = a1.gjahr
+            AND ( ( j3.buzeid = a1.buzei AND j3.npddi <= 1 AND j3.debet = a1.racct ) OR
+                  ( j3.buzeik = a1.buzei AND j3.npdki <= 1 AND j3.kredit = a1.racct )
+                )
+
+       LEFT JOIN MATDOC as mseg  --#25560
+            ON m.sakto = ' '
+            AND m.mandt = mseg.mandt
+            AND m.mblnr = mseg.mblnr
+            AND m.mjahr = mseg.mjahr
+            AND m.werks = mseg.werks
+            AND m.matnr = mseg.matnr
+            AND m.line_id = mseg.parent_id
+
+       LEFT JOIN MBEW as mbew  --#25560
+            ON mbew.mandt = mseg.mandt
+            AND mbew.matnr = mseg.matnr
+            AND mbew.bwkey = mseg.werks
+            AND mbew.bwtar = mseg.charg
+            AND mseg.sobkz <> 'Q'
+
+       LEFT JOIN QBEW as qbew  --#25560
+            ON qbew.mandt = mseg.mandt
+            AND qbew.matnr = mseg.matnr
+            AND qbew.bwkey = mseg.werks
+            AND qbew.bwtar = mseg.charg
+            AND mseg.sobkz = 'Q'
+
+       LEFT JOIN T030 as t030  --#25560
+            ON  t030.mandt = mseg.mandt
+            AND t030.ktopl = 'BNFT'
+            AND t030.ktosl = 'BSX'
+            AND t030.bwmod = 'ZZ10'
+            AND (t030.bklas = mbew.bklas or t030.bklas = qbew.bklas )
+
+
+       LEFT JOIN matdoc AS m2
+              ON m2.cancellation_type = '2' AND m.cancelled = 'X'
+             AND m2.mandt = m.mandt
+             AND m2.smbln = m.mblnr
+             AND m2.smblp = m.zeile
+             --AND m2.gjper <> m.gjper
+
+       LEFT JOIN matdoc AS m3
+              ON m.cancellation_type = '2' AND m3.cancelled = 'X'
+             AND m.mandt = m3.mandt
+             AND m.smbln = m3.mblnr
+             AND m.smblp = m3.zeile
+             --AND m2.gjper <> m.gjper
+
+      JOIN ZMSFO_MAT_CORR AS mat_corr
+              ON m.mandt = mat_corr.mandt
+             AND m.bukrs = mat_corr.bukrs
+             AND m.matnr = mat_corr.matnr
+             AND m.charg = mat_corr.charg
+             AND m.mblnr = mat_corr.mblnr
+             AND m.zeile = mat_corr.zeile
+             AND m.bwart = mat_corr.bwart
+             AND m.bwtar = mat_corr.bwtar
+
+      LEFT JOIN tvarvc as vmrk
+              ON vmrk.mandt = m.mandt
+             AND vmrk.name = 'ZIFRS_ARCH_MARK_MATNR'
+
+
+            WHERE m.mandt = p_clnt
+            and ( (m.gjper >= :lv_frst_mnth and vmrk.low = 'X') or ( vmrk.low <> 'X' ) )
+            and ( (m2.gjper <> m.gjper and (m2.gjper > p_period or m.gjper > p_period))
+                    or (m3.gjper <> m.gjper and (m3.gjper > p_period or m.gjper > p_period))
+                    or (m.cancelled = ' ' and m.smbln = ' ') )          --and m.cancelled = ' ' and m.smbln = ' ' m.cancellation_type <>'2' and m2.cancelled <> 'X'
+            AND ( (m.bwtar >= '0701000000' AND m.bwtar < '0708000000') OR (m.bwtar >= '0803000000' AND m.bwtar < '0819000000' )); -- OR (m.bwtar LIKE '0841%')) ;
+
+  /*     UNION ALL
+
+        SELECT DISTINCT
+            '300' as mandt,
+            arch.companycode as bukrs,
+            arch.plant as werks,
+            arch.material as matnr,
+            arch.valuationtype as bwtar,
+            arch.batch as charg,
+            arch.movtype as bwart,
+            arch.batch1 as umcha,
+            arch.debitcreditcode as shkzg,
+            arch.businesspartner as vptnr,
+            '2' as rel_party,
+            arch."/BIC/ZGMCNDVAL" as dmbtr_stock,
+            arch.cccurrency as waers,
+            arch."/BIC/ZSTCKVAL" as stock_qty,
+            arch.base_uom as meins,
+            arch.fiscalperiod as gjper,
+            arch.postingdate as budat,
+            '' as mblnr,
+            '' as smbln,
+            '' as zeile,
+            left(arch.fiscalperiod,4) as gjahr,
+            arch.glaccountoff as sakto,
+            arch.invspecstocktype as sobkz,
+            '' as aufnr,
+            '' as objek,
+            arch.ktansw1 as ktansw1,
+            arch.date_orig as date_orig,
+            arch.date_maturity5 as date_maturity5,
+            arch.last_posting as last_posting,
+            arch.date_cancelled as date_cancelled,
+            '' as kunnr
+        FROM "/BIC/AZ_AARC_MM2" AS arch
+        LEFT JOIN tvarvc as vmrk
+              ON vmrk.mandt = '300'
+             AND vmrk.name = 'ZIFRS_ARCH_MARK'
+        WHERE arch.fiscalperiod < :lv_frst_mnth AND arch.datacode = 'MM_ORIG' AND arch.dstream = 'ORIG' and vmrk.low = 'X' WITH HINT(NO_INLINE)      ;
+  */
+       ENDMETHOD.
+
+
+METHOD ZT_MM_DCOST
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using ZMM_DCOST INOB AUSP CABN.
+
+
+        DECLARE lv_fiscyearper NVARCHAR(7);
+        DECLARE lv_count       INTEGER:= 0;
+        DECLARE lv_count1      INTEGER:= 0;
+        DECLARE lv_step        INTEGER:= 2;
+        DECLARE lv_prev_step   INTEGER:= 1;
+        DECLARE lv_date NVARCHAR( 8 );                                      -- ins 17.04.2024 V.Lipskij #37102
+
+        lv_date = CONCAT( LEFT( p_period, 4 ) + 1, '0101' );                -- ins 17.04.2024 V.Lipskij #37102
+
+    lt_dcost = SELECT
+           zmm.mandt      AS mandt,
+           zmm.werks      AS werks,
+           zmm.matnr      AS matnr,
+           zmm.bwtar      AS bwtar,
+           zmm.kschl      AS kschl,
+           zmm.awtyp, --new
+
+           zmm.menge,
+           zmm.meins,
+           zmm.dmbtr,
+           zmm.waers,
+           zmm.budat,
+           zmm.prbudat,
+
+
+           1              AS step,
+           zmm.prev_werks AS prev_werks,
+           zmm.prev_matnr AS prev_matnr,
+           zmm.prev_bwtar AS prev_bwtar,
+           zmm.smbln,
+           zmm.delta,
+-- --> AK_BUTVILOVS #27133 Отчет 297 - учет документов неоднократного перемещения из партии в партию
+           '0000000000' AS belnr,
+           '0000' AS zeile
+-- <-- AK_BUTVILOVS #27133
+           FROM ZMM_DCOST AS zmm
+
+           --WHERE zmm.budat < P_date --AND zmm.kschl <> '';                        -- del 17.04.2024 V.Lipskij #37102
+           WHERE zmm.budat < :lv_date                                               -- ins 17.04.2024 V.Lipskij #37102
+             AND zmm.mandt = :p_clnt;  -- AK_BUTVILOVS #27133 Отчет 297 - учет документов неоднократного перемещения из партии в партию
+
+  SELECT COUNT(*) INTO lv_count1 FROM :lt_dcost;
+  WHILE lv_step < 30 AND lv_count <> lv_count1 DO
+
+   lv_count = lv_count1;
+   lv_prev_step = :lv_step - 1;
+   lt_dcost =
+
+      SELECT * FROM :lt_dcost
+
+      UNION ALL
+
+      SELECT
+           lt.mandt       AS mandt,
+           lt.werks       AS werks,
+           lt.matnr       AS matnr,
+           lt.bwtar       AS bwtar,
+           zmm.kschl      AS kschl,
+           zmm.awtyp, --new
+
+           zmm.menge,
+           zmm.meins,
+           zmm.dmbtr,
+           zmm.waers,
+           zmm.budat,
+           zmm.prbudat,
+           :lv_step       AS step,
+           zmm.prev_werks AS prev_werks,
+           zmm.prev_matnr AS prev_matnr,
+           zmm.prev_bwtar AS prev_bwtar,
+           zmm.smbln,
+           zmm.delta,
+
+-- --> AK_BUTVILOVS #27133 Отчет 297 - учет документов неоднократного перемещения из партии в партию
+           zmm.belnr,
+           zmm.zeile
+-- <-- AK_BUTVILOVS #27133
+
+           FROM :lt_dcost AS lt
+           JOIN ZMM_DCOST AS zmm
+             ON lt.step = :lv_prev_step
+            AND lt.prev_werks = zmm.werks
+            AND lt.prev_matnr = zmm.matnr
+            AND lt.prev_bwtar = zmm.bwtar
+
+           --WHERE zmm.budat < :P_date                                              -- del 17.04.2024 V.Lipskij #37102
+           WHERE zmm.budat < :lv_date                                               -- ins 17.04.2024 V.Lipskij #37102
+-- --> AK_BUTVILOVS #27133 Отчет 297 - учет документов неоднократного перемещения из партии в партию
+             AND zmm.mandt = :p_clnt
+             AND NOT EXISTS ( SELECT * FROM :lt_dcost
+                                WHERE matnr = zmm.matnr
+                                  AND belnr = zmm.belnr
+                                  AND zeile = zmm.zeile
+                                  AND bwtar = zmm.bwtar
+                                  AND werks = zmm.werks );
+-- <-- AK_BUTVILOVS #27133
+
+    lv_step = :lv_step + 1;
+    SELECT COUNT(*) INTO lv_count1 FROM :lt_dcost;
+   END WHILE;
+
+   lt_factors =  SELECT
+           LEFT(inob.objek, 18)    AS matnr,
+           RIGHT(inob.objek, 10)   AS bwtar,
+           ausp.dec_value_from     AS factor
+
+           FROM inob
+
+           JOIN ausp
+             ON ausp.mandt = :p_clnt
+            AND ausp.objek = inob.cuobj
+            AND ausp.klart = '023'
+
+           JOIN cabn as cabn1
+             ON cabn1.mandt = :p_clnt
+            and cabn1.atinn = ausp.atinn
+            and cabn1.atfor = 'NUM' and cabn1.msehi like 'Z%' and cabn1.adzhl = '0000'
+
+           WHERE inob.mandt = :p_clnt AND inob.klart = '023' AND inob.obtab = 'MCH1'
+             AND ( inob.objek LIKE '%07________' OR inob.objek LIKE '%08________' ) ;
+
+   RETURN SELECT
+           zmm.mandt,
+           zmm.werks,
+           zmm.matnr,
+           zmm.bwtar,
+           CASE WHEN zmm.awtyp = 'PRCHG' THEN 'ZCR3'
+                ELSE zmm.kschl
+           END AS kschl,
+           zmm.awtyp, --new
+           CASE WHEN f.factor IS NULL THEN zmm.menge
+                ELSE f.factor * zmm.menge
+           END AS smeng,
+           zmm.menge,
+           zmm.meins,
+
+           CASE WHEN zmm.awtyp = 'PRCHG' THEN 0 --zmm.delta
+                ELSE zmm.dmbtr
+           END AS dmbtr,
+           CASE WHEN zmm.awtyp = 'PRCHG' THEN zmm.delta
+                ELSE 0
+           END AS delta,
+           zmm.waers,
+           zmm.budat,
+           zmm.prbudat,
+           LEFT(zmm.budat,4) || '0' || substring(zmm.budat, 5,2) AS fiscyearper,
+           step
+
+           FROM :lt_dcost AS zmm
+
+      LEFT JOIN :lt_factors as f
+             ON f.matnr = zmm.matnr
+            AND f.bwtar = zmm.bwtar
+
+          WHERE ( zmm.kschl <> '' OR zmm.awtyp = 'PRCHG' ) AND zmm.smbln = '' WITH HINT(NO_INLINE);
+ENDMETHOD.
+
+
+METHOD ZT_MM_RULE
+BY DATABASE function FOR HDB
+        LANGUAGE SQLSCRIPT
+        OPTIONS READ-ONLY using /BIC/PM_RULE.
+
+   RETURN SELECT
+            r."/BIC/M_RULE"       as m_rule,
+            r."/BIC/M_MSFOCOR"    as m_msfocor,
+            r."/BIC/M_RPARTY"     as m_rparty,
+            r."/BIC/M_TVO"        as m_tvo,
+            r."/BIC/M_VO"         as m_vo,
+            r."/BIC/M_CORR"       as m_corr,
+            r."/BIC/M_TRANS"      as m_trans,
+            r."/BIC/M_ONAONO"     as m_onaono,
+            r."/BIC/M_MSFOACC"    as m_msfoacc,
+            r."AA_TTYGRP"         as aa_ttygrp,
+            r."/BIC/M_INFL"       as m_infl
+
+          FROM "/BIC/PM_RULE" as r
+          WHERE r.objvers = 'A' and r."/BIC/M_SCOPE" = 'MMMM' and r.flag = 'X'
+
+
+        UNION ALL
+
+          SELECT
+            r."/BIC/M_RULE"       as m_rule,
+            r1."/BIC/M_MSFOCOR"   as m_msfocor,
+            r1."/BIC/M_RPARTY"    as m_rparty,
+            r1."/BIC/M_TVO"       as m_tvo,
+            r1."/BIC/M_VO"        as m_vo,
+            r1."/BIC/M_CORR"      as m_corr,
+            r1."/BIC/M_TRANS"     as m_trans,
+            r1."/BIC/M_ONAONO"    as m_onaono,
+            r1."/BIC/M_MSFOACC"   as m_msfoacc,
+            r1."AA_TTYGRP"        as aa_ttygrp,
+            r1."/BIC/M_INFL"      as m_infl
+
+          FROM "/BIC/PM_RULE" as r
+
+          JOIN "/BIC/PM_RULE" as r1
+            ON r1.objvers = 'A' and r1."/BIC/M_SCOPE" = 'MINF' and r.flag = 'X' AND r."/BIC/M_INFL" = r1."/BIC/M_INFL"
+
+          WHERE r.objvers = 'A' and (r."/BIC/M_RULE" = 'M07' or r."/BIC/M_RULE" = 'M08' or r."/BIC/M_SCOPE" = 'MMMM') and r.flag = 'X' and r."/BIC/M_INFL" > '0' WITH HINT(NO_INLINE);
+
+ENDMETHOD.
+ENDCLASS.

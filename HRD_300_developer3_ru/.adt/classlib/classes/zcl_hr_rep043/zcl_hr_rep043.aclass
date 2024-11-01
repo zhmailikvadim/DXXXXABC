@@ -1,0 +1,245 @@
+class ZCL_HR_REP043 definition
+  public
+  final
+  create public .
+
+public section.
+
+  methods CONSTRUCTOR
+    importing
+      !IV_BEGDA type DATUM
+      !IV_OBJID type PD_OBJID_R .
+  methods GET_DATA
+    returning
+      value(RT_RESULT) type ZHR_T_REPORT_EMPLOYMENT_CENTER .
+protected section.
+private section.
+
+  data S_MASSN type MASSN .
+  data S_BEGDA type BEGDA .
+  data PV_OBJID type PD_OBJID_R .
+ENDCLASS.
+
+
+
+CLASS ZCL_HR_REP043 IMPLEMENTATION.
+
+
+  method CONSTRUCTOR.
+*&---------------------------------------------------------------------*
+*& Исполнитель          : ООО «Атлантконсалт»                          *
+*& Дата создания        : 03/09/2014                                   *
+*& Автор                : Валерия Радкевич (DEVELOPER4)                *
+*& Описание             : конструктор класса                           *
+*&---------------------------------------------------------------------*
+    s_massn = zif_hr_kadry_con=>gc_massn-a02.     " вид мерприятия
+    pv_objid = iv_objid.                          " орг. единица
+    s_begda = iv_begda.                           " дата "С"
+
+  ENDMETHOD.
+
+
+  METHOD get_data.
+*&---------------------------------------------------------------------*
+*& Исполнитель          : ООО «Атлантконсалт»                          *
+*& Дата создания        : 03/09/2014                                   *
+*& Автор                : Валерия Радкевич (DEVELOPER4)                *
+*& Описание             : сбор данных для отчёта                       *
+*&---------------------------------------------------------------------*
+    DATA: lt_p1001        TYPE TABLE OF p1001,
+          ls_p1001        TYPE p1001,
+          lo_requisition  TYPE REF TO cl_hrrcf_requisition,
+          lt_vacancy_list	TYPE rcf_t_requisition_vacancy,
+          wa_vacancy      TYPE rcf_s_requisition_vacancy,
+          lo_om_s         TYPE REF TO zcl_hr_om_s,
+          lo_payment      TYPE REF TO zcl_hr_om_s_payment,
+          lt_result_pos   TYPE TABLE OF swhactor,
+          ls_result_pos   TYPE swhactor,
+          lt_lgard_tab    TYPE zhr_t_lgart_tab,
+          ls_lgard_tab    TYPE zhr_s_lgart_tab,
+          wa_result       LIKE LINE OF rt_result,
+          lo_elemdescr    TYPE REF TO cl_abap_elemdescr,
+          lt_fixed_values TYPE ddfixvalues,
+          ls_fixed_values TYPE ddfixvalue.
+
+*    FIELD-SYMBOLS <wa_result> LIKE LINE OF rt_result.
+
+
+
+    CLEAR lt_p1001.
+*выбираем все штатные должности, удовлетворяющих заданным критериям. считываем id табельного номера и дату
+    SELECT * FROM hrp1001 AS p0
+    INNER JOIN hrp5122 AS p5 ON p0~plvar = p5~plvar AND
+                                p0~otype = p5~otype AND
+                                p0~objid = p5~objid
+   INTO CORRESPONDING FIELDS OF TABLE lt_p1001
+     WHERE p0~plvar            = zif_hr_om_con=>gc_active_plvar  AND
+           p0~otype            = zif_hr_om_con=>gc_object_type-nc  AND
+           p0~istat            = zif_hr_om_con=>gc_istat-active   AND
+           p0~sclas            = zif_hr_om_con=>gc_object_type-nb  AND
+           p5~posting_channel  = '9001'.
+
+    LOOP AT lt_p1001 INTO ls_p1001.
+*      APPEND INITIAL LINE TO rt_result ASSIGNING <wa_result>.
+      TRY.
+          cl_hrrcf_requisition=>get(
+            EXPORTING
+              id          = CONV hrobjid( ls_p1001-sobid )
+            IMPORTING
+              requisition = lo_requisition
+          ).
+        CATCH cx_hrrcf.    "
+          CONTINUE.
+      ENDTRY.
+
+      TRY.
+          lo_requisition->get_vacancy_of_requisition(
+            IMPORTING
+              vacancy_list = lt_vacancy_list
+          ).
+        CATCH cx_hrrcf_infotype_operation.    "
+*нет вакансии ШД
+          CONTINUE.
+      ENDTRY.
+
+      LOOP AT lt_vacancy_list INTO wa_vacancy.
+*Выбираем вложенные орг. единицы
+        CALL FUNCTION 'RH_STRUC_GET'
+          EXPORTING
+            act_otype      = zif_hr_om_con=>gc_object_type-s
+            act_objid      = wa_vacancy-sobid
+            act_wegid      = zif_hr_om_con=>gc_wegid-psoo
+            act_plvar      = zif_hr_om_con=>gc_active_plvar
+          TABLES
+            result_tab     = lt_result_pos
+          EXCEPTIONS
+            no_plvar_found = 1
+            no_entry_found = 2
+            OTHERS         = 3.
+        IF sy-subrc = 0.
+* Проверка совпадает ли введенная орг. единица с выборкой
+          LOOP AT lt_result_pos INTO ls_result_pos.
+
+            IF  ls_result_pos-objid = pv_objid AND ls_result_pos-objid <> '50000215' .
+
+              CREATE OBJECT lo_om_s
+                EXPORTING
+                  iv_objid = CONV hrobjid( wa_vacancy-sobid )
+                  iv_plvar = zif_hr_om_con=>gc_active_plvar.
+*Получение кода должности:
+              lo_om_s->get_doljn(  EXPORTING  iv_date = s_begda
+                                      IMPORTING  rv_objid = wa_result-stell_code ).
+*Получение названия должности:
+              wa_result-stell = lo_om_s->get_long_text( s_begda ).
+
+              CREATE OBJECT lo_payment
+                EXPORTING
+                  iv_objid = CONV hrobjid( wa_vacancy-sobid )
+                  iv_plvar = zif_hr_om_con=>gc_active_plvar.
+              TRY.
+*Получение тарифа и тарифной группы:
+                  lo_payment->get_tarif(  EXPORTING  iv_date  = s_begda
+                                                     iv_istat = zif_hr_om_con=>gc_istat-active
+                                          IMPORTING  ev_trfst = wa_result-trfst
+                                                     ev_trfgb = wa_result-trfgb ).
+*Получение размера заработной платы:
+
+                  lt_lgard_tab = lo_payment->get_payment( EXPORTING iv_date  = s_begda
+                                                                    iv_istat = zif_hr_om_con=>gc_istat-active ).
+                CATCH zcx_hr_om_payment_calc.
+              ENDTRY.
+
+
+              READ TABLE lt_lgard_tab INTO ls_lgard_tab
+                WITH KEY lgart = '1050'.
+              WRITE ls_lgard_tab-betrg TO wa_result-payment CURRENCY ls_lgard_tab-curcy.
+
+
+*Получение раздела персонала для штатной должности
+
+              lo_om_s->get_account_data( EXPORTING iv_date  = s_begda
+                                         IMPORTING ev_persa = wa_result-persa ).
+
+*Получение категории сотрудников и группы сотрудников
+
+              lo_om_s->get_persk( EXPORTING iv_data  = s_begda
+                                  IMPORTING ev_persk = wa_result-persk
+                                            ev_persg = wa_result-persg ).
+
+*Получение вида совместительства и типа персонала
+
+              lo_om_s->get_9150( EXPORTING iv_data      = s_begda
+                                 IMPORTING ev_comb_type = wa_result-comb_type
+                                           ev_pers_type = wa_result-pers_type ).
+*Тип персонала (текстовое поле)
+              CLEAR:  lt_fixed_values,
+                      ls_fixed_values,
+                      lo_elemdescr.
+
+              lo_elemdescr ?= cl_abap_typedescr=>describe_by_data( p_data = wa_result-pers_type ).
+
+              IF lo_elemdescr IS BOUND.
+                lo_elemdescr->get_ddic_fixed_values(
+                  RECEIVING
+                    p_fixed_values = lt_fixed_values    " Defaults
+                  EXCEPTIONS
+                    not_found      = 1
+                    no_ddic_type   = 2
+                    OTHERS         = 3
+                ).
+                IF sy-subrc <> 0.
+
+                ENDIF.
+
+                READ TABLE lt_fixed_values INTO ls_fixed_values
+                    WITH KEY low = wa_result-pers_type.
+                IF sy-subrc = 0.
+                  wa_result-pers_type_txt = ls_fixed_values-ddtext.
+                ENDIF.
+
+              ENDIF.
+*---------------------------------------------------------------------------------
+* Вид совместительства( текстовое поле)
+              lo_elemdescr ?= cl_abap_typedescr=>describe_by_data( p_data = wa_result-comb_type ).
+
+              IF lo_elemdescr IS BOUND.
+                lo_elemdescr->get_ddic_fixed_values(
+                  RECEIVING
+                    p_fixed_values = lt_fixed_values    " Defaults
+                  EXCEPTIONS
+                    not_found      = 1
+                    no_ddic_type   = 2
+                    OTHERS         = 3
+                ).
+                IF sy-subrc <> 0.
+
+                ENDIF.
+
+                READ TABLE lt_fixed_values INTO ls_fixed_values
+                    WITH KEY low = wa_result-comb_type.
+                IF sy-subrc = 0.
+                  wa_result-comb_type_text = ls_fixed_values-ddtext.
+                ENDIF.
+
+              ENDIF.
+*--------------------------------------------------------------------------
+*Название групп сотрудников
+              wa_result-ptext = zcl_hr_t501t=>get_ptext( iv_persg = wa_result-persg ).
+
+*Название категории сотрудников
+
+              wa_result-persktxt = zcl_hr_t503t=>get_ptext( iv_persk = wa_result-persk ).
+
+*---------------------------------------------------------------------------
+
+              APPEND wa_result TO rt_result.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+
+      ENDLOOP.
+    ENDLOOP.
+
+  ENDMETHOD.
+ENDCLASS.

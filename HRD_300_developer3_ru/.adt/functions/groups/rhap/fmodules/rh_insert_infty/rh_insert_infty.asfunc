@@ -1,0 +1,160 @@
+FUNCTION RH_INSERT_INFTY
+  IMPORTING
+    VALUE(FCODE) LIKE HRRHAP-FCODE DEFAULT 'INSE'
+    VALUE(VTASK) LIKE HRRHAP-VTASK
+    VALUE(ORDER_FLG) LIKE HRRHAP-ORDER_FLG DEFAULT 'X'
+    VALUE(COMMIT_FLG) LIKE HRRHAP-COMMIT_FLG DEFAULT 'X'
+    VALUE(AUTHY) LIKE HRRHAP-AUTHY DEFAULT 'X'
+    VALUE(PPPAR_IMP) LIKE PPPAR OPTIONAL
+    VALUE(OLD_TABNR) LIKE HRRHAP-OLD_TABNR DEFAULT SPACE
+    VALUE(REPID) LIKE SY-REPID DEFAULT SPACE
+    VALUE(FORM) TYPE ANY DEFAULT SPACE
+    VALUE(KEEP_LUPD) LIKE HRRHAP-KEEP_LUPD OPTIONAL
+    VALUE(WORKF_ACTV) LIKE HRRHAP-WORKF_ACTV DEFAULT 'X'
+  TABLES
+    INNNN TYPE STANDARD TABLE
+    ILFCODE LIKE ILFCOD OPTIONAL
+  EXCEPTIONS
+    NO_AUTHORIZATION
+    ERROR_DURING_INSERT
+    REPID_FORM_INITIAL
+    CORR_EXIT
+    BEGDA_GREATER_ENDDA.
+
+
+
+
+  DATA: l_return_code type sy-subrc.                          "ANDPLAN
+
+  PERFORM SET_KEEP_LUPD USING KEEP_LUPD.                  "VWMWF
+  PERFORM SET_WORKF_ACTV USING WORKF_ACTV.                "VWMWF
+  DESCRIBE TABLE ILFCODE LINES ILFCODE_LINES.             "VWMWF
+  IF RHAP_WORKF_ACTV NE SPACE AND                         "VWMWF
+     ILFCODE_LINES > 0.                                   "VWMWF
+    SORT ILFCODE BY TABIX.                                "VWMWF
+  ENDIF.                                                  "VWMWF
+
+  CLEAR HRRHAP-SUBRC.
+  CLEAR GAP_NEW_BEGDA.                                    "VWMGAPTCO1
+  CLEAR GAP_NEW_ENDDA.                                    "VWMGAPTCO1
+* Bestimmen, ob "echter" Mengen-Update auf DB vorliegt
+* => Verbuchung zunächst nur im Puffer
+  VTASK_SWITCHED_TO_BUFFER = OFF.
+  DESCRIBE TABLE INNNN LINES INNNN_COUNT.
+  IF INNNN_COUNT > 1 AND
+     VTASK NE 'B' AND
+     NOT VTASK IS INITIAL.
+    VTASK_SWITCHED_TO_BUFFER = ON.
+    RHAP-VTASK = 'B'.
+  ELSE.
+    RHAP-VTASK = VTASK.
+  ENDIF.
+
+  assign innnn to <innnn> casting type c.                   "ANDUNI
+  LOOP AT INNNN.
+    HRRHAP-TABIX = SY-TABIX.
+
+    IF FCODE = AKTI.
+*     check for planned operations (infotype 6200)            "ANDPLAN
+
+      IF VTASK_SWITCHED_TO_BUFFER = OFF AND                   "ANDPLAN
+         vtask <> 'B' and                                     "ANDPLAN
+         vtask is not initial.                                "ANDPLAN
+        VTASK_SWITCHED_TO_BUFFER = ON.                        "ANDPLAN
+        RHAP-VTASK = 'B'.                                     "ANDPLAN
+      ENDIF.                                                  "ANDPLAN
+
+      perform planned_infotype_operation using innnn          "ANDPLAN
+                                               rhap-vtask     "ANDPLAN
+                                               l_return_code. "ANDPLAN
+
+      IF l_return_code = 5.
+*        missing authorization
+         HRRHAP-SUBRC = 12.
+      ELSEIF l_return_code > 1.
+*        error situation.
+         HRRHAP-SUBRC = 16.
+      ENDIF.
+    ENDIF.
+
+    IF l_return_code = 0.                                     "ANDPLAN
+
+      CLEAR ACT_LFCOD.                                        "VWMWF
+*     Ermitteln des log. FCODEs zum aktuellen Satz            "VWMWF
+    IF RHAP_WORKF_ACTV NE SPACE AND                         "VWMWF
+       ILFCODE_LINES > 0.                                   "VWMWF
+      READ TABLE ILFCODE WITH KEY TABIX = HRRHAP-TABIX      "VWMWF
+                 BINARY SEARCH.                             "VWMWF
+      IF SY-SUBRC = 0.                                      "VWMWF
+        ACT_LFCOD = ILFCODE-LFCOD.                          "VWMWF
+      ENDIF.                                                "VWMWF
+    ENDIF.                                                  "VWMWF
+    clear wplog_struct.                                     "ANDUNI
+    wplog_struct = <innnn>.                                 "ANDUNI
+*      PERFORM INSERT_INFTY USING FCODE INNNN                 "ANDUNI
+    PERFORM INSERT_INFTY USING FCODE                        "ANDUNI
+                               wplog_struct                 "ANDUNI
+                               HRRHAP-TABIX
+                               RHAP-VTASK
+                               ORDER_FLG COMMIT_FLG
+                               AUTHY PPPAR_IMP
+                               OLD_TABNR REPID FORM
+                               ACT_LFCOD                    "VWMWF
+                               HRRHAP-SUBRC.
+    IF HRRHAP-SUBRC GE 12.
+*       EXPORT HRRHAP-TABIX TO MEMORY ID 'RHAP'.              "VWMGAPTCO1
+        EXIT.
+      ENDIF.
+    ENDIF.                                                    "ANDPLAN
+  ENDLOOP.
+
+  IF HRRHAP-SUBRC LT 12.                                   "VWMGAPTCO1
+    CLEAR HRRHAP-TABIX.                                    "VWMGAPTCO1
+  ENDIF.                                                   "VWMGAPTCO1
+
+* EXPORT HRRHAP-SUBRC TO MEMORY ID 'RHAP'.                 "VWMGAPTCO1
+  EXPORT HRRHAP-SUBRC HRRHAP-TABIX                         "VWMGAPTCO1
+         GAP_NEW_BEGDA GAP_NEW_ENDDA TO MEMORY ID 'RHAP'.  "VWMGAPTCO1
+
+  IF HRRHAP-SUBRC LT 12.
+    IF VTASK_SWITCHED_TO_BUFFER = ON.
+      CLEAR CORR_SUBRC.
+      CASE VTASK.
+        WHEN 'D'.                      " Update im DIALOG
+          PERFORM UPDATE_PLOG USING ORDER_FLG
+                                    COMMIT_FLG
+                                    CORR_SUBRC.
+        WHEN 'V'.                      " Update in der Verbuchung
+          PERFORM UPDATE_PLOG_VTASK USING ORDER_FLG
+                                          COMMIT_FLG
+                                          CORR_SUBRC.
+        WHEN 'S'.                      " Synchupdate in Verbuchung
+*          PERFORM UPDATE_PLOG_VTASK_WAIT USING ORDER_FLG
+*                                               CORR_SUBRC.
+           commit_flg = 'X'.                    "Note 1589671
+           PERFORM UPDATE_PLOG USING ORDER_FLG
+                                    COMMIT_FLG
+                                               CORR_SUBRC.
+      ENDCASE.
+      IF CORR_SUBRC NE 0.
+*       Fehler Vergabe Korrektur-Nummer
+        HRRHAP-SUBRC = 30.
+        EXPORT HRRHAP-SUBRC TO MEMORY ID 'RHAP'.
+        MESSAGE S377 RAISING CORR_EXIT.
+      ENDIF.
+    ENDIF.
+  ELSE.
+    CASE HRRHAP-SUBRC.
+      WHEN 12.
+        RAISE NO_AUTHORIZATION.
+      WHEN 16.
+        RAISE ERROR_DURING_INSERT.
+      WHEN 20.
+        RAISE REPID_FORM_INITIAL.
+      WHEN 24.
+        RAISE BEGDA_GREATER_ENDDA.
+      WHEN 30.
+        MESSAGE S377 RAISING CORR_EXIT.
+    ENDCASE.
+  ENDIF.
+ENDFUNCTION.

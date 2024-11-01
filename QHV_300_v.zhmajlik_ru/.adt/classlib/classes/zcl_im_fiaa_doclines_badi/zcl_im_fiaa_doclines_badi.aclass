@@ -1,0 +1,500 @@
+class ZCL_IM_FIAA_DOCLINES_BADI definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_EX_BADI_FIAA_DOCLINES .
+
+  class-methods SUBS_BWASL_GES
+    importing
+      !IV_OBJNR type A_OBJID optional
+    changing
+      !CT_ACCIT type APOST_TT_ACCIT optional
+      !CT_PROJIT type IF_FAA_MDO_ITEM=>TS_DATA_PROJECTED optional .
+  class-methods FILL_DATE_MSFO
+    importing
+      !IS_LAMBU type RLAMBU .
+  class-methods REMOVE_MSFOACCEPT
+    importing
+      !IS_LAMBU type RLAMBU .
+protected section.
+private section.
+
+  class-data:
+    gt_bwasl_inv  type range of anep-bwasl . "движения выбытия
+  class-data:
+    gt_bwasl_mod  type range of anep-bwasl . "движения модернизации
+  class-data:
+    gt_bwasl_subs TYPE SORTED TABLE OF zps_bwasl_imprf WITH UNIQUE KEY old_bwasl imprf .
+  class-data:
+    BEGIN OF gs_cobrb,
+      objid TYPE rlambu-objid,
+      imprf TYPE prps-imprf,
+      belnr type auak-belnr,
+    END OF gs_cobrb .
+  class-data GV_NO_SUBS type ABAP_BOOL .
+  class-data GV_ZANLU_UPDATE type ABAP_BOOL .
+  class-data GV_REMOVE_MSFOACCEPT type ABAP_BOOL .
+
+  class-methods RESOLVE_TARGET_BWASL
+    importing
+      value(IV_SRC) type BWASL
+      value(IS_SUBST) type ZPS_BWASL
+    returning
+      value(RV_RESULT) type BWASL .
+  methods FILL_AUFNR
+    changing
+      !CT_ACCIT type APOST_TT_ACCIT .
+  methods FILL_HIST
+    importing
+      !IS_RLAMBU type RLAMBU .
+  methods CHECK_INV_DEFFER
+    importing
+      !IS_RLAMBU type RLAMBU .
+ENDCLASS.
+
+
+
+CLASS ZCL_IM_FIAA_DOCLINES_BADI IMPLEMENTATION.
+
+
+  METHOD check_inv_deffer.
+    "DEV.030-БНУ.03.O-229
+    "   Если при выбытии ОС выполняется хотя бы одно из следующих условий:
+    "   1.1Вид движения Z*, ZANLU-INVDE = ‘X’, и разница между датой проводки и ANLA-AKTIV меньше 3-х лет.
+    "   1.2Вид движения Z*, ZANLU-PARTMOV = ‘X’, и разница между датой проводки и ANEP-BZDAT меньше 3-х лет, где BWASL в списке «Вид движения реконструкции».
+    "   Выдавать сообщение «Необходимо восстановить инвестиционный вычет на сумму __». Сумму восстановления брать из ZANLU- INVAMOUNT.
+    DATA:
+      lc_name_inv TYPE string VALUE 'ZFI_INVEST',
+      lc_name_mod TYPE string VALUE 'ZFI_INVEST_REC'.
+    " заполнение диапазонов движений
+    IF gt_bwasl_inv IS INITIAL.
+      SELECT name,sign,low,opti AS option,high
+        INTO TABLE @DATA(lt_stvarv)
+        FROM tvarvc
+        WHERE name IN (@lc_name_inv,@lc_name_mod).
+      LOOP AT lt_stvarv ASSIGNING  FIELD-SYMBOL(<ls_cust>).
+        IF <ls_cust>-name = lc_name_inv.
+          APPEND CORRESPONDING #( <ls_cust> ) TO gt_bwasl_inv.
+        ELSE.
+          APPEND CORRESPONDING #( <ls_cust> ) TO gt_bwasl_mod.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+    "нет настройки - нет проверки
+    IF gt_bwasl_inv IS INITIAL OR is_rlambu-bwasl NOT IN gt_bwasl_inv.
+      RETURN.
+    ENDIF.
+    SELECT SINGLE zanlu~invde,
+                  zanlu~invamount,
+                  zanlu~partmov,
+                  anla~aktiv
+      FROM anla
+        JOIN zanlu ON anla~invnr = zanlu~invnr
+      INTO @DATA(ls_asset)
+      WHERE anla~bukrs = @is_rlambu-bukrs
+        AND anla~anln1 = @is_rlambu-anln1
+        AND anla~anln2 = @is_rlambu-anln2 .
+    DATA: lv_years TYPE i.
+    CALL FUNCTION 'HR_IE_CAL_YEARS_BETWEEN_DATES'
+      EXPORTING
+        first_date                  = ls_asset-aktiv
+        second_date                 = is_rlambu-budat
+      IMPORTING
+        years_between_dates         = lv_years
+      EXCEPTIONS
+        sequence_of_dates_not_valid = 1
+        OTHERS                      = 2.
+    IF sy-subrc <> 0.
+      CLEAR lv_years.
+    ENDIF.
+    IF ls_asset-invde = abap_true AND lv_years < 3.
+      DATA(lv_mess_x) = abap_true.
+    ELSEIF ls_asset-partmov = abap_true AND gt_bwasl_mod IS NOT INITIAL.
+      SELECT bzdat
+        INTO @DATA(lv_bzdat)
+        FROM anep
+        WHERE  bukrs = @is_rlambu-bukrs
+           AND anln1 = @is_rlambu-anln1
+           AND anln2 = @is_rlambu-anln2
+           AND afabe = '01'
+           AND bwasl IN  @gt_bwasl_mod
+        ORDER BY bzdat DESCENDING.
+        EXIT.
+      ENDSELECT.
+      IF lv_bzdat > '19000101'.
+        CALL FUNCTION 'HR_IE_CAL_YEARS_BETWEEN_DATES'
+          EXPORTING
+            first_date                  = is_rlambu-bzdat
+            second_date                 = is_rlambu-budat
+          IMPORTING
+            years_between_dates         = lv_years
+          EXCEPTIONS
+            sequence_of_dates_not_valid = 1
+            OTHERS                      = 2.
+        IF sy-subrc <> 0.
+          CLEAR lv_years.
+        ENDIF.
+      ENDIF.
+      IF lv_years < 3 AND  lv_bzdat > '19000101'.
+        lv_mess_x = abap_true.
+      ENDIF.
+    ENDIF.
+    IF lv_mess_x = abap_true.
+      MESSAGE w094(zaa) WITH  |{ ls_asset-invamount NUMBER = ENVIRONMENT }|.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD fill_aufnr.
+    TYPES:
+      lty_t_bseg      TYPE STANDARD TABLE OF bseg.
+    FIELD-SYMBOLS:
+      <lt_bseg> TYPE lty_t_bseg.
+    DATA:
+      lt_subst    TYPE HASHED TABLE OF zaa_aufnr_subst WITH UNIQUE  KEY hkont1 caufn1.
+    SELECT hkont1,
+           caufn1,
+           hkont2,
+           caufn2
+      FROM zaa_aufnr_subst
+      INTO CORRESPONDING FIELDS OF TABLE @lt_subst.
+    IF lt_subst IS INITIAL.
+      RETURN.
+    ENDIF.
+    ASSIGN ('(SAPMF05A)XBSEG[]') TO <lt_bseg>.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+    LOOP AT <lt_bseg> ASSIGNING FIELD-SYMBOL(<ls_bseg>) WHERE aufnr IS NOT INITIAL.
+      READ TABLE lt_subst ASSIGNING FIELD-SYMBOL(<ls_subst>) WITH TABLE KEY
+        hkont1 = <ls_bseg>-hkont
+        caufn1 = <ls_bseg>-aufnr.
+      CHECK sy-subrc = 0.
+      LOOP AT ct_accit ASSIGNING FIELD-SYMBOL(<ls_accit>) WHERE hkont = <ls_subst>-hkont2.
+        <ls_accit>-aufnr = <ls_subst>-caufn2.
+        CLEAR: <ls_accit>-kostl, <ls_accit>-ps_psp_pnr.
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD fill_date_msfo.
+**********************************************************************
+* Описание : замена видов движения при итоговом расчете СПП-элементов
+* Код ТС : DEV.030-БНУ.03.I-006
+* Разработчик : Тараренко О.Н
+* Постановка задачи: Дробышевский К.
+* Redmine #12648
+**********************************************************************
+    " предотвращение множественного выполнения кода
+    IF gv_zanlu_update = abap_false.
+      gv_zanlu_update = abap_true.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    "Заполнение начала экспл в МСФО
+    SELECT SINGLE anla~aktiv, anla~invnr, anla~anlkl, zanlu~expdate
+      FROM anla
+        LEFT JOIN zanlu ON zanlu~invnr = anla~invnr
+      INTO @DATA(ls_anla)
+      WHERE bukrs =  @is_lambu-bukrs
+        AND anln1 =  @is_lambu-anln1
+        AND anln2 =  @is_lambu-anln2.
+
+    IF ls_anla-aktiv IS INITIAL AND ls_anla-expdate IS INITIAL.
+      "RM 13561 #77 ...в классе 8*, 9720*, 9722* (все карточки НКС, кроме 81800000) дата по МСФО не заполняется
+      IF ( ls_anla-anlkl CP '8*' AND ls_anla-anlkl <> '81800000' )
+          OR ( ls_anla-anlkl CP '9720*' ) OR ( ls_anla-anlkl CP '9722*' ).
+        RETURN.
+      ENDIF.
+
+      IF ls_anla-anlkl = '81800000'.
+        CALL FUNCTION 'ZAA_ZANLU_FLD_UPDATE' IN UPDATE TASK
+          EXPORTING
+            iv_fname = CONV string( 'EXPDATE' )
+            iv_fval  = CONV string( is_lambu-bzdat )
+            iv_invnr = ls_anla-invnr.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  method FILL_HIST.
+"{DEV.030-БНУ.03.I-213 Заполнение исторической таблицы при итоговом расчете
+*      IF is_rlambu-vorgn = 'AUUZ' AND is_rlambu-ldgrp = 'L1'
+*        AND is_rlambu-obart = 'PR'.
+*      IF  is_rlambu-ldgrp = 'L1' and is_rlambu-lfdnr = 1.
+*        fill_hist(  EXPORTING is_rlambu  = is_rlambu ).
+*      ENDIF.
+      "}DEV.030-БНУ.03.I-213 Заполнение исторической таблицы при итоговом расчете
+
+
+  endmethod.
+
+
+  method IF_EX_BADI_FIAA_DOCLINES~ADD_DOC_LINES.
+  endmethod.
+
+
+  METHOD if_ex_badi_fiaa_doclines~change_document.
+    "{DEV.030-БНУ.03.I-006 Заполение поля ДатаНачаЭксплуатации для МСФО
+    fill_date_msfo( EXPORTING is_lambu  = is_rlambu ).
+    " DEV.030-БНУ.03.I-006}
+
+    "{ DEV.030-БНУ.03.I-006 (#12648-198,221) При проводке видом движения М33 убирать галку "Признается в МСФО"
+    IF is_rlambu-bwasl = 'M33' OR is_rlambu-bwasl = 'M34'.
+      remove_msfoaccept( EXPORTING is_lambu  = is_rlambu ).
+    ENDIF.
+    "} DEV.030-БНУ.03.I-006
+
+    IF is_acchd-tcode = 'CJ88'.
+      "{DEV.020-БНУ.03.E-158 Замена вида движений при итоговом расчете
+      subs_bwasl_ges( EXPORTING iv_objnr  = is_rlambu-objid
+                      CHANGING  ct_accit  = ct_accit ).
+      "}DEV.020-БНУ.03.E-158 Замена вида движений при итоговом расчете
+    ENDIF.
+    "{ Заполнение ВнЗ по 91 счету при реализации ОС транзакцией F-92
+    IF is_rlambu-tcode = 'FB01'.
+      fill_aufnr(  CHANGING  ct_accit  = ct_accit ).
+    ENDIF.
+    "{  Заполнение ВнЗ по 91 счету при переоценке ОС транзакцией ZFI_REVAS
+    IF is_rlambu-tcode = 'ZFI_REVAS' OR is_rlambu-blart = 'A1'.
+      DATA:
+        lt_91 TYPE SORTED TABLE OF accit WITH UNIQUE KEY bukrs shkzg hkont.
+      LOOP AT ct_accit ASSIGNING FIELD-SYMBOL(<ls_accit>) WHERE hkont(2) = '91'.
+        CLEAR <ls_accit>-kostl.
+        INSERT VALUE #( bukrs = <ls_accit>-bukrs
+                        shkzg = <ls_accit>-shkzg
+                        saknr = <ls_accit>-hkont ) INTO TABLE lt_91.
+      ENDLOOP.
+      IF lt_91 IS NOT INITIAL.
+        SELECT bukrs, shkzg, saknr, aufnr
+          INTO TABLE @DATA(lt_91_aufnr)
+          FROM zmap_saknr_aufnr
+          FOR ALL ENTRIES IN @lt_91
+          WHERE bukrs     = @lt_91-bukrs
+            AND shkzg     = @lt_91-shkzg
+            AND saknr     = @lt_91-saknr
+            AND oper_type = 'AA_REVAS'.
+        SORT lt_91_aufnr BY bukrs shkzg saknr.
+        LOOP AT ct_accit ASSIGNING <ls_accit> WHERE hkont(2) = '91'.
+          READ TABLE lt_91_aufnr ASSIGNING FIELD-SYMBOL(<ls_91_aufnr>)
+            WITH KEY bukrs = <ls_accit>-bukrs
+                     shkzg = <ls_accit>-shkzg
+                     saknr = <ls_accit>-hkont
+                     BINARY SEARCH.
+          IF sy-subrc = 0.
+            <ls_accit>-aufnr = <ls_91_aufnr>-aufnr.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+    IF is_rlambu-ldgrp = 'L1'.                 "{  DEV.030-БНУ.03.O-229
+      check_inv_deffer( is_rlambu ).
+    ENDIF.                                                  "} #14823
+
+  ENDMETHOD.
+
+
+  method IF_EX_BADI_FIAA_DOCLINES~CHANGE_DOC_TYPE.
+  endmethod.
+
+
+  method IF_EX_BADI_FIAA_DOCLINES~GET_LINE_ITEM_SCHEME.
+  endmethod.
+
+
+  METHOD remove_msfoaccept.
+    " Описание : При проводке видом движения М33 убирать галку "Признается в МСФО"
+    " Код ТС : DEV.030-БНУ.03.I-006
+    " Разработчик : Рудько В.П.
+    " Постановка задачи: Дробышевский К.
+    " Redmine #12648-198
+
+    " предотвращение множественного выполнения кода
+    IF gv_remove_msfoaccept = abap_false.
+      gv_remove_msfoaccept = abap_true.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    "Заполнение начала экспл в МСФО
+    DATA:
+      lt_flds TYPE tbspstrings.
+
+    SELECT SINGLE invnr
+      FROM anla
+      INTO @DATA(lv_invnr)
+      WHERE bukrs =  @is_lambu-bukrs
+        AND anln1 =  @is_lambu-anln1
+        AND anln2 =  @is_lambu-anln2.
+
+    IF sy-subrc <> 0 OR lv_invnr = ''.
+      RETURN.
+    ENDIF.
+
+    APPEND 'MSFOACCEPT' TO lt_flds.
+    " begin of 20050
+*    CALL FUNCTION 'ZAA_ZANLZ_UPDATE_ALL_RANGE' IN UPDATE TASK
+*      EXPORTING
+*        is_zanlz = VALUE zanlz( adatu = is_lambu-budat msfoaccept = '' )
+*        it_flds  = lt_flds
+*        iv_invnr = lv_invnr.
+    CALL FUNCTION 'ZAA_ZANLZ_IFRS_UPDATE_ALL_RANG' IN UPDATE TASK
+      EXPORTING
+        is_zanlz_ifrs = VALUE zanlz_ifrs( adatu = is_lambu-budat msfoaccept = '' )
+        it_flds       = lt_flds
+        iv_invnr      = lv_invnr.
+    " end of 20050
+
+  ENDMETHOD.
+
+
+  METHOD resolve_target_bwasl.
+
+    rv_result = iv_src.
+
+    ASSIGN COMPONENT |BWASL_{ iv_src }| OF STRUCTURE is_subst TO FIELD-SYMBOL(<lv_dst>).
+    IF sy-subrc = 0.
+      rv_result = <lv_dst>.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD subs_bwasl_ges.
+************************************************************************************
+* Описание : замена видов движения при итоговом расчете СПП-элементов
+* Код ТС : DEV.030-БНУ.03.E-158
+* Разработчик : Бондарь Я.С.
+* Постановка задачи: Чулаков А.
+* Redmine #13522
+************************************************************************************
+    "---> #13522(41) - "Доработка по задаче 17767" - заменить бизнес-логику
+    DATA: lv_prps  TYPE string.
+    FIELD-SYMBOLS: <ls_lko74> TYPE lko74.
+
+    IF sy-tcode <> 'CJ88' OR gs_cobrb-objid = iv_objnr OR iv_objnr IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    ASSIGN ('(SAPLKO71)LKO74') TO <ls_lko74>.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    DATA(ls_lsko74) = <ls_lko74>.
+
+    CALL FUNCTION 'CONVERSION_EXIT_ABPSP_OUTPUT'
+      EXPORTING
+        input  = iv_objnr
+      IMPORTING
+        output = lv_prps.
+
+    SELECT SINGLE
+           prps~pspnr,
+           prps~imprf,
+           prps~zzps_bwasl,
+           prps~zzps_blart,
+           prps~zzps_datum,
+           subst~*
+      INTO @DATA(ls_prps)
+      FROM prps AS prps
+        LEFT JOIN zps_bwasl AS subst ON subst~ps_bwasl = prps~zzps_bwasl
+      WHERE prps~pspnr = @iv_objnr.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    IF ls_prps-zzps_bwasl IS INITIAL AND ls_lsko74-vaart = 8.
+      MESSAGE e064(zps) WITH  |{ lv_prps }|.
+    ENDIF.
+
+    IF ct_projit IS SUPPLIED.
+      "Для этой ветки пе подстановки не проверялись
+      LOOP AT ct_projit[] ASSIGNING FIELD-SYMBOL(<ls_proj>).
+        LOOP AT <ls_proj>-t_doc_it[] ASSIGNING FIELD-SYMBOL(<ls_doc>).
+          <ls_doc> =  VALUE #( BASE <ls_doc>
+            bwasl =
+              COND #( WHEN ls_lsko74-vaart = 8 AND ls_prps-zzps_bwasl IS NOT INITIAL
+                        THEN resolve_target_bwasl( iv_src = <ls_doc>-bwasl is_subst = ls_prps-subst )
+                        ELSE <ls_doc>-bwasl )
+            budat = COND #( WHEN ls_lsko74-bzdat IS INITIAL OR ls_lsko74-vaart <> 8 THEN <ls_doc>-budat ELSE ls_lsko74-bzdat )
+            "bzdat = COND #( WHEN ls_lsko74-bzdat is INITIAL THEN <ls_doc>-bzdat ELSE ls_lsko74-bzdat )
+          ).
+        ENDLOOP.
+      ENDLOOP.
+
+    ELSE.
+      LOOP AT ct_accit[] ASSIGNING FIELD-SYMBOL(<ls_accit>).
+        <ls_accit> = VALUE #( BASE <ls_accit>
+          anbwa =
+            COND #( WHEN ls_lsko74-vaart = 8 AND ls_prps-zzps_bwasl IS NOT INITIAL
+                      THEN resolve_target_bwasl( iv_src = <ls_accit>-anbwa is_subst = ls_prps-subst )
+                      ELSE <ls_accit>-anbwa )
+          blart = COND #( WHEN ls_lsko74-vaart = 8 AND ls_prps-zzps_blart IS NOT INITIAL
+                            THEN ls_prps-zzps_blart
+                            ELSE <ls_accit>-blart )
+          budat = COND #( WHEN ls_lsko74-bzdat IS INITIAL OR ls_lsko74-vaart <> 8 THEN <ls_accit>-budat ELSE ls_lsko74-bzdat )
+          "bzdat = COND #( WHEN ls_lsko74-bzdat is INITIAL THEN <ls_accit>-bzdat ELSE ls_lsko74-bzdat )
+        ).
+      ENDLOOP.
+    ENDIF.
+
+    RETURN.
+    "<--- #13522(41) - "Доработка по задаче 17767" - заменить бизнес-логику
+
+    FIELD-SYMBOLS:
+      <ls_acc_key>      TYPE if_faa_posting_types=>ty_s_acc_key_ext.
+
+    IF gt_bwasl_subs IS INITIAL AND gv_no_subs IS INITIAL.
+      SELECT *
+         FROM zps_bwasl_imprf
+         INTO TABLE gt_bwasl_subs.
+      IF gt_bwasl_subs IS INITIAL.
+        gv_no_subs = abap_true.
+      ENDIF.
+    ENDIF.
+
+    " gs_cobrb-objid заполняется при вызове из IF_EX_BADI_FIAA_DOCLINES~CHANGE_DOCUMENT
+    IF gs_cobrb-objid <> iv_objnr AND iv_objnr IS NOT INITIAL.
+      "выборка профиля инвестиций и даты первой проводки у ОС - получателя итогового расчета
+      "определение признака существования несторнированного расчета
+      SELECT SINGLE
+             prps~pspnr AS objid,
+             prps~imprf,
+             auak~belnr
+        INTO @gs_cobrb
+        FROM prps LEFT JOIN auak ON auak~objnr  = prps~objnr
+                                  AND auak~perbz = 'GES'
+                                  AND auak~stflg = @abap_false
+                                  AND auak~stokz = @abap_false
+        WHERE prps~pspnr = @iv_objnr.
+      IF gs_cobrb-belnr IS NOT INITIAL.
+        gs_cobrb-imprf = 'ZUGDT'.
+      ENDIF.
+    ENDIF.
+
+    IF gs_cobrb-imprf IS NOT INITIAL AND gv_no_subs IS INITIAL.
+      IF ct_projit IS SUPPLIED.
+        LOOP AT ct_projit ASSIGNING <ls_proj>.
+          LOOP AT <ls_proj>-t_doc_it ASSIGNING <ls_doc>.
+            <ls_doc>-bwasl =  VALUE #( gt_bwasl_subs[ old_bwasl = <ls_doc>-bwasl
+                                                      imprf = gs_cobrb-imprf ]-new_bwasl DEFAULT <ls_doc>-bwasl ).
+          ENDLOOP.
+        ENDLOOP.
+
+      ELSE.
+        LOOP AT ct_accit ASSIGNING <ls_accit>.
+          <ls_accit>-anbwa =  VALUE #( gt_bwasl_subs[ old_bwasl = <ls_accit>-anbwa
+                                                      imprf  = gs_cobrb-imprf ]-new_bwasl DEFAULT <ls_accit>-anbwa ).
+        ENDLOOP.
+      ENDIF.
+
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

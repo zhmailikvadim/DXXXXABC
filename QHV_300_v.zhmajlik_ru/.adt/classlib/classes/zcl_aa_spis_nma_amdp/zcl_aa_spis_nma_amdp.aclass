@@ -1,0 +1,313 @@
+CLASS ZCL_AA_SPIS_NMA_AMDP DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    INTERFACES IF_AMDP_MARKER_HDB.
+
+    TYPES:
+      BEGIN OF GTY_S_HEADER,
+        BUKRS TYPE BUKRS,                         "ОБОСОБЛЕННОЕ ПОДРАЗДЕЛЕНИЕ
+        BNAME TYPE CHAR200,                       "НАИМ ОБОСОБЛ ПОДРАЗДЕЛЕНИЯ
+        INVNR TYPE ANLA-INVNR,                    "ИНВЕНТАРНЫЙ НОМЕР
+        TXT50 TYPE CHAR256,                       "НАИМЕНОВАНИЕ ОБЪЕКТА ОС
+        AKTIV TYPE ANLA-AKTIV,
+      END OF GTY_S_HEADER,
+      GTY_T_HEADER TYPE STANDARD TABLE OF GTY_S_HEADER,
+      BEGIN OF GTY_S_DATA,
+        RAUMN       TYPE CHAR100,                       "СТРУКТУРНОЕ ПОДРАЗДЕЛЕНИЕ " HRP1000-STEXT,
+        NAZNUSE     TYPE CHAR100,                       "ВИД ДЕЯТЕЛЬНОСТИ
+        DEBET       TYPE CHAR256,                       "СЧЕТ ДЕБЕТА
+        KREDIT      TYPE CHAR256,                       "СЧЕТ КРЕДИТА
+        KANSW       TYPE KANSW,                         "ПЕРВОНАЧАЛЬНАЯ (ПЕРЕОЦЕНЕННАЯ) СТОИМОСТЬ ЗНАЧЕНИЕ НА ДАТУ ФОРМИРОВАНИЯ АКТА.
+        KNAFA       TYPE KNAFA,                         "НАКОПЛЕННАЯ АМОРТИЗАЦИЯ                  ЗНАЧЕНИЕ НА ДАТУ ФОРМИРОВАНИЯ АКТА
+        NETVL       TYPE VTCUR12,                       "ОСТАТОЧНАЯ СТОИМОСТЬ
+        INVNR       TYPE ANLA-INVNR,                    "ИНВЕНТАРНЫЙ НОМЕР
+        ZZNUMCADAST TYPE VIBDAO-ZZNUMCADAST,            "КАДАСТРОВЫЙ НОМЕР
+        FLAG_ER     TYPE I,                             "ПРИЗНАК ТОГО ЧТО ЕСТЬ ДВИЖЕНИЯ ПОСЛЕ ДАТЫ ВЫБЫТИЯ
+      END OF GTY_S_DATA,
+      GTY_T_DATA TYPE STANDARD TABLE OF GTY_S_DATA,
+      BEGIN OF GTY_S_CORR_ITEMS,
+        DEBET  TYPE J_3RKDEBET,                     "СЧЕТ ДЕБЕТА
+        KREDIT TYPE J_3RKKREDIT,                    "СЧЕТ КРЕДИТА
+      END OF GTY_S_CORR_ITEMS,
+      GTY_T_CORR_ITEMS TYPE STANDARD TABLE OF GTY_S_CORR_ITEMS.
+
+    CLASS-METHODS:
+      GET_DATA
+        IMPORTING
+          VALUE(IV_BUKRS)      TYPE BUKRS
+          VALUE(IV_ANLN1)      TYPE ANLN1
+          VALUE(IV_ANLN2)      TYPE ANLN2
+          VALUE(IV_SDATE)      TYPE d
+          VALUE(IV_DISPOSAL)   TYPE SY-DATUM
+          VALUE(IV_A)          TYPE CHAR50
+          VALUE(IV_NA)         TYPE CHAR50
+        EXPORTING
+          VALUE(ET_HEADER)     TYPE GTY_T_HEADER
+          VALUE(ET_DATA)       TYPE GTY_T_DATA
+          VALUE(ET_CORR_ITEMS) TYPE GTY_T_CORR_ITEMS
+        RAISING   CX_AMDP_ERROR.
+ENDCLASS.
+
+
+
+CLASS ZCL_AA_SPIS_NMA_AMDP IMPLEMENTATION.
+
+
+  METHOD GET_DATA BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT OPTIONS READ-ONLY
+                  USING ANLA T001 BUT000 FAAV_ANEK ZAFULL ANLZ ZANLZ BKPF J_3RK_CORR_ITEMS HRP1000
+                        VIBDOBJASS VIBDAO VIBDPR VIBDOBJREL ZAA_UTILS_HDB=>GET_ASSET_VALUES
+                        FAAV_ANLP FAAT_PLAN_VALUES FAAV_ANEP TABW TABWG ZAA_UTILS_HDB=>GET_ASSET_VAL_NG.
+
+    DECLARE LV_SPRAS  CHAR(1) := SESSION_CONTEXT('LOCALE_SAP');
+    DECLARE LV_MANDT  CHAR(3) := SESSION_CONTEXT('CLIENT');
+    DECLARE LV_ADATE  CHAR(8) := TO_DATS( LEFT ( ADD_MONTHS( :IV_DISPOSAL, 1),8)||'01');
+    DECLARE LV_GDATE  CHAR(8) := YEAR (:IV_DISPOSAL) || '0000';                                -- ДАТА НАЧАЛО ГОДА
+    DECLARE LV_EDATEY CHAR(8) := YEAR (:IV_DISPOSAL) || '1231';                                -- ДАТА КОНЦА ГОДА
+    DECLARE LV_BDATE  CHAR(8) := TO_DATS( YEAR (:IV_DISPOSAL)||'0101');
+    DECLARE LV_EDATE  CHAR(8) := TO_DATS(LAST_DAY(:IV_DISPOSAL) );                             -- ДАТА ОКОНЧАНИЯ ОТЧЕТА
+    DECLARE LV_ADDDATE CHAR(8) := TO_DATS( ADD_DAYS( :IV_DISPOSAL, 1));
+
+    ET_HEADER =
+    SELECT
+      T001.BUKRS,
+      BU.NAME_ORG1 || CHAR(32) || BU.NAME_ORG2 || BU.NAME_ORG3 || BU.NAME_ORG4 AS BNAME,
+      ANLA.INVNR,
+      ZAFULL.TXTF1 || CHAR(32) || ZAFULL.TXTF2 AS TXT50,
+      CASE WHEN ANLA.AKTIV <> '' THEN ANLA.AKTIV END AS AKTIV
+    FROM ANLA AS ANLA
+      INNER JOIN T001 AS T001 ON T001.MANDT = ANLA.MANDT
+                             AND T001.BUKRS = ANLA.BUKRS
+      LEFT JOIN ZAFULL AS ZAFULL ON ZAFULL.MANDT = ANLA.MANDT
+                                AND ZAFULL.BUKRS = ANLA.BUKRS
+                                AND ZAFULL.ANLN1 = ANLA.ANLN1
+                                AND ZAFULL.ANLN2 = ANLA.ANLN2
+      LEFT OUTER JOIN BUT000 AS BU ON BU.CLIENT  = ANLA.MANDT
+                                  AND BU.PARTNER = LPAD( T001.BUKRS, 10, '0')
+    WHERE ANLA.MANDT = :LV_MANDT
+      AND ANLA.BUKRS = :IV_BUKRS
+      AND ANLA.ANLN1 = :IV_ANLN1
+      AND ANLA.ANLN2 = :IV_ANLN2
+      AND ANLA.AKTIV <> '00000000';
+
+ LT_DATA =
+   SELECT
+     ANLA.BUKRS,
+     ANLA.ANLN1,
+     ANLA.ANLN2,
+     HRP1000.STEXT                               AS RAUMN,
+     CASE WHEN ZANLZ.NAZNUSE = 1 THEN :IV_A
+          WHEN ZANLZ.NAZNUSE = 2 THEN :IV_NA END AS NAZNUSE,
+     ''                                          AS DEBET,
+     ''                                          AS KREDIT,
+     ABS(ASSET.KANSW) AS KANSW,                                   -- ПЕРВОНАЧАЛЬНАЯ (ПЕРЕОЦЕНЕННАЯ) СТОИМОСТЬ
+     ANLA.INVNR,
+     VIBDAO.ZZNUMCADAST,
+     ANLA.DEAKT
+   FROM ANLA AS ANLA
+     LEFT JOIN ZAFULL AS ZAFULL ON ZAFULL.MANDT = ANLA.MANDT
+                               AND ZAFULL.BUKRS = ANLA.BUKRS
+                               AND ZAFULL.ANLN1 = ANLA.ANLN1
+                               AND ZAFULL.ANLN2 = ANLA.ANLN2
+     LEFT JOIN ANLZ AS ANLZ ON ANLZ.MANDT = ANLA.MANDT
+                           AND ANLZ.BUKRS = ANLA.BUKRS
+                           AND ANLZ.ANLN1 = ANLA.ANLN1
+                           AND ANLZ.ANLN2 = ANLA.ANLN2
+                           AND ANLZ.BDATU >= TO_DATS(:IV_DISPOSAL)
+                           AND ANLZ.ADATU <= TO_DATS(:IV_DISPOSAL)
+     LEFT JOIN HRP1000 AS HRP1000 ON HRP1000.MANDT = ANLZ.MANDT
+                                 AND HRP1000.PLVAR = '01'
+                                 AND HRP1000.OTYPE = 'O'
+                                 AND HRP1000.OBJID = ANLZ.RAUMN
+                                 AND HRP1000.ISTAT = '1'
+                                 AND HRP1000.BEGDA <= TO_DATS(:IV_DISPOSAL)
+                                 AND HRP1000.ENDDA >= TO_DATS(:IV_DISPOSAL)
+                                 AND HRP1000.LANGU = :LV_SPRAS
+     LEFT JOIN ZANLZ AS ZANLZ ON ZANLZ.MANDT = ANLA.MANDT
+                             AND ZANLZ.INVNR = ANLA.INVNR
+                             AND ZANLZ.BDATU >= TO_DATS(:IV_DISPOSAL)
+                             AND ZANLZ.ADATU <= TO_DATS(:IV_DISPOSAL)
+     LEFT JOIN VIBDOBJASS AS VIBDOBJASS ON VIBDOBJASS.MANDT = :LV_MANDT
+                                       AND SUBSTRING( VIBDOBJASS.OBJNRTRG,1,2 )  = 'AN'
+                                       AND SUBSTRING( VIBDOBJASS.OBJNRTRG,3,2 )  = ANLA.BUKRS
+                                       AND SUBSTRING( VIBDOBJASS.OBJNRTRG,7,12 ) = ANLA.ANLN1
+                                       AND SUBSTRING( VIBDOBJASS.OBJNRTRG,19,4 ) = ANLA.ANLN2
+                                       AND VIBDOBJASS.OBJASSTYPE = '63'
+                                       AND VIBDOBJASS.VALIDFROM < NOW( )
+                                       AND VIBDOBJASS.VALIDTO > NOW( )
+     LEFT JOIN VIBDPR AS VIBDPR ON VIBDPR.MANDT = VIBDOBJASS.MANDT
+                               AND VIBDPR.OBJNR = VIBDOBJASS.OBJNRSRC
+     LEFT JOIN VIBDOBJREL AS VIBDOBJREL ON VIBDOBJREL.MANDT      = VIBDPR.MANDT
+                                       AND VIBDOBJREL.INTRENOTRG = VIBDPR.INTRENO
+     LEFT JOIN VIBDAO AS VIBDAO ON VIBDAO.MANDT   = VIBDOBJREL.MANDT
+                               AND VIBDAO.INTRENO = VIBDOBJREL.INTRENOSRC
+
+     LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES"( :LV_MANDT, :LV_ADDDATE, '' ) AS ASSET
+                               ON ASSET.BUKRS = ANLA.BUKRS
+                              AND ASSET.ANLN1 = ANLA.ANLN1
+                              AND ASSET.ANLN2 = ANLA.ANLN2
+                              AND ASSET.AFABE = '01'
+        WHERE ANLA.MANDT = :LV_MANDT
+          AND ANLA.BUKRS = :IV_BUKRS
+          AND ANLA.ANLN1 = :IV_ANLN1
+          AND ANLA.ANLN2 = :IV_ANLN2
+          AND ANLA.DEAKT <> ''
+          AND ANLA.AKTIV <> '00000000'
+        GROUP BY ANLA.BUKRS, ANLA.ANLN1, ANLA.ANLN2, HRP1000.STEXT, ZANLZ.NAZNUSE,
+                 ASSET.KANSW, ANLA.INVNR, VIBDAO.ZZNUMCADAST, ANLA.DEAKT;
+
+-- РАССЧИТЫВАЮТСЯ СТОИМОСТИ НА НАЧАЛО И КОНЕЦ ОТЧЕТА
+  LT_VALS =
+    SELECT BUKRS,
+           ANLN1,
+           ANLN2,
+           ABS(COALESCE(KANSW_DISPB,VALUE_BEG)) AS VALUE_BEG,  -- ПЕРВОНАЧАЛЬНАЯ СТОИМОСТЬ
+           ABS(COALESCE(NETVL_DISPB,NETVL_BEG)) AS NETVL_BEG,  -- НАКОПЛЕННАЯ АМОРТИЗАЦИЯ
+           ABS(COALESCE(KANSW_DISPE,VALUE_END)) AS VALUE_END,
+           ABS(COALESCE(NETVL_DISPE,NETVL_END)) AS NETVL_END,
+           FLAG_ER AS FLAG_ER                                  -- ПРИЗНАК ТОГО ЧТО ЕСТЬ ДВИЖЕНИЯ ПОСЛЕ ДАТЫ ВЫБЫТИЯ
+      FROM ( SELECT DT.BUKRS,
+                    DT.ANLN1,
+                    DT.ANLN2,
+                    SUM(CASE WHEN MOVS.BUDAT = :IV_DISPOSAL  THEN MOVS.KANSW END) AS KANSW_DISPB,
+                    SUM(CASE WHEN MOVS.BUDAT < :LV_BDATE     THEN MOVS.KANSW END) AS VALUE_BEG,
+                    SUM(CASE WHEN MOVS.BUDAT = :IV_DISPOSAL  THEN MOVS.NETVL END) AS NETVL_DISPB,
+                    SUM(CASE WHEN MOVS.BUDAT < :LV_BDATE     THEN MOVS.NETVL END) AS NETVL_BEG,
+
+                    SUM(CASE WHEN MOVS.BUDAT = :IV_DISPOSAL  THEN MOVS.KANSW END) AS KANSW_DISPE,
+                    SUM(CASE WHEN MOVS.BUDAT <= :LV_EDATE    THEN MOVS.KANSW END) AS VALUE_END,
+                    SUM(CASE WHEN MOVS.BUDAT = :IV_DISPOSAL  THEN MOVS.NETVL END) AS NETVL_DISPE,
+                    SUM(CASE WHEN MOVS.BUDAT <= :LV_EDATE    THEN MOVS.NETVL END) AS NETVL_END,
+
+                    SUM(CASE WHEN MOVS.BWASL = '' THEN 0
+                             ELSE
+                               CASE WHEN MOVS.BUDAT > :LV_BDATE AND MOVS.BUDAT <= :LV_EDATEY AND MOVS.BUDAT > :IV_DISPOSAL
+                               THEN CASE WHEN MOVS.BUDAT <> :IV_DISPOSAL
+                                         THEN 1 ELSE 0 END
+                               ELSE 0 END
+                    END) AS FLAG_ER
+               FROM "ZAA_UTILS_HDB=>GET_ASSET_VAL_NG"( SESSION_CONTEXT('CLIENT') ) AS MOVS
+                 INNER JOIN :LT_DATA AS DT ON  DT.BUKRS = MOVS.BUKRS
+                                           AND DT.ANLN1 = MOVS.ANLN1
+                                           AND DT.ANLN2 = MOVS.ANLN2
+              WHERE MOVS.AFABE = '01'
+                AND ( DT.DEAKT <> '00000000' AND ( MOVS.BWASL <> '' OR RIGHT (MOVS.BUDAT,4) = '0000' )
+                 OR DT.DEAKT = '00000000' ) -- ЕСЛИ СПИСАНИЯ НЕ БЫЛО
+                AND MOVS.BUDAT >= :LV_GDATE
+                AND MOVS.BUDAT <= :LV_EDATEY
+              GROUP BY DT.BUKRS, DT.ANLN1, DT.ANLN2);
+
+LT_FAA_ALL =
+  SELECT *
+    FROM (-- АМОРТИЗАЦИЯ ИЗ ПРОВЕДЕННЫХ ЗНАЧЕНИЙ
+          SELECT FAAV.BUKRS AS BUKRS,
+                 FAAV.ANLN1 AS ANLN1,
+                 FAAV.ANLN2 AS ANLN2,
+                 FAAV.PERAF AS POPER,
+                 COALESCE(ABS(SUM(FAAV.NAFAZ)),0) AS NAFA,
+                 'F' AS TYP
+            FROM FAAV_ANLP AS FAAV
+           WHERE FAAV.MANDT = :LV_MANDT
+             AND FAAV.BUKRS = :IV_BUKRS
+             AND FAAV.ANLN1 = :IV_ANLN1
+             AND FAAV.ANLN2 = :IV_ANLN2
+             AND FAAV.AFABER = '01'
+             AND FAAV.PERAF <= LPAD(MONTH( :IV_DISPOSAL ), 3, '0' )
+             AND FAAV.GJAHR = YEAR ( :IV_DISPOSAL )
+           GROUP BY BUKRS, ANLN1, ANLN2, PERAF
+      UNION ALL
+          -- АМОРТИЗАЦИЯ ИЗ ПЛАНОВЫХ ЗНАЧЕНИЙ
+          SELECT FAAT.BUKRS AS BUKRS,
+                 FAAT.ANLN1 AS ANLN1,
+                 FAAT.ANLN2 AS ANLN2,
+                 FAAT.POPER AS POPER,
+                 COALESCE(ABS(SUM(FAAT.HSL)),0) AS NAFA,
+                 'P' AS TYP
+            FROM FAAT_PLAN_VALUES AS FAAT
+           WHERE FAAT.MANDT = :LV_MANDT
+             AND FAAT.BUKRS = :IV_BUKRS
+             AND FAAT.ANLN1 = :IV_ANLN1
+             AND FAAT.ANLN2 = :IV_ANLN2
+             AND FAAT.AFABE = '01'
+             AND FAAT.GJAHR = YEAR( :IV_DISPOSAL )
+             AND FAAT.POPER <= LPAD(MONTH( :IV_DISPOSAL ), 3, '0' )
+           GROUP BY BUKRS, ANLN1, ANLN2, POPER )
+   ORDER BY BUKRS, ANLN1,ANLN2, POPER, TYP;
+
+ LT_DATA_PLAN =
+   SELECT S1.BUKRS,
+          S1.ANLN1,
+          S1.ANLN2,
+          SUM(S1.NAFA) AS NAFA
+     FROM (SELECT S1.BUKRS,
+                  S1.ANLN1,
+                  S1.ANLN2,
+                  S1.POPER,
+                  CASE WHEN S2.TYP = S1.TYP AND S1.TYP = 'P' THEN S1.NAFA ELSE 0 END AS NAFA,
+                  S1.TYP
+             FROM :LT_FAA_ALL AS S1
+               LEFT JOIN :LT_FAA_ALL AS S2 ON  S2.BUKRS = S1.BUKRS
+                                           AND S2.ANLN1 = S1.ANLN1
+                                           AND S2.ANLN2 = S1.ANLN2
+                                           AND S2.POPER = S1.POPER ) AS S1
+    GROUP BY BUKRS, ANLN1, ANLN2;
+
+  ET_DATA =
+   SELECT DATA.RAUMN, DATA.NAZNUSE, DATA.DEBET, DATA.KREDIT,
+          CASE WHEN VL.FLAG_ER > 0 THEN COALESCE( VL.VALUE_BEG,DATA.KANSW) ELSE COALESCE( VL.VALUE_END,DATA.KANSW) END               AS KANSW,
+          ( CASE WHEN VL.FLAG_ER > 0 THEN VL.VALUE_BEG - VL.NETVL_BEG ELSE VL.VALUE_END - VL.NETVL_END END ) + COALESCE(PLAN.NAFA,0) AS KNAFA,
+          ( CASE WHEN VL.FLAG_ER > 0 THEN VL.NETVL_BEG ELSE VL.NETVL_END END ) - COALESCE(PLAN.NAFA,0)                               AS NETVL,
+          DATA.INVNR,DATA.ZZNUMCADAST,
+          VL.FLAG_ER AS FLAG_ER
+     FROM :LT_DATA AS DATA
+       LEFT JOIN :LT_DATA_PLAN AS PLAN ON  PLAN.BUKRS = DATA.BUKRS
+                                       AND PLAN.ANLN1 = DATA.ANLN1
+                                       AND PLAN.ANLN2 = DATA.ANLN2
+       LEFT JOIN :LT_VALS AS VL ON  VL.BUKRS = DATA.BUKRS
+                                AND VL.ANLN1 = DATA.ANLN1
+                                AND VL.ANLN2 = DATA.ANLN2;
+
+  ET_CORR_ITEMS =
+    SELECT DISTINCT
+        DEBET,
+        KREDIT
+      FROM J_3RK_CORR_ITEMS AS CITEMS
+        INNER JOIN BKPF AS BKPF ON  BKPF.MANDT = CITEMS.MANDT
+                                AND BKPF.BUKRS = CITEMS.BUKRS
+                                AND BKPF.BELNR = CITEMS.BELNR
+                                AND BKPF.GJAHR = CITEMS.GJAHR
+        INNER JOIN FAAV_ANEK AS ANEK ON  ANEK.MANDT = BKPF.MANDT
+                                     AND ANEK.AWTYP = BKPF.AWTYP
+                                     AND ANEK.BELNR || ANEK.AWORG = BKPF.AWKEY
+                                     AND ANEK.BUDAT = BKPF.BUDAT
+                                     AND ANEK.LDGRP = BKPF.LDGRP
+        INNER JOIN ANLA AS ANLA ON  ANLA.MANDT = ANEK.MANDT
+                                AND ANLA.BUKRS = ANEK.BUKRS
+                                AND ANLA.ANLN1 = ANEK.ANLN1
+                                AND ANLA.ANLN2 = ANEK.ANLN2
+        INNER JOIN FAAV_ANEP AS ANEP ON  ANEP.MANDT = ANEK.MANDT
+                                     AND ANEP.BUKRS = ANEK.BUKRS
+                                     AND ANEP.ANLN1 = ANEK.ANLN1
+                                     AND ANEP.ANLN2 = ANEK.ANLN2
+                                     AND ANEP.GJAHR = ANEK.GJAHR
+                                     AND ANEP.LNRAN = ANEK.LNRAN
+                                     AND ANEP.AFABE = '01'
+                                     --AND ANEP.LNSAN <> ''
+                                     AND ( ANEP.LNSAN = '' OR ANEP.LNSAN = '00000' ) --СТОРНИРОВАННЫЕ ОТСЕКАЕМ
+          JOIN TABW AS TABW ON  TABW.MANDT = ANEP.MANDT
+                            AND TABW.BWASL = ANEP.BWASL
+          JOIN TABWG AS TABWG ON  TABWG.MANDT  = TABW.MANDT
+                              AND TABWG.BWAGRP = TABW.BWAGRP
+                              AND TABWG.GITCOL = '2'
+      WHERE ANEK.MANDT = :LV_MANDT
+        AND ANEK.BUKRS = :IV_BUKRS
+        AND ANEK.ANLN1 = :IV_ANLN1
+        AND ANEK.ANLN2 = :IV_ANLN2
+        AND ANEK.LDGRP = 'L1'
+        AND CITEMS.BUDAT = :IV_DISPOSAL
+      ORDER BY DEBET;
+
+  ENDMETHOD.
+ENDCLASS.

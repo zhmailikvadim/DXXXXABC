@@ -1,0 +1,662 @@
+*----------------------------------------------------------------------*
+*   INCLUDE LBUBA_4A01                                                 *
+*----------------------------------------------------------------------*
+form address_data_save.
+
+  data:
+      lt_object_types like tsadrv occurs 0 with header line,
+      lt_address_group like adagroups occurs 0 with header line,
+      lt_person_group  like adpgroups occurs 0 with header line,
+      lv_cd_suppressed type boole-boole.
+
+  call function 'BUP_MEMORY_PREPARE_FOR_UPD_ADR'.
+
+*------------- save the BP-address data -------------------------------*
+  call function 'BUP_MEMORY_ADDRESS_SAVE'
+    exporting
+      iv_update_task    = gc_x
+      iv_xgeocoding_off = gv_xgeocoding_off.
+
+*------------- save the BAS addresses---------------------------------*
+   call function 'BUPA_CHECK_CD_SUPPRESSED'
+     IMPORTING
+       ev_cd_suppressed = lv_cd_suppressed.
+   IF NOT lv_cd_suppressed IS INITIAL.
+     call function 'ADDR_SUPPRESS_CHANGE_DOCUMENTS'
+       EXPORTING
+         suppress_cd_type_1 = gc_x
+         suppress_cd_type_2 = gc_x
+         suppress_cd_type_3 = gc_x.
+   ENDIF.
+
+  if not  gv_addr_memory_save is initial.
+
+*------ Change documents in the BAS do not delete -> consulting note
+    if 1 = 2.
+      lt_object_types-tablename = 'BUT000'.
+      lt_object_types-fieldname = 'PARTNER'.
+      append lt_object_types.
+      call function 'ADDR_WRITE_CD_FOR_DELETION'
+        tables
+          object_types = lt_object_types.
+    endif.
+    call function 'OM_FUNC_MODULE_EXIST'
+      exporting
+        function_module = 'ADDR_MEMORY_SAVE_GROUP_FILTER'
+      exceptions
+        not_existent    = 1
+        others          = 2.
+
+    if sy-subrc = 0.
+      lt_person_group-pers_group = gc_addr_group.
+      append lt_person_group.
+      lt_address_group-addr_group = gc_addr_group.
+      append lt_address_group.
+      lt_address_group-addr_group = 'CAM1'.
+      append lt_address_group.
+      call function 'ADDR_MEMORY_SAVE_GROUP_FILTER'
+        tables
+          it_address_group      = lt_address_group
+          it_person_group       = lt_person_group
+        exceptions
+          invalid_address_group = 1
+          invalid_person_group  = 2.               "#EC EXISTS
+    endif.
+
+    call function 'ADDR_MEMORY_SAVE'
+      exporting
+        execute_in_update_task = gc_x
+      exceptions
+        others                 = 1.
+
+    if  sy-subrc    >   0
+    and sy-msgty    co  'EA'.
+       message  ID  sy-msgid    TYPE  gc_msgty_abort   NUMBER  sy-msgno
+              with  sy-msgv1  sy-msgv2  sy-msgv3  sy-msgv4.
+       clear: gv_addr_memory_save.
+    endif.
+
+  endif.
+
+* Initilisation of the global memory after the Update
+
+endform.                    "ADDRESS_DATA_SAVE
+*----------------------------------------------------------------------*
+*    Read the table BUT020
+*----------------------------------------------------------------------*
+form bp_adr_read tables     et_return     structure bapiret2
+                            et_but020     structure bus020___i
+                            et_but020_old structure bus020___i
+                  using     i_partner      like but020-partner
+                            i_addrnumber   like but020-addrnumber
+                            i_guid         like but020-address_guid
+                  changing  i_memory_found like boole-boole.
+
+  data: lt_return         like bapiret2   occurs 0 with header line,
+        lt_but020         like bus020___i occurs 0 with header line,
+        ls_address        like but020,
+        ls_but000         like bus000___i,
+        ls_but000_old     like bus000___i,
+        lv_rc             like sy-subrc.
+
+
+  clear i_memory_found.
+
+*---> Address in the memory?
+  call function 'BUP_MEMORY_BUT020_GET'
+    exporting
+      iv_partner      = i_partner
+    tables
+      et_but020       = et_but020
+      et_but020_old_aktyp = et_but020_old
+    exceptions
+      not_found       = 1
+      parameter_error = 2
+      others          = 3.
+
+  if sy-subrc ne 0.
+*---> read the data base
+    call function 'BUA_BUT020_SELECT_WITH_PARTNER'
+      exporting
+        i_partner        = i_partner
+        i_valdt_sel      = '00000000'
+      tables
+        t_but020         = et_but020
+      exceptions
+        not_found        = 1
+        wrong_parameters = 2
+        internal_error   = 3
+        others           = 4.
+    if sy-subrc <> 0.
+      lt_return-type       = sy-msgty.
+      lt_return-id         = sy-msgid.
+      lt_return-number     = sy-msgno.
+      lt_return-message_v1 = sy-msgv1.
+      lt_return-message_v2 = sy-msgv2.
+      lt_return-message_v3 = sy-msgv3.
+      lt_return-message_v4 = sy-msgv4.
+      append lt_return.
+      et_return[] = lt_return[].
+      exit.
+    else.
+      loop at et_but020  where  not xdfadr  IS initial.
+        clear  et_but020-xdfadr.
+        modify  et_but020  transporting   xdfadr.
+      endloop.
+      et_but020_old[] = et_but020[].
+    endif.
+  else.
+    i_memory_found = gc_x.
+  endif.
+
+* Check if as the case may be the data which are also relevant
+* for the BAS are changed with the FM BUPA_CENTRAL_CHANGE
+  if i_memory_found is initial.
+    call function 'BUP_MEMORY_BUT000_GET'
+      exporting
+        iv_partner      = i_partner
+      importing
+        es_but000       = ls_but000
+        es_but000_old   = ls_but000_old
+      exceptions
+        not_found       = 1
+        parameter_error = 2
+        others          = 3.
+
+    if sy-subrc = 0.
+      if not ls_but000-langu_corr = ls_but000_old-langu_corr or
+         not ls_but000-title      = ls_but000_old-title      or
+         not ls_but000-name_last  = ls_but000_old-name_last  or
+         not ls_but000-name_first = ls_but000_old-name_first or
+         not ls_but000-name_lst2  = ls_but000_old-name_lst2  or
+         not ls_but000-name_last2 = ls_but000_old-name_last2 or
+         not ls_but000-namemiddle = ls_but000_old-namemiddle or
+         not ls_but000-name1_text = ls_but000_old-name1_text or
+         not ls_but000-title_aca1 = ls_but000_old-title_aca1 or
+         not ls_but000-title_aca2 = ls_but000_old-title_aca2 or
+         not ls_but000-prefix1    = ls_but000_old-prefix1    or
+         not ls_but000-prefix2    = ls_but000_old-prefix2    or
+         not ls_but000-title_royl = ls_but000_old-title_royl or
+         not ls_but000-nickname   = ls_but000_old-nickname   or
+         not ls_but000-initials   = ls_but000_old-initials   or
+         not ls_but000-nameformat = ls_but000_old-nameformat or
+         not ls_but000-namcountry = ls_but000_old-namcountry or
+         not ls_but000-bu_sort1   = ls_but000_old-bu_sort1   or
+         not ls_but000-bu_sort2   = ls_but000_old-bu_sort2   or
+         not ls_but000-xsexm      = ls_but000_old-xsexm      or
+         not ls_but000-xsexf      = ls_but000_old-xsexf      or
+         not ls_but000-xsexu      = ls_but000_old-xsexu      or
+         not ls_but000-name_org1  = ls_but000_old-name_org1  or
+         not ls_but000-name_org2  = ls_but000_old-name_org2  or
+         not ls_but000-name_org3  = ls_but000_old-name_org3  or
+         not ls_but000-name_org4  = ls_but000_old-name_org4  or
+         not ls_but000-name_grp1  = ls_but000_old-name_grp1  or
+         not ls_but000-name_grp2  = ls_but000_old-name_grp2.
+        i_memory_found = gc_x.
+      endif.
+    endif.
+  endif.
+endform.                    "BP_ADR_READ
+*----------------------------------------------------------------------*
+* Read the table BUT021                                                *
+*----------------------------------------------------------------------*
+form bp_adr_use_read tables et_return     structure bapiret2
+                            et_but021     structure bus021_fs_i
+                            et_but021_old structure bus021_fs_i
+                     using  i_partner     like but021-partner
+                            i_addrnumber  like but021-addrnumber.
+
+  data: lt_return  like bapiret2 occurs 0 with header line,
+        lt_addruse like but021_fs  occurs 0 with header line.
+
+*--> at first the memroy
+  call function 'BUP_MEMORY_BUT021_GET_ALL'
+    exporting
+      iv_partner      = i_partner
+    tables
+      et_but021       = et_but021
+      et_but021_old_aktyp = et_but021_old
+    exceptions
+      not_found       = 1
+      parameter_error = 2
+      others          = 3.
+
+  if sy-subrc <> 0.
+*--> read the data base, if nothing is found in the memory
+    call function 'BUA_BUT021_SELECT_WITH_PARTNER'
+      exporting
+        i_partner        = i_partner
+        i_valdt_sel      = '00000000'
+      tables
+        t_but021_fs      = et_but021
+      exceptions
+        not_found        = 1
+        wrong_parameters = 2
+        internal_error   = 3
+        others           = 4.
+
+    if sy-subrc <> 0.
+      perform exception_message_store tables et_return.
+      exit.
+    else.
+      et_but021_old[] = et_but021[].
+    endif.
+  endif.
+endform.                    "BP_ADR_USE_READ
+*eject.
+*----------------------------------------------------------------------*
+*              Form ADDR_CHECK_DELETE                                  *
+*----------------------------------------------------------------------
+*             Check, if the address can be deleted                     *
+*                                                                      *
+*----------------------------------------------------------------------*
+form addr_check_delete tables et_return structure bapiret2
+                       using    iv_partner like but000-partner
+                                iv_partner_guid like but000-partner_guid
+                                iv_addrnumber like but020-addrnumber
+                                iv_address_guid like but020-address_guid
+                       changing ev_xdel    like boole-boole.
+
+*------ local data declaration ----------------------------------------
+  constants: lc_calltp_dialog like bus000flds-char1 value '2',
+             lc_dele_no       like bus000flds-char1 value '3',
+             lc_dele_possible like bus000flds-char1 value '2',
+             lc_dele_yes      like bus000flds-char1 value '1'.
+  data:      lt_tbz1f         like tbz1f occurs 0 with header line,
+             lv_result        like bus000flds-char1,
+             lv_result_total  like bus000flds-char1,
+             lv_answer        like bus000flds-char1,
+             lv_msgv1         like sy-msgv1,
+             ls_return        like bapiret2.
+
+*----> Begin of the check
+  clear ev_xdel.
+
+*----> Event ADDEL; Check, if it is possible to delete the address
+*---> Get thefunction module
+  call function 'BDT_TBZ1F_GET'
+    exporting
+      iv_objcn  = gc_objcn_bupa
+      iv_objap  = gc_objap_bupa
+    tables
+      et_tbz1f  = lt_tbz1f
+    exceptions
+      not_found = 1
+      others    = 2.
+
+*---> Set the initial return code: Erasure is possible
+  lv_result_total = lc_dele_yes.
+
+*------call the function module, which is found ----------------------------
+  loop at lt_tbz1f where    ztpkt =  'ADDEL'
+                   and not fname is initial.
+    call function lt_tbz1f-fname
+      exporting
+        i_partner     = iv_partner
+        i_partnerguid = iv_partner_guid
+        i_addrnumber  = iv_addrnumber
+        i_addrguid    = iv_address_guid
+        i_calltp      = lc_calltp_dialog
+      importing
+        e_result      = lv_result.
+
+*----> Notice the upperest result -----------------------
+    if lv_result > lv_result_total.                       "#EC PORTABLE
+      lv_result_total = lv_result.
+    endif.
+
+*---> Result: ' do not delete' -> stopp the event
+    if lv_result_total = lc_dele_no.
+      exit.
+    endif.
+  endloop.
+
+*---> result = 'delete it' -> Set te return parameter
+  case lv_result_total.
+    when lc_dele_yes.
+      ev_xdel = gc_x.
+
+*---> result =  'Delete it with a warning' -> Set the return
+*     parameter and the message
+    when lc_dele_possible.
+      if 1 = 2. message w456(r1). endif.
+      lv_msgv1 = iv_addrnumber.
+      call function 'BALW_BAPIRETURN_GET2'
+        exporting
+          type   = gc_msgty_warn
+          cl     = gc_msgid_r1
+          number = 456
+          par1   = lv_msgv1
+        importing
+          return = ls_return.
+      append ls_return to et_return.
+      ev_xdel = gc_x.
+
+*---> result:= 'Not possible to delete it' -> Set the message
+    when lc_dele_no.
+      if 1 = 2. message e455(r1). endif.
+      lv_msgv1 = iv_addrnumber.
+      call function 'BALW_BAPIRETURN_GET2'
+        exporting
+          type   = gc_msgty_error
+          cl     = gc_msgid_r1
+          number = 455
+          par1   = lv_msgv1
+        importing
+          return = ls_return.
+      append ls_return to et_return.
+  endcase.
+endform.                    "ADDR_CHECK_DELETE
+*eject
+*----------------------------------------------------------------------*
+*   Reset the address memory                                          *
+*----------------------------------------------------------------------*
+form init_addr_memory using iv_persnum type ad_persnum
+                            iv_bp_type type bu_type
+                            iv_addressnumber type ad_addrnum.
+
+  if iv_bp_type = gc_type_person.
+    call function 'OM_FUNC_MODULE_EXIST'
+      exporting
+        function_module = 'ADDR_PERSON_SINGLE_RESET'
+      exceptions
+        not_existent    = 1
+        others          = 2.
+    if sy-subrc eq 0.
+      call function 'ADDR_PERSON_SINGLE_RESET'
+        exporting
+          person_number    = iv_persnum
+          reset_type2      = gc_x
+          reset_type3      = gc_x
+          force            = ' '
+        exceptions
+          number_not_found = 1
+          handle_not_found = 2
+          parameter_error  = 3
+          internal_error   = 4
+          others           = 5.
+    endif.
+  else.
+    call function 'ADDR_SINGLE_RESET'
+      exporting
+        address_number   = iv_addressnumber
+      exceptions
+        number_not_found = 1
+        handle_not_found = 2
+        parameter_error  = 3
+        internal_error   = 4
+        others           = 5.
+  endif.
+endform.                    "INIT_ADDR_MEMORY
+*eject.
+*----------------------------------------------------------------------*
+*  Check the valdity interval of the address (Add an address)          *
+*----------------------------------------------------------------------*
+form check_addr_validity tables ct_return structure bapiret2
+                                ct_but020 structure bus020___i
+                                ct_but021 structure bus021_fs_i
+                                it_aduse  structure bapibus1006_addressusage
+                         using  iv_partner  type bu_partner
+                                is_but020_mem  like  bus020___i
+                                iv_chind       type cdchngind.
+
+* data declaration
+  data: lt_addrcheck like busaddrcheck occurs 0 with header line,
+        lt_advwcheck like busadvwcheck occurs 0 with header line,
+        ls_addrcheck like busaddrcheck.
+
+  move-corresponding is_but020_mem to ls_addrcheck.
+  ls_addrcheck-chind_addr      = iv_chind.            "hinzufügen
+
+  loop at ct_but020.        " where addrhandle ne gv_addresshandle.
+    move-corresponding ct_but020 to lt_addrcheck.
+    append lt_addrcheck.
+  endloop.
+
+  loop at ct_but021.       " where addrnumber ne gv_addresshandle
+    " and   addrhandle ne gv_addresshandle.
+    move-corresponding ct_but021 to lt_advwcheck.
+    append lt_advwcheck.
+  endloop.
+
+  call function 'BUA_CHECK_ADDR_VALIDITY'
+    tables
+      t_addr                 = lt_addrcheck
+      t_advw                 = lt_advwcheck
+    changing
+      c_addr                 = ls_addrcheck
+    exceptions
+      valid_from_invalid     = 1
+      valid_to_invalid       = 2
+      move_date_invalid      = 3
+      valid_from_gt_valid_to = 4
+      move_address_missing   = 5
+      move_address_invalid   = 6
+      check_table_missing    = 7
+      action_not_allowed     = 8
+      others                 = 9.
+
+  if sy-subrc <> 0.
+    perform exception_message_store tables ct_return.
+    exit.
+  else.
+    move-corresponding   ls_addrcheck   to   is_but020_mem.
+    append  is_but020_mem  to   ct_but020.
+
+    if it_aduse[]  is initial.
+      refresh ct_but021.
+      loop  at lt_advwcheck.
+        move-corresponding    lt_advwcheck  to   ct_but021.
+        append  ct_but021.
+      endloop.
+    else.
+*                  first creation of standard usage only done here
+      loop  at lt_advwcheck.
+        if  lt_advwcheck-chind_advw      =  'D'
+        or  lt_advwcheck-addrnumber      <> is_but020_mem-addrnumber.
+            continue.
+        endif.
+        read table it_aduse  with key   addresstype  =  lt_advwcheck-adr_kind.
+        if  sy-subrc > 0.
+            move-corresponding    lt_advwcheck  to   ct_but021.
+            append  ct_but021.
+        endif.
+      endloop.
+    endif.
+
+  endif.
+
+endform.                    "check_addr_validity
+
+*----------------------------------------------------------------------*
+*   Check the valdity interval of the address (Change the address)     *
+*----------------------------------------------------------------------*
+form check_addr_validity_change tables ct_return structure bapiret2
+                                       ct_but020 structure bus020___i
+                                       ct_but021 structure bus021_fs_i
+                         using  iv_partner    type bu_partner
+                                iv_addrnumber like but020-addrnumber
+                                is_but020_mem like bus020___i
+                                iv_chind      type cdchngind.
+
+* data declaration
+  data: lt_addrcheck like busaddrcheck occurs 0 with header line,
+        lt_advwcheck like busadvwcheck occurs 0 with header line,
+        ls_addrcheck like busaddrcheck.
+
+  clear is_but020_mem-xdfadr.     "avoid error R1 494
+  move-corresponding is_but020_mem  to ls_addrcheck.
+  ls_addrcheck-chind_addr  = iv_chind.
+
+
+  if iv_chind = 'I'.              "Hinzuf Adreßverwendung
+    if not  gv_addresshandle  is  initial.
+      loop at ct_but020 where addrhandle ne gv_addresshandle.
+        move-corresponding ct_but020 to lt_addrcheck.
+        append lt_addrcheck.
+      endloop.
+
+      loop at ct_but021 where addrnumber ne gv_addresshandle
+                        and   addrhandle ne gv_addresshandle.
+        move-corresponding ct_but021 to lt_advwcheck.
+        append lt_advwcheck.
+      endloop.
+    else.
+      loop at ct_but020 where addrnumber ne iv_addrnumber.
+        move-corresponding ct_but020 to lt_addrcheck.
+        append lt_addrcheck.
+      endloop.
+
+      loop at ct_but021 where addrnumber ne iv_addrnumber  .
+        move-corresponding ct_but021 to lt_advwcheck.
+        append lt_advwcheck.
+      endloop.
+    endif.
+  else.                          "Ändern/Remove Adreßverwe.
+    loop at ct_but020.
+      move-corresponding ct_but020 to lt_addrcheck.
+      append lt_addrcheck.
+    endloop.
+
+    loop at ct_but021.
+      move-corresponding ct_but021 to lt_advwcheck.
+      append lt_advwcheck.
+    endloop.
+  endif.
+
+  call function 'BUA_CHECK_ADDR_VALIDITY'
+    tables
+      t_addr                 = lt_addrcheck
+      t_advw                 = lt_advwcheck
+    changing
+      c_addr                 = ls_addrcheck
+    exceptions
+      valid_from_invalid     = 1
+      valid_to_invalid       = 2
+      move_date_invalid      = 3
+      valid_from_gt_valid_to = 4
+      move_address_missing   = 5
+      move_address_invalid   = 6
+      check_table_missing    = 7
+      action_not_allowed     = 8
+      others                 = 9.
+
+  if sy-subrc <> 0.
+    perform exception_message_store tables ct_return.
+    exit.
+  else.
+
+        refresh:  ct_but020,  ct_but021.
+        clear:    ct_but020,  ct_but021.
+        loop  at  lt_addrcheck.
+          move-corresponding  lt_addrcheck  to  ct_but020.
+          append  ct_but020.
+        endloop.
+        loop  at  lt_advwcheck.
+          move-corresponding  lt_advwcheck  to  ct_but021.
+          append  ct_but021.
+        endloop.
+
+  endif.
+
+
+endform.                    "check_addr_validity_change
+*eject.
+*----------------------------------------------------------------------*
+*  Check the time validity  (Change the address usage)                 *
+*----------------------------------------------------------------------*
+form check_advw_validity_change tables ct_return structure bapiret2
+                                       ct_but020 structure bus020___i
+                                       ct_but021 structure bus021_fs_i
+                                 using iv_partner     type bu_partner
+                                       is_but021      like bus021_fs_i
+                                       iv_but021_tabix
+                                       iv_chind       type cdchngind.
+
+  data:  ls_advwcheck  like busadvwcheck occurs 0 with header line,
+         lt_advwcheck  like busadvwcheck occurs 0 with header line,
+         lt_addrcheck  like busaddrcheck occurs 0 with header line.
+
+
+  move-corresponding is_but021 to ls_advwcheck.
+  ls_advwcheck-chind_advw = iv_chind.
+
+  loop at ct_but020    where partner = iv_partner.
+    move-corresponding ct_but020 to lt_addrcheck.
+    append lt_addrcheck.
+  endloop.
+
+  loop at ct_but021    where partner = iv_partner.
+    move-corresponding ct_but021 to lt_advwcheck.
+    append lt_advwcheck.
+  endloop.
+
+
+
+  call function 'BUA_CHECK_ADVW_VALIDITY'
+    exporting
+      i_tabix                  = iv_but021_tabix
+    tables
+      t_advw                   = lt_advwcheck
+      t_addr                   = lt_addrcheck
+    changing
+      c_advw                   = ls_advwcheck
+    exceptions
+      valid_from_invalid       = 1
+      valid_to_invalid         = 2
+      valid_from_gt_valid_to   = 3
+      addr_advw_validity_error = 4
+      check_table_missing      = 5
+      action_not_allowed       = 6
+      others                   = 7.
+
+  if sy-subrc <> 0.
+    perform exception_message_store tables ct_return.
+    exit.
+  else.
+    refresh ct_but021.
+    loop at  lt_advwcheck.
+      move-corresponding   lt_advwcheck  to  ct_but021.
+      append  ct_but021.
+    endloop.
+  endif.
+
+endform.                    "check_advw_validity_change
+*eject.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_CLEAR_ADDR_ADD
+*&---------------------------------------------------------------------*
+*   Clear the flag: Call the ADDRESS_ADD, clear it after rollback      *
+*----------------------------------------------------------------------*
+FORM  F_CLEAR_ADDR_ADD.
+  CLEAR   GV_PARTNER_CALL.
+ENDFORM.                                "F_CLEAR_ADDR_ADD
+*eject.
+
+FORM F_CLEAR_AUTH_BUF.
+    CLEAR: gt_auth_buf_grp, gt_auth_buf_rlt.
+ENDFORM.
+
+FORM F_CLEAR_BUT0ID_LOCK.
+
+DATA: wa_but0id TYPE but0id.
+
+   LOOP AT gt_but0id_lock INTO wa_but0id.
+     CALL FUNCTION 'DEQUEUE_EBU_IDENT'
+      EXPORTING
+*        MODE_BUT0ID       = 'E'
+         CLIENT            = sy-mandt
+         TYPE              = wa_but0id-type
+         IDNUMBER          = wa_but0id-idnumber.
+*         X_TYPE            = ' '
+*        X_IDNUMBER        = ' '
+*        _SCOPE            = '3'
+*        _SYNCHRON         = ' '
+*        _COLLECT          = ' '
+   ENDLOOP.
+
+CLEAR gt_but0id_lock.
+REFRESH gt_but0id_lock.
+
+ENDFORM.

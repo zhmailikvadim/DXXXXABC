@@ -1,0 +1,475 @@
+* 46C
+*    ANDBJAK003661 04022000 Stabil sortieren
+*----------------------------------------------------------------------*
+*   INCLUDE LRHAPF00                                                   *
+*----------------------------------------------------------------------*
+
+*---------------------------------------------------------------------*
+*       FORM FUELLE_BUFFER_WITH_DATA                                  *
+*---------------------------------------------------------------------*
+*       Fuellen des Buffers abhaengig von Uebrgabewerten              *
+*       PLVAR/OTYPE/OBJID -> fuellen mit allen Saetzen eines Objekts  *
+*       PLVAR/OTYPE/OBJID/INFTY -> fuellen mit allen Saetzen          *
+*                                  eines Infotyps                     *
+*       PLVAR/OTYPE/OBJID/INFTY/SUBTY -> fuellen mit allen Saetzen    *
+*                                        eines Subtyps                *
+* Es wird immer zuerst im Buffer geprueft, ob die angeforderten       *
+* Saetze bereits im Buffer enthalten sind;                            *
+* falls nein, werden die Saetze von der DB gelesen und direkt in den  *
+*             Buffer geschrieben;                                     *
+* falls ja  , werden die Saetze von der DB gelesen und pro Satz wird  *
+*             geprueft, ob er schon im Buffer enthalten ist;          *
+* Der Buffer wird immer bezgl. des KEYS sortiert gehalten , so dass   *
+* alle Direkt-Zugriffe ueber BINARY SEARCH realisiert werden koennen  *
+*---------------------------------------------------------------------*
+*       VALUE(FBWD_PLVAR)                                             *
+*       VALUE(FBWD_OTYPE)                                             *
+*       VALUE(FBWD_OBJID)                                             *
+*       VALUE(FBWD_INFTY)                                             *
+*       VALUE(FBWD_SUBTY)                                             *
+*       VALUE(FBWD_ISTAT)                                             *
+*       VALUE(FBWD_BEGDA)                                             *
+*       VALUE(FBWD_ENDDA)                                             *
+*       VALUE(FBWD_VARYF)                                             *
+*       FBWD_SUBRC                                                    *
+*---------------------------------------------------------------------*
+FORM fuelle_buffer_with_data USING value(fbwd_plvar) LIKE wplog-plvar
+                                   value(fbwd_otype) LIKE wplog-otype
+                                   value(fbwd_objid) LIKE wplog-objid
+                                   value(fbwd_infty)
+                                   value(fbwd_subty)
+                                   value(fbwd_istat)
+                                   value(fbwd_begda)
+                                   value(fbwd_endda)
+                                   value(fbwd_varyf)
+                                   fbwd_subrc LIKE sy-subrc.
+  DATA : BEGIN OF fbwd_key.
+          INCLUDE STRUCTURE ppkey.
+  DATA : END   OF fbwd_key.
+  DATA : fbwd_insert_tabix LIKE sy-tabix.
+  DATA : fbwd_insert_buffer(1).
+  DATA : BEGIN OF fbwd_sel_plog OCCURS 1.
+          INCLUDE STRUCTURE wplog.
+  DATA : END   OF fbwd_sel_plog.
+  DATA : fbwd_sel_plvar LIKE plog-plvar.
+  DATA : fbwd_sel_otype LIKE plog-otype.
+  DATA : fbwd_sel_objid LIKE plog-objid.
+  DATA : fbwd_sel_infty LIKE plog-infty.
+  DATA : fbwd_sel_subty LIKE plog-subty.
+  DATA : fbwd_sel_istat LIKE plog-istat.
+  DATA : fbwd_sel_varyf LIKE plog-varyf.
+  DATA : fbwd_sel_begda LIKE plog-begda.
+  DATA : fbwd_sel_endda LIKE plog-endda.
+
+  IF t77s0_workf_read = off.                               "VWMWF
+    PERFORM set_workf_actv USING 'X'.                      "VWMWF
+  ENDIF.                                                   "VWMWF
+  PERFORM client_set.
+  CLEAR : fbwd_subrc, fbwd_key.
+  fbwd_sel_plvar = fbwd_plvar.
+  fbwd_sel_otype = fbwd_otype.
+  fbwd_sel_objid = fbwd_objid.
+  fbwd_sel_infty = fbwd_infty.
+  fbwd_sel_subty = fbwd_subty.
+  fbwd_sel_istat = fbwd_istat.
+  fbwd_sel_varyf = fbwd_varyf.
+  IF fbwd_begda EQ space.
+    fbwd_sel_begda = low_date.
+  ELSE.
+    fbwd_sel_begda = fbwd_begda.
+  ENDIF.
+  IF fbwd_endda EQ space.
+    fbwd_sel_endda = high_date.
+  ELSE.
+    fbwd_sel_endda = fbwd_endda.
+  ENDIF.
+
+  CALL FUNCTION 'RH_FETCH_DATA'
+       EXPORTING
+            plvar     = fbwd_sel_plvar
+            otype     = fbwd_sel_otype
+            objid     = fbwd_sel_objid
+            infty     = fbwd_sel_infty
+            subty     = fbwd_sel_subty
+            istat     = fbwd_sel_istat
+            begda     = fbwd_sel_begda
+            endda     = fbwd_sel_endda
+            varyf     = fbwd_sel_varyf
+       TABLES
+            data      = fbwd_sel_plog
+       EXCEPTIONS
+            not_found = 04.
+
+  IF pppar-fcode NE display AND                             "VWMWF
+     pppar-fcode NE lisd.                                   "VWMWF
+
+    CALL FUNCTION 'HR_GET_BUSINESS_ADD_IN'                  "ANDBADI
+      EXPORTING
+        EXIT_NAME            = infty_badi_name
+      IMPORTING
+        IS_IMPLEMENTED       = is_implemented
+      CHANGING
+        INSTANCE             = infty_badi_exit.
+
+    PERFORM fill_befaft_image TABLES fbwd_sel_plog          "VWMWF
+                                     before_image           "VWMWF
+                              USING  'B'                    "VWMWF
+                                     is_implemented.        "ANDBADI
+  ENDIF.                                                    "VWMWF
+
+  IF buffer_sorted EQ off.
+    SORT buffer stable BY mandt plvar otype objid       "ANDBJAK003661
+                          infty subty istat priox
+                          begda endda varyf seqnr.
+    buffer_sorted = on.
+  ENDIF.
+  MOVE : rhap_client TO fbwd_key-mandt,
+         fbwd_plvar TO fbwd_key-plvar,
+         fbwd_otype TO fbwd_key-otype,
+         fbwd_objid TO fbwd_key-objid.
+  IF fbwd_infty NE space.
+    MOVE fbwd_infty TO fbwd_key-infty.
+    IF fbwd_subty NE space.
+      MOVE fbwd_subty TO fbwd_key-subty.
+    ENDIF.
+  ENDIF.
+  IF fbwd_key-infty NE space.
+    IF fbwd_key-subty NE space.
+      READ TABLE buffer WITH KEY fbwd_key(23) BINARY SEARCH.
+    ELSE.                              "PLVAR/OTYPE/OBJID/INFTY
+      READ TABLE buffer WITH KEY fbwd_key(19) BINARY SEARCH.
+    ENDIF.
+  ELSE.                                "PLVAR/OTYPE/OBJID
+    READ TABLE buffer WITH KEY fbwd_key(15) BINARY SEARCH.
+  ENDIF.
+  IF sy-subrc GT 0.
+* INFTY/SUBTY nicht im Buffer
+    fbwd_subrc = 4.
+    fbwd_insert_tabix = sy-tabix.
+
+    LOOP AT fbwd_sel_plog.
+      buffer = fbwd_sel_plog.
+      fbwd_insert_buffer = on.
+      READ TABLE plog_tab WITH KEY buffer(55).
+      IF sy-subrc EQ 0 AND plog_tab-opera EQ del_marker.
+        fbwd_insert_buffer = off.
+      ENDIF.
+      IF fbwd_insert_buffer = on.
+        fbwd_subrc = 0.
+        INSERT buffer INDEX fbwd_insert_tabix.
+        PERFORM insert_tb_buffer USING buffer.             "VWMBUFDIALG
+        ADD 1 TO fbwd_insert_tabix.
+      ENDIF.
+    ENDLOOP.
+  ELSE.
+* INFTY/SUBTY bereits im BUFFER
+    fbwd_subrc = 0.
+    LOOP AT fbwd_sel_plog.
+      buffer = fbwd_sel_plog.
+      READ TABLE buffer WITH KEY buffer(55) BINARY SEARCH
+                        TRANSPORTING NO FIELDS.
+      IF sy-subrc GT 0.
+        fbwd_insert_tabix  = sy-tabix.
+        fbwd_insert_buffer = on.
+*       Note 1447373
+*       MGD Changed because of ITF. When there is an insertion
+*       and afterwards a deletion, the first line is read, however,
+*       the last line should be the one taken into consideration.
+*       READ TABLE plog_tab WITH KEY buffer(55).
+        LOOP AT plog_tab WHERE TABLE_LINE(55) = buffer(55).
+        ENDLOOP.
+        IF sy-subrc EQ 0 AND plog_tab-opera EQ del_marker.
+          fbwd_insert_buffer = off.
+        ENDIF.
+        IF fbwd_insert_buffer = on.
+          INSERT buffer INDEX fbwd_insert_tabix.
+          PERFORM insert_tb_buffer USING buffer.           "VWMBUFDIALG
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+  DESCRIBE TABLE buffer LINES buffer_count.
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+*       FORM DELETE_BUFFER                                            *
+*---------------------------------------------------------------------*
+* Loeschen von Bufferinhalten durch generischen LOOP                  *
+*---------------------------------------------------------------------*
+*       VALUE(DB_ENQ_KEY)                                             *
+*---------------------------------------------------------------------*
+FORM delete_buffer USING value(db_enq_key).
+  LOCAL : enqueue_key.
+  enqueue_key = db_enq_key.
+  LOOP AT buffer WHERE plvar EQ enqueue_key-plvar
+                 AND   otype EQ enqueue_key-otype
+                 AND   objid EQ enqueue_key-objid.
+    DELETE buffer.
+    PERFORM delete_tb_buffer USING buffer.
+  ENDLOOP.
+
+  PERFORM delete_buffo USING enqueue_key-plvar
+                             enqueue_key-otype
+                             enqueue_key-objid.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM DELETE_BUFFO                                             *
+*---------------------------------------------------------------------*
+*       Loeschen BUFFO fuer ein Objekt                                *
+*---------------------------------------------------------------------*
+*       VALUE(DB_PLVAR)                                               *
+*       VALUE(DB_OTYPE)                                               *
+*       VALUE(DB_OBJID)                                               *
+*---------------------------------------------------------------------*
+FORM delete_buffo USING value(db_plvar) like ppenq-plvar
+                        value(db_otype) like ppenq-otype
+                        value(db_objid) like ppenq-objid.
+  LOOP AT buffo WHERE plvar EQ db_plvar
+                AND   otype EQ db_otype
+                AND   objid EQ db_objid.
+    DELETE buffo.
+  ENDLOOP.
+  IF sy-subrc EQ 0.
+    buffo_object_count = buffo_object_count - 1.
+  ENDIF.
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+*       FORM PRINT_BUFFER                                             *
+*---------------------------------------------------------------------*
+* Buffer andrucken                                                    *
+*---------------------------------------------------------------------*
+FORM print_buffer.
+  ULINE.
+  WRITE : / 'BUFFER'.
+  SKIP.
+  LOOP AT  buffer.
+    WRITE : / buffer-opera,
+              buffer-mandt,
+              buffer-plvar,
+              buffer-otype,
+              buffer-objid,
+              buffer-infty,
+              buffer-subty,
+              buffer-istat,
+              buffer-priox,
+              buffer-begda DD/MM/YY,
+              buffer-endda DD/MM/YY,
+              buffer-varyf,
+              buffer-seqnr.
+    WRITE : /5 buffer-vdata.
+  ENDLOOP.
+  ULINE.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM SET_KEEP_LUPD                                            *
+*---------------------------------------------------------------------*
+*       Setzen globale Variable RHAP_KEEP_LUPD                        *
+*---------------------------------------------------------------------*
+*  -->  VALUE(SKL_KEEP_LUPD)                                          *
+*---------------------------------------------------------------------*
+FORM set_keep_lupd USING value(skl_keep_lupd) LIKE HRRHAP-KEEP_LUPD.
+  rhap_keep_lupd = skl_keep_lupd.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  FILL_BUFFER_1001_EXT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->FBE_PLVAR  text
+*      -->FBE_SCLAS  text
+*      -->FBE_SOBID  text
+*      -->FBE_INV_RSIGN  text
+*      -->FBE_RELAT  text
+*      -->FBE_ISTAT  text
+*      -->FBE_BEGDA  text
+*      -->FBE_ENDDA  text
+*      -->FBE_OTYPE  text
+*      -->FBE_SUBRC  text
+*----------------------------------------------------------------------*
+FORM fill_buffer_1001_ext USING value(fbe_plvar) LIKE p1001-plvar
+                                value(fbe_sclas) LIKE p1001-sclas
+                                value(fbe_sobid) LIKE p1001-sobid
+                                value(fbe_rsign) LIKE p1001-rsign
+                                value(fbe_relat) LIKE p1001-relat
+                                value(fbe_istat) LIKE p1001-istat
+                                value(fbe_begda) LIKE p1001-begda
+                                value(fbe_endda) LIKE p1001-endda
+                                value(fbe_otype) LIKE p1001-otype
+                                fbe_subrc LIKE sy-subrc.
+
+DATA: objects LIKE hrsobid OCCURS 1 WITH HEADER LINE,
+      sc_tab LIKE hrcond OCCURS 0 WITH HEADER LINE,
+      fbe_subty LIKE wplog-subty,
+      fbe_condition LIKE hrrhdb-condition,
+      fbe_hri1001 LIKE hri1001 OCCURS 0 WITH HEADER LINE,
+      fbe_p1001 LIKE p1001 OCCURS 0 WITH HEADER LINE,
+      fbe_wplog LIKE wplog OCCURS 0 WITH HEADER LINE,
+      fbe_tabix,
+      fbe_ppkey LIKE ppkey,
+      fbe_insert_tabix LIKE sy-tabix,
+      fbe_insert_buffer.
+
+* Condition für SCLAS, BEGDA, ENDDA, SUBTY aufbauen
+  objects-plvar = fbe_plvar.
+  objects-otype = fbe_sclas.
+  objects-sobid = fbe_sobid.
+  APPEND objects.
+
+  CLEAR sc_tab.
+  sc_tab-field = 'SCLAS'.
+  sc_tab-opera = 'EQ'.
+  sc_tab-low   = fbe_otype.
+  APPEND sc_tab.
+
+  CLEAR sc_tab.
+  sc_tab-field = 'BEGDA'.
+  sc_tab-opera = 'LE'.
+  sc_tab-low   = fbe_endda.
+  APPEND sc_tab.
+
+  CLEAR sc_tab.
+  sc_tab-field = 'ENDDA'.
+  sc_tab-opera = 'GE'.
+  sc_tab-low   = fbe_begda.
+  APPEND sc_tab.
+
+  fbe_subty(1)   = fbe_rsign.
+  fbe_subty+1(3) = fbe_relat.
+  CLEAR sc_tab.
+  sc_tab-field = 'SUBTY'.
+  sc_tab-opera = 'EQ'.
+  sc_tab-low   = fbe_subty.
+  APPEND sc_tab.
+
+  CALL FUNCTION 'RH_CONDITION_BUILD'
+       EXPORTING
+            infty            = '1001'
+       IMPORTING
+            condition        = fbe_condition
+       TABLES
+            condtab          = sc_tab
+       EXCEPTIONS
+            empty_condtab    = 1
+            no_db_field      = 2
+            unknown_infty_db = 3
+            wrong_condition  = 4
+            unknown_pad_db   = 5
+            OTHERS           = 6.
+
+  fbe_subrc = sy-subrc.
+  IF fbe_subrc <> 0.
+    EXIT.
+  ENDIF.
+
+* Neuer Parameter WITH_EV_FOR_EXT (Default = 'X')
+* Aufruf mit SPACE
+* Aufruf FB 'RH_READ_INFTY_1001_EXT'
+  CALL FUNCTION 'RH_READ_INFTY_1001_EXT'
+       EXPORTING
+            authority       = delete
+            with_stru_auth  = 'X'
+            istat           = fbe_istat
+            extend          = 'D'
+            subty           = fbe_subty
+            begda           = fbe_begda
+            endda           = fbe_endda
+            condition       = fbe_condition
+*           SORT            = 'X'
+*           WITH_EV_FOR_INT = ' '
+            with_ev_for_ext = ' '
+            keep_varyf      = def_keep_varyf_yes
+*           ADATA           = 'X'
+       TABLES
+            i1001           = fbe_hri1001
+            objects         = objects
+       EXCEPTIONS
+            nothing_found   = 1
+            wrong_condition = 2
+            OTHERS          = 3.
+
+  fbe_subrc = sy-subrc.
+  CALL FUNCTION 'RH_CONDITION_DELETE'                     "note 967174
+       EXPORTING condition = fbe_condition.
+  IF fbe_subrc <> 0.
+*   keine ZB-abhaengigen Saetze gefunden
+    EXIT.
+  ENDIF.
+
+
+* Verknüpfungen externes Objekt - internes Objekt transformieren
+* in Verknüpfungen internes Objekt - externes Objekt, da im Buffer
+* nur Verknüpfunen in dieser Richtung verwaltet werden können.
+  PERFORM transform_hri1001_to_p1001 TABLES fbe_hri1001
+                                            fbe_p1001
+                                      USING def_keep_Varyf_yes
+                                            fbe_tabix
+                                            fbe_subrc.
+
+  CHECK fbe_subrc = 0.
+
+*  fbe_wplog[] = fbe_p1001[].                             "ANDUNI
+  perform fill_wplog_lengths.                             "ANDUNI
+  assign fbe_p1001-hrip1001 to <wplog_vdata>              "ANDUNI
+                               casting type c.            "ANDUNI
+  loop at fbe_p1001.                                      "ANDUNI
+    fbe_wplog(pkeyadmin_len) = fbe_p1001(pkeyadmin_len).  "ANDUNI
+    fbe_wplog-vdata = <wplog_vdata>.                      "ANDUNI
+    append fbe_wplog.                                     "ANDUNI
+  endloop.                                                "ANDUNI
+
+  CALL FUNCTION 'HR_GET_BUSINESS_ADD_IN'                  "ANDBADI
+    EXPORTING
+      EXIT_NAME            = infty_badi_name
+    IMPORTING
+      IS_IMPLEMENTED       = is_implemented
+    CHANGING
+      INSTANCE             = infty_badi_exit.
+
+  PERFORM fill_befaft_image TABLES fbe_wplog
+                                 before_image
+                          USING  'B'
+                                 is_implemented.          "ANDBADI
+
+  IF buffer_sorted EQ off.
+    SORT buffer stable BY mandt plvar otype objid        "note550175
+                          infty subty istat priox
+                          begda endda varyf seqnr.
+    buffer_sorted = on.
+  ENDIF.
+
+  fbe_subrc = 4.
+
+  assign fbe_p1001-hrip1001 to <wplog_vdata> casting type c. "ANDUNI
+  LOOP AT fbe_p1001.
+    clear buffer.                                            "ANDUNI
+*    buffer = fbe_p1001.
+    buffer(pkeyadmin_len) = fbe_p1001(pkeyadmin_len).        "ANDUNI
+    buffer-vdata = <wplog_vdata>.                            "ANDUNI
+    READ TABLE buffer WITH KEY buffer(55) BINARY SEARCH
+                      TRANSPORTING NO FIELDS.
+    IF sy-subrc GT 0.
+      fbe_insert_tabix  = sy-tabix.
+      fbe_insert_buffer = on.
+      READ TABLE plog_tab WITH KEY buffer(55).
+      IF sy-subrc EQ 0 AND plog_tab-opera EQ del_marker.
+        fbe_insert_buffer = off.
+      ENDIF.
+      IF fbe_insert_buffer = on.
+        fbe_subrc = 0.
+        INSERT buffer INDEX fbe_insert_tabix.
+
+
+
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  DESCRIBE TABLE buffer LINES buffer_count.
+
+ENDFORM.                    " FILL_BUFFER_1001_EXT

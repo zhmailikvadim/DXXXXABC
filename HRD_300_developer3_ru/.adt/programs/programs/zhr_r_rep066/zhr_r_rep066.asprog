@@ -1,0 +1,145 @@
+*&---------------------------------------------------------------------*
+*& Исполнитель          : ООО «Атлантконсалт»                          *
+*& Дата создания        : 21/10/2014                                   *
+*& Автор                : Тумашик В.Г.  (DEVELOPER12)                  *
+*& Функциональная спец. :                                              *
+*& Техническая спец.    :                                              *
+*& Redmine              :                                              *
+*& Описание             :                                              *
+*& Отчёт по вакансиям                                                  *
+*&---------------------------------------------------------------------*
+
+REPORT zhr_r_rep066.
+
+CLASS lcl_report DEFINITION.
+  PUBLIC SECTION.
+    TYPES:
+      BEGIN OF ty_out,
+        position_id   TYPE objektid,                  " номер штатной должности
+        position_txt  TYPE string,                    " название штатной должности
+        obj_nc        TYPE objektid,                  " ид объекта типа NC
+        obj_nb        TYPE sobid,                     " ид объекта типа NB
+        header        TYPE rcf_requisition_header,    " название заявки на поиск
+        start_date    TYPE rcf_posting_start_date,    " начало действия вакансии
+        end_date      TYPE rcf_posting_end_date,      " конец действия вакансии
+        uname         TYPE uname,                     " пользователь
+        external_code TYPE rcf_external_code,         " ссылочый код
+      END OF ty_out,
+      tt_output TYPE TABLE OF ty_out.
+    METHODS:
+      run.                                                              " метод запуска приложения
+  PRIVATE SECTION.
+    DATA: mt_output TYPE tt_output.                                     " таблица для вывода
+
+    METHODS:
+      get_data,                                                         " метод заполнения данных отчета
+      show_alv,                                                         " метод вызова ALV
+      set_layout CHANGING co_alv TYPE REF TO cl_salv_table.             "настройка отображения
+
+    CONSTANTS: gc_ext_post_channel TYPE rcf_posting_channel VALUE '02'. "внешний канал публикации
+ENDCLASS.
+
+CLASS lcl_report IMPLEMENTATION.
+  METHOD run.
+    get_data( ).
+    show_alv( ).
+  ENDMETHOD.
+
+  METHOD get_data.
+    DATA:
+      lo_requisition  TYPE REF TO cl_hrrcf_requisition,
+      lt_vacancy_list	TYPE rcf_t_requisition_vacancy.
+
+    "получаем данные о действующих вакансиях
+    SELECT p0~sobid AS obj_nb
+           p5~objid AS obj_nc
+           p5~start_date
+           p5~end_date
+           p5~uname
+           p5~external_code
+      FROM hrp1001 AS p0
+        INNER JOIN hrp5122 AS p5 ON p0~plvar = p5~plvar AND
+                                    p0~otype = p5~otype AND
+                                    p0~objid = p5~objid
+       INTO CORRESPONDING FIELDS OF TABLE mt_output
+         WHERE p0~plvar            = zif_hr_om_con=>gc_active_plvar   AND
+               p0~otype            = zif_hr_om_con=>gc_object_type-nc AND
+               p0~istat            = zif_hr_om_con=>gc_istat-active   AND
+               p0~sclas            = zif_hr_om_con=>gc_object_type-nb AND
+               p5~end_date         GE sy-datum AND
+               p5~posting_channel  = gc_ext_post_channel. " '02'
+
+    LOOP AT mt_output ASSIGNING FIELD-SYMBOL(<out>).
+      TRY.
+          cl_hrrcf_requisition=>get( EXPORTING id          = CONV hrobjid( <out>-obj_nb )
+                                     IMPORTING requisition = lo_requisition ).
+        CATCH cx_hrrcf.
+          CONTINUE.
+      ENDTRY.
+
+      TRY.
+          lo_requisition->get_vacancy_of_requisition( IMPORTING vacancy_list = lt_vacancy_list ).
+        CATCH cx_hrrcf_infotype_operation.
+          "нет вакансии ШД
+          CONTINUE.
+      ENDTRY.
+
+      "получаем ID штатной должности и ее название
+      LOOP AT lt_vacancy_list INTO DATA(ls_vac).
+        <out>-position_id  = ls_vac-sobid.
+        <out>-position_txt = ls_vac-description.
+      ENDLOOP.
+
+      "получаем название заявки на поиск из инфотипа 5125
+      TRY.
+          DATA(ls_p5125) = NEW zcl_hr_req_nb( iv_objid  = CONV hrobjid( <out>-obj_nb ) )->get_hrp5125( ).
+          <out>-header = ls_p5125-header.
+        CATCH zcx_hr_om.
+      ENDTRY.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD show_alv.
+    DATA:
+      lo_alv       TYPE REF TO cl_salv_table,
+      lo_functions TYPE REF TO cl_salv_functions_list.
+
+    cl_salv_table=>factory( IMPORTING r_salv_table = lo_alv CHANGING t_table = mt_output ).
+
+    "настройка варианта отображения
+    set_layout( CHANGING co_alv = lo_alv ).
+
+    "Обработка вывода колонок alv отчета
+    lo_alv->get_columns( )->set_optimize( 'X' ).
+
+    lo_alv->get_columns( )->get_column( 'OBJ_NC' )->set_technical( 'X' ).
+    lo_alv->get_columns( )->get_column( 'OBJ_NB' )->set_technical( 'X' ).
+
+    lo_alv->get_columns( )->get_column( 'POSITION_ID'   )->set_long_text( 'ID должности').
+    lo_alv->get_columns( )->get_column( 'POSITION_TXT'  )->set_long_text( 'Название должности').
+    lo_alv->get_columns( )->get_column( 'HEADER'        )->set_long_text( 'Название заявки на поиск' ).
+    lo_alv->get_columns( )->get_column( 'UNAME'         )->set_long_text( 'Создал' ).
+    lo_alv->get_columns( )->get_column( 'EXTERNAL_CODE' )->set_long_text( 'Cсылочый код').
+
+    "настройка функций панели инструментов
+    lo_functions = lo_alv->get_functions( ).
+    lo_functions->set_all( 'X' ).
+    lo_functions->set_layout_save( abap_true ).
+    lo_functions->set_layout_maintain( abap_true ).
+
+    "показ alv
+    lo_alv->display( ).
+  ENDMETHOD.
+
+  METHOD set_layout.
+    DATA lo_layout  TYPE REF TO cl_salv_layout.
+
+    lo_layout = co_alv->get_layout( ).
+    lo_layout->set_key( VALUE salv_s_layout_key( report = sy-repid )  ).
+    lo_layout->set_save_restriction( if_salv_c_layout=>restrict_none ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+START-OF-SELECTION.
+  NEW lcl_report( )->run( ).

@@ -1,0 +1,259 @@
+class ZCL_EXCEL_SIMPLE_EXT definition
+  public
+  inheriting from ZCL_EXCEL_SIMPLE
+  final
+  create public .
+
+public section.
+
+  methods CREATE_FROM_TABLE
+    importing
+      !IT_TABLE type TABLE
+      !IV_CLASSNAME type C
+      !IV_KEYID type C
+      !IV_FORMNAME type C
+    exporting
+      !ET_MSG type IF_SALV_BS_TT=>YT_MSG .
+  methods ADD_DATA_SHEET
+    importing
+      !IV_NAME type Z_E_SHEET_NAME
+      !IT_TABLE type TABLE
+      !IT_HEADER type TABLE optional
+      !IV_COL_FROM type I optional
+      !IV_ROW_FROM type I optional
+      !IV_RANGE_NAME type C
+      !IV_HEADER_COL_FROM type I optional
+      !IV_HEADER_ROW_FROM type I optional
+      !IV_FRAME type FLAG optional .
+protected section.
+private section.
+
+  data GR_CONTAINER_CONTROL type ref to I_OI_CONTAINER_CONTROL .
+ENDCLASS.
+
+
+
+CLASS ZCL_EXCEL_SIMPLE_EXT IMPLEMENTATION.
+
+
+  METHOD add_data_sheet.
+    DATA:
+      lr_error       TYPE REF TO i_oi_error,
+      lv_retcode     TYPE soi_ret_string,
+      lt_ftab        TYPE soi_fields_table,
+      lr_structdescr TYPE REF TO cl_abap_structdescr,
+      lr_tabledescr  TYPE REF TO cl_abap_tabledescr,
+      lv_top         TYPE i,
+      lv_left        TYPE i,
+      lv_rows        TYPE i,
+      lv_col         TYPE i,
+      lv_header_rows TYPE i,
+      lv_header_col  TYPE i,
+      lv_header_name TYPE tabname.
+
+* Добавить новый лист
+    gr_handle->add_sheet( EXPORTING name    = iv_name
+                          IMPORTING error   = lr_error
+                                    retcode = lv_retcode ).
+
+*--------------------------------------------------------------------*
+* Вставка заголовка (если нужно)
+*--------------------------------------------------------------------*
+    IF it_header IS NOT INITIAL.
+      IF iv_header_col_from IS NOT INITIAL.
+        lv_left = iv_header_col_from.
+      ELSE.
+        lv_left = 1.
+      ENDIF.
+      IF iv_header_row_from IS NOT INITIAL.
+        lv_top = iv_header_row_from.
+      ELSE.
+        lv_top = 1.
+      ENDIF.
+
+      lv_header_rows = lines( it_header ).
+
+      lr_tabledescr  ?= cl_abap_typedescr=>describe_by_data( it_header ).
+      lr_structdescr ?= lr_tabledescr->get_table_line_type( ).
+
+      lv_header_col = lines( lr_structdescr->components[] ).
+
+      CALL FUNCTION 'DP_GET_FIELDS_FROM_TABLE'
+        TABLES
+          data   = it_header
+          fields = lt_ftab
+        EXCEPTIONS
+          OTHERS = 1.
+
+      lv_header_name = 'HEADER_' && iv_range_name.
+
+      gr_handle->insert_range_dim(
+            EXPORTING
+              no_flush = 'X'
+              name     = lv_header_name
+              left     = lv_left
+              top      = lv_top
+              rows     = lv_header_rows
+              columns  = lv_header_col ).
+
+      gr_handle->insert_one_table(
+        EXPORTING
+          data_table   = it_header
+          fields_table = lt_ftab[]
+          wholetable   = 'X'
+          rangename    = lv_header_name
+          updating     = 0
+        IMPORTING
+          error        = lr_error  ).
+
+      IF iv_frame = abap_true.
+        CALL METHOD gr_handle->set_frame
+          EXPORTING
+            rangename = lv_header_name
+            typ       = 127
+            color     = 1.
+      ENDIF.
+
+    ENDIF.
+
+*--------------------------------------------------------------------*
+* Добавление основной таблицы
+*--------------------------------------------------------------------*
+    CLEAR: lv_left, lv_top, lr_tabledescr, lr_structdescr.
+    IF iv_col_from IS NOT INITIAL.
+      lv_left = iv_col_from.
+    ELSEIF iv_header_col_from IS NOT INITIAL.
+      lv_left = iv_header_col_from.
+    ELSE.
+      lv_left = 1.
+    ENDIF.
+    IF iv_row_from IS NOT INITIAL.
+      lv_top = iv_row_from.
+    ELSE.
+      lv_top = iv_header_row_from + lv_header_rows.
+    ENDIF.
+
+    lv_rows = lines( it_table ).
+
+    lr_tabledescr  ?= cl_abap_typedescr=>describe_by_data( it_table ).
+    lr_structdescr ?= lr_tabledescr->get_table_line_type( ).
+
+    lv_col = lines( lr_structdescr->components[] ).
+
+    CALL FUNCTION 'DP_GET_FIELDS_FROM_TABLE'
+      TABLES
+        data   = it_table
+        fields = lt_ftab
+      EXCEPTIONS
+        OTHERS = 1.
+
+    gr_handle->insert_range_dim(
+          EXPORTING
+            no_flush = 'X'
+            name     = iv_range_name
+            left     = lv_left
+            top      = lv_top
+            rows     = lv_rows
+            columns  = lv_col ).
+
+    gr_handle->insert_one_table(
+      EXPORTING
+        data_table   = it_table
+        fields_table = lt_ftab[]
+        wholetable   = 'X'
+        rangename    = iv_range_name
+        updating     = 0
+      IMPORTING
+        error        = lr_error  ).
+
+    IF iv_frame = abap_true.
+      CALL METHOD gr_handle->set_frame
+        EXPORTING
+          rangename = iv_range_name
+          typ       = 127
+          color     = 1.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD create_from_table.
+    DATA:
+      lv_xml         TYPE xstring,
+      lv_len         TYPE i,
+      lt_xml         TYPE xml_rawdata,
+      lv_error       TYPE text100,
+      lo_excel       TYPE REF TO zcl_excel_simple_ext,
+      lr_dockin_cont TYPE REF TO cl_gui_docking_container.
+
+    IF iv_formname IS NOT INITIAL.
+      lo_excel = NEW #( ).
+      lo_excel->load_from_reposid(
+        EXPORTING
+          iv_classname = iv_classname
+          iv_keyid     = iv_keyid
+          iv_inplace  = 'X'
+          iv_formname  = iv_formname
+        IMPORTING
+          ev_data      = lv_xml
+          ev_error     = lv_error ).
+    ENDIF.
+    IF lv_error IS INITIAL.
+      lo_excel->destroy_excel( ).
+      FREE lo_excel.
+    ENDIF.
+
+    CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+      EXPORTING
+        buffer        = lv_xml
+      IMPORTING
+        output_length = lv_len
+      TABLES
+        binary_tab    = lt_xml.
+
+    c_oi_container_control_creator=>get_container_control(
+                                      IMPORTING
+                                        control = gr_container_control ).
+    IF gr_container IS INITIAL.
+      CREATE OBJECT lr_dockin_cont
+        EXPORTING
+          side      = cl_gui_docking_container=>dock_at_top
+          extension = 1000.
+
+      gr_container = lr_dockin_cont.
+    ENDIF.
+
+    gr_container_control->init_control(
+      EXPORTING
+        r3_application_name      = 'report'
+        inplace_enabled          = abap_false
+*      inplace_scroll_documents = 'X'
+        parent                   = gr_container " cl_gui_custom_container=>screen0
+        register_on_close_event  = 'X'
+        register_on_custom_event = 'X'
+        no_flush                 = 'X' ).
+
+    gr_container_control->get_document_proxy(
+                                         EXPORTING
+                                           document_type      = 'Excel.Sheet'
+                                         IMPORTING
+                                           document_proxy     = gr_proxy ).
+
+    CALL METHOD gr_proxy->open_document_from_table
+      EXPORTING
+        document_size  = lv_len
+        document_table = lt_xml.
+
+    gr_proxy->get_spreadsheet_interface( IMPORTING sheet_interface = gr_handle ).
+
+    gr_proxy->get_document_handle( EXPORTING no_flush = ''
+                                   IMPORTING handle   = DATA(ls_handle) ).
+    gr_workbook = ls_handle-obj.
+
+    CALL METHOD OF gr_workbook 'Worksheets' = gs_sheet
+      EXPORTING
+       #1 = 1.
+
+
+  ENDMETHOD.
+ENDCLASS.

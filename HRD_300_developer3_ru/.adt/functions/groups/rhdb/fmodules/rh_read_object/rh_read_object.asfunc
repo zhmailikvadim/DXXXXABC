@@ -1,0 +1,714 @@
+*5.0 UNICODE, Parameter DISPLAY_TEXT
+*4.6C
+* ANDBJAK001950 190100 Spezialabfrage für PPOM: Sind Objekte schon im
+*                      RHOMBuffer gelöscht?
+*$*$ 4.6A
+* GGB90K005408 100599 Erweiterung der SET_DATE Logik
+
+FUNCTION RH_READ_OBJECT
+  IMPORTING
+    VALUE(PLVAR) LIKE PLOG-PLVAR
+    VALUE(OTYPE) LIKE PLOG-OTYPE
+    VALUE(OBJID) LIKE PLOG-OBJID OPTIONAL
+    VALUE(REALO) LIKE OBJEC-REALO DEFAULT SPACE
+    VALUE(ISTAT) LIKE PLOG-ISTAT DEFAULT SPACE
+    VALUE(BEGDA) LIKE PLOG-BEGDA DEFAULT SY-DATUM
+    VALUE(ENDDA) LIKE PLOG-ENDDA DEFAULT SY-DATUM
+    VALUE(LANGU) LIKE SY-LANGU DEFAULT SY-LANGU
+    VALUE(OINTERVAL) LIKE HRPP0C-TEST DEFAULT 'X'
+    VALUE(STORE) LIKE HRPP0C-TEST DEFAULT 'X'
+    VALUE(CHECK_STRU_AUTH) LIKE HRRHAS-AUTHY DEFAULT 'X'
+    VALUE(READ_DB) LIKE HRPP0C-TEST DEFAULT SPACE
+  EXPORTING
+    VALUE(OBEG) LIKE PLOG-BEGDA
+    VALUE(OEND) LIKE PLOG-ENDDA
+    VALUE(OSTAT) LIKE PLOG-ISTAT
+    VALUE(HISTO) LIKE PLOG-HISTO
+    VALUE(SHORT) LIKE P1000-SHORT
+    VALUE(STEXT) LIKE P1000-STEXT
+    VALUE(TISTAT) LIKE P1000-ISTAT
+    VALUE(TLANGU) LIKE P1000-LANGU
+    VALUE(DISPLAY_TEXT) LIKE P1000-STEXT
+  TABLES
+    EXISTENCE LIKE HROEXIST OPTIONAL
+  EXCEPTIONS
+    NOT_FOUND.
+
+
+
+FIELD-SYMBOLS : <sort>.
+DATA: text_date LIKE wplog-begda.
+DATA: text_found(1) VALUE '0'.
+DATA: temp_index LIKE sy-tabix.
+DATA: temp_buffer LIKE textbuf OCCURS 1 WITH HEADER LINE.
+DATA: buffer_sel_wa  LIKE textbuf,                         "B90K005408
+      buffer_sel     LIKE textbuf OCCURS 1.                "B90K005408
+DATA: temp_buffer_lines TYPE i.
+DATA: check_stru_fcode LIKE t77fc-fcode VALUE 'DISP'.
+DATA: objid_was_initial(1).
+DATA: check_objid(45) TYPE n.
+DATA: vary_offset TYPE i.                                  "GGUNICODE
+DATA: P_SUBRC LIKE SY-SUBRC.
+STATICS: P_OTYPE LIKE PLOG-OTYPE.
+
+DATA: TEXT_BUFFER_SAVE TYPE TEXTBUF.        "Note 1583485
+
+  if plvar is initial or otype is initial.
+*   because initial plvar or initial otype can not exist we
+*   can exit.
+    raise not_found.
+  endif.
+
+  IF CHECK_STRU_AUTH EQ 'X'.
+   PERFORM fill_view(saplrhac) USING plvar sy-uname.
+  ENDIF.
+  PERFORM client_set.
+  CLEAR   existence.
+  REFRESH existence.
+
+  IF objid IS INITIAL.
+    objid_was_initial = 'X'.
+    objid = realo.
+  ENDIF.
+  text_object-plvar = plvar.
+  text_object-otype = otype.
+  text_object-objid = objid.
+* Datuemer setzen
+* falls BEGDA < cpu < ENDDA --> Text zu cpu
+* falls ENDDA < cpu         --> Text zu ENDDA
+* falls BEGDA > cpu         --> Text zu BEGDA
+  text_date = sy-datum.
+  CALL FUNCTION 'RH_SET_DATE'
+       EXPORTING
+            beg_dat            =  begda
+            end_dat            =  endda
+       IMPORTING
+            ret_dat            =  text_date
+       EXCEPTIONS
+            OTHERS             = 0.
+
+  PERFORM fill_i77eo.
+  i77eo_key-mandt = rhdb_client.
+  i77eo_key-otype = otype.
+  CLEAR i77eo.
+  READ TABLE i77eo
+       WITH KEY mandt = i77eo_key-mandt
+                otype = i77eo_key-otype
+       BINARY SEARCH.
+  i77eo_subrc = sy-subrc.
+  IF i77eo_subrc GT 0 OR i77eo-inrel NE space.
+    IF objid_was_initial NE space.
+      check_objid = realo.
+      IF check_objid NE objid.       "REALO mehr als achtstellig
+        RAISE not_found.
+      ELSEIF realo CN ' 0123456789'. "REALO enthält CHARs
+        RAISE not_found.
+      ENDIF.
+    ENDIF.
+
+    IF read_db EQ space.                                  "ANDBJAK001950
+*     Prüfen, ob Objekt im RHOMBuffer bereits als gelöscht"ANDBJAK001950
+*     gekennzeichnet ist.                                 "ANDBJAK001950
+      CALL FUNCTION 'RHOM_CHECK_OBJ_DELETED_IN_BUFF'      "ANDBJAK001950
+        EXPORTING                                         "ANDBJAK001950
+          plvar                     = text_object-plvar   "ANDBJAK001950
+          otype                     = text_object-otype   "ANDBJAK001950
+          objid                     = text_object-objid   "ANDBJAK001950
+        EXCEPTIONS                                        "ANDBJAK001950
+          no_active_plvar           = 1                   "ANDBJAK001950
+          obj_deleted_in_buff       = 2                   "ANDBJAK001950
+          OTHERS                    = 3.                  "ANDBJAK001950
+
+      IF sy-subrc <> 0.                                   "ANDBJAK001950
+        RAISE not_found.                                  "ANDBJAK001950
+      ENDIF.                                              "ANDBJAK001950
+    ENDIF.                                                "ANDBJAK001950
+
+*   Berechtigungsprüfung
+    IF check_stru_auth NE space.
+      IF check_stru_auth EQ 'M'.
+        check_stru_fcode = 'INSE'.
+      ENDIF.
+     IF P_OTYPE IS INITIAL.
+      PERFORM RE77S0(MSTT77S0) USING 'OTYPE' 'PERNR'
+                                      P_OTYPE   P_SUBRC.
+     ENDIF.
+     IF TEXT_OBJECT-OTYPE NE P_OTYPE.
+      CALL FUNCTION 'RH_STRU_AUTHORITY_CHECK'
+           EXPORTING
+                fcode  = check_stru_fcode
+                plvar  = text_object-plvar
+                otype  = text_object-otype
+                objid  = text_object-objid
+           EXCEPTIONS
+                OTHERS = 4.
+      IF sy-subrc GT 0.
+        RAISE not_found.
+      ENDIF.
+     ENDIF.
+    ENDIF.
+
+    READ TABLE text_buffer
+         WITH KEY plvar = text_object-plvar
+                  otype = text_object-otype
+                  objid = text_object-objid
+         BINARY SEARCH
+         TRANSPORTING NO FIELDS.
+    text_buffer_index = sy-tabix.
+    IF sy-subrc EQ 0 AND read_db NE space.
+*     delete object from text_buffer
+      PERFORM ask_store USING space.
+      sy-subrc = 4.
+    ENDIF.
+    IF sy-subrc GT 0.
+      IF i77eo_subrc GT 0      OR
+         i77eo-sotyp <> space.
+        temp_index = text_buffer_index.
+        IF i77eo-sotyp IS INITIAL.
+          SELECT plvar otype objid istat
+                 begda endda langu histo short stext
+                 FROM hrp1000 CLIENT SPECIFIED
+                                APPENDING TABLE temp_buffer
+                                WHERE mandt EQ rhdb_client
+                                AND   plvar EQ text_object-plvar
+                                AND   otype EQ text_object-otype
+                                AND   objid EQ text_object-objid.
+          IF sy-subrc GT 0.
+            RAISE not_found.
+          ENDIF.
+        ELSE.
+          PERFORM get_hrs_object TABLES temp_buffer
+                                 USING  text_object-plvar
+                                        text_object-otype
+                                        text_object-objid
+                                        store
+                                        check_stru_auth
+                                        read_db.
+        ENDIF.
+
+        ASSIGN temp_buffer(textbuf_key_length) TO <sort>.
+        SORT temp_buffer BY <sort>.
+        LOOP AT temp_buffer.
+          text_buffer = temp_buffer.
+          INSERT text_buffer INDEX temp_index.
+          ADD 1 TO temp_index.
+        ENDLOOP.
+        DESCRIBE TABLE temp_buffer LINES temp_buffer_lines.
+        ADD 1 TO object_count.
+      ELSE.
+        CLEAR text_buffer.
+        text_buffer-plvar = plvar.
+        text_buffer-otype = otype.
+        text_buffer-objid = objid.
+        text_buffer-istat = '1'.
+        text_buffer-langu = langu.
+* Begin of note 1583485
+         MOVE-CORRESPONDING text_buffer TO text_buffer_save.
+* End of note 1583485
+        IF sy-mandt EQ rhdb_client.
+          PERFORM set_external_crit USING i77eo-prog
+                                          langu
+                                          store
+                                          check_stru_auth
+                                          read_db.
+
+          PERFORM get_object IN PROGRAM (i77eo-prog) USING
+                             objid begda endda text_date
+                             text_buffer-begda text_buffer-endda
+                             text_buffer-short text_buffer-stext
+                             subrc.
+* Begin of note 1583485
+          IF text_buffer-plvar is initial.
+             text_buffer-plvar = text_buffer_save-plvar.
+             text_buffer-otype = text_buffer_save-otype.
+             text_buffer-objid = text_buffer_save-objid.
+             text_buffer-istat = text_buffer_save-istat.
+             text_buffer-langu = text_buffer_save-langu.
+          ENDIF.
+* End of note 1583485
+
+          PERFORM set_external_crit USING i77eo-prog
+                             langu
+                             store
+                             'X'
+                             read_db.
+
+        ELSE.
+          subrc = 4.
+        ENDIF.
+        IF subrc EQ 0.
+          INSERT text_buffer INDEX text_buffer_index.
+          ADD 1 TO object_count.
+        ELSE.
+          RAISE not_found.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*   TEMP_BUFFER füllen
+    IF temp_buffer_lines EQ 0.
+      tabix = text_buffer_index.
+      DO.
+        READ TABLE text_buffer INDEX tabix.
+        IF sy-subrc GT 0. EXIT. ENDIF.
+        IF text_buffer(12) EQ text_object.
+          APPEND text_buffer TO temp_buffer.
+          tabix = tabix + 1.
+        ELSE.
+          EXIT.
+        ENDIF.
+      ENDDO.
+      DESCRIBE TABLE temp_buffer LINES temp_buffer_lines.
+    ENDIF.
+
+    READ TABLE temp_buffer INDEX 1.
+*   HISTO und OSTAT setzen
+    histo  = temp_buffer-histo.
+    ostat  = temp_buffer-istat.
+    tistat = temp_buffer-istat.
+    tlangu = temp_buffer-langu.
+    IF temp_buffer_lines EQ 1.
+*     nur ein Satz vorhanden
+      short = temp_buffer-short.
+      stext = temp_buffer-stext.
+      obeg  = temp_buffer-begda.
+      oend  = temp_buffer-endda.
+      text_found = on.
+    ELSE.
+      IF ointerval NE space.
+        obeg  = temp_buffer-begda.
+        LOOP AT temp_buffer WHERE istat EQ ostat.
+          oend  = temp_buffer-endda.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+    IF existence IS REQUESTED.
+      LOOP AT temp_buffer.
+        existence-istat = temp_buffer-istat.
+        existence-begda = temp_buffer-begda.
+        existence-endda = temp_buffer-endda.
+        APPEND existence.
+      ENDLOOP.
+    ENDIF.
+    IF ointerval EQ 'I' OR temp_buffer_lines EQ 1.
+      PERFORM ask_store USING store.
+      if DISPLAY_TEXT is supplied.
+        if not stext is initial.
+          display_text = stext.
+        else.
+          display_text = short.
+        endif.
+      endif.
+      EXIT.
+    ENDIF.
+
+    PERFORM set_varyfield USING istat.
+*   Text lesen mit gew. Sprache mit gew. Datum
+*    DO VARYANZ TIMES                                       "GGUNICODE
+*               VARYING VARYISTAT FROM VARYFIELD NEXT VARYFIELD+1.
+    DO varyanz TIMES.                                       "GGUNICODE
+      vary_offset = sy-index - 1.                           "GGUNICODE
+      varyistat = varyfield+vary_offset(1).                 "GGUNICODE
+      CLEAR buffer_sel[].                                   "B90K005408
+      LOOP AT temp_buffer INTO buffer_sel_wa                "B90K005408
+          WHERE istat    EQ varyistat AND
+*                BEGDA    LE TEXT_DATE AND                  "B90K005408
+*                ENDDA    GE TEXT_DATE AND                  "B90K005408
+                begda    LE endda     AND                   "B90K005408
+                endda    GE begda     AND                   "B90K005408
+                langu    EQ langu.
+        IF buffer_sel_wa-begda LE text_date AND             "B90K005408
+           buffer_sel_wa-endda GE text_date.                "B90K005408
+          short  = buffer_sel_wa-short.                     "B90K005408
+          stext  = buffer_sel_wa-stext.                     "B90K005408
+          tistat = buffer_sel_wa-istat.                     "B90K005408
+          tlangu = buffer_sel_wa-langu.                     "B90K005408
+          text_found = on.                                  "B90K005408
+          EXIT.                                             "B90K005408
+        ELSE.                                               "B90K005408
+          APPEND buffer_sel_wa TO buffer_sel.               "B90K005408
+        ENDIF.                                              "B90K005408
+      ENDLOOP.
+      IF sy-subrc = 0 AND text_found EQ off.                "B90K005408
+*       Aus der Tabelle den Satz, der am nächsten zu TEXT_DATE ist
+*       und den Zeitraum schneidet, auswählen.
+        IF text_date > oend.                                "B90K005408
+          SORT buffer_sel BY begda DESCENDING.              "B90K005408
+        ELSEIF text_date < obeg.                            "B90K005408
+          SORT buffer_sel BY begda.                         "B90K005408
+        ENDIF.                                              "B90K005408
+        READ TABLE buffer_sel INTO buffer_sel_wa INDEX 1.   "B90K005408
+        IF sy-subrc = 0.            "must be 0              "B90K005408
+          short  = buffer_sel_wa-short.                     "B90K005408
+          stext  = buffer_sel_wa-stext.                     "B90K005408
+          tistat = buffer_sel_wa-istat.                     "B90K005408
+          tlangu = buffer_sel_wa-langu.                     "B90K005408
+          text_found = on.                                  "B90K005408
+        ENDIF.                                              "B90K005408
+      ENDIF.                                                "B90K005408
+      IF text_found EQ on.
+        EXIT.
+      ENDIF.
+    ENDDO.
+
+    IF text_found EQ off.
+      PERFORM fill_i778l.
+*     Text lesen mit Sprache nach T778L mit gew. Datum
+      LOOP AT i778l WHERE langu NE langu.
+*        DO VARYANZ TIMES                                   "GGUNICODE
+*                    VARYING VARYISTAT FROM VARYFIELD NEXT VARYFIELD+1.
+        DO varyanz TIMES.                                   "GGUNICODE
+          vary_offset = sy-index - 1.                       "GGUNICODE
+          varyistat = varyfield+vary_offset(1).             "GGUNICODE
+          CLEAR buffer_sel[].                               "B90K005408
+          LOOP AT temp_buffer INTO buffer_sel_wa            "B90K005408
+              WHERE istat    EQ varyistat AND
+*                    BEGDA    LE TEXT_DATE AND              "B90K005408
+*                    ENDDA    GE TEXT_DATE AND              "B90K005408
+                    begda    LE endda     AND               "B90K005408
+                    endda    GE begda     AND               "B90K005408
+                    langu    EQ i778l-langu.
+            IF buffer_sel_wa-begda LE text_date AND         "B90K005408
+               buffer_sel_wa-endda GE text_date.            "B90K005408
+              short  = buffer_sel_wa-short.                 "B90K005408
+              stext  = buffer_sel_wa-stext.                 "B90K005408
+              tistat = buffer_sel_wa-istat.                 "B90K005408
+              tlangu = buffer_sel_wa-langu.                 "B90K005408
+              text_found = on.
+              EXIT.
+            ELSE.                                           "B90K005408
+              APPEND buffer_sel_wa TO buffer_sel.           "B90K005408
+            ENDIF.
+          ENDLOOP.
+          IF sy-subrc = 0 AND text_found EQ off.            "B90K005408
+*           Aus der Tabelle den Satz, der am nächsten zu TEXT_DATE ist
+*           und den Zeitraum schneidet, auswählen.
+            IF text_date > oend.                            "B90K005408
+              SORT buffer_sel BY begda DESCENDING.          "B90K005408
+            ELSEIF text_date < obeg.                        "B90K005408
+              SORT buffer_sel BY begda.                     "B90K005408
+            ENDIF.                                          "B90K005408
+            READ TABLE buffer_sel INTO buffer_sel_wa INDEX 1.
+            IF sy-subrc = 0.            "must be 0          "B90K005408
+              short  = buffer_sel_wa-short.                 "B90K005408
+              stext  = buffer_sel_wa-stext.                 "B90K005408
+              tistat = buffer_sel_wa-istat.                 "B90K005408
+              tlangu = buffer_sel_wa-langu.                 "B90K005408
+              text_found = on.                              "B90K005408
+            ENDIF.                                          "B90K005408
+          ENDIF.
+          IF text_found EQ on.
+            EXIT.
+          ENDIF.
+        ENDDO.
+        IF text_found EQ on.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+    IF text_found EQ off.
+*     Text lesen mit gew. Sprache und dem Datum, das als nächstes an
+*     TEXT_DATE liegt
+*      DO VARYANZ TIMES                                   "GGUNICODE
+*                 VARYING VARYISTAT FROM VARYFIELD NEXT VARYFIELD+1.
+      DO varyanz TIMES.                                     "GGUNICODE
+        vary_offset = sy-index - 1.                         "GGUNICODE
+        varyistat = varyfield+vary_offset(1).               "GGUNICODE
+        CLEAR buffer_sel[].                                 "B90K005408
+        LOOP AT temp_buffer INTO buffer_sel_wa              "B90K005408
+                            WHERE istat    EQ varyistat AND
+                                  langu    EQ langu.
+          APPEND buffer_sel_wa TO buffer_sel.               "B90K005408
+*          SHORT  = TEMP_BUFFER-SHORT.                      "B90K005408
+*          STEXT  = TEMP_BUFFER-STEXT.                      "B90K005408
+*          TISTAT = TEMP_BUFFER-ISTAT.                      "B90K005408
+*          TLANGU = TEMP_BUFFER-LANGU.                      "B90K005408
+*          TEXT_FOUND = ON.                                 "B90K005408
+*          EXIT.                                            "B90K005408
+        ENDLOOP.
+        IF sy-subrc = 0.                                    "B90K005408
+          IF text_date > oend.                              "B90K005408
+            SORT buffer_sel BY begda DESCENDING.            "B90K005408
+          ELSEIF text_date < obeg.                          "B90K005408
+            SORT buffer_sel BY begda.                       "B90K005408
+          ENDIF.                                            "B90K005408
+          READ TABLE buffer_sel INTO buffer_sel_wa INDEX 1.
+          IF sy-subrc = 0.            "must be 0            "B90K005408
+            short  = buffer_sel_wa-short.                   "B90K005408
+            stext  = buffer_sel_wa-stext.                   "B90K005408
+            tistat = buffer_sel_wa-istat.                   "B90K005408
+            tlangu = buffer_sel_wa-langu.                   "B90K005408
+            text_found = on.                                "B90K005408
+          ENDIF.                                            "B90K005408
+        ENDIF.                                              "B90K005408
+        IF text_found EQ on.
+          EXIT.
+        ENDIF.
+      ENDDO.
+      IF text_found EQ off.
+        PERFORM fill_i778l.
+*       Text lesen mit Sprache nach T778L mit bel. Datum
+        LOOP AT i778l WHERE langu NE langu.
+*          DO VARYANZ TIMES                               "GGUNICODE
+*                     VARYING VARYISTAT FROM VARYFIELD NEXT VARYFIELD+1.
+          DO varyanz TIMES.                                 "GGUNICODE
+            vary_offset = sy-index - 1.                     "GGUNICODE
+            varyistat = varyfield+vary_offset(1).           "GGUNICODE
+            CLEAR buffer_sel[].                            "B90K005408
+            LOOP AT temp_buffer INTO buffer_sel_wa         "B90K005408
+                                WHERE istat    EQ varyistat AND
+                                      langu    EQ i778l-langu.
+              APPEND buffer_sel_wa TO buffer_sel.           "B90K005408
+*              SHORT  = TEMP_BUFFER-SHORT.                  "B90K005408
+*              STEXT  = TEMP_BUFFER-STEXT.                  "B90K005408
+*              TISTAT = TEMP_BUFFER-ISTAT.                  "B90K005408
+*              TLANGU = TEMP_BUFFER-LANGU.                  "B90K005408
+*              TEXT_FOUND = ON.                             "B90K005408
+*              EXIT.                                        "B90K005408
+            ENDLOOP.
+            IF sy-subrc = 0.                                "B90K005408
+              IF text_date > oend.                          "B90K005408
+                SORT buffer_sel BY begda DESCENDING.        "B90K005408
+              ELSEIF text_date < obeg.                      "B90K005408
+                SORT buffer_sel BY begda.                   "B90K005408
+              ENDIF.                                        "B90K005408
+              READ TABLE buffer_sel INTO buffer_sel_wa INDEX 1.
+              IF sy-subrc = 0.            "must be 0        "B90K005408
+                short  = buffer_sel_wa-short.               "B90K005408
+                stext  = buffer_sel_wa-stext.               "B90K005408
+                tistat = buffer_sel_wa-istat.               "B90K005408
+                tlangu = buffer_sel_wa-langu.               "B90K005408
+                text_found = on.                            "B90K005408
+              ENDIF.                                        "B90K005408
+            ENDIF.                                          "B90K005408
+            IF text_found EQ on.
+              EXIT.
+            ENDIF.
+          ENDDO.
+          IF text_found EQ on.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+    PERFORM ask_store USING store.
+  ELSE.
+*   externe Objekte (nicht NUM8)
+    PERFORM set_external_crit USING i77eo-prog
+                                    langu
+                                    store
+                                    check_stru_auth
+                                    read_db.
+
+    IF realo IS INITIAL.
+      realo = objid.
+    ENDIF.
+    histo = space.
+    ostat = '1'.
+    tistat = ostat.
+    tlangu = langu.
+    IF begda LE sy-datum AND endda GE sy-datum.
+      text_date = sy-datum.
+    ELSE.
+      IF endda LE sy-datum.
+        text_date = endda.
+      ELSE.
+        IF begda GE sy-datum.
+          text_date = begda.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+    IF sy-mandt NE rhdb_client.
+      RAISE not_found.
+    ENDIF.
+    PERFORM get_time_interval IN PROGRAM (i77eo-prog) IF FOUND
+       USING  realo obeg oend subrc.
+    IF subrc GT 0.
+      RAISE not_found.
+    ENDIF.
+    IF text_date LT obeg.
+      text_date = obeg.
+    ELSEIF text_date GT oend.
+      text_date = oend.
+    ENDIF.
+    IF ointerval NE 'I'.
+      PERFORM get_name IN PROGRAM (i77eo-prog) IF FOUND
+         USING  realo  '' ''
+                text_date text_date
+                short  stext subrc.
+      IF subrc GT 0.
+        RAISE not_found.
+      ENDIF.
+    ENDIF.
+    IF existence IS REQUESTED.
+* VIF
+      CALL FUNCTION 'RH_EXISTENCE_GET'
+           EXPORTING
+               plvar                 = plvar
+               otype                 = otype
+               objid                 = realo
+               including_int_objects = space
+          TABLES
+               existence             = existence
+          EXCEPTIONS
+               OTHERS                = 0.
+
+*     EXISTENCE-ISTAT = OSTAT.              "VIF
+*     EXISTENCE-BEGDA = OBEG.
+*     EXISTENCE-ENDDA = OEND.
+*     APPEND EXISTENCE.
+    ENDIF.
+  ENDIF.
+  if DISPLAY_TEXT is supplied.
+    if not stext is initial.
+      display_text = stext.
+    else.
+      display_text = short.
+    endif.
+  endif.
+ENDFUNCTION.
+
+*---------------------------------------------------------------------*
+*       FORM SET_VARYFIELD                                            *
+*---------------------------------------------------------------------*
+*       Variationsfeld setzen                                         *
+*---------------------------------------------------------------------*
+*  -->  VALUE(SV_ISTAT)                                               *
+*---------------------------------------------------------------------*
+FORM set_varyfield USING value(sv_istat) TYPE istat_d.
+
+  CASE sv_istat.
+    WHEN '1'.
+      varyanz = 1. varyfield = '1'.
+    WHEN '2'.
+      varyanz = 2. varyfield = '21'.
+    WHEN '3'.
+      varyanz = 3. varyfield = '312'.
+    WHEN '4'.
+      varyanz = 4. varyfield = '4123'.
+    WHEN '5'.
+      varyanz = 5. varyfield = '51234'.
+    WHEN ' '.
+      varyanz = 5. varyfield = '12345'.
+  ENDCASE.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM ASK_STORE                                                *
+*---------------------------------------------------------------------*
+*       Abfrage : Objekt Puffern ?                                    *
+*---------------------------------------------------------------------*
+*  -->  AS_STORE                                                      *
+*  -->  AS_OBJECT                                                     *
+*---------------------------------------------------------------------*
+FORM ask_store USING as_store TYPE hr_test_sw.
+
+  IF as_store EQ space.
+    IF object_count LE 1.
+      CLEAR object_count.
+      REFRESH text_buffer.
+    ELSE.
+      tabix = text_buffer_index.
+      DO.
+        READ TABLE text_buffer INDEX tabix.
+        IF sy-subrc EQ 0 AND
+           text_buffer(12) EQ text_object.
+          DELETE text_buffer INDEX tabix.
+        ELSE.
+          EXIT.
+        ENDIF.
+      ENDDO.
+      object_count = object_count - 1.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM SET_EXTERNAL_CRIT                                        *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  VALUE(I77EO_PROG)                                             *
+*  -->  VALUE(LANGU)                                                  *
+*  -->  VALUE(STORE)                                                  *
+*  -->  VALUE(CHECK_STRU_AUTH)                                        *
+*  -->  VALUE(READ_DB)                                                *
+*---------------------------------------------------------------------*
+FORM set_external_crit USING value(i77eo_prog)      LIKE t77eo-prog
+                             value(langu)           LIKE sy-langu
+                             value(store)           LIKE hrpp0c-test
+                             value(check_stru_auth) LIKE hrrhas-authy
+                             value(read_db)         LIKE hrpp0c-test.
+
+  DATA: read_criteria LIKE rhobjextrd.
+
+  PERFORM get_read_criteria IN PROGRAM (i77eo_prog)
+                            USING read_criteria
+          IF FOUND.
+
+  read_criteria-langu      = langu.
+  read_criteria-store      = store.
+  read_criteria-stru_authy = check_stru_auth.
+  read_criteria-read_db    = read_db.
+
+  PERFORM set_read_criteria IN PROGRAM (i77eo_prog)
+                            USING read_criteria
+          IF FOUND.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM GET_HRS_OBJECT                                           *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+*  -->  TEMP_BUFFER                                                   *
+*  -->  VALUE(PLVAR)                                                  *
+*  -->  VALUE(OTYPE)                                                  *
+*  -->  VALUE(OBJID)                                                  *
+*  -->  VALUE(STORE)                                                  *
+*  -->  VALUE(CHECK_STRU_AUTH)                                        *
+*  -->  VALUE(READ_DB)                                                *
+*---------------------------------------------------------------------*
+FORM get_hrs_object TABLES temp_buffer STRUCTURE textbuf
+                    USING  value(plvar)           LIKE textbuf-plvar
+                           value(otype)           LIKE textbuf-otype
+                           value(objid)           LIKE textbuf-objid
+                           value(store)           LIKE hrpp0c-test
+                           value(check_stru_auth) LIKE hrrhas-authy
+                           value(read_db)         LIKE hrpp0c-test.
+
+  DATA: act_hrs1000 LIKE hrs1000 OCCURS 0 WITH HEADER LINE.
+
+* use all languages via act_hrs1000!
+  CALL FUNCTION 'RH_READ_HRS_OBJECT_TEXT'
+       EXPORTING
+            act_otype       = otype
+            act_objid       = objid
+            store_flag      = store
+            authority_check = check_stru_auth
+            read_db         = read_db
+       TABLES
+            act_hrs1000     = act_hrs1000
+       EXCEPTIONS
+            OTHERS          = 4.
+
+  IF sy-subrc GT 0.
+    RAISE not_found.
+  ENDIF.
+
+  LOOP AT act_hrs1000.
+    CLEAR temp_buffer.
+    temp_buffer-plvar = plvar.
+    temp_buffer-otype = act_hrs1000-otype.
+    temp_buffer-objid = act_hrs1000-objid.
+    temp_buffer-istat = '1'.
+    temp_buffer-langu = act_hrs1000-langu.
+    temp_buffer-begda = low_date.
+    temp_buffer-endda = high_date.
+    temp_buffer-short = act_hrs1000-short.
+    temp_buffer-stext = act_hrs1000-stext.
+    APPEND temp_buffer.
+  ENDLOOP.
+ENDFORM.

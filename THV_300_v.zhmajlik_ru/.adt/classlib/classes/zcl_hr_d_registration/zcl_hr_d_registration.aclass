@@ -1,0 +1,174 @@
+CLASS zcl_hr_d_registration DEFINITION
+  PUBLIC
+  INHERITING FROM /bobf/cl_lib_d_supercl_simple FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    METHODS /bobf/if_frw_determination~execute REDEFINITION.
+
+  PROTECTED SECTION.
+    METHODS add_bobf_messages
+      IMPORTING it_messages TYPE bapirettab
+      CHANGING  co_message  TYPE REF TO /bobf/if_frw_message.
+
+    METHODS modify_candidate
+      IMPORTING VALUE(it_header)    TYPE zthri_candidateheader3 "#EC CI_VALPAR
+                is_candidate_header TYPE zhr_s_candidate_header
+                is_ctx              TYPE /bobf/s_frw_ctx_det
+                io_modify           TYPE REF TO /bobf/if_frw_modify.
+
+  PRIVATE SECTION.
+    TYPES ty_lt_sysmessages TYPE STANDARD TABLE OF symsg WITH DEFAULT KEY.
+
+    METHODS add_log_messages
+      IMPORTING it_messages TYPE bapirettab
+                it_key      TYPE /bobf/t_frw_key
+                is_ctx      TYPE /bobf/s_frw_ctx_det
+                io_modify   TYPE REF TO /bobf/if_frw_modify
+                io_read     TYPE REF TO /bobf/if_frw_read.
+ENDCLASS.
+
+
+
+CLASS ZCL_HR_D_REGISTRATION IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_determination~execute.
+    DATA lt_header    TYPE zthri_candidateheader3.
+    DATA ls_candidate TYPE zhr_s_sync_btw_erp_and_hr.
+
+
+    io_read->retrieve( EXPORTING iv_node    = is_ctx-node_key
+                                 it_key     = it_key
+                       IMPORTING et_data    = lt_header
+                       " TODO: variable is assigned but never used (ABAP cleaner)
+                                 eo_message = DATA(lo_message) ).
+
+    IF lt_header[ 1 ]-is_run_registration = abap_false.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_header ASSIGNING FIELD-SYMBOL(<ls_headers>).
+      CONDENSE: <ls_headers>-useralias, <ls_headers>-password.
+      DELETE FROM zhr_pb0002d WHERE uuid <> <ls_headers>-key AND num01_email = <ls_headers>-num01_email.
+      DELETE FROM zhr_recruit_logd WHERE uuid_candidate = <ls_headers>-key.
+      COMMIT WORK AND WAIT.
+    ENDLOOP.
+
+    ls_candidate-candidate_header = CORRESPONDING #( lt_header[ 1 ] ).
+
+    DATA(lt_messages) = zcl_recruitment_static=>register_candidate_sap( CHANGING cs_candidate = ls_candidate ).
+
+    IF lt_messages IS NOT INITIAL.
+      add_bobf_messages( EXPORTING it_messages = lt_messages
+                         CHANGING  co_message  = eo_message ).
+
+      CLEAR ls_candidate-candidate_header-num01_email.
+
+      add_log_messages( it_messages = lt_messages
+                        it_key      = it_key
+                        is_ctx      = is_ctx
+                        io_read     = io_read
+                        io_modify   = io_modify ).
+
+      LOOP AT lt_header ASSIGNING FIELD-SYMBOL(<ls_header>).
+        <ls_header>-has_errors = 'X'.
+      ENDLOOP.
+    ELSEIF ls_candidate-candidate_header-zsap_user IS NOT INITIAL.
+      TRY.
+          zcl_recruitment_static=>send_email( CHANGING cs_candidate = ls_candidate ).
+        CATCH cx_send_req_bcs cx_document_bcs cx_address_bcs.
+      ENDTRY.
+    ENDIF.
+
+    modify_candidate( it_header           = lt_header
+                      is_candidate_header = ls_candidate-candidate_header
+                      is_ctx              = is_ctx
+                      io_modify           = io_modify ).
+  ENDMETHOD.
+
+
+  METHOD add_bobf_messages.
+    DATA lt_sysmessages TYPE ty_lt_sysmessages.
+
+    IF co_message IS INITIAL.
+      co_message = /bobf/cl_frw_factory=>get_message( ).
+    ENDIF.
+
+    lt_sysmessages = VALUE #( FOR ls_message IN it_messages
+                              ( msgid = ls_message-id
+                                msgno = ls_message-log_msg_no
+                                msgty = ls_message-type
+                                msgv1 = ls_message-message_v1
+                                msgv2 = ls_message-message_v2
+                                msgv3 = ls_message-message_v3
+                                msgv4 = ls_message-message_v4 ) ).
+
+    LOOP AT lt_sysmessages ASSIGNING FIELD-SYMBOL(<ls_sysmessages>).
+      co_message->add_message( <ls_sysmessages> ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD add_log_messages.
+    DATA lt_log TYPE zthri_recruitment_log.
+    DATA ls_log TYPE zshri_recruitment_log.
+
+    io_read->retrieve_by_association(
+      EXPORTING it_key         = it_key
+                iv_node        = is_ctx-node_key
+                iv_association = zif_hr_i_candidateheader3_c=>sc_association-zhr_i_candidateheader-_recruitmentlog
+                iv_fill_data   = abap_true
+      IMPORTING et_data        = lt_log ).
+
+    io_modify->delete( iv_node = zif_hr_i_candidateheader3_c=>sc_node-zhr_i_recruitment_log
+                       it_key  = CORRESPONDING #( lt_log MAPPING key = key ) ).
+
+    LOOP AT it_messages ASSIGNING FIELD-SYMBOL(<ls_messages>).
+      ls_log-type       = <ls_messages>-type.
+      ls_log-znumber    = <ls_messages>-number.
+      ls_log-id         = <ls_messages>-id.
+      ls_log-message    = <ls_messages>-message.
+      ls_log-message_v1 = <ls_messages>-message_v1.
+      ls_log-message_v2 = <ls_messages>-message_v2.
+      ls_log-message_v3 = <ls_messages>-message_v3.
+      ls_log-message_v4 = <ls_messages>-message_v4.
+      ls_log-zparameter = <ls_messages>-parameter.
+
+      LOOP AT it_key ASSIGNING FIELD-SYMBOL(<ls_key>).
+        io_modify->create(
+            iv_source_node_key = zif_hr_i_candidateheader3_c=>sc_node-zhr_i_candidateheader
+            iv_source_key      = <ls_key>-key
+            iv_assoc_key       = zif_hr_i_candidateheader3_c=>sc_association-zhr_i_candidateheader-_recruitmentlog
+            iv_node            = zif_hr_i_candidateheader3_c=>sc_node-zhr_i_recruitment_log
+            is_data            = REF #( ls_log ) ).
+      ENDLOOP.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD modify_candidate.
+    LOOP AT it_header REFERENCE INTO DATA(ls_header).
+      IF ls_header->objid IS INITIAL.
+        ls_header->pernr        = is_candidate_header-pernr.
+        ls_header->objid        = is_candidate_header-objid.
+        ls_header->otype        = is_candidate_header-otype.
+        ls_header->plvar        = is_candidate_header-plvar.
+        ls_header->zsap_user    = is_candidate_header-zsap_user.
+        ls_header->useralias    = is_candidate_header-useralias.
+        ls_header->password     = is_candidate_header-password.
+        ls_header->created_data = sy-datum.
+        ls_header->created_user = sy-uname.
+        ls_header->created_time = sy-uzeit.
+      ELSE.
+        ls_header->changed_data = sy-datum.
+        ls_header->changed_user = sy-uname.
+        ls_header->changed_time = sy-uzeit.
+      ENDIF.
+
+      io_modify->update( iv_node = is_ctx-node_key
+                         iv_key  = ls_header->key
+                         is_data = ls_header ).
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.

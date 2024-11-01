@@ -1,0 +1,650 @@
+CLASS zcl_api_attachments DEFINITION
+  PUBLIC
+  INHERITING FROM cl_rest_resource
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    TYPES:
+      BEGIN OF mty_s_attachment,
+        task_id        TYPE string,
+        location_id    TYPE string,
+        log_tc_uuid    TYPE string,
+        cntrl_point_id TYPE string,
+        uuid_inconsist TYPE string,
+        filename       TYPE string,
+        description    TYPE string,
+        mimetype       TYPE string,
+        uuid           TYPE string,
+        content        TYPE string,
+        doc_id         TYPE bapisignat-doc_count,
+      END OF mty_s_attachment.
+    TYPES mty_t_attachments TYPE STANDARD TABLE OF mty_s_attachment WITH DEFAULT KEY.
+
+    CLASS-METHODS read_attachments
+      IMPORTING VALUE(iv_task)            TYPE string    OPTIONAL
+                VALUE(iv_location)        TYPE string    OPTIONAL
+                VALUE(iv_point)           TYPE string    OPTIONAL
+                VALUE(iv_uuid_inconsist)  TYPE string    OPTIONAL
+                VALUE(iv_uuid)            TYPE string    OPTIONAL
+                VALUE(iv_file)            TYPE string    OPTIONAL
+                VALUE(iv_no_content)      TYPE abap_bool OPTIONAL
+                VALUE(iv_has_task_in_key) TYPE abap_bool DEFAULT abap_false
+      RETURNING VALUE(rt_attachments)     TYPE mty_t_attachments.
+
+    CLASS-METHODS store_attachments
+      IMPORTING VALUE(is_attachment) TYPE mty_s_attachment
+      EXPORTING VALUE(ev_uuid)       TYPE mty_s_attachment-uuid
+      CHANGING  VALUE(ct_errors)     TYPE wdy_key_value_list
+      RETURNING VALUE(rv_ok)         TYPE abap_bool.
+
+    CLASS-METHODS delete_attachments
+      IMPORTING VALUE(iv_task)     TYPE string
+                VALUE(iv_location) TYPE string OPTIONAL
+                VALUE(iv_point)    TYPE string OPTIONAL
+                VALUE(iv_uuid)     TYPE string OPTIONAL.
+
+    CLASS-METHODS read_property
+      IMPORTING VALUE(iv_document) TYPE bds_dcount
+                VALUE(iv_key)      TYPE bds_propna            DEFAULT 'BDS_KEYWORD'
+                VALUE(iv_property) TYPE bds_propva            OPTIONAL
+                it_signature       TYPE dpcommon_t_bapisignat OPTIONAL
+      RETURNING VALUE(rv_value)    TYPE string.
+
+    CLASS-METHODS insert_uuid_into_signature
+      IMPORTING iv_object_key TYPE sbdst_object_key
+                iv_uuid       TYPE  /bobf/conf_key
+      RETURNING VALUE(rv_ok)  TYPE abap_bool.
+
+    METHODS if_rest_resource~get  REDEFINITION.
+    METHODS if_rest_resource~post REDEFINITION.
+    METHODS if_rest_resource~put  REDEFINITION.
+
+  PROTECTED SECTION.
+
+  PRIVATE SECTION.
+    CONSTANTS mv_file_uid     TYPE string VALUE 'file' ##NO_TEXT.
+    CONSTANTS mv_uri_filter   TYPE string VALUE 'filter' ##NO_TEXT.
+    CONSTANTS mv_task_uid     TYPE string VALUE 'task_id' ##NO_TEXT.
+    CONSTANTS mv_point_uid    TYPE string VALUE 'control_point' ##NO_TEXT.
+    CONSTANTS mv_location_uid TYPE string VALUE 'location' ##NO_TEXT.
+
+    CLASS-DATA mt_signature TYPE dpcommon_t_bapisignat.
+
+    CONSTANTS mv_nocontent_uid  TYPE string VALUE 'no_content' ##NO_TEXT.
+    CONSTANTS mv_document_uid   TYPE string VALUE 'uuid' ##NO_TEXT.
+    CONSTANTS mv_hastaskkey_uid TYPE string VALUE 'with_task' ##NO_TEXT.
+ENDCLASS.
+
+
+
+CLASS ZCL_API_ATTACHMENTS IMPLEMENTATION.
+
+
+  METHOD delete_attachments.
+    DATA lt_signature TYPE STANDARD TABLE OF bapisignat.
+
+    IF iv_location IS NOT INITIAL OR iv_point IS NOT INITIAL.
+      DATA(lt_attach) = read_attachments( iv_task       = iv_task
+                                          iv_location   = iv_location
+                                          iv_point      = iv_point
+                                          iv_uuid       = iv_uuid
+                                          iv_no_content = abap_true ).
+
+      IF lt_attach[] IS INITIAL.
+        RETURN.
+      ENDIF.
+
+      LOOP AT lt_attach[] ASSIGNING FIELD-SYMBOL(<ls_attach>).
+        lt_signature[] = VALUE #( BASE lt_signature[] FOR <ls_sign> IN mt_signature[]
+                                  WHERE ( doc_count = <ls_attach>-doc_id )
+                                  ( <ls_sign> ) ).
+      ENDLOOP.
+    ENDIF.
+
+    cl_bds_document_set=>delete( EXPORTING classname      = 'ZEHS'
+                                           classtype      = 'OT'
+                                           object_key     = CONV #( iv_task )
+                                           x_force_delete = abap_true
+                                 CHANGING  signature      = lt_signature[] ).
+  ENDMETHOD.
+
+
+  METHOD if_rest_resource~get.
+*    DATA: lt_content    TYPE STANDARD TABLE OF bapiconten,
+*          lt_sign       TYPE STANDARD TABLE OF bapisignat,
+*          lt_components TYPE STANDARD TABLE OF bapicompon,
+*          lt_comps      TYPE STANDARD TABLE OF bapicompon.
+*    DATA: lt_response   TYPE STANDARD TABLE OF mty_s_attachment.
+
+    DATA(lv_task_id) = mo_request->get_uri_query_parameter( iv_name = me->mv_task_uid ).
+    IF lv_task_id IS NOT INITIAL.
+      " TODO: variable is assigned but only used in commented-out code (ABAP cleaner)
+      DATA(lv_objectkey) = CONV sbdst_object_key( lv_task_id ).
+    ENDIF.
+    " TODO: variable is assigned but only used in commented-out code (ABAP cleaner)
+    DATA(lv_location) = mo_request->get_uri_query_parameter( iv_name = me->mv_location_uid ).
+    " TODO: variable is assigned but only used in commented-out code (ABAP cleaner)
+    DATA(lv_point) = mo_request->get_uri_query_parameter( iv_name = me->mv_point_uid ).
+    " TODO: variable is assigned but only used in commented-out code (ABAP cleaner)
+    DATA(lv_uuid) = mo_request->get_uri_query_parameter( iv_name = me->mv_document_uid ).
+    " TODO: variable is assigned but only used in commented-out code (ABAP cleaner)
+    DATA(lv_file_name) = cl_http_utility=>if_http_utility~unescape_url(
+                             mo_request->get_uri_query_parameter( iv_name = me->mv_file_uid ) ).
+
+    DATA(lt_response) = read_attachments(
+        iv_task            = mo_request->get_uri_query_parameter( iv_name = me->mv_task_uid )
+        iv_location        = mo_request->get_uri_query_parameter( iv_name = me->mv_location_uid )
+        iv_point           = mo_request->get_uri_query_parameter( iv_name = me->mv_point_uid )
+        iv_uuid            = mo_request->get_uri_query_parameter( iv_name = me->mv_document_uid )
+        iv_file            = cl_http_utility=>if_http_utility~unescape_url(
+                                 mo_request->get_uri_query_parameter( iv_name = me->mv_file_uid ) )
+        iv_no_content      = mo_request->has_uri_query_parameter( iv_name = me->mv_nocontent_uid )
+        iv_has_task_in_key = mo_request->has_uri_query_parameter( iv_name = me->mv_hastaskkey_uid ) ).
+
+*    cl_bds_document_set=>get_with_table( EXPORTING classname  = 'ZEHS'
+*                                                   classtype  = 'OT'
+*                                                   object_key = lv_objectkey
+*                                         CHANGING  content    = lt_content[]
+*                                                   signature  = me->mt_signature[]
+*                                                   components = lt_components[] ).
+*
+*    DATA(lv_no_content) = mo_request->has_uri_query_parameter( iv_name = me->mv_nocontent_uid ).
+*
+*    IF lv_task_id IS INITIAL AND lv_file_name IS INITIAL AND lv_location IS INITIAL AND lv_point IS INITIAL AND lv_uuid IS INITIAL.
+**      lt_response[] = CORRESPONDING #( lt_components[] ).
+*      LOOP AT lt_components[] ASSIGNING FIELD-SYMBOL(<ls_component>).
+*
+*        APPEND VALUE #( task_id        = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_property = 'TASK' )
+*                        location_id    = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_property = 'LOCATION' )
+*                        cntrl_point_id = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_property = 'CONTROL_POINT' )
+*                        filename       = <ls_component>-comp_id
+*                        description    = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_key      = 'DESCRIPTION' )
+*                        mimetype       = <ls_component>-mimetype ) TO lt_response[].
+*      ENDLOOP.
+*
+*      zcl_api_utils=>process_response( EXPORTING ir_data   = REF #( lt_response[] )
+*                                       CHANGING  cr_response = me->mo_response ).
+*      RETURN.
+*    ELSE.
+*      LOOP AT lt_components[] ASSIGNING <ls_component>.
+*        IF lv_file_name IS NOT INITIAL.
+*          CHECK <ls_component>-comp_id = lv_file_name.
+*        ENDIF.
+*
+*        IF lv_location IS NOT INITIAL.
+*          CHECK me->read_property( iv_document = <ls_component>-doc_count
+*                                   iv_property = 'LOCATION' ) = lv_location.
+**          CHECK sy-subrc = 0.
+*        ENDIF.
+*
+*        IF lv_point IS NOT INITIAL.
+*          CHECK me->read_property( iv_document = <ls_component>-doc_count
+*                                   iv_property = 'CONTROL_POINT' ) = lv_point.
+*        ENDIF.
+*
+*        lt_sign[] = VALUE #( FOR <ls_signature> IN me->mt_signature[]
+*                             WHERE ( doc_count = <ls_component>-doc_count )
+*                             ( CORRESPONDING #( <ls_signature> ) ) ).
+*
+*        IF lv_uuid IS NOT INITIAL.
+*          DELETE lt_sign[] WHERE doc_id NP |* { lv_uuid }|.
+*          CHECK lt_sign[] IS NOT INITIAL.
+*        ENDIF.
+*
+*        CLEAR: lt_content[].
+*        cl_bds_document_set=>get_with_table( EXPORTING classname  = 'ZEHS'
+*                                                       classtype  = 'OT'
+*                                             CHANGING  content    = lt_content[]
+*                                                       signature  = lt_sign[]
+*                                                       components = lt_comps[] ).
+*
+*        DATA(lv_content) = REDUCE #( INIT lv_value TYPE xstring
+*                                     FOR <ls_line> IN lt_content[]
+*                                     NEXT lv_value = lv_value && <ls_line>-line ).
+*
+*        lv_content =  lv_content(<ls_component>-comp_size).
+*
+*        APPEND VALUE #( task_id        = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_property = 'TASK_ID' )
+*                        location_id    = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_property = 'LOCATION' )
+*                        cntrl_point_id = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_property = 'CONTROL_POINT' )
+*                        filename       = <ls_component>-comp_id
+*                        description    = me->read_property( iv_document = <ls_component>-doc_count
+*                                                            iv_key      = 'DESCRIPTION' )
+*                        mimetype       = <ls_component>-mimetype
+*                        uuid           = lt_sign[ 1 ]-doc_id+10
+*                        content        = SWITCH #( lv_no_content WHEN abap_true THEN ''
+*                                                                 ELSE me->read_property( iv_document = <ls_component>-doc_count
+*                                                                                         iv_property = 'PREFIX' ) && cl_http_utility=>encode_x_base64( lv_content ) ) ) TO lt_response[].
+*      ENDLOOP.
+*    ENDIF.
+
+    zcl_api_utils=>post_filter_data(
+      EXPORTING iv_filter = mo_request->get_uri_query_parameter( iv_name = me->mv_uri_filter )
+      CHANGING  ct_data   = lt_response[] ).
+
+    zcl_api_utils=>process_response( EXPORTING ir_data     = REF #( lt_response[] )
+                                     CHANGING  cr_response = me->mo_response ).
+  ENDMETHOD.
+
+
+  METHOD if_rest_resource~post.
+    DATA lt_errors   TYPE wdy_key_value_list.
+    DATA lt_request  TYPE STANDARD TABLE OF mty_s_attachment.
+    DATA lv_uuid     TYPE mty_s_attachment-uuid.
+
+    DATA lt_response TYPE STANDARD TABLE OF mty_s_attachment.
+
+    " DATA: lv_length  TYPE i.
+    "       LT_CONTENT    type standard table of BAPICONTEN,
+    "       LT_REQUEST    type standard table of MTY_S_ATTACHMENT,
+    "       LT_SIGNATURE  type standard table of BAPISIGNAT,
+    "       LT_COMPONENTS type stanDARD TABLE OF bapicompon,
+
+    zcl_api_utils=>get_data_from_request( EXPORTING ir_request = me->mo_request
+                                          CHANGING  ct_errors  = lt_errors[]
+                                                    c_data     = lt_request[] ).
+
+    IF lt_errors[] IS NOT INITIAL.
+      zcl_api_utils=>process_response( EXPORTING it_errors   = lt_errors[]
+                                       CHANGING  cr_response = me->mo_response ).
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_request[] ASSIGNING FIELD-SYMBOL(<ls_request>).
+      IF <ls_request>-content IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      IF me->store_attachments( EXPORTING is_attachment = <ls_request>
+                                IMPORTING ev_uuid       = lv_uuid
+                                CHANGING  ct_errors     = lt_errors[] ).
+        lt_response[] = VALUE #( BASE lt_response[]
+                                 ( task_id        = <ls_request>-task_id
+                                   location_id    = <ls_request>-location_id
+                                   cntrl_point_id = <ls_request>-cntrl_point_id
+                                   filename       = <ls_request>-filename
+                                   description    = <ls_request>-description
+                                   mimetype       = <ls_request>-mimetype
+                                   uuid           = lv_uuid ) ). " VALUE #( lt_signature[ 1 ]-doc_id+10 OPTIONAL ) ) )
+      ENDIF.
+
+*      "Обрезать data:image/jpeg;base64,:
+*      FIND REGEX '(^\S+base64,)(\S+)' IN <ls_request>-content SUBMATCHES DATA(lv_prefix)
+*                                                                         <ls_request>-content.
+*      "Если sy-subrc = 0, префикс отрежется и сложится в lv_prefix.
+*
+*      DATA(lv_xstring) = cl_http_utility=>decode_x_base64( <ls_request>-content ).
+*      cl_bcs_convert=>xstring_to_xtab( EXPORTING iv_xstring = lv_xstring
+*                                       IMPORTING et_xtab    = lt_content[]  ).
+*
+*      lt_signature[] = VALUE #( doc_count = 1
+*                                comp_count = 1
+*                                ( prop_name = 'BDS_DOCUMENTTYPE'  prop_value = 'BDS_IMAGE')
+*                                ( prop_name = 'BDS_DOCUMENTCLASS' prop_value = 'JPG'        ) "'JPG' ) "Таблица ->TOADD
+*                                ( prop_name = 'DESCRIPTION'       prop_value = <ls_request>-description )
+*                                ( prop_name = 'BDS_KEYWORD'       prop_value = |TASK={ <ls_request>-task_id }| )
+*                                ( prop_name = 'BDS_KEYWORD'       prop_value = |LOCATION={ <ls_request>-location_id }| )
+*                                ( prop_name = 'BDS_KEYWORD'       prop_value = |CONTROL_POINT={ <ls_request>-cntrl_point_id }| )
+*                                ( prop_name = 'BDS_KEYWORD'       prop_value = |PREFIX={ lv_prefix }| ) ).
+*
+*      DATA(lv_objectkey) = CONV sbdst_object_key( <ls_request>-task_id ).
+*
+*      cl_bds_document_set=>create_with_table( EXPORTING classname  = 'ZEHS'
+*                                                        classtype  = 'OT'
+*                                                        components = VALUE #( ( doc_count  = 1
+*                                                                                comp_count = 1
+*                                                                                comp_id    = <ls_request>-filename
+*                                                                                mimetype   = <ls_request>-mimetype   "'application/octet-stream' "'image/jpeg' "Таблица ->TOADD
+*                                                                                comp_size  = xstrlen( lv_xstring ) ) )
+*                                                        content    = lt_content[]
+*                                              CHANGING  signature  = lt_signature[]
+*                                                        object_key = lv_objectkey
+*                                              EXCEPTIONS internal_error  = 1
+*                                                         error_kpro      = 2
+*                                                         parameter_error = 3
+*                                                         not_authorized  = 4
+*                                                         not_allowed     = 5
+*                                                         nothing_found   = 6
+*                                                         OTHERS          = 7 ).
+*      IF sy-subrc <> 0.
+*        lt_errors[] = VALUE #( BASE lt_errors[] ( key = zcl_api_utils=>gc_err_create
+*                                                  value = SWITCH #( sy-subrc WHEN 1 THEN 'INTERNAL ERROR'
+*                                                                             WHEN 2 THEN 'ERROR KPRO'
+*                                                                             WHEN 3 THEN 'PARAMETER ERROR'
+*                                                                             WHEN 4 THEN 'NOT AUTHORIZED'
+*                                                                             WHEN 5 THEN 'NOT ALLOWED'
+*                                                                             WHEN 6 THEN 'NOTHING FOUND'
+*                                                                             WHEN 7 THEN 'OTHER ERROR' ) ) ).
+*      ELSE.
+*        lt_response[] = VALUE #( BASE lt_response[] ( task_id        = <ls_request>-task_id
+*                                                      location_id    = <ls_request>-location_id
+*                                                      cntrl_point_id = <ls_request>-cntrl_point_id
+*                                                      filename       = <ls_request>-filename
+*                                                      description    = <ls_request>-description
+*                                                      mimetype       = <ls_request>-mimetype
+*                                                      uuid           = VALUE #( lt_signature[ 1 ]-doc_id+10 OPTIONAL ) ) ).
+*      ENDIF.
+    ENDLOOP.
+
+    zcl_api_utils=>process_response( EXPORTING it_errors   = lt_errors[]
+                                               ir_data     = REF #( lt_response[] )
+                                     CHANGING  cr_response = me->mo_response ).
+  ENDMETHOD.
+
+
+  METHOD if_rest_resource~put.
+    me->if_rest_resource~post( io_entity = io_entity ).
+  ENDMETHOD.
+
+
+  METHOD insert_uuid_into_signature.
+    DATA lt_content    TYPE STANDARD TABLE OF bapiconten.
+    DATA lt_signature  TYPE dpcommon_t_bapisignat.
+    DATA lt_components TYPE STANDARD TABLE OF bapicompon.
+    DATA lv_uuid       TYPE string.
+    DATA lt_prop       TYPE sbdst_properties.
+
+    cl_bds_document_set=>get_with_table( EXPORTING  classname       = 'ZEHS'
+                                                    classtype       = 'OT'
+                                                    object_key      = iv_object_key
+                                         CHANGING   content         = lt_content[]
+                                                    signature       = lt_signature[]
+                                                    components      = lt_components[]
+                                         EXCEPTIONS internal_error  = 1
+                                                    error_kpro      = 2
+                                                    parameter_error = 3
+                                                    not_allowed     = 4
+                                                    not_authorized  = 5
+                                                    nothing_found   = 6
+                                                    OTHERS          = 7 ).
+    DELETE lt_signature WHERE prop_name = 'CREATED_AT' OR prop_name = 'CREATED_BY' OR prop_name = 'LAST_CHANGED_AT' OR prop_name = 'LAST_CHANGED_BY' OR prop_name = 'STATE'.
+    IF lt_signature IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_components[] ASSIGNING FIELD-SYMBOL(<ls_component>).
+      CLEAR lv_uuid.
+      lv_uuid = zcl_api_attachments=>read_property( iv_document  = <ls_component>-doc_count
+                                                    it_signature = lt_signature
+                                                    iv_property  = 'UUID' ).
+      IF lv_uuid IS NOT INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      DELETE lt_signature WHERE prop_value CP |UUID=*| AND doc_count = <ls_component>-doc_count.
+      DATA(ls_signature) = lt_signature[ doc_count = <ls_component>-doc_count ].
+      ls_signature-doc_count  = <ls_component>-doc_count.
+      ls_signature-prop_name  = 'BDS_KEYWORD'.
+      ls_signature-prop_value = |UUID={ iv_uuid }|.
+      APPEND ls_signature TO lt_signature.
+
+      DATA(lt_signature1) = lt_signature.
+      DELETE lt_signature1 WHERE doc_id <> ls_signature-doc_id.
+      lt_prop = CORRESPONDING #( lt_signature1 ).
+      cl_bds_document_set=>change_properties( EXPORTING  classname       = 'ZEHS'
+                                                         classtype       = 'OT'
+                                                         doc_id          = ls_signature-doc_id
+                                                         doc_ver_no      = ls_signature-doc_ver_no
+                                                         doc_var_id      = ls_signature-doc_var_id
+                                                         object_key      = iv_object_key
+                                              CHANGING   properties      = lt_prop
+                                              EXCEPTIONS nothing_found   = 1
+                                                         internal_error  = 2
+                                                         error_kpro      = 3
+                                                         not_authorized  = 4
+                                                         not_allowed     = 5
+                                                         parameter_error = 6
+                                                         OTHERS          = 99 ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD read_attachments.
+    " lv_content    type xstring,
+
+    DATA lt_content    TYPE STANDARD TABLE OF bapiconten.
+    DATA lt_components TYPE STANDARD TABLE OF bapicompon.
+    DATA lt_sign       TYPE STANDARD TABLE OF bapisignat.
+    DATA lt_comps      TYPE STANDARD TABLE OF bapicompon.
+
+    IF iv_task IS NOT INITIAL.
+      DATA(lv_objectkey) = CONV sbdst_object_key( shift_left( val = iv_task
+                                                              sub = '0' ) ).
+    ENDIF.
+
+    CLEAR mt_signature[].
+
+    cl_bds_document_set=>get_with_table( EXPORTING  classname       = 'ZEHS'
+                                                    classtype       = 'OT'
+                                                    object_key      = lv_objectkey
+                                         CHANGING   content         = lt_content[]
+                                                    signature       = mt_signature[]
+                                                    components      = lt_components[]
+                                         EXCEPTIONS internal_error  = 1
+                                                    error_kpro      = 2
+                                                    parameter_error = 3
+                                                    not_allowed     = 4
+                                                    not_authorized  = 5
+                                                    nothing_found   = 6
+                                                    OTHERS          = 7 ).
+
+    IF iv_task IS INITIAL AND iv_file IS INITIAL AND iv_location IS INITIAL AND iv_point IS INITIAL AND iv_uuid IS INITIAL.
+      LOOP AT lt_components[] ASSIGNING FIELD-SYMBOL(<ls_component>).
+
+        APPEND VALUE #( task_id        = read_property( iv_document = <ls_component>-doc_count
+                                                        iv_property = 'TASK' )
+                        location_id    = read_property( iv_document = <ls_component>-doc_count
+                                                        iv_property = 'LOCATION' )
+                        cntrl_point_id = read_property( iv_document = <ls_component>-doc_count
+                                                        iv_property = 'CONTROL_POINT' )
+                        uuid_inconsist = read_property( iv_document = <ls_component>-doc_count
+                                                        iv_property = 'UUID' )
+                        filename       = <ls_component>-comp_id
+                        description    = read_property( iv_document = <ls_component>-doc_count
+                                                        iv_key      = 'DESCRIPTION' )
+                        mimetype       = <ls_component>-mimetype ) TO rt_attachments[].
+      ENDLOOP.
+
+      RETURN.
+    ELSE.
+      LOOP AT lt_components[] ASSIGNING <ls_component>.
+        IF iv_file IS NOT INITIAL.
+          IF <ls_component>-comp_id <> iv_file.
+            CONTINUE.
+          ENDIF.
+        ENDIF.
+
+        IF iv_has_task_in_key = 'X' AND iv_task IS NOT INITIAL.
+          IF read_property( iv_document = <ls_component>-doc_count
+                            iv_property = 'TASK' ) <> iv_task.
+            CONTINUE.
+          ENDIF.
+        ENDIF.
+
+        IF iv_location IS NOT INITIAL.
+          IF read_property( iv_document = <ls_component>-doc_count
+                            iv_property = 'LOCATION' ) <> iv_location.
+            CONTINUE.
+          ENDIF.
+        ENDIF.
+
+        IF iv_point IS NOT INITIAL.
+          IF read_property( iv_document = <ls_component>-doc_count
+                            iv_property = 'CONTROL_POINT' ) <> iv_point.
+            CONTINUE.
+          ENDIF.
+        ENDIF.
+
+        IF iv_uuid_inconsist IS NOT INITIAL.
+          IF read_property( iv_document = <ls_component>-doc_count
+                            iv_property = 'UUID' ) <> iv_uuid_inconsist.
+            CONTINUE.
+          ENDIF.
+        ENDIF.
+
+        lt_sign[] = VALUE #( FOR <ls_signature> IN mt_signature[]
+                             WHERE ( doc_count = <ls_component>-doc_count )
+                             ( CORRESPONDING #( <ls_signature> ) ) ).
+
+        IF iv_uuid IS NOT INITIAL.
+          DELETE lt_sign[] WHERE doc_id NP |* { iv_uuid }|.
+          IF lt_sign[] IS INITIAL.
+            CONTINUE.
+          ENDIF.
+        ENDIF.
+
+        CLEAR lt_content[].
+        cl_bds_document_set=>get_with_table( EXPORTING classname  = 'ZEHS'
+                                                       classtype  = 'OT'
+                                             CHANGING  content    = lt_content[]
+                                                       signature  = lt_sign[]
+                                                       components = lt_comps[] ).
+
+*        LOOP AT lt_content[] ASSIGNING FIELD-SYMBOL(<ls_content>).
+*          lv_content = |{ lv_content }{ <ls_content>-line }|.
+*        ENDLOOP.
+*        DATA(lv_content) = REDUCE #( INIT lv_value TYPE xstring
+*                                     FOR <ls_line> IN lt_content[]
+*                                     NEXT lv_value = lv_value && <ls_line>-line ).
+
+        TRY.
+            DATA(lv_content) = cl_bcs_convert=>xtab_to_xstring( lt_content[] ).
+          CATCH cx_bcs.
+            " handle exception
+        ENDTRY.
+        lv_content = lv_content(<ls_component>-comp_size).
+
+        APPEND VALUE #(
+            task_id        = read_property( iv_document = <ls_component>-doc_count
+                                            iv_property = 'TASK' )
+            location_id    = read_property( iv_document = <ls_component>-doc_count
+                                            iv_property = 'LOCATION' )
+            cntrl_point_id = read_property( iv_document = <ls_component>-doc_count
+                                            iv_property = 'CONTROL_POINT' )
+            uuid_inconsist = read_property( iv_document = <ls_component>-doc_count
+                                            iv_property = 'UUID' )
+            filename       = <ls_component>-comp_id
+            description    = read_property( iv_document = <ls_component>-doc_count
+                                            iv_key      = 'DESCRIPTION' )
+            mimetype       = <ls_component>-mimetype
+            uuid           = lt_sign[ 1 ]-doc_id+10
+            content        = SWITCH #( iv_no_content
+                                       WHEN abap_true
+                                       THEN ''
+                                       ELSE read_property( iv_document = <ls_component>-doc_count
+                                                           iv_property = 'PREFIX' ) && cl_http_utility=>encode_x_base64(
+                                                                                           lv_content ) )
+            doc_id         = <ls_component>-doc_count ) TO rt_attachments[].
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD read_property.
+    DATA lt_signature LIKE mt_signature.
+
+    IF it_signature IS SUPPLIED.
+      lt_signature = it_signature.
+    ELSE.
+      lt_signature = mt_signature.
+    ENDIF.
+
+    LOOP AT lt_signature ASSIGNING FIELD-SYMBOL(<ls_signature>) WHERE     doc_count = iv_document
+                                                                      AND prop_name = iv_key.
+      IF iv_property IS SUPPLIED.
+        IF <ls_signature>-prop_value NP |{ iv_property }=*|.
+          CONTINUE.
+        ENDIF.
+        rv_value = shift_left( val    = <ls_signature>-prop_value
+                               places = strlen( iv_property ) + 1 ).
+        EXIT.
+      ENDIF.
+
+      rv_value = <ls_signature>-prop_value.
+      EXIT.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD store_attachments.
+    DATA lt_content   TYPE STANDARD TABLE OF bapiconten.
+    DATA lt_signature TYPE STANDARD TABLE OF bapisignat.
+
+    " Обрезать data:image/jpeg;base64,:
+    FIND REGEX '(^data:(\S+);base64,)(.+)$' IN is_attachment-content SUBMATCHES DATA(lv_prefix)
+         DATA(lv_mimetype)
+         is_attachment-content.
+    " Если sy-subrc = 0, префикс отрежется и сложится в lv_prefix.
+
+    FIND REGEX '^image/(\S+)' IN lv_mimetype SUBMATCHES DATA(lv_imageclass).
+
+    DATA(lv_xstring) = cl_http_utility=>decode_x_base64( is_attachment-content ).
+    TRY.
+        cl_bcs_convert=>xstring_to_xtab( EXPORTING iv_xstring = lv_xstring
+                                         IMPORTING et_xtab    = lt_content[]  ).
+      CATCH cx_bcs.
+        " handle exception
+    ENDTRY.
+
+    lt_signature[] = VALUE #(
+        doc_count  = 1
+        comp_count = 1
+        ( prop_name = 'BDS_DOCUMENTTYPE'  prop_value = 'BDS_IMAGE' )
+        ( prop_name  = 'BDS_DOCUMENTCLASS'
+          prop_value = COND #( WHEN lv_imageclass IS INITIAL
+                               THEN 'JPG'
+                               ELSE to_upper( lv_imageclass ) ) )
+        ( prop_name = 'DESCRIPTION'       prop_value = is_attachment-description )
+        ( prop_name = 'BDS_KEYWORD'       prop_value = |TASK={ is_attachment-task_id }| )
+        ( prop_name = 'BDS_KEYWORD'       prop_value = |LOCATION={ is_attachment-location_id }| )
+        ( prop_name = 'BDS_KEYWORD'       prop_value = |CONTROL_POINT={ is_attachment-cntrl_point_id }| )
+        ( prop_name = 'BDS_KEYWORD'       prop_value = |UUID={ is_attachment-uuid_inconsist }| )
+        ( prop_name = 'BDS_KEYWORD'       prop_value = |LOG_TC_UUID={ is_attachment-log_tc_uuid }| )
+        ( prop_name = 'BDS_KEYWORD'       prop_value = |PREFIX={ lv_prefix }| ) ).
+
+    DATA(lv_objectkey) = CONV sbdst_object_key( is_attachment-task_id ).
+
+    cl_bds_document_set=>create_with_table(
+      EXPORTING  classname       = 'ZEHS'
+                 classtype       = 'OT'
+                 components      = VALUE #( ( doc_count  = 1
+                                              comp_count = 1
+                                              comp_id    = is_attachment-filename
+                                              mimetype   = COND #( WHEN is_attachment-mimetype IS INITIAL
+                                                                   THEN lv_mimetype
+                                                                   ELSE is_attachment-mimetype )
+                                              comp_size  = xstrlen( lv_xstring ) ) )
+                 content         = lt_content[]
+      CHANGING   signature       = lt_signature[]
+                 object_key      = lv_objectkey
+      EXCEPTIONS internal_error  = 1
+                 error_kpro      = 2
+                 parameter_error = 3
+                 not_authorized  = 4
+                 not_allowed     = 5
+                 nothing_found   = 6
+                 OTHERS          = 7 ).
+    IF sy-subrc <> 0.
+      ct_errors[] = VALUE #( BASE ct_errors[]
+                             ( key   = zcl_api_utils=>gc_err_create
+                               value = SWITCH #( sy-subrc
+                                                 WHEN 1 THEN 'INTERNAL ERROR'
+                                                 WHEN 2 THEN 'ERROR KPRO'
+                                                 WHEN 3 THEN 'PARAMETER ERROR'
+                                                 WHEN 4 THEN 'NOT AUTHORIZED'
+                                                 WHEN 5 THEN 'NOT ALLOWED'
+                                                 WHEN 6 THEN 'NOTHING FOUND'
+                                                 WHEN 7 THEN 'OTHER ERROR' ) ) ).
+    ELSE.
+      ev_uuid = VALUE #( lt_signature[ 1 ]-doc_id+10 OPTIONAL ).
+      rv_ok   = abap_true.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

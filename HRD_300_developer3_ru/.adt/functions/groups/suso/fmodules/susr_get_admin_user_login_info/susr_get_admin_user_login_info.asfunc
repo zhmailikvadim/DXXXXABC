@@ -1,0 +1,124 @@
+FUNCTION SUSR_GET_ADMIN_USER_LOGIN_INFO
+  IMPORTING
+    VALUE(USERID) TYPE XUBNAME OPTIONAL
+    VALUE(ALIASNAME) TYPE USALIAS OPTIONAL
+    VALUE(AUTHORITY_CHECK) TYPE CHAR1 OPTIONAL
+  EXPORTING
+    VALUE(USER_ID) TYPE XUBNAME
+    VALUE(PASSWORD_STATUS) TYPE XUPWDSTATE
+    VALUE(LOCK_STATUS) TYPE XUUFLAG
+    VALUE(LAST_LOGON_DATE) TYPE XULDATE
+  EXCEPTIONS
+    NOT_AUTHORIZED
+    NO_USERID_FOR_ALIASNAME
+    PARAMETER_MISSING
+    USER_NOT_EXISTS
+    INTERNAL_ERROR.
+
+
+
+
+* Old style authority check. Correct checks follow later.
+  IF authority_check IS INITIAL.
+    CALL FUNCTION 'AUTHORITY_CHECK_TCODE'
+      EXPORTING
+        tcode         = 'SU01'
+      EXCEPTIONS
+        ok            = 0
+        not_ok        = 1
+        OTHERS        = 2.
+    IF sy-subrc <> 0.
+      RAISE not_authorized.
+    ENDIF.
+  ENDIF.
+
+* convert to upper case (caller might not have done, yet)
+  TRANSLATE aliasname TO UPPER CASE.                    "#EC SYNTCHAR
+  TRANSLATE userid    TO UPPER CASE.                    "#EC SYNTCHAR
+
+  IF aliasname IS NOT INITIAL.
+*   for formal correctness
+    DATA: alias TYPE bapialias.
+    alias = aliasname.
+*   Authority check for search for users of any group
+    IF NOT authority_check IS INITIAL.
+      AUTHORITY-CHECK OBJECT 'S_USER_GRP'
+        ID 'CLASS' DUMMY
+        ID 'ACTVT' FIELD '03'.
+      IF sy-subrc <> 0.
+        MESSAGE e495(01) RAISING not_authorized.
+      ENDIF.
+    ENDIF.
+*   Retrieve (internal) USERID that matches given ALIAS
+    CALL FUNCTION 'SUSR_USER_BNAME_FROM_ALIAS'
+      EXPORTING
+         alias          = alias
+      IMPORTING
+         bname          = user_id
+      EXCEPTIONS
+         no_bname_found = 1
+         OTHERS         = 2.
+    CASE sy-subrc.
+      WHEN 0.  IF NOT userid IS INITIAL AND userid <> user_id.
+                 RAISE no_userid_for_aliasname.
+               ENDIF.
+      WHEN 1.  RAISE no_userid_for_aliasname.
+      WHEN OTHERS. RAISE internal_error.
+    ENDCASE.
+  ELSE.
+    user_id = userid.
+  ENDIF.
+
+  IF user_id IS INITIAL.
+    RAISE parameter_missing.
+  ENDIF.
+
+  DATA:
+    lf_uclass TYPE xuclass.
+
+* Retrieve lock status (bit field)
+*      0 = not locked
+*     32 = globally (CUA) locked by administrator
+*     64 = locally locked by administrator
+*    128 = locked due to failed password logon attempts
+*
+  SELECT SINGLE uflag trdat class
+    INTO (lock_status, last_logon_date, lf_uclass)
+    FROM usr02 WHERE bname = user_id.
+  IF sy-subrc <> 0.
+    RAISE user_not_exists.
+  ENDIF.
+
+* Authority check
+  IF NOT authority_check IS INITIAL.
+    AUTHORITY-CHECK OBJECT 'S_USER_GRP'
+      ID 'CLASS' FIELD lf_uclass
+      ID 'ACTVT' FIELD '03'.
+    IF sy-subrc <> 0.
+      MESSAGE e512(01) WITH lf_uclass.
+    ENDIF.
+  ENDIF.
+
+* retrieve password status and existance:
+*     -5 = user does not exist
+*     -4 = user has no password
+*     -3 = password logon disabled for this user
+*     -2 = password can generally not be changed
+*     -1 = password cannot be changed today (only once per day)
+*      0 = password can but does not have to be changed
+*      1 = password is initial and has to be changed
+*      2 = password is expired and has to be changed
+*
+  CALL 'PASSWORD' ID 'OPCODE'   FIELD 'S'
+                  ID 'USERNAME' FIELD user_id
+                  ID 'PASSFLAG' FIELD password_status.
+
+  IF sy-subrc <> 0.
+    RAISE internal_error.
+  ENDIF.
+
+  IF password_status = -5.
+    RAISE user_not_exists.
+  ENDIF.
+
+ENDFUNCTION.

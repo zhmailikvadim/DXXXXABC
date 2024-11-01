@@ -1,0 +1,261 @@
+*********************************************************************
+* Описание          : Отчет «Наличие ТМЦ, полученных в безвозмездное
+*                     пользование»
+* Код ТС            : DEV.030-БНУ.46.О-145
+* Разработчик       : Доманикова Г.М.
+* Постановка задачи : Ганжа Т.И.
+*********************************************************************
+CLASS zcl_fi_tmc_bp_amdp DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+  " hdp amdp marker interface
+    interfaces if_amdp_marker_hdb.
+     TYPES:
+      BEGIN OF gty_s_data,
+        butxt      TYPE char200,       "БЕ НАИМЕНОВАНИЕ
+        ktansw     TYPE ktansw,        "Счет бух учета КОД
+        ktantxt    TYPE char200,       "Счет бух учета НАИМЕНОВАНИЕ
+        anlkl      TYPE anla-anlkl,    "Класс ОС КОД
+        anltxt     TYPE char200,       "Класс ОС НАИМЕНОВАНИЕ
+        anln1      TYPE anla-anln1,    "Системный номер
+        anln2      TYPE anla-anln2,    "Субномер
+        txt50      TYPE char256,       "Наименование объекта
+        invnr      TYPE anla-invnr,    "Инвентарный номер ОС
+        lgort      TYPE anlz-lgort,    "Склад КОД
+        name_lgort TYPE char200,       "Склад НАИМЕНОВАНИЕ
+        raumn      TYPE anlz-raumn,    "Подразделение КОД
+        raumntxt   TYPE char200,       "Подразделение НАИМЕНОВАНИЕ
+        menge      TYPE anla-menge,    "Количество
+        plantnr    TYPE zanlu-plantnr, "Заводской номер
+        mestona    TYPE zanlz-mestona, "Государственный № а/м
+        inv_link   TYPE char200,       "Местонахождение
+        zz_ndoc    TYPE zcase-zz_ndoc, "№ договора
+        zz_dcdoc   TYPE zcase-zz_dcdoc,"Дата договора
+        zz_partner TYPE char10,        "Контрагент КОД
+        tx_partner TYPE string,        "Контрагент НАИМЕНОВАНИЕ
+        xblnr      TYPE zaa_v0_move-xblnr,
+        bldat      TYPE zaa_v0_move-bldat,
+        blart      TYPE string,
+        kansw      TYPE kansw,
+        waers      TYPE waers,
+        bukrs      TYPE anla-bukrs,     "БЕ КОД
+      END of gty_s_data,
+
+        gty_t_data TYPE STANDARD TABLE OF gty_s_data WITH EMPTY KEY.
+    CLASS-METHODS:
+      get_data
+        IMPORTING
+          VALUE(iv_sdate) TYPE datum      "дата отчета
+          VALUE(iv_flt)   TYPE string     "фильтр по прочим полям
+        EXPORTING
+          VALUE(et_data)  TYPE gty_t_data "выходная таблица
+          VALUE(ev_sdate) TYPE char10     "начало отчета (с первого дня месяца С)
+          VALUE(ev_edate) TYPE char10     "конец отчета  (по последний день месяца ПО)
+          VALUE(ev_bukrs) TYPE string.    "перечисление номеров БЕ для вывода в Excel
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_TMC_BP_AMDP IMPLEMENTATION.
+
+
+METHOD get_data  by database procedure for hdb language sqlscript
+                 using anla t001 but000 t095 skat ankt zafull anlz t001l hrp1000 zanlu zanlz zcase
+                       ZAA_UTILS_HDB=>GET_ASSET_VALUES tvarvc zaa_v0_move bkpf t003t t093c bseg.
+    declare lv_mandt char(3) := session_context('CLIENT');
+    declare lv_spras char(1) := session_context('LOCALE_SAP');
+    declare lv_datad char(8) := to_dats( add_days( :iv_sdate, 1) );
+
+    lt_data = select
+                 anla.bukrs,
+                 b.name_org1 || b.name_org2 || b.name_org3 || b.name_org4 as butxt,
+                 t095.ktansw,
+                 skat.txt20,
+                 anla.anlkl,
+                 ankt.txk20,
+                 anla.anln1,
+                 anla.anln2,
+                 zafull.txtf1 || char(32) || zafull.txtf2 as txt50,
+                 anla.invnr,
+                 coalesce(anlz.lgort,'') as lgort,
+                 t001l.lgobe as name_lgort,
+                 anlz.raumn,
+                 hrp.stext,
+                 anla.menge,
+                 zanlu.plantnr,
+                 zanlz.mestona,
+                 case when zanlz.inv_link <> '' then zanlz.inv_link || char(32) || zafulln.txtf1 || char(32) || zafulln.txtf2 end as inv_link,
+                 zcase.zz_ndoc,
+                 zcase.zz_dcdoc,
+                 zcase.zz_partner as zz_partner,
+                 but.name_org1 || char(32) || but.name_org2 || char(32) || but.name_org3 || char(32) || but.name_org4 as tx_partner,
+                 movs.bwasl,
+                 case when anla.zugdt < '20190101' then bkpfp.xblnr else movs.xblnr end as xblnr,
+                 --case when anla.aktiv <= t093c.datum then anla.aktiv else movs.bldat end as bldat,
+                 --case when anla.zugdt < '19000101' then anla.aktiv else
+                 case when anla.zugdt < '20190101' or anla.aktiv <= t093c.datum then anla.aktiv else movs.bldat end as bldat,
+                 case when anla.zugdt < '20190101' then t003tp.ltext else t003t.ltext end as blart,
+                 val.kansw,
+                 t001.waers
+               from anla as anla
+                 inner join t001 as t001 on  t001.mandt = anla.mandt
+                                         and t001.bukrs = anla.bukrs
+                 left outer join but000 as b on  b.client = t001.mandt                  --наименование БЕ
+                                             and b.partner = lpad( t001.bukrs,10,'0' )
+                 inner join t095 as t095 on  t095.mandt = anla.mandt                    --счета запаса класса ос
+                                         and t095.ktopl = t001.ktopl
+                                         and t095.ktogr = anla.ktogr
+                                         and t095.afabe = '01'
+                 left outer join skat as skat on  skat.mandt = anla.mandt               --наименование бух. счета
+                                              and skat.spras = :lv_spras
+                                              and skat.ktopl = t095.ktopl
+                                              and skat.saknr = t095.ktansw
+                 left outer join ankt as ankt on  ankt.mandt = anla.mandt               --наименование класса ОС
+                                              and ankt.spras = :lv_spras
+                                              and ankt.anlkl = anla.anlkl
+                 inner join zafull as zafull on  zafull.mandt = anla.mandt              --наименование объекта
+                                             and zafull.bukrs = anla.bukrs
+                                             and zafull.anln1 = anla.anln1
+                                             and zafull.anln2 = anla.anln2
+                 left outer join anlz as anlz on  anlz.mandt = anla.mandt               --ос временно завим данные
+                                              and anlz.bukrs = anla.bukrs
+                                              and anlz.anln1 = anla.anln1
+                                              and anlz.anln2 = anla.anln2
+                                              and anlz.adatu <= :iv_sdate
+                                              and anlz.bdatu >= :iv_sdate
+                 left outer join t001l as t001l  on  t001l.mandt = anlz.mandt
+                                                 and t001l.werks = anlz.werks
+                                                 and t001l.lgort = anlz.lgort
+                 left outer join hrp1000 AS hrp on  hrp.mandt = anlz.mandt              --наименование подразделения
+                                                and hrp.plvar = '01'
+                                                and hrp.otype = 'O'
+                                                and hrp.objid = anlz.raumn
+                                                and hrp.istat = '1'
+                                                and hrp.begda <= TO_DATS(CURRENT_DATE)
+                                                and hrp.endda >= TO_DATS(CURRENT_DATE)
+                                                and hrp.langu = :lv_spras
+                 inner join zanlu as zanlu on  zanlu.mandt = anla.mandt
+                                           and zanlu.invnr = anla.invnr
+                 left outer join zanlz as zanlz on  zanlz.mandt = anla.mandt            --наименование местонахождения
+                                                and zanlz.invnr = anla.invnr
+                                                and zanlz.adatu <= :iv_sdate
+                                                and zanlz.bdatu >= :iv_sdate
+                                                --and zanlz.inv_link <> ''
+                 left outer join anla as anlan on  anlan.mandt = zanlz.mandt
+                                               and anlan.invnr = zanlz.inv_link
+                 left outer join zafull as zafulln on  zafulln.mandt = anlan.mandt
+                                                   and zafulln.bukrs = anlan.bukrs
+                                                   and zafulln.anln1 = anlan.anln1
+                                                   and zafulln.anln2 = anlan.anln2
+                 left outer join zcase as zcase on  zcase.mandt = zanlu.mandt
+                                                and zcase.ext_key = zanlu.abnnr
+                                                and zcase.langu = :lv_spras
+                 left outer join but000 as but on  but.client = zcase.mandt
+                                               and but.partner = zcase.zz_partner
+                 left outer join "ZAA_UTILS_HDB=>GET_ASSET_VALUES"( :lv_mandt, :iv_sdate,  '' ) -- стоимостные значения ОС на дату отчета
+                                        as val on  val.bukrs = anla.bukrs
+                                               and val.anln1 = anla.anln1
+                                               and val.anln2 = anla.anln2
+                                              and val.afabe = '01'
+                 left outer join zaa_v0_move as movs on  movs.mandt = :lv_mandt              -- движения ОС
+                                                     and movs.bukrs = anla.bukrs
+                                                     and movs.anln1 = anla.anln1
+                                                     and movs.anln2 = anla.anln2
+                                                     and movs.afabe = '01'
+                                                     and movs.bldat = anla.aktiv
+                                                     and movs.bwasl in ( select low
+                                                                         from tvarvc AS tvarvc
+                                                                         where tvarvc.mandt = :lv_mandt
+                                                                           and tvarvc.type = 'S'
+                                                                           and tvarvc.name = 'ZAA_BWASL_BEZVOZM')
+                 left outer join bkpf as bkpf on  bkpf.mandt = movs.mandt              -- заголовок fi документа
+                                               and bkpf.bukrs = movs.bukrs
+                                               and bkpf.gjahr = movs.gjahr
+                                               and bkpf.belnr = movs.belnr
+                 left outer join zaa_v0_move as movs_rev on  movs_rev.bukrs = movs.bukrs -- сторно движения ОС
+                                                         and movs_rev.mandt = movs.mandt
+                                                         and movs_rev.anln1 = movs.anln1
+                                                         and movs_rev.anln2 = movs.anln2
+                                                         and movs_rev.gjahr = movs.gjahr
+                                                         and movs_rev.afabe = movs.afabe
+                                                         and movs_rev.lnran = movs.lnsan
+                 left outer join t003t as t003t on  t003t.mandt = bkpf.mandt            -- название вида документа
+                                                and t003t.spras = :lv_spras
+                                                and t003t.blart = bkpf.blart
+
+/*                 left outer join bkpf as bkpfl on  bkpfl.mandt = movs.mandt              -- фильтр fi документа
+                                               and bkpfl.bukrs = movs.bukrs
+                                               and bkpfl.gjahr = movs.gjahr
+                                               and bkpfl.belnr = movs.belnr
+                                               and bkpfl.LDGRP = 'L1'*/
+                 left outer join bseg as bsegp on  bsegp.mandt = :lv_mandt         -- номер ПУД для загруженных
+                                               and bsegp.bukrs = anla.bukrs
+                                               and bsegp.anln1 = anla.anln1
+                                               and bsegp.anln2 = anla.anln2
+                                               and bsegp.anbwa = '980'
+                                               and bsegp.buzei = '001'
+                                               and bsegp.bukrs in ( select bukrs from bkpf as bkpft where bkpft.mandt = bsegp.mandt
+                                                                                                           and bkpft.bukrs = bsegp.bukrs
+                                                                                                           and bkpft.gjahr = bsegp.gjahr
+                                                                                                           and bkpft.belnr = bsegp.belnr
+                                                                                                           and bkpft.ldgrp = 'L1' )
+                 left outer join bkpf as bkpfp on  bkpfp.mandt = bsegp.mandt              -- дата ПУД для загруженных
+                                               and bkpfp.bukrs = bsegp.bukrs
+                                               and bkpfp.gjahr = bsegp.gjahr
+                                               and bkpfp.belnr = bsegp.belnr
+                 left outer join t003t as t003tp on t003tp.mandt = bkpfp.mandt            -- название ПУД для загруженных
+                                                and t003tp.spras = :lv_spras
+                                                and t003tp.blart = bkpfp.blart
+                 left outer join t093c as t093c on  t093c.mandt = :lv_mandt
+                                                and t093c.bukrs = anla.bukrs
+               where anla.mandt = :lv_mandt
+                 and movs_rev.budat is null
+                 and anla.aktiv <= :iv_sdate
+                 and anla.aktiv > '19000101'
+                 and ( anla.deakt >= :lv_datad   or anla.deakt = '00000000' )
+               order by bukrs, anln1, anln2;
+     lt_data = apply_filter (:lt_data, :iv_flt);
+
+    if is_empty ( :lt_data ) then return;
+    end if;
+
+     --подготовка итоговой таблицы
+    et_data = select
+                  :lt_data.butxt as butxt,
+                  :lt_data.ktansw,
+                  :lt_data.txt20 as ktantxt,
+                  :lt_data.anlkl,
+                  :lt_data.txk20 as anltxt,
+                  :lt_data.anln1,
+                  :lt_data.anln2,
+                  :lt_data.txt50,
+                  :lt_data.invnr,
+                  :lt_data.lgort,
+                  :lt_data.name_lgort,
+                  :lt_data.raumn,
+                  :lt_data.stext as raumntxt,
+                  :lt_data.menge,
+                  :lt_data.plantnr,
+                  :lt_data.mestona,
+                  :lt_data.inv_link,
+                  :lt_data.zz_ndoc,
+                  :lt_data.zz_dcdoc,
+                  :lt_data.zz_partner,
+                  :lt_data.tx_partner,
+                  :lt_data.xblnr,
+                  :lt_data.bldat,
+                  :lt_data.blart,
+                  :lt_data.kansw,
+                  :lt_data.waers,
+                  :lt_data.bukrs
+      from :lt_data
+      order by butxt, ktansw, anlkl, anln1, anln2, txt50, invnr, name_lgort, raumn,
+               menge, plantnr, mestona, inv_link, zz_ndoc, zz_dcdoc, zz_partner, xblnr ;
+
+ENDMETHOD.
+ENDCLASS.

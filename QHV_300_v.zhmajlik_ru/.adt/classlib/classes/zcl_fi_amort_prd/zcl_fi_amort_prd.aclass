@@ -1,0 +1,291 @@
+*********************************************************************
+* ОПИСАНИЕ          : ВЕДОМОСТЬ НАЛИЧИЯ И РАСЧЕТ АМОРТИЗАЦИИ ПРОИЗВОДСТВЕННЫМ СПОСОБОМ
+* КОД ТС            : АСУБН.САП-КСУП.DEV.030-БНУ.58.О-039
+* РАЗРАБОТЧИК       : ВОРОЖУН Ю.С.
+* ПОСТАНОВКА ЗАДАЧИ : ГАНЖА Т.И.
+*********************************************************************
+CLASS ZCL_FI_AMORT_PRD DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    INTERFACES IF_AMDP_MARKER_HDB.
+
+    TYPES:
+     BEGIN OF GTY_S_DATA,
+         BUKRS            TYPE BUKRS,
+         "NAME_BUKRS       TYPE T001-BUTXT,
+         ANLKL            TYPE ANLA-ANLKL,
+         KTANSW           TYPE KTANSW,                 "СЧЕТ, СУБСЧЕТ
+         NAME_KTANSW      TYPE CHAR70,
+         ANLN1            TYPE ANLA-ANLN1,             "СИСТЕМНЫЙ НОМЕР
+         INVNR            TYPE ANLA-INVNR,             "ИНВЕНТАРНЫЙ НОМЕР
+         TXT              TYPE CHAR260,                "НАИМЕНОВАНИЕ ОБЪЕКТА
+         ZUGDT            TYPE ANLA-ZUGDT,             "ДАТА ВВОДА В ЭКСПЛУАТАЦИЮ
+         ZZBUDATE         TYPE ANLU-ZZBUDATE,          "ДАТА ПРИНЯТИЯ К БУХГАЛТЕРСКОМУ УЧЕТУ
+         OKOF             TYPE J_3RFOKOF,              "ШИФР НОРМАТИВНОГО СРОКА СЛУЖБЫ
+         AMORTGR          TYPE J_3RFAMORTGR,           "ГРУППА
+         DESCRIPT         TYPE J_3RFAMORTGRDESC,       "НАИМЕНОВАНИЕ ГРУППЫ
+         LGORT            TYPE LGORT_D,
+         LGOBE            TYPE LGOBE,                  "НАИМЕНОВАНИЕ СКЛАДА
+
+         PERST            TYPE ACDOCA-HSL,             "ПЕРВОНАЧАЛЬНАЯ СТОИМОСТЬ, РУБ.КОП.
+         AMORT            TYPE ACDOCA-HSL,             "СУММА НАКОПЛЕННОЙ АМОРТИЗАЦИИ, РУБ.КОП.
+         OSTST            TYPE ACDOCA-HSL,             "ОСТАТОЧНАЯ СТОИМОСТЬ, РУБ.КОП.
+         AMORT_ST         TYPE ACDOCA-HSL,             "АМОРТИЗИРУЕМАЯ СТОИМОСТЬ
+
+         DATE_NORM        TYPE J_3RFTOKOF-UMSROKGD,    "НОРМАТИВНЫЙ СРОК СЛУЖБЫ
+         DATE_WRNT        TYPE CHAR10,                 "СРОК ПОЛЕЗНОГО ИСПОЛЬЗОВАНИЯ, ЛЕТ МЕС
+         DATE_OST         TYPE CHAR10,                 "ОСТАТОЧНЫЙ СРОК СЛУЖБЫ  НА КОНЕЦ ПЕРИОДА ОТЧЕТА
+         NORMW            TYPE ZAA_STD_VALUE-NORMW,    "РЕСУРС ОБЪЕКТА ОС   ZAA_STD_VALUE- NORMW, ДЕЙСТВУЮЩИЙ НА ДАТУ ОТЧЕТА
+         FACTW            TYPE ZAA_MNTH_FACT-FACTW,    "КОЛИЧЕСТВО ПРОДУКЦИИ (РАБОТ, УСЛУГ), ПРОИЗВЕДЕННОЕ
+
+         AMORT_PER        TYPE ACDOCA-HSL,             "АМОРТИЗАЦИЯ ЗА МЕСЯЦ
+
+         WAERS            TYPE T001-WAERS,
+         ANLN2            TYPE ANLA-ANLN2,              "СУБНОМЕР
+         POS              TYPE I,
+     END OF GTY_S_DATA,
+     GTY_T_DATA TYPE STANDARD TABLE OF GTY_S_DATA WITH EMPTY KEY,
+
+      BEGIN OF GTY_S_BUKRS,
+        BUKRS TYPE BUKRS,
+      END OF GTY_S_BUKRS,
+      GTY_T_BUKRS TYPE STANDARD TABLE OF GTY_S_BUKRS WITH EMPTY KEY.
+
+     CLASS-METHODS:
+      GET_DATA
+        IMPORTING
+          VALUE(IV_BUDAT)  TYPE BUDAT
+          VALUE(IV_KOD_AM) TYPE ANLB-AFASL
+          VALUE(IV_AFABE)  TYPE ANLC-AFABE
+          VALUE(IV_YEAR)   TYPE CHAR3
+          VALUE(IV_MNTH)   TYPE CHAR3
+          VALUE(IV_FLT)    TYPE STRING        "ФИЛЬТР ПО ПРОЧИМ ПОЛЯМ
+        EXPORTING
+          VALUE(ET_DATA)   TYPE GTY_T_DATA
+          VALUE(ET_BUKRS)  TYPE GTY_T_BUKRS
+        RAISING CX_AMDP_ERROR.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_AMORT_PRD IMPLEMENTATION.
+
+
+METHOD GET_DATA BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT OPTIONS READ-ONLY
+                USING ANLA ANLZ ANLB ANLBZA ANLU SKAT FAAV_ANLP FAAT_PLAN_VALUES T095 T095B TKA02
+                      T001 T001L ZAA_UTILS_HDB=>GET_ASSET_SPI J_3RFTOKOF J_3RFDEPRGROUPT ZAFULL
+                      ZAA_STD_VALUE ZAA_MNTH_FACT ZAA_UTILS_HDB=>GET_ASSET_VALUES  GLOFAAASSETDATA.
+
+  DECLARE LV_MANDT    CHAR(3) := SESSION_CONTEXT( 'CLIENT' );
+  DECLARE LV_SPRAS    CHAR(1) := SESSION_CONTEXT( 'LOCALE_SAP' );
+  DECLARE LV_END_DAY  CHAR(8) := TO_DATS( ADD_DAYS( :IV_BUDAT,1 ) );
+  DECLARE LV_LAST_DAY CHAR(8) := TO_DATS( LAST_DAY(:IV_BUDAT ));
+  DECLARE LV_BEG_DAY  CHAR(8) := TO_DATS( '19000101');
+
+  LT_DATA =
+     SELECT ANLA.BUKRS,
+            ANLA.ANLKL,
+            T095.KTANSW,                                                                                                --СЧЕТ, СУБСЧЕТ
+            T095.KTANSW || CHAR(32) || SKAT.TXT50               AS NAME_KTANSW,
+            ANLA.ANLN1,                                                                                                 --СИСТЕМНЫЙ НОМЕР
+            ANLA.INVNR,                                                                                                 --ИНВЕНТАРНЫЙ НОМЕР
+            ZAF.TXTF1 || CHAR(32) || ZAF.TXTF2                  AS TXT,                                                                --НАИМЕНОВАНИЕ ОБЪЕКТА
+            ANLA.ZUGDT,                                                                                                 --ДАТА ВВОДА В ЭКСПЛУАТАЦИЮ
+            CASE WHEN AU.ZZBUDATE = '00000000' OR AU.ZZBUDATE IS NULL
+                 THEN ANLA.ZUGDT
+                 ELSE AU.ZZBUDATE END                           AS ZZBUDATE, --ДАТА ПРИНЯТИЯ К БУХГАЛТЕРСКОМУ УЧЕТУ
+            GLO.GLO_RUS_OKOF                                    AS OKOF,                                                                                  --ШИФР НОРМАТИВНОГО СРОКА СЛУЖБЫ
+            GLO.GLO_RUS_DEPGR                                   AS AMORTGR,
+            J_3GR.DESCRIPT                                      AS DESCRIPT,
+            AZ.LGORT                                            AS LGORT,
+            T001L.LGOBE                                         AS LGOBE,
+            VALS.KANSW                                          AS PERST,                                                                                 --ПЕРВОНАЧАЛЬНАЯ СТОИМОСТЬ, РУБ.КОП.
+            ABS(VALS.KNAFA)                                     AS AMORT,                                                                                 --СУММА НАКОПЛЕННОЙ АМОРТИЗАЦИИ, РУБ.КОП.
+            VALS.NETVL                                          AS OSTST,                                                                                 --ОСТАТОЧНАЯ СТОИМОСТЬ, РУБ.КОП.
+            VALS2.KANSW                                         AS AMORT_ST,                                                                              --АМОРТИЗИРУЕМАЯ СТР, РУБ.КОП.
+            --VALS2.NETVL                                         AS AMORT_ST,
+            CAST( (J_3.UMSROKGD) AS INT )                       AS DATE_NORM,                                                                 --НОРМАТИВНЫЙ СРОК СЛУЖБЫ
+            CAST( (COALESCE(ANLBZA.NDJAR,ANLB.NDJAR) ) AS INT ) AS NDJAR,
+            CAST( (COALESCE(ANLBZA.NDPER,ANLB.NDPER) ) AS INT ) AS NDPER,
+            CAST( SPI.RESTJ AS INT )                            AS DATE_OST_Y,
+            CAST( SPI.RESTP AS INT )                            AS DATE_OST_M,                                                                      --ОСТАВШИЙСЯ СРОК СЛУЖБЫ РАССЧИТЫВАЕТСЯ ОТ ДАТЫ ОТЧЕТА ДО ДАТЫ ОКОНЧАНИЯ СРОКА СЛУЖБЫ
+            STD_VAL.NORMW                                       AS NORMW,        -- РЕСУРС ОБЪЕКТА ОС
+            MNTH_FACT.FACTW                                     AS FACTW,        -- КОЛИЧЕСТВО ПРОДУКЦИИ (РАБОТ, УСЛУГ), ПРОИЗВЕДЕННОЕ
+            COALESCE(AMORT_FACT,0)                              AS AMORT_FACT,
+            COALESCE(AMORT_PLAN,0)                              AS AMORT_PLAN,
+            T001.WAERS,
+            ANLA.ANLN2,                                                          -- СУБНОМЕР
+            ANLBZA.AFASL,
+            VALS3.NETVL
+          FROM ANLA AS ANLA
+            INNER JOIN T001 AS T001 ON T001.MANDT = ANLA.MANDT
+                                   AND T001.BUKRS = ANLA.BUKRS
+            INNER JOIN ANLZ AS AZ   ON AZ.MANDT = ANLA.MANDT
+                                   AND AZ.BUKRS = ANLA.BUKRS
+                                   AND AZ.ANLN1 = ANLA.ANLN1
+                                   AND AZ.ANLN2 = ANLA.ANLN2
+                                   AND AZ.BDATU >= :LV_END_DAY
+            INNER JOIN T095 AS T095 ON T095.MANDT = ANLA.MANDT
+                                   AND T095.KTOGR = ANLA.KTOGR
+                                   AND T095.KTOPL = T001.KTOPL
+                                   AND T095.AFABE = :IV_AFABE
+            INNER JOIN T095B AS T095B ON T095B.MANDT = ANLA.MANDT
+                                     AND T095B.KTOGR = ANLA.KTOGR
+                                     AND T095B.KTOPL = T001.KTOPL
+                                     AND T095B.AFABE = :IV_AFABE
+            INNER JOIN TKA02 AS TKA02 ON TKA02.BUKRS = ANLA.BUKRS                -- ПРИСВОЕНИЕ КЕ
+                                     AND TKA02.MANDT = ANLA.MANDT
+
+            LEFT JOIN ANLBZA AS ANLBZA  ON ANLBZA.MANDT = ANLA.MANDT
+                                       AND ANLBZA.BUKRS = ANLA.BUKRS
+                                       AND ANLBZA.ANLN1 = ANLA.ANLN1
+                                       AND ANLBZA.ANLN2 = ANLA.ANLN2
+                                       AND ANLBZA.AFABE = :IV_AFABE
+                                       AND ANLBZA.ADATU < :LV_END_DAY
+                                       AND ANLBZA.BDATU >= :LV_END_DAY
+                                    -- AND ANLBZA.AFASL = :IV_KOD_AM
+            LEFT JOIN ANLB   AS ANLB    ON ANLB.MANDT = ANLA.MANDT
+                                       AND ANLB.BUKRS = ANLA.BUKRS
+                                       AND ANLB.ANLN1 = ANLA.ANLN1
+                                       AND ANLB.ANLN2 = ANLA.ANLN2
+                                       AND ANLB.AFABE = :IV_AFABE
+                                     --AND ANLB.AFASL = :IV_KOD_AM
+
+            LEFT JOIN ANLU AS AU ON AU.MANDT = ANLA.MANDT
+                                AND AU.BUKRS = ANLA.BUKRS
+                                AND AU.ANLN1 = ANLA.ANLN1
+                                AND AU.ANLN2 = ANLA.ANLN2
+            LEFT JOIN ZAFULL AS ZAF ON ZAF.MANDT = ANLA.MANDT
+                                   AND ZAF.BUKRS = ANLA.BUKRS
+                                   AND ZAF.ANLN1 = ANLA.ANLN1
+                                   AND ZAF.ANLN2 = ANLA.ANLN2
+
+            LEFT JOIN GLOFAAASSETDATA AS GLO ON GLO.MANDT = ANLA.MANDT
+                                            AND GLO.BUKRS = ANLA.BUKRS
+                                            AND GLO.ANLN1 = ANLA.ANLN1
+                                            AND GLO.ANLN2 = ANLA.ANLN2
+            LEFT JOIN J_3RFDEPRGROUPT AS J_3GR ON J_3GR.MANDT   = GLO.MANDT                --НАИМЕНОВАНИЕ ГРУППЫ
+                                              AND J_3GR.AMORTGR = GLO.GLO_RUS_DEPGR
+                                              AND J_3GR.SPRSL   = :LV_SPRAS
+
+            LEFT JOIN J_3RFTOKOF AS J_3 ON J_3.MANDT    = GLO.MANDT
+                                       AND J_3.OKOF     = GLO.GLO_RUS_OKOF
+                                       AND J_3.OKOF_DOP = GLO.GLO_RUS_DEPGR
+
+            LEFT JOIN ZAA_STD_VALUE AS STD_VAL ON STD_VAL.MANDT = ANLA.MANDT
+                                              AND STD_VAL.BUKRS = ANLA.BUKRS
+                                              AND STD_VAL.ANLN1 = ANLA.ANLN1
+                                              AND STD_VAL.ANLN2 = ANLA.ANLN2
+                                              AND STD_VAL.ADATU <= :LV_END_DAY
+                                              AND STD_VAL.BDATU >= :LV_END_DAY
+            LEFT JOIN T001L AS T001L ON T001L.MANDT = AZ.MANDT                             --НАИМЕНОВАНИЕ СКЛАДА
+                                    AND T001L.WERKS = AZ.WERKS
+                                    AND T001L.LGORT = AZ.LGORT
+            LEFT JOIN SKAT AS SKAT   ON SKAT.MANDT = T001.MANDT                            --НАИМЕНОВАНИЕ СЧЕТА
+                                    AND SKAT.SPRAS = :LV_SPRAS
+                                    AND SKAT.KTOPL = T001.KTOPL
+                                    AND SKAT.SAKNR = T095.KTANSW
+
+            LEFT OUTER JOIN ( SELECT BUKRS, ANLN1, ANLN2, SUM( FACTW ) AS FACTW
+                                FROM ZAA_MNTH_FACT AS MNTH_FACT
+                               WHERE MANDT  = :LV_MANDT
+                                 AND GJAHR <= YEAR(:IV_BUDAT)
+                                 AND AFPER <= MONTH(:IV_BUDAT)
+                               GROUP BY BUKRS, ANLN1, ANLN2 )
+                              AS MNTH_FACT ON MNTH_FACT.BUKRS = ANLA.BUKRS
+                                          AND MNTH_FACT.ANLN1 = ANLA.ANLN1
+                                          AND MNTH_FACT.ANLN2 = ANLA.ANLN2
+
+            LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES"( :LV_MANDT, :LV_END_DAY, '' )
+                              AS VALS ON VALS.BUKRS = ANLA.BUKRS
+                                     AND VALS.ANLN1 = ANLA.ANLN1
+                                     AND VALS.ANLN2 = ANLA.ANLN2
+                                     AND VALS.AFABE = :IV_AFABE
+            LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES"( :LV_MANDT, :LV_END_DAY, 'X' )
+                              AS VALS2 ON VALS2.BUKRS = ANLA.BUKRS
+                                      AND VALS2.ANLN1 = ANLA.ANLN1
+                                      AND VALS2.ANLN2 = ANLA.ANLN2
+                                      AND VALS2.AFABE = :IV_AFABE
+            LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES"( :LV_MANDT, :LV_LAST_DAY, '' )
+                              AS VALS3 ON VALS3.BUKRS = ANLA.BUKRS
+                                      AND VALS3.ANLN1 = ANLA.ANLN1
+                                      AND VALS3.ANLN2 = ANLA.ANLN2
+                                      AND VALS3.AFABE = :IV_AFABE
+            LEFT OUTER JOIN ( SELECT BUKRS, ANLN1, ANLN2, SUM( NAFAZ + SAFAZ ) AS AMORT_FACT
+                                FROM FAAV_ANLP AS ANLP
+                               WHERE MANDT          = :LV_MANDT
+                                 AND AFABER         = :IV_AFABE
+                                 AND GJAHR          = YEAR(:IV_BUDAT)
+                                 AND RIGHT(PERAF,2) = MONTH(:IV_BUDAT)
+                               GROUP BY BUKRS, ANLN1, ANLN2 )
+                     AS ANLP ON ANLP.BUKRS = ANLA.BUKRS
+                            AND ANLP.ANLN1 = ANLA.ANLN1
+                            AND ANLP.ANLN2 = ANLA.ANLN2
+
+            LEFT OUTER JOIN ( SELECT BUKRS, ANLN1, ANLN2, HSL AS AMORT_PLAN
+                                FROM FAAT_PLAN_VALUES AS PLAN_VALUES
+                               WHERE MANDT = :LV_MANDT
+                                 AND AFABE = :IV_AFABE
+                                 AND GJAHR = YEAR(:IV_BUDAT)
+                                 AND RIGHT(POPER,2) = MONTH(:IV_BUDAT) )
+                   AS PLAN_VALUES ON PLAN_VALUES.BUKRS = ANLA.BUKRS
+                                 AND PLAN_VALUES.ANLN1 = ANLA.ANLN1
+                                 AND PLAN_VALUES.ANLN2 = ANLA.ANLN2
+             LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_SPI"( :LV_MANDT, :IV_BUDAT ) AS SPI
+                                  ON SPI.BUKRS = ANLA.BUKRS
+                                 AND SPI.ANLN1 = ANLA.ANLN1
+                                 AND SPI.ANLN2 = ANLA.ANLN2
+                                 AND SPI.AFABE = :IV_AFABE
+           WHERE ANLA.MANDT = :LV_MANDT
+             AND ANLA.ZUGDT > :LV_BEG_DAY
+             AND ANLA.ZUGDT <= :LV_END_DAY
+             AND ( ANLA.DEAKT >= :LV_END_DAY OR ANLA.DEAKT < :LV_BEG_DAY )
+             AND ( ANLBZA.AFASL = :IV_KOD_AM OR ANLB.AFASL = :IV_KOD_AM )
+           ORDER BY BUKRS, ANLKL, ANLN1, ANLN2, INVNR ;
+
+    LT_DATA = APPLY_FILTER (:LT_DATA, :IV_FLT);
+
+    IF IS_EMPTY ( :LT_DATA ) THEN RETURN;
+    END IF;
+
+    ET_DATA = SELECT BUKRS,
+                     ANLKL,
+                     KTANSW,                    --СЧЕТ, СУБСЧЕТ
+                     NAME_KTANSW,
+                     ANLN1,                     --СИСТЕМНЫЙ НОМЕР
+                     INVNR,                     --ИНВЕНТАРНЫЙ НОМЕР
+                     TXT,                       --НАИМЕНОВАНИЕ ОБЪЕКТА
+                     ZUGDT,                     --ДАТА ВВОДА В ЭКСПЛУАТАЦИЮ
+                     ZZBUDATE,                  --ДАТА ПРИНЯТИЯ К БУХГАЛТЕРСКОМУ УЧЕТУ
+                     OKOF,                      --ШИФР НОРМАТИВНОГО СРОКА СЛУЖБЫ
+                     AMORTGR,
+                     DESCRIPT,
+                     LGORT,
+                     LGOBE,
+                     PERST,                     --ПЕРВОНАЧАЛЬНАЯ СТОИМОСТЬ, РУБ.КОП.
+                     AMORT,                     --СУММА НАКОПЛЕННОЙ АМОРТИЗАЦИИ, РУБ.КОП.
+                     OSTST,                     --ОСТАТОЧНАЯ СТОИМОСТЬ, РУБ.КОП.
+
+                     CASE WHEN AFASL = :IV_KOD_AM THEN NETVL ELSE AMORT_ST END AS AMORT_ST,         --АМОРТИЗИРУЕМАЯ СТОИМОСТЬ, РУБ.КОП.
+                     DATE_NORM,                 --НОРМАТИВНЫЙ СРОК СЛУЖБЫ
+                     CASE WHEN NDJAR = '000' AND NDPER = '000' THEN ''
+                          ELSE NDJAR || :IV_YEAR || CHAR(32) || NDPER || :IV_MNTH END AS DATE_WRNT, --СРОК ПОЛЕЗНОГО ИСПОЛЬЗОВАНИЯ, ЛЕТ МЕС
+                     DATE_OST_Y || :IV_YEAR || CHAR(32) || DATE_OST_M || :IV_MNTH     AS DATE_OST,  --ОСТАВШИЙСЯ СРОК СЛУЖБЫ РАССЧИТЫВАЕТСЯ ОТ ДАТЫ ОТЧЕТА ДО ДАТЫ ОКОНЧАНИЯ СРОКА СЛУЖБЫ
+                     NORMW,                     --РЕСУРС ОБЪЕКТА ОС
+                     FACTW,                     --КОЛИЧЕСТВО ПРОДУКЦИИ (РАБОТ, УСЛУГ), ПРОИЗВЕДЕННОЕ
+                     ABS(AMORT_FACT + AMORT_PLAN)                                     AS AMORT_PER, --АМОРТИЗАЦИЯ ЗА МЕСЯЦ
+                     WAERS,
+                     ANLN2,                     --СУБНОМЕР
+                     ROW_NUMBER() OVER ( ) AS POS
+                FROM :LT_DATA;
+
+    ET_BUKRS = SELECT DISTINCT BUKRS
+                 FROM :ET_DATA;
+ENDMETHOD.
+ENDCLASS.

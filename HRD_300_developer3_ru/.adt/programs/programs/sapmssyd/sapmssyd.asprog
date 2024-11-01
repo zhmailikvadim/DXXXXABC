@@ -1,0 +1,868 @@
+program sapmssyd .
+*-----------------------------------------------------------------------
+*  This program SAPMSSYD contains all abap handlers for the new
+*  dynpro main steps (called by dynp while processing a dynpro)
+*  Overview of Dynpro Main Steps:
+*-----------------------------------------------------------------------
+*  Seq# / Name                   Short Name   Comment / Subroutine  Name
+*-----------------------------------------------------------------------
+*  0. Dynpro Init                (   )        %_ctl_init
+*  1. Process Before Output      (PBO)        - nothing to do here
+*  2. Control Output             (   )        %_ctl_output
+*  3. Data Communication Output  (DCO)        --> Diag Send
+*  --- Processing on Frontend Server           nothing to do here
+*  4. Data Communication Input   (DCI)        <-- Diag Receive
+*  5. Control Input              (   )        %_ctl_input
+*  6. Control PAI                (   )        %_ctl_pai
+*  8. Process After Input        (PAI)         nothing to do here
+*  9. Dynpro End                 (   )        %_ctl_end
+*-----------------------------------------------------------------------
+
+*///////////////////////////////////////////////////////////////////////
+* C A U T I O N:
+*///////////////////////////////////////////////////////////////////////
+* If you want to add a specific handler within a main step handler,
+* make sure to follow the following
+* G O L D E N  R U L E
+* If you do not know, what a dynpro is:    HANDS OFF
+* If you do not know, what a main step is: HANDS OFF
+* To avoid syntax errors in SAPMSSYD, do not call directly:
+* - methods
+* - class methods
+* - function modules
+* - NO(!!!) ABAP OBJECTS in SAPMSSYD !!!!
+* Use external perform to a form pool (SAPF...) instead
+* Example: perform manage_visibility(sapfguicntl) if found.
+* Never call without the clause "... if found".
+* Whenever possible, make sure, that the handler is necessary in the
+* current state BEFORE you call it, by checking a global variable,
+* calling a kernel function, ...
+
+* Good Example:
+*    system-call kernel_info 'CONTROL_DYNPRO_OO' l_dynpro_controls.
+*    if not l_dynpro_controls is initial.
+*      perform manage_visibility(sapfguicntl) if found.
+*    endif.
+
+* N E V E R  prototype here. You may damage the system seriously.
+* The worst case will lead to a system, where nobody can login.
+* It will be your job, to spend the following night in your office
+* to repair the system.
+*///////////////////////////////////////////////////////////////////////
+
+* form sync_abap_with_kernel given
+* this form will be called by dynp at startup
+constants:
+  sync_abap_with_kernel type i value 1.                     "#EC NEEDED
+
+* Kennzeichen: dunkler SUBMIT aktiv
+data g_dark_submit type i.
+* Emergency-Anmeldung?
+data g_emergency.
+* CC active?
+data g_cc.
+
+data : g_support_xml_blobs type char01.
+
+data %_CALLER_PROGRAM_NAME like SY-REPID.                   "#EC *
+
+data: sap_personas_support type i value -1.
+
+data: sap_personas_xml type string.
+
+data: my_ucomm like sy-ucomm.
+
+data : wpb_init type i value 0.
+
+*======================================================================*
+* C O N T R O L  I N I T
+* Dynpro: OnLoad
+*======================================================================*
+Module %_CTL_INIT1 output.                                  "#EC *
+  perform %_CTL_INIT using %_CALLER_PROGRAM_NAME.
+endmodule.
+
+form %_ctl_init using p_repid like sy-repid.                "#EC *
+  data l_imode_controls.
+  statics : EverCalled type C.
+
+*  if p_repid = 'SAPMSSY7'. "kein INIT step bei Antwort asynch. RFCs
+*    exit.
+*  endif.
+
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+  if EverCalled is initial.
+    EverCalled = 'Y'.
+    perform sync_abap_with_kernel.
+    perform %_IMODE_INIT.
+    perform init_system_menu_texts.
+  endif.
+
+  SYSTEM-CALL KERNEL_INFO 'CONTROL_IMODE_OO' l_imode_controls. "#EC CI_SYSTEMCALL
+  if not l_imode_controls is initial.
+    perform control_init(sapfguicntl) using p_repid if found.
+  endif.
+
+  if g_cc is initial.
+    system-call kernel_info 'CC_ACTIVE' g_cc.        "#EC CI_SYSTEMCALL
+  endif.
+  if not g_cc is initial.
+    perform cc_init in program sapfguicntl if found.
+  endif.
+endform.                               " %_CTL_INIT
+
+*======================================================================*
+* C O N T R O L  I M O D E  I N I T
+* Called once for each imode before first PBO
+*======================================================================*
+form %_IMODE_INIT.                                          "#EC *
+  perform INIT_IMODE in program SAPFSYSCALLS if found.
+endform.
+
+
+*======================================================================*
+* C O N T R O L  O U T P U T
+* Dynpro: Main Step after PBO and before DCO
+*======================================================================*
+module %_CTL_OUTPUT1 output.                                "#EC *
+  perform %_CTL_OUTPUT using %_CALLER_PROGRAM_NAME.
+endmodule.
+
+form %_ctl_output using p_repid like sy-repid.              "#EC *
+* WebReporting
+  constants: l_www_mode  type i value 0.                    "get
+  data:      l_www_state type i value 0.
+  data:      l_dynpro_controls.
+  data:      flag_kyk_active.
+  data:      cua_state type i value 0.
+*  DATA:      l_save_ws(10) TYPE C.
+
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+  system-call webrfc mode l_www_mode state l_www_state. "#EC CI_SYSTEMCALL
+  if not l_www_state is initial.
+    perform dco(sapfwww) using p_repid l_www_state if found.
+    exit.
+  endif.
+
+* enable drag and relate
+  "Is there a GUI?
+  CALL 'RFCControl' ID 'CODE' FIELD '?'.                  "#EC CI_CCALL
+  IF SY-SUBRC = 0.                       "Yes!
+    PERFORM HRNP(SAPFSPOR) USING P_REPID IF FOUND.
+  ENDIF.
+
+  if cua_state = 0.
+* form get_gui_standard_toolbar in saplsmpi callable
+    cua_state = 1.
+    CALL 'DYNP_SET_STATUS'
+    ID 'FUNCTION' FIELD 36
+    ID 'VALUE'    FIELD cua_state.                        "#EC CI_CCALL
+  endif.
+*==> Send Value Sets for Comboboxes (always)
+*    Aufruf von Wertemengenmanager und Help bei Frontend-Combobox
+
+  "Is there a GUI?
+  CALL 'RFCControl' ID 'CODE' FIELD '?'.                  "#EC CI_CCALL
+  IF SY-SUBRC = 0.                       "Yes!
+    call function 'SYSTEM_COMBO_OUTPUT'
+      exporting
+        modul  = p_repid
+        dynpro = sy-dynnr.
+  ENDIF.
+
+  system-call kernel_info 'CONTROL_DYNPRO_OO' l_dynpro_controls. "#EC CI_SYSTEMCALL
+  if not l_dynpro_controls is initial.
+    perform manage_visibility(sapfguicntl) if found.
+  endif.
+
+* Einzelbildverarbeitung Transaktionsvarianten/Batch-Input/CATT
+  call function 'SYSTEM_SCREEN_OUTPUT'
+    exporting
+      modul = p_repid.
+
+* Exit for special WD-Uis if requested
+  import flag_kyk_active from memory id '%_KYK_ACTIVE'.
+  if sy-subrc eq 0 and not flag_kyk_active is initial.
+    perform dynpro_api_hook_out(SAPFSKYKDYAPI) if found.
+  endif.
+
+* Hook for Seclog Addon
+  perform ('CALL_SECLOG_HOOK') in program ('SAPFS_SECLOG') using 'OUT' p_repid if found.
+
+* Hook for Read Access Logging
+  perform ('CALL_SECLOG_HOOK') in program ('SAPFS_SECLOG') using 'RAL' p_repid if found.
+
+* Notify SAP GUI that input fields need to have a search overlay enabled (type-ahead, auto-suggest...)
+  perform enable_type_ahead in program radshpbopreflight using p_repid if found.
+
+  clear sy-subrc. "to be compatible
+
+endform.                               " %_CTL_OUTPUT
+
+
+*======================================================================*
+* C O N T R O L  O U T P U T  FLUSH
+* Dynpro: Main Step after DCO for flush controls
+*======================================================================*
+module %_CTL_OUTPUT_FLUSH output.                           "#EC *
+  perform %_CTL_OUTPUT_FLUSH using %_CALLER_PROGRAM_NAME.
+endmodule.
+
+form %_ctl_output_flush using p_repid like sy-repid.        "#EC *
+
+  data: t type string.
+
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+* Flush Automation Queue
+  call 'DYNP_GET_SUBSCREEN'.                              "#EC CI_CCALL
+  if sy-subrc = 2.
+    if wpb_init = 0.
+      wpb_init = 1.
+      perform register(wpbhelp_registration) if found.
+    endif.
+
+    perform SAP_PERSONAS_GET_RESULT using t.
+    perform handle_flush_pbo(sapfguicntl) if found.
+    perform diag_xml_send.
+  endif.
+
+* MS: Check for ITS frontend jobs
+  perform front_check_its_jobs_hook.
+
+* Hook for Read Access Logging
+  perform ('CALL_SECLOG_HOOK') in program ('SAPFS_SECLOG') using 'PAL' p_repid if found.
+
+endform.
+
+*======================================================================*
+* C O N T R O L  I N P U T
+* Dynpro: Main Step after DCI and before PAI
+* List of handlers:
+* FunctionCode  | Condition /  Handler
+* ----------------------------------------------------------------------
+* %_GC          | A control fires an event
+*               | --> control_dispatch(sapfguicntl) (sy-ucomm)
+* %_GS          | A control shell fires an event
+*               | --> control_dispatch(sapfguicntl) (sy-ucomm)
+* %_GIMC        | Intermodus communication fires an event
+*               | --> imc_dispatch(sapfimccntl) (sy-ucomm)
+* %_GAMC        | GUI ABAP Messaging Channels fires an event
+*               | --> CL_AMC_RUNTIME=>DISPATCH_SAPGUI
+*======================================================================*
+module %_CTL_INPUT1 input.                                  "#EC *
+  perform %_CTL_INPUT using %_CALLER_PROGRAM_NAME.
+endmodule.
+
+form %_ctl_input using p_repid like sy-repid.               "#EC *
+  data: ucomm_long(2048).
+  data:  l_imode_controls.
+  data:  flag_kyk_active.
+  DATA:  dummy1 TYPE d020s-prog,
+         dummy2 TYPE d020s-dnum,
+         dynid  TYPE dynpro_id.
+
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+* get real ok_code
+  call 'DYNP_OKCODE_GET' id 'FCODE' field ucomm_long.     "#EC CI_CCALL
+  if ucomm_long(1) = '='. shift ucomm_long. endif.
+  my_ucomm = ucomm_long.
+
+*  check if field was added or deleted from RAL
+  if my_ucomm(5) eq '%_RAL'.
+*   call function for add/delete field from RAL here
+    if my_ucomm eq '%_RAL+' or my_ucomm eq '%_RAL-'. "Scripting ID comes from backend
+      perform ('GET_SCRIPTING_ID') in program ('SDYNREC') changing ucomm_long if found.
+      perform ('CHANGE_FIELD_STATUS_RAL') in program ('SDYNREC') using ucomm_long if found.
+    else. "Scripting ID comes from GUI
+      perform ('CHANGE_FIELD_STATUS_RAL_OLD') in program ('SDYNREC') using ucomm_long if found.
+    endif.
+    CALL 'DYNP_SET_STATUS' ID 'FUNCTION' FIELD 4 ID 'VALUE' FIELD 1. "#EC CI_CCALL
+    return.
+  endif.
+
+*==> handling for diag xml buffer inclusive support handling
+  if my_ucomm(8) ne '%_GS 0 4'. perform  diag_xml_handling. endif.  "handle XML of system events later
+
+* Do whatever needs to be done if there are controls around.
+  SYSTEM-CALL KERNEL_INFO 'CONTROL_IMODE_OO' l_imode_controls. "#EC CI_SYSTEMCALL
+  if not l_imode_controls is initial.
+    perform control_input(sapfguicntl) using p_repid if found.
+  endif.
+
+*==> WWW Dispatch (%_GGCWEBRFC)
+  if my_ucomm(10) = '%_GCWEBRFC'.
+    perform dci(sapfwww) using p_repid if found.
+*==> Add current transaction to favorites
+  ELSEIF my_ucomm(8) = '%_GCADDF'.
+    call function 'GUI_ADD_TCODE_TO_FAVORITES'
+      exporting
+        transaction_to_add = sy-tcode.
+    CALL 'DYNP_SET_STATUS' ID 'FUNCTION' FIELD 4 ID 'VALUE' FIELD 1. "#EC CI_CCALL
+*==> start/end automation callstack tracing
+  ELSEIF my_ucomm(8) = '%_GCACCS'.
+    perform control_errortrace(sapfguicntl) if found.
+    call 'DYNP_SET_STATUS' id 'FUNCTION' field 4 id 'VALUE' field 1. "#EC CI_CCALL
+*==> enable/disable synchron mode of automation queue processing
+  ELSEIF my_ucomm(8) = '%_GCACSY'.
+    perform control_ac_syncmode(sapfguicntl) if found.
+    call 'DYNP_SET_STATUS' id 'FUNCTION' field 4 id 'VALUE' field 1. "#EC CI_CCALL
+*==> Dispatch Control Event (%_GC) or Shell Event (%_GS)
+  elseif my_ucomm(4) = '%_GC' or my_ucomm(4) = '%_GS'.
+    "Only Once: On Mainscreen
+    call 'DYNP_GET_SUBSCREEN'.                            "#EC CI_CCALL
+    if sy-subrc = 2.
+      perform  control_dispatch(sapfguicntl)
+           using my_ucomm
+           if found.
+    endif.
+*==> Call Autosuggest Search Dialog
+  elseif my_ucomm(15) = '%_SEARCH_DIALOG'.
+    perform search_dialog in program radshsuggest using my_ucomm p_repid sy-dynnr if found.
+    call 'DYNP_SET_STATUS' id 'FUNCTION' field 4 id 'VALUE' field 1. "#EC CI_CCALL
+*==> Dispatch SADL Search Events (%_SEARCH) to AutoSuggest
+  elseif my_ucomm(8) = '%_SEARCH'.
+    perform search in program radshsuggest using my_ucomm p_repid sy-dynnr if found.
+    call 'DYNP_SET_STATUS' id 'FUNCTION' field 4 id 'VALUE' field 1. "#EC CI_CCALL
+    CALL 'DYNP_SET_STATUS' ID 'FUNCTION' FIELD 45 ID 'VALUE' FIELD 1. "#EC CI_CCALL
+
+*==> Dispatch Intermodus Communication Events (%_GIMC)
+  elseif my_ucomm(6) = '%_GIMC'.
+    perform imc_dispatch(sapfimccntl) using my_ucomm if found.
+  elseif my_ucomm(6) = '%_GAMC'.
+    TRY.
+        CALL METHOD ('CL_AMC_RUNTIME')=>DISPATCH_SAPGUI.
+      CATCH cx_sy_dyn_call_illegal_class
+            cx_sy_dyn_call_illegal_method
+            cx_sy_dyn_call_param_missing
+            cx_apc_ws_progress_indicator.
+    ENDTRY.
+  elseif g_dark_submit ne 0.
+    perform dci(rsdbrunt) if found.
+  endif.
+
+* Einzelbildverarbeitung Transaktionsvarianten/Batch-Input/CATT
+  call function 'SYSTEM_SCREEN_INPUT'
+    exporting
+      modul = p_repid.
+
+* Exit for special WD-Uis if requested
+  import flag_kyk_active from memory id '%_KYK_ACTIVE'.
+  if sy-subrc eq 0 and not flag_kyk_active is initial.
+    perform dynpro_api_hook_inp(SAPFSKYKDYAPI) if found.
+  endif.
+
+* Hook for Seclog Addon
+  perform ('CALL_SECLOG_HOOK') in program ('SAPFS_SECLOG') using 'INP' p_repid if found.
+
+* Hook for Read Access Logging
+  perform ('CALL_SECLOG_HOOK') in program ('SAPFS_SECLOG') using 'QAL' p_repid if found.
+
+  clear sy-subrc. "to be compatible
+
+endform.                               " %_CTL_INPUT
+
+*======================================================================*
+* C O N T R O L  AT EXIT
+* Dynpro: Main Step Before Applications At Exit-Module
+* Modul vor At Exit
+*======================================================================*
+module %_CTL_AT_EXIT1 input.                                "#EC *
+  perform %_CTL_AT_EXIT using %_CALLER_PROGRAM_NAME.
+endmodule.
+
+form %_ctl_at_exit using p_repid like sy-repid.             "#EC *
+*==> handling for diag xml buffer inclusive support handling
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+* To be reinserted after testing in GetProperty and SetProperty
+* is finished
+*
+  perform  diag_xml_handling.
+endform.                               " %_CTL_AT_EXIT
+
+*======================================================================*
+* C O N T R O L  O N  H E L P  R E Q U E S T  (F1)
+* Called before any help-request-module
+*======================================================================*
+Module %_CTL_ON_HELP_REQUEST input.                         "#EC *
+  perform %_CTL_ON_HELP_REQUEST using %_CALLER_PROGRAM_NAME.
+Endmodule.
+
+form %_CTL_ON_HELP_REQUEST using p_repid like sy-repid.     "#EC *
+*==> handling for diag xml buffer inclusive support handling
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+* To be reinserted after testing in GetProperty and SetProperty
+* is finished
+*
+  perform  diag_xml_handling.
+endform.                               " %_CTL_ON_HELP_REQUEST
+
+*======================================================================*
+* C O N T R O L  O N  V A L U E  H E L P  (F4)
+* Called before any value-help-module
+*======================================================================*
+Module %_CTL_ON_VALUE_HELP input.                           "#EC *
+  perform %_CTL_ON_VALUE_HELP using %_CALLER_PROGRAM_NAME.
+Endmodule.
+
+form %_CTL_ON_VALUE_HELP using p_repid like sy-repid.       "#EC *
+*==> handling for diag xml buffer inclusive support handling
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+* To be reinserted after testing in GetProperty and SetProperty
+* is finished
+*
+  perform  diag_xml_handling.
+endform.                               " %_CTL_ON_VALUE_HELP
+
+*======================================================================*
+* C O N T R O L  P A I
+* Dynpro: Main Step Before First Module in PAI
+* Erstes Modul in PAI
+*======================================================================*
+* module %_CTL_PAI1 input.
+*   perform %_CTL_PAI using %_CALLER_PROGRAM_NAME.
+* endmodule.
+
+form %_ctl_pai using p_repid like sy-repid.                 "#EC *
+endform.                               " %_CTL_PAI
+
+*======================================================================*
+* C O N T R O L  E N D
+* Dynpro: OnUnload
+*======================================================================*
+* module %_CTL_END1 input.                                          "#EC *
+*   perform %_CTL_END using %_CALLER_PROGRAM_NAME.
+* endmodule.
+
+form %_ctl_end using p_repid like sy-repid.                 "#EC *
+
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+  "Only Once: On Mainscreen
+  call 'DYNP_GET_SUBSCREEN'.                              "#EC CI_CCALL
+  check sy-subrc = 2.
+  if g_support_xml_blobs = 'Y'.
+    perform control_end(sapfguicntl) using p_repid if found.
+  endif.
+
+endform.                               " %_CTL_END
+
+*======================================================================*
+* Customizing System PBO
+* Dynpro: Exit for transaction variants: Mix in field values in PBO
+* Exit für Transaktionsvarianten: Einmischen Feldinhalte bei PBO
+*======================================================================*
+form %_hdsyspbo using p_repid like sy-repid.                "#EC *
+* %_repid = p_repid.
+* call function 'RS_HDSYS_SET_DYNPRO_PBO'
+*      exporting
+*           curr_prog = %_repid
+*      exceptions
+*           not_found = 01.
+endform.                               " %_HDSYSPBO
+
+*======================================================================*
+* Customizing System PAI
+* Dynpro: Exit for transaction variants: Accept field values in PAI
+* Exit für Transaktionsvarianten: Übernehmen Feldinhalte bei PAI
+*======================================================================*
+* module %_HDSYSPAI1 input.                                         "#EC *
+*   perform %_HDSYSPAI using %_CALLER_PROGRAM_NAME.
+* endmodule.
+
+form %_hdsyspai using p_repid like sy-repid.                "#EC *
+  data l_repid type sy-repid.
+  l_repid = p_repid.
+  call function 'RS_HDSYS_GET_DYNPRO_PAI'
+    exporting
+      curr_prog = l_repid
+    exceptions
+      not_found = 01
+      cancel    = 02.
+  if sy-subrc = 02.
+    set screen sy-dynnr. leave screen.
+  endif.
+endform.                               " %_HDSYSPAI
+
+* Kennzeichen, dass ein dunkler SUBMIT ablaeuft
+* Verhindert, dass aus %_CTL_INPUT bei jedem Dynpro RSDBRUNT
+* gerufen wird.
+form dark_submit using p_on_off type i.
+  g_dark_submit = p_on_off.
+endform.
+
+
+data : g_support_proppump type char01.
+DATA : G_FLUSHXMLDATA.
+
+
+* Process additional DIAG data if present. This call has to be done
+* prior to dispatching Control events, contextmenus etc. otherwise
+* some data like event parameter or control properties will not be
+* updated
+
+
+form diag_xml_handling.
+*Statics, get supportbit only once ! 'Y' indicates xml_blob_support
+  data : support_bit type i.
+* First call ?
+  IF g_support_xml_blobs IS INITIAL.
+*  Ask for Supportbit
+    CALL 'C_GUI_SUPPORT'
+       ID 'FEATURE' FIELD 'XML_BLOBS'
+       ID 'VALUE' FIELD SUPPORT_BIT.                      "#EC CI_CCALL
+* IMPORTANT set support_xml_blobs = 'N', in order to avoid
+* calling 'C_GUI_SUPPORT' for each step
+    IF SUPPORT_BIT = 1.
+      g_support_xml_blobs = 'Y'.
+    ELSE.
+      g_support_xml_blobs = 'N'.
+    ENDIF.
+  ENDIF.
+* If we have support we are aallowed to call status function, otherwise
+* we would get rabax CALL_C_FUNCTION_NOT_FOUND !!!!!
+  if g_support_xml_blobs = 'Y'.
+    CALL 'DIAG_XMLBLOB_STATUS'.                           "#EC CI_CCALL
+* sy-subrc = 1 means, there is some data to be read and processed
+* from diag's xml buffer. This is done in
+* handle_diag_input_data(sapfguicntl)
+    data xval type x.
+    statics bitval type x.
+* Move sy-subrc to x typed value in oder to use bit operations
+    xval = sy-subrc.
+* check for 1 st bit in sy-subrc
+    bitval = 1.
+    xval = xval bit-and bitval.
+    if xval eq bitval.
+      perform handle_diag_input_data(sapfguicntl) if found.
+    endif.
+  endif.
+endform.
+
+*---------------------------------------------------------------------*
+*       FORM SET_ADDTIONAL_FLUSH                                      *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM SET_XML_FLUSH.
+  G_FLUSHXMLDATA = 'X'.
+ENDFORM.
+
+FORM RESET_XML_FLUSH.
+  clear G_FLUSHXMLDATA.
+ENDFORM.
+
+FORM GET_XML_FLUSH CHANGING STATE TYPE CHAR01.
+  STATE = G_FLUSHXMLDATA.
+ENDFORM.
+
+
+* Call to send xml data via diag to frontend
+form diag_xml_send.
+  data : support_bit type i.
+  DATA : SENDString TYPE STRING.
+
+  if sap_personas_support = -1.
+    perform sap_personas_init using sap_personas_support.
+  endif.
+
+* First call ?
+  IF g_support_proppump IS INITIAL.
+* Ask for Supportbit
+    CALL 'C_GUI_SUPPORT'
+         ID 'FEATURE' FIELD 'PROPERTYPUMP'
+         ID 'VALUE' FIELD SUPPORT_BIT.                    "#EC CI_CCALL
+* IMPORTANT set support_xml_blobs = 'N', in order to avoid
+* calling 'C_GUI_SUPPORT' for each step
+    IF SUPPORT_BIT = 1.
+      g_support_proppump = 'Y'.
+    ELSE.
+      g_support_proppump = 'N'.
+    ENDIF.
+  ENDIF.
+
+  if g_support_proppump = 'Y'.
+    data call_diag(1) type c.
+
+* Get send stream
+    call_diag = 'X'.
+
+    if sap_personas_support = 1.
+      data v type i.
+
+      " check suppress dialog on main screen
+      call 'DYNP_GET_STATUS'
+        id 'FUNCTION' field 7
+        id 'VALUE'    field v. "#EC CI_CCALL"#EC CI_CCALL
+
+      if sy-subrc = 0 and v = 0.
+        " check skip 1st screen
+        call 'DYNP_GET_STATUS'
+          id 'FUNCTION' field 8
+          id 'VALUE'    field v. "#EC CI_CCALL
+
+        if sy-subrc = 0 and v = 0.
+          call_diag = 'Y'.
+        endif.
+      endif.
+
+      " check skip personas call
+      call 'DYNP_GET_STATUS'
+        id 'FUNCTION' field 47
+        id 'VALUE'    field v. "#EC CI_CCALL
+
+      if sy-subrc = 0 and v = 0.
+        call_diag = 'Y'.
+      endif.
+    endif.
+
+    perform get_xml_send_data_stream(sapfguicntl)
+                  using call_diag
+                  changing SendString  if found.
+
+    if not SENDString is initial.
+* Advice DIAG to send xml stream
+      CALL 'DIAG_XMLBLOB_SEND' ID 'XMLBLOB' FIELD SENDString. "#EC CI_CCALL
+    endif.
+
+    clear G_FLUSHXMLDATA.
+  endif.
+endform.
+
+form is_emergency.
+  data l_emergency type i.
+
+* First call ?
+  IF g_emergency IS INITIAL.
+* Ask for Supportbit
+    CALL 'C_GUI_SUPPORT'
+         ID 'FEATURE' FIELD 'EMERGENCY_REPAIR'
+         ID 'VALUE' FIELD l_emergency.                    "#EC CI_CCALL
+
+
+    IF l_emergency = 1.
+      g_emergency = 'Y'.
+    ELSE.
+      g_emergency = 'N'.
+    ENDIF.
+  ENDIF.
+
+endform.
+
+form set_cc using p_cc.
+  g_cc = p_cc.
+endform.
+
+* called by DYNP at startup
+form sync_abap_with_kernel.                                 "#EC CALLED
+  data v type i.
+  data shadow(1).
+
+  perform is_emergency.
+  check g_emergency ne 'Y'.
+
+* kernel sync already done
+  call 'DYNP_GET_STATUS'
+    id 'FUNCTION' field 42
+    id 'VALUE'    field v.                                "#EC CI_CCALL
+
+  if sy-subrc ne 0.
+    return.
+  endif.
+
+  if v = 1.
+    return.
+  endif.
+
+* perform sync_abap_with_kernel(sapmsyst) if found.
+
+*  perform register(wpbhelp_registration) if found.
+
+" no sap personas in shadow system
+* call UPG_IS_SHADOW_SYSTEM the same way as the upgrade tool as this subroutine
+* may be called before the upgrade-phase ALTNTAB_FILL which usually creates the
+* relevant table entries.
+  call function 'UPG_IS_SHADOW_SYSTEM'
+    exporting
+      IV_R3UP = 'X'
+    importing
+      ev_shadow = shadow.
+
+  " new kernel stores the info
+  v = 0.
+  if shadow = 'X'.
+    v = 1.
+  endif.
+
+  call 'DYNP_SET_STATUS'
+      id 'FUNCTION' field 49
+      id 'VALUE'    field v.
+
+* inform kernel about sync done
+  call 'DYNP_SET_STATUS'
+    id 'FUNCTION' field 42
+    id 'VALUE'    field 1.                                "#EC CI_CCALL
+endform.
+
+* init dynamic texts for system menu
+form init_system_menu_texts.
+  data v type i.
+
+* dynamic texts for menusyst already given ?
+  v = 0.
+  call 'DYNP_GET_STATUS'
+    id 'FUNCTION' field 43
+    id 'VALUE'    field v.                                "#EC CI_CCALL
+
+  if sy-subrc = 0 and v = 1.
+    return.
+  endif.
+
+  perform cua_system_menu_set_dyntxt(STORE_HELP_LABEL) if found.
+endform.
+
+form sap_personas_init using i.
+  data is_shadow(1).
+  data v type i.
+
+  CALL 'C_GUI_SUPPORT'
+       ID 'FEATURE' FIELD 'SAP_PERSONAS'
+       ID 'VALUE' FIELD i.                                "#EC CI_CCALL
+
+  if sy-subrc ne 0.
+    i = 0.
+    exit.
+  endif.
+
+  " no sap personas in shadow system
+  call 'DYNP_GET_STATUS'
+    id 'FUNCTION' field 49
+    id 'VALUE'    field v.
+
+  if sy-subrc ne 0.
+    " old kernel : do shadow check
+    call function 'UPG_IS_SHADOW_SYSTEM'
+      importing
+        ev_shadow = is_shadow.
+
+    if is_shadow = 'X'.
+      i = 0.
+    endif.
+  else.
+    if v = 1.
+      i = 0.
+    endif.
+  endif.
+endform.
+
+FORM SAP_PERSONAS_GET_RESULT using p type string.
+  if sap_personas_support = -1.
+    perform sap_personas_init using sap_personas_support.
+  endif.
+
+  if sap_personas_support ne 1.
+    exit.
+  endif.
+
+  " form wird vor handle_flush_pbo bzw in Serialize des Datamanagers gerufen
+  if sap_personas_xml is not initial.
+    p = sap_personas_xml.
+    exit.
+  endif.
+
+  data v type i.
+
+  " check suppress dialog on main screen
+  call 'DYNP_GET_STATUS'
+    id 'FUNCTION' field 7
+    id 'VALUE'    field v. "#EC CI_CCALL
+
+  if sy-subrc = 0 and v = 1.
+    exit.
+  endif.
+
+  " check skip first screen
+  call 'DYNP_GET_STATUS'
+    id 'FUNCTION' field 8
+    id 'VALUE'    field v. "#EC CI_CCALL
+
+  if sy-subrc = 0 and v = 1.
+    exit.
+  endif.
+
+" check skip personas call
+  call 'DYNP_GET_STATUS'
+    id 'FUNCTION' field 47
+    id 'VALUE'    field v. "#EC CI_CCALL
+
+  if sy-subrc = 0 and v = 1.
+    exit.
+  endif.
+
+  " write dev trace
+  call 'DYNP_SET_STATUS'
+    id 'FUNCTION' field 46
+    id 'VALUE'    field 1
+    ID 'TEXT'     field '  call SAP_PERSONAS_GET interface'. "#EC CI_CCALL
+
+  clear sap_personas_xml.
+
+  perform SAP_PERSONAS_GET in program /PERSONAS/DYNP_INTEGRATION using sap_personas_xml if found.
+ENDFORM.
+
+FORM SAP_PERSONAS_CLEAR_RESULT.
+  clear sap_personas_xml.
+endform.
+
+* As of Release 7.54, this is an extenal perform in SAPLSPOF.
+* In the current release, it has to be an internal perform as the debugger would always stop in SAPLSPOF
+* and 'system-call debugger set system path on' is not available
+* Responsible component for this form is BC-CCM-PRN-PC
+FORM front_check_its_jobs_hook.
+
+  DATA ls_msg TYPE symsg.
+  DATA is_its.
+  DATA pendreq TYPE i.
+
+* MS: Check for ITS frontend jobs
+  CALL FUNCTION 'GUI_IS_ITS'
+    IMPORTING
+      return = is_its.
+
+  IF is_its IS NOT INITIAL.
+
+    MOVE-CORRESPONDING syst TO ls_msg. "cache control clears sy-msg variables
+
+    CALL 'RSPO_CACHE_CONTROL' ID 'AREA'     FIELD 'FRONT'
+                              ID 'OP'       FIELD 'ITSCHECKPENDREQ'
+                              ID 'PENDREQ'  FIELD pendreq. "#EC CI_CCALL
+
+    IF sy-subrc = 0.
+      IF pendreq > 0.
+        CALL FUNCTION 'RSPO_FRONT_CHECK_ITS_JOB'
+          EXCEPTIONS
+            operation_failed = 1
+            cannot_open_file = 2
+            OTHERS           = 3  ##FM_SUBRC_OK.
+      ENDIF.
+    ENDIF.
+
+    MOVE-CORRESPONDING ls_msg TO syst.
+
+  ENDIF.
+
+ENDFORM.

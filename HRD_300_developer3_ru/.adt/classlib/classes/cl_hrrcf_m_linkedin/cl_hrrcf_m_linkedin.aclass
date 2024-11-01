@@ -1,0 +1,537 @@
+class CL_HRRCF_M_LINKEDIN definition
+  public
+  inheriting from CL_WD_COMPONENT_ASSISTANCE
+  create public .
+
+public section.
+
+  class-methods GET_LINKEDIN_LOGIN_URL
+    importing
+      !IV_CLIENT_ID type STRING
+      !IV_POSTING_GUID type RCF_PINST_GUID
+    exporting
+      !EV_LOGIN_URL type STRING
+      !ET_MESSAGE type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  methods GET_LINKEDIN_APP_DATA
+    exporting
+      !EV_CLIENT_SECRET type STRING
+      !EV_CLIENT_ID type STRING
+      !ET_MESSAGE type BAPIRETTAB
+      !EV_LINK_URL_CAT type RCF_URL_CATEGORY
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  methods GET_RFC_DESTINATION
+    returning
+      value(EV_RFC_DEST) type RFCDEST .
+  methods CONSTRUCTOR .
+  methods RETRIEVE_CANDIDATE_DATA
+    exporting
+      !ET_MESSAGE type BAPIRETTAB
+      !ES_CANDIDATE_DATA type CL_HRRCF_LINKEDIN_INTEGRATION=>GTS_LINK_PROFILE
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  methods SET_CODE_FROM_RESPONSE
+    importing
+      !IT_PARAMETERS type TIHTTPNVP
+    exporting
+      !ET_MESSAGE type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  methods GET_CAND_HROBJECT
+    importing
+      !IV_USER type XUBNAME
+    returning
+      value(RS_HROBJECT) type HROBJECT
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  class-methods CONVERT_LINKEDIN_DATA
+    importing
+      !IV_LINK_DATA type STRING
+    exporting
+      !ES_CANDIDATE_DATA type CL_HRRCF_LINKEDIN_INTEGRATION=>GTS_LINK_PROFILE .
+  methods CREATE_INTERNET_REFERENCE
+    importing
+      !IS_CAND_HROBJECT type HROBJECT
+      !IS_INTERNET_REFERENCE type RCF_S_MDL_CAND_INTERNET_REF
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  methods CREATE_WORK_EXP
+    importing
+      !IS_CAND_HROBJECT type HROBJECT
+      !IS_WORKEXPERIENCE type RCF_S_MDL_CAND_WORK_EXPERIENCE
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  methods GET_INDUSTRY_CODE
+    importing
+      !IV_INDUSTRY_TEXT type RCF_INDUSTRY_TXT
+    returning
+      value(RV_INDUSTRY) type RCF_INDUSTRY .
+  methods GET_COUNTRY_CODE
+    importing
+      !IV_COUNTRY type RCF_COUNTRY_ID
+    returning
+      value(RV_COUNTRY_TEXT) type RCF_COUNTRY_TXT .
+protected section.
+private section.
+
+  data GV_RFC_DEST type RFCDEST .
+
+  methods SET_RFC_DESTINATION
+    importing
+      !IV_DESTINATION type RFCDEST .
+ENDCLASS.
+
+
+
+CLASS CL_HRRCF_M_LINKEDIN IMPLEMENTATION.
+
+
+  METHOD constructor.
+
+    DATA: lv_dest TYPE rfcdest.
+
+    super->constructor( ).
+
+* get rfc destination
+    CALL METHOD cl_hrrcf_wd_services=>get_bl_destination
+      RECEIVING
+        rfc_dest = lv_dest.
+
+    CALL METHOD me->set_rfc_destination
+      EXPORTING
+        iv_destination = lv_dest.
+
+  ENDMETHOD.
+
+
+  METHOD convert_linkedin_data.
+
+    DATA: lt_json         TYPE TABLE OF string,
+          lv_temp         TYPE string,
+          lv_json_profile TYPE string.
+
+    DATA: ls_cand_profile_v2  TYPE cl_hrrcf_linkedin_integration=>gts_link_profile_v2.
+
+    SPLIT iv_link_data AT cl_abap_char_utilities=>newline INTO TABLE lt_json.
+
+    LOOP AT lt_json INTO lv_temp.
+      CONCATENATE lv_json_profile lv_temp INTO lv_json_profile.
+    ENDLOOP.
+
+    cl_fdt_json=>json_to_data( EXPORTING   iv_json = lv_json_profile
+                               CHANGING    ca_data = ls_cand_profile_v2 ).
+
+    es_candidate_data-id        = ls_cand_profile_v2-id.
+    es_candidate_data-firstname = ls_cand_profile_v2-localizedfirstname.
+    es_candidate_data-lastname  = ls_cand_profile_v2-localizedlastname.
+    es_candidate_data-emailaddress = cl_hrrcf_linkedin_integration=>get_email( ).
+
+  ENDMETHOD.
+
+
+method CREATE_INTERNET_REFERENCE.
+
+  data: lv_dest           type rfcdest,
+        lv_message(80)    type c.
+
+  clear: et_messages.
+
+  lv_dest = me->get_rfc_destination( ).
+
+  call function 'HRRCF_MDL_CAND_IREF_CREATE'
+    destination lv_dest
+    exporting
+      is_cand_hrobject      = is_cand_hrobject
+      is_record             = is_internet_reference
+    importing
+      et_messages           = et_messages
+    exceptions
+      system_failure        = 1  message lv_message
+      communication_failure = 2  message lv_message.
+
+  if sy-subrc <> 0.
+*   problem with RFC connection
+    case sy-subrc.
+      when 1.
+        raise exception type cx_hrrcf_rfc_communication
+          exporting
+            textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+      when 2.
+        raise exception type cx_hrrcf_rfc_communication
+          exporting
+            textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+    endcase.
+  endif.
+
+  cl_hrrcf_m_rfc_services=>commit_and_refresh( lv_dest ).
+
+endmethod.
+
+
+METHOD create_work_exp.
+
+  DATA: lv_dest        TYPE rfcdest,
+        lv_message(80) TYPE c.
+
+* get rfc destination
+  lv_dest = me->get_rfc_destination( ).
+
+  CALL FUNCTION 'HRRCF_MDL_CAND_WORK_CREATE'
+    DESTINATION lv_dest
+    EXPORTING
+      record                = is_workexperience
+      cand_hrobject         = is_cand_hrobject
+    IMPORTING
+      messages              = et_messages
+    EXCEPTIONS
+      system_failure        = 1  MESSAGE lv_message
+      communication_failure = 2  MESSAGE lv_message.
+
+  IF sy-subrc <> 0.
+*   problem with rfc connection
+    CASE sy-subrc.
+      WHEN 1.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+      WHEN 2.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+    ENDCASE.
+  ENDIF.
+
+  cl_hrrcf_m_rfc_services=>commit_and_refresh( lv_dest ).
+
+ENDMETHOD.
+
+
+  METHOD get_cand_hrobject.
+
+
+    DATA: lv_dest          TYPE rfcdest,
+          ls_cand_hrobject TYPE hrobject,
+          lv_message(80)   TYPE c.
+
+* get rfc connection
+    lv_dest = get_rfc_destination( ).
+
+* determine candidate object for user
+    CALL FUNCTION 'HRRCF_MDL_ADMN_CAND_RETRIEVE'
+      DESTINATION lv_dest
+      EXPORTING
+        iv_user               = iv_user
+      IMPORTING
+        ev_cand_hrobject      = ls_cand_hrobject
+      EXCEPTIONS
+        failed                = 1
+        system_failure        = 2 MESSAGE lv_message
+        communication_failure = 3 MESSAGE lv_message
+        OTHERS                = 4.
+
+    IF sy-subrc <> 0.
+      CASE sy-subrc.
+        WHEN 1 OR 4.
+*      todo: error handling
+        WHEN 2.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+        WHEN 3.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+      ENDCASE.
+    ENDIF.
+
+    rs_hrobject = ls_cand_hrobject.
+
+  ENDMETHOD.
+
+
+  METHOD get_country_code.
+
+    DATA: lv_rfc_dest     TYPE rfcdest,
+          lv_message(80)  TYPE c,
+          lt_field_names  TYPE rcf_t_mdl_uis_fieldname,
+          lt_valuehelp    TYPE rcf_t_mdl_uis_valuehelp,
+          lt_messages     TYPE bapirettab,
+          ls_field_name   TYPE rcf_s_mdl_uis_fieldname,
+          ls_valuehelp    TYPE rcf_s_mdl_uis_valuehelp,
+          lv_country      TYPE rcf_country_id.
+
+    FIELD-SYMBOLS:
+          <fs_valuehelp>   TYPE rcf_s_mdl_uis_valuehelp.
+
+    ls_field_name-fieldname = 'COUNTRY'.
+    ls_field_name-init_key_included = abap_false.
+    APPEND ls_field_name TO lt_field_names.
+
+* get RFC destination
+    lv_rfc_dest = me->get_rfc_destination( ).
+
+* retrieve requested value help(s)
+    CALL FUNCTION 'HRRCF_MDL_UIS_VH_COMMON'
+      DESTINATION lv_rfc_dest
+      EXPORTING
+        field_names           = lt_field_names
+      IMPORTING
+        valuehelp_list        = lt_valuehelp
+        messages              = lt_messages
+      EXCEPTIONS
+        communication_failure = 1 MESSAGE lv_message
+        system_failure        = 2 MESSAGE lv_message.
+
+* retrive code from the text
+    LOOP AT lt_valuehelp ASSIGNING <fs_valuehelp>.
+      TRANSLATE <fs_valuehelp>-vh_value TO UPPER CASE.
+    ENDLOOP.
+
+    lv_country = iv_country.
+
+    TRANSLATE lv_country TO UPPER CASE.
+
+    READ TABLE lt_valuehelp INTO ls_valuehelp
+      WITH KEY vh_key = lv_country.
+    IF sy-subrc = 0.
+      rv_country_text = ls_valuehelp-vh_value.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_industry_code.
+
+    DATA: lv_rfc_dest      TYPE rfcdest,
+          lv_message(80)   TYPE c,
+          lt_field_names   TYPE rcf_t_mdl_uis_fieldname,
+          lt_valuehelp     TYPE rcf_t_mdl_uis_valuehelp,
+          lt_messages      TYPE bapirettab,
+          ls_field_name    TYPE rcf_s_mdl_uis_fieldname,
+          ls_valuehelp     TYPE rcf_s_mdl_uis_valuehelp,
+          lv_industry_text TYPE rcf_industry_txt.
+
+    FIELD-SYMBOLS:
+          <fs_valuehelp>   TYPE rcf_s_mdl_uis_valuehelp.
+
+    ls_field_name-fieldname = 'INDUSTRY'.
+    ls_field_name-init_key_included = abap_false.
+    APPEND ls_field_name TO lt_field_names.
+
+* get RFC destination
+    lv_rfc_dest = me->get_rfc_destination( ).
+
+* retrieve requested value help(s)
+    CALL FUNCTION 'HRRCF_MDL_UIS_VH_COMMON'
+      DESTINATION lv_rfc_dest
+      EXPORTING
+        field_names           = lt_field_names
+      IMPORTING
+        valuehelp_list        = lt_valuehelp
+        messages              = lt_messages
+      EXCEPTIONS
+        communication_failure = 1 MESSAGE lv_message
+        system_failure        = 2 MESSAGE lv_message.
+
+* retrive code from the text
+    LOOP AT lt_valuehelp ASSIGNING <fs_valuehelp>.
+      TRANSLATE <fs_valuehelp>-vh_value TO UPPER CASE.
+    ENDLOOP.
+
+    lv_industry_text = iv_industry_text.
+
+    TRANSLATE lv_industry_text TO UPPER CASE.
+
+    READ TABLE lt_valuehelp INTO ls_valuehelp
+      WITH KEY vh_value = lv_industry_text.
+    IF sy-subrc = 0.
+      rv_industry = ls_valuehelp-vh_key.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_linkedin_app_data.
+
+    DATA: lv_rfc_dest    TYPE rfcdest,
+          lv_message(80) TYPE c.
+
+    CLEAR: et_message.
+
+* get RFC destination
+    lv_rfc_dest = me->get_rfc_destination( ).
+
+* retrieve application data
+    CALL FUNCTION 'HRRCF_GET_LINKEDIN_APP_DATA'
+      DESTINATION lv_rfc_dest
+      IMPORTING
+        ev_client_secret      = ev_client_secret
+        ev_client_id          = ev_client_id
+        ev_link_url_cat       = ev_link_url_cat
+        messages              = et_message
+      EXCEPTIONS
+        system_failure        = 1 MESSAGE lv_message
+        communication_failure = 2 MESSAGE lv_message.
+
+    IF sy-subrc <> 0.
+*   problem with RFC connection
+      CASE sy-subrc.
+        WHEN 1.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+        WHEN 2.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+      ENDCASE.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD get_linkedin_login_url.
+
+    DATA: lv_rfc_dest    TYPE rfcdest,
+          lv_message(80) TYPE c,
+          lv_wda_url     TYPE string.
+
+    CLEAR: et_message.
+
+* get RFC destination
+    lv_rfc_dest = cl_hrrcf_wd_services=>get_bl_destination( ).
+
+* retrieve application data
+    CALL FUNCTION 'HRRCF_GET_LINKEDIN_LOGIN_URL'
+      DESTINATION lv_rfc_dest
+      EXPORTING
+        iv_client_id          = iv_client_id
+        iv_posting_guid       = iv_posting_guid
+      IMPORTING
+        ev_login_url          = ev_login_url
+        ev_wda_url            = lv_wda_url
+        messages              = et_message
+      EXCEPTIONS
+        system_failure        = 1 MESSAGE lv_message
+        communication_failure = 2 MESSAGE lv_message.
+
+    IF sy-subrc <> 0.
+*   problem with RFC connection
+      CASE sy-subrc.
+        WHEN 1.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+        WHEN 2.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+      ENDCASE.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD GET_RFC_DESTINATION.
+
+    ev_rfc_dest = me->gv_rfc_dest.
+
+  ENDMETHOD.
+
+
+  METHOD retrieve_candidate_data.
+
+    DATA: lv_rfc_dest    TYPE rfcdest,
+          lv_message(80) TYPE c,
+          lv_cand_data   TYPE string.
+
+    CLEAR: et_message.
+
+* get RFC destination
+    lv_rfc_dest = me->get_rfc_destination( ).
+
+* retrieve application data
+    CALL FUNCTION 'HRRCF_GET_DATA_FROM_LINKEDIN'
+      DESTINATION lv_rfc_dest
+      IMPORTING
+        messages              = et_message
+        ev_candidate_data     = lv_cand_data
+      EXCEPTIONS
+        system_failure        = 1 MESSAGE lv_message
+        communication_failure = 2 MESSAGE lv_message.
+
+    IF sy-subrc <> 0.
+*   problem with RFC connection
+      CASE sy-subrc.
+        WHEN 1.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+        WHEN 2.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+      ENDCASE.
+    ENDIF.
+
+    CHECK lv_cand_data IS NOT INITIAL.
+
+    convert_linkedin_data(
+      EXPORTING
+        iv_link_data      = lv_cand_data
+      IMPORTING
+        es_candidate_data = es_candidate_data
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD set_code_from_response.
+
+    DATA: lv_rfc_dest    TYPE rfcdest,
+          lv_message(80) TYPE c.
+
+    CLEAR: et_message.
+
+* get RFC destination
+    lv_rfc_dest = me->get_rfc_destination( ).
+
+* retrieve application data
+    CALL FUNCTION 'HRRCF_SET_LINKEDIN_CODE_PARAM'
+      DESTINATION lv_rfc_dest
+      EXPORTING
+        it_parameters         = it_parameters
+      IMPORTING
+        messages              = et_message
+      EXCEPTIONS
+        system_failure        = 1 MESSAGE lv_message
+        communication_failure = 2 MESSAGE lv_message.
+
+    IF sy-subrc <> 0.
+*   problem with RFC connection
+      CASE sy-subrc.
+        WHEN 1.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+        WHEN 2.
+          RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+            EXPORTING
+              textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+      ENDCASE.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+  METHOD SET_RFC_DESTINATION.
+
+* retrieve the RFC destination
+    gv_rfc_dest = cl_hrrcf_wd_services=>get_bl_destination( ).
+
+  ENDMETHOD.
+ENDCLASS.

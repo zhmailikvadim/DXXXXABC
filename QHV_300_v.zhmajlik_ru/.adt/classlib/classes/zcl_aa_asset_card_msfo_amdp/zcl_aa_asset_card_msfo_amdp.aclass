@@ -1,0 +1,208 @@
+CLASS zcl_aa_asset_card_msfo_amdp DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    INTERFACES if_amdp_marker_hdb.
+
+    TYPES:
+      BEGIN OF gty_s_header,
+        butxt TYPE char255,
+        invnr TYPE anla-invnr,
+        budat TYPE char10,
+        txt50 TYPE anla-txt50,
+      END OF gty_s_header,
+
+      BEGIN OF gty_s_tab1,
+        expdate      TYPE char10,
+*        grmsfo       TYPE zanlu-grmsfo,
+        grmsfo       TYPE zanlu_ifrs-grmsfo,           " AK_BADYLEVIC #25832 Изменить «Группу ОС, НМА по МСФО» в карточках ОС
+        ktansw       TYPE t095-ktansw,
+*        msfoaccept   TYPE zanlz-msfoaccept,           " begin of #20050
+        msfoaccept   TYPE zanlz_ifrs-msfoaccept,       " end of #20050
+        anlkl        TYPE char10,
+        ktnafb       TYPE t095b-ktnafb,
+        afatxt       TYPE t090nat-afatxt,
+        glo_rus_okof TYPE glofaaassetdata-glo_rus_okof,
+        zzz          TYPE char100,
+        naznuse      TYPE zanlz-naznuse,
+      END OF gty_s_tab1,
+
+
+    gty_t_header TYPE STANDARD TABLE OF gty_s_header WITH EMPTY KEY,
+    gty_t_tab1   TYPE STANDARD TABLE OF gty_s_tab1 WITH EMPTY KEY.
+
+    CLASS-METHODS get_data
+      IMPORTING
+        VALUE(iv_bukrs)  TYPE anla-bukrs
+        VALUE(iv_anln1)  TYPE anla-anln1
+        VALUE(iv_anln2)  TYPE anla-anln2
+        VALUE(iv_date)   TYPE dats
+        VALUE(iv_afabe)  TYPE char1
+      EXPORTING
+        VALUE(et_header) TYPE gty_t_header
+        VALUE(et_tab1)   TYPE gty_t_tab1
+        VALUE(ev_return) TYPE char1.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZCL_AA_ASSET_CARD_MSFO_AMDP IMPLEMENTATION.
+
+
+  METHOD get_data BY DATABASE PROCEDURE FOR HDB
+         LANGUAGE SQLSCRIPT OPTIONS READ-ONLY
+         USING anla anlb t001 glofaaassetdata t090nat t095 t093c t095b zanlu
+               zanlz zanlz_ifrs but000
+               zaa_utils_hdb=>get_asset_values
+               zanlu_ifrs.  --AK_BADYLEVIC #25832 Изменить «Группу ОС, НМА по МСФО» в карточках ОС
+
+*    declare lv_kanws int;
+    declare lv_mandt char(3);
+    declare lv_spras char(1);
+    declare lv_afabe1 char(2);
+    declare lv_afabe2 char(2);
+    declare i int;
+    declare lv_flag char(1);
+
+    lv_mandt = session_context( 'CLIENT' );
+    lv_spras = session_context( 'LOCALE_SAP' );
+
+    if iv_afabe = '1' then
+      lv_afabe1 = '50';
+      lv_afabe2 = '51';
+    else
+      lv_afabe1 = '52';
+      lv_afabe2 = '53';
+    end if;
+
+    lt_kansw_check = select :lv_afabe1 as afabe, COALESCE( aa_values.kansw, 0 ) as kansw from "ZAA_UTILS_HDB=>GET_ASSET_VALUES"( :lv_mandt, :iv_date, '' ) as aa_values
+                      where aa_values.bukrs = :iv_bukrs
+                        and aa_values.anln1 = :iv_anln1
+                        and aa_values.anln2 = :iv_anln2
+                        and aa_values.afabe = :lv_afabe1
+
+                     union all
+
+                     select :lv_afabe2 as afabe, COALESCE( aa_values.kansw, 0 ) as kansw from "ZAA_UTILS_HDB=>GET_ASSET_VALUES"( :lv_mandt, :iv_date, '' ) as aa_values
+                      where aa_values.bukrs = :iv_bukrs
+                        and aa_values.anln1 = :iv_anln1
+                        and aa_values.anln2 = :iv_anln2
+                        and aa_values.afabe = :lv_afabe2;
+
+    if is_empty( :lt_kansw_check ) then return; end if;
+
+    for i in 1 .. record_count(:lt_kansw_check)
+      do if :lt_kansw_check.afabe[:i] = :lv_afabe1 and :lt_kansw_check.kansw[:i] = 0 then
+        lv_flag = '';
+      end if;
+      if :lt_kansw_check.afabe[:i] = :lv_afabe1 and :lt_kansw_check.kansw[:i] <> 0 then
+        lv_flag = '1';
+      end if;
+
+      if :lt_kansw_check.afabe[:i] = :lv_afabe2 and :lt_kansw_check.kansw[:i] = 0 and lv_flag = '' then
+        lv_flag = 'A';
+      end if;
+      if :lt_kansw_check.afabe[:i] = :lv_afabe2 and :lt_kansw_check.kansw[:i] <> 0 and lv_flag = '1' then
+        lv_flag = 'B';
+      end if;
+      if :lt_kansw_check.afabe[:i] = :lv_afabe2 and :lt_kansw_check.kansw[:i] <> 0 and lv_flag = '' then
+        lv_flag = 'C';
+      end if;
+      if :lt_kansw_check.afabe[:i] = :lv_afabe2 and :lt_kansw_check.kansw[:i] = 0 and lv_flag = '1' then
+        lv_flag = 'D';
+      end if;
+    end for;
+
+    if lv_flag = 'A' then
+      ev_return = 'X';
+      return;
+    end if;
+    if lv_flag = 'B' then
+      ev_return = 'X';
+      return;
+    end if;
+    if lv_flag = 'C' then
+      lv_afabe1 = lv_afabe2;
+    end if;
+
+
+*Заголовок
+    et_header = select but000.name_org1 || but000.name_org2 || but000.name_org3 || but000.name_org4 as butxt,
+                       anla.invnr,
+                       ( SUBSTRING ( :iv_date, 7, 2 ) || '.' || SUBSTRING ( :iv_date, 5, 2 ) || '.' || SUBSTRING ( :iv_date, 0, 4 ) ) as budat,
+                       anla.txt50
+                  from anla as anla left join t001 as t001 on t001.mandt = anla.mandt
+                                                          and t001.bukrs = anla.bukrs
+                                    left join but000 as but000 on but000.client = session_context( 'CLIENT' )
+                                                              and but000.partner = lpad( t001.bukrs,10,'0' )
+                 where anla.mandt = lv_mandt
+                   and anla.bukrs = :iv_bukrs
+                   and anla.anln1 = :iv_anln1
+                   and anla.anln2 = :iv_anln2;
+
+*Таблица 1
+    et_tab1 = select ( SUBSTRING ( zanlu.expdate, 7, 2 ) || '.' || SUBSTRING ( zanlu.expdate, 5, 2 ) || '.' || SUBSTRING ( zanlu.expdate, 0, 4 ) ) as expdate,
+                     zanlu_ifrs.grmsfo,
+                     t095.ktansw,
+                     zanlz_ifrs.msfoaccept,
+                     case when ( anla.anlkl = '303' ) then 'Да' end anlkl,
+                     t095b.ktnafb,
+                     t090nat.afatxt,
+                     glo.glo_rus_okof,
+                     'Уточнить откуда брать' as zzz,
+                     case when ( zanlz.naznuse = '1' ) then 'Да'
+                          when ( zanlz.naznuse = '2' ) then 'Нет'
+                     end naznuse
+                from zanlu as zanlu join anla as anla on anla.mandt = zanlu.mandt
+                                                     and anla.invnr = zanlu.invnr
+                                    join t001 as t001 on t001.mandt = anla.mandt
+                                                     and t001.bukrs = anla.bukrs
+*{                                  AK_BADYLEVIC #25832 Изменить «Группу ОС, НМА по МСФО» в карточках ОС
+                                    join zanlu_ifrs as zanlu_ifrs on zanlu_ifrs.mandt = anla.mandt
+                                                                 and zanlu_ifrs.bukrs = anla.bukrs
+                                                                 and zanlu_ifrs.anln1 = anla.anln1
+                                                                 and zanlu_ifrs.anln2 = anla.anln2
+*}                                  AK_BADYLEVIC #25832 Изменить «Группу ОС, НМА по МСФО» в карточках ОС
+                                    left join t095 as t095 on t095.mandt = anla.mandt
+                                                          and t095.ktogr = anla.ktogr
+                                                          and t095.ktopl = t001.ktopl
+                                                          and t095.afabe = '50'
+                                    left join zanlz as zanlz on zanlz.mandt = zanlu.mandt
+                                                            and zanlz.invnr = zanlu.invnr
+                                                            and ( zanlz.adatu <= :iv_date and zanlz.bdatu >= :iv_date )
+                                    --- begin of #20050
+                                    left join zanlz_ifrs as zanlz_ifrs on zanlz_ifrs.mandt = zanlu.mandt
+                                                                      and zanlz_ifrs.invnr = zanlu.invnr
+                                                                      and ( zanlz_ifrs.adatu <= :iv_date and zanlz_ifrs.bdatu >= :iv_date )
+                                    --- end of #20050
+                                    left join t095b as t095b on t095b.mandt = anla.mandt
+                                                            and t095b.ktogr = anla.ktogr
+                                                            and t095b.ktopl = t001.ktopl
+                                                            and t095b.afabe = '50'
+                                    left join anlb as anlb on anlb.mandt = anla.mandt
+                                                          and anlb.bukrs = anla.bukrs
+                                                          and anlb.anln1 = anla.anln1
+                                                          and anlb.anln2 = anla.anln2
+                                                          and anlb.afabe = lv_afabe1
+                                                          and ( anlb.adatu <= :iv_date and anlb.bdatu >= :iv_date )
+                                    left join t093c as t093c on t093c.mandt = t001.mandt
+                                                            and t093c.bukrs = t001.bukrs
+                                    left join t090nat as t090nat on t090nat.mandt = zanlu.mandt
+                                                                and t090nat.afasl = anlb.afasl
+                                                                and t090nat.afapl = t093c.afapl
+                                                                and t090nat.spras = lv_spras
+                                    left join glofaaassetdata as glo on glo.mandt = anla.mandt
+                                                                    and glo.bukrs = anla.bukrs
+                                                                    and glo.anln1 = anla.anln1
+                                                                    and glo.anln2 = anla.anln2
+               where zanlu.mandt = lv_mandt
+                 and anla.bukrs = :iv_bukrs
+                 and anla.anln1 = :iv_anln1
+                 and anla.anln2 = :iv_anln2;
+  ENDMETHOD.
+ENDCLASS.

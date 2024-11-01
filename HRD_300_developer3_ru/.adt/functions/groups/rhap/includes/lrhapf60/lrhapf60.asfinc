@@ -1,0 +1,728 @@
+*----------------------------------------------------------------------*
+*   INCLUDE LRHAPF60                                                   *
+*----------------------------------------------------------------------*
+
+*&---------------------------------------------------------------------*
+*&      Form  FETCH_TDATA
+*&---------------------------------------------------------------------*
+*       Abholen Tabellenteil zum Schlüsselsatz aus Anwendungsprogramm  *
+*       bei Tabelleninfotypen                                          *
+*----------------------------------------------------------------------*
+*  -->  VALUE(FT_SET)            Zugehöriger Schlüsselsatz             *
+*  -->  VALUE(FT_TABIX)          Index des Satzes bei Mengenverarb.    *
+*  -->  VALUE(FT_REPID)          Report-Name Anwendungsprogramm        *
+*  -->  VALUE(FT_FORM)           FORM-Name Anwendungsprogramm          *
+*  -->  VALUE(FT_OPERA)          Operationskennzeichen                 *
+*                                  (I=Insert,U=Update)                 *
+*  <--  FT_SUBRC                 Return-Code = 0 Tabellenteil gefüllt  *
+*                                            = 4 Tabellenteil leer     *
+*----------------------------------------------------------------------*
+FORM fetch_tdata USING value(ft_set)
+                       value(ft_tabix) LIKE hrrhap-tabix
+                       value(ft_repid)
+                       value(ft_form)
+                       value(ft_tabnr) STRUCTURE hrpointer
+                       value(ft_opera)
+                       ft_subrc.
+
+  PERFORM client_set.
+
+  CLEAR ft_subrc.
+  CLEAR fetch_wplog.
+  fetch_wplog = ft_set.
+
+* Löschen evtl. bestehende Einträge zur gleichen TABNR in TB_BUFFER
+* (Bei aufeinanderfolgenden UPDATE-UPDATE-Folgen auf bestehende Sätze
+* muß die letzte gewinnen, d.h. die alten Tabellenwerte sind
+* bedeutungslos)
+  IF ft_opera = upd_marker AND
+    NOT ft_tabnr IS INITIAL.
+*   AND FT_TABNR-FLAG NE '$'.                              "VWMB034312
+    LOOP AT tb_buffer
+    WHERE infty = fetch_wplog-infty
+      AND mandt = rhap_client
+      AND tabnr = ft_tabnr
+*     AND OPERA = UPD_MARKER.                              "VWMB034312
+      AND opera NE del_marker.                              "VWMB034312
+      DELETE tb_buffer.
+    ENDLOOP.
+*   Einträge müssen auch aus TB_PLOG_TAB gelöscht werden   "VWMB034312
+    LOOP AT tb_plog_tab                                     "VWMB034312
+    WHERE infty = fetch_wplog-infty                         "VWMB034312
+      AND mandt = rhap_client                               "VWMB034312
+      AND tabnr = ft_tabnr                                  "VWMB034312
+      AND opera NE del_marker.                              "VWMB034312
+      DELETE tb_plog_tab.                                   "VWMB034312
+    ENDLOOP.                                                "VWMB034312
+  ENDIF.
+
+* Abholen TB_TAB aus Anwendungsprogramm
+  REFRESH fetch_tb_tab.
+  PERFORM (ft_form) IN PROGRAM (ft_repid)
+          TABLES fetch_tb_tab
+          USING ft_set
+                ft_tabix.
+
+  CLEAR tb_buffer.
+  tb_buffer-infty = fetch_wplog-infty.
+  tb_buffer-mandt = rhap_client.
+  DESCRIBE TABLE fetch_tb_tab LINES fetch_tb_tab_count.
+  IF fetch_tb_tab_count > 0.
+* Übertragen TB_TAB in TB_BUFFER
+    tb_buffer-tabnr = ft_tabnr.
+    tb_buffer-opera = ft_opera.
+    LOOP AT fetch_tb_tab.
+      tb_buffer-tabseqnr = sy-tabix.
+      tb_buffer-tdata = fetch_tb_tab.
+      APPEND tb_buffer.
+    ENDLOOP.
+  ELSE.
+* leerer Tabelleninfotyp
+* Schreiben Initialwert (Kopfzeile FETCH_TB_TAB) in TB_BUFFER
+    ft_subrc = 4.
+    tb_buffer-tdata = fetch_tb_tab.
+    tb_buffer-opera = ins_marker.
+*   Bei mehreren Tabelleninfotypen nur einmal Initialsatz einfügen
+    READ TABLE tb_buffer                             "XMKSINGLINIT
+         WITH KEY infty = fetch_wplog-infty          "XMKSINGLINIT
+                  mandt = rhap_client                "XMKSINGLINIT
+                  tabnr = space                      "XMKSINGLINIT
+         TRANSPORTING NO FIELDS.                     "XMKSINGLINIT
+    IF sy-subrc <> 0.                                "XMKSINGLINIT
+      APPEND tb_buffer.
+    ENDIF.                                           "XMKSINGLINIT
+    IF NOT ft_tabnr IS INITIAL AND
+       ft_tabnr-flag NE '$'.
+*     Weder leerer noch temporärer Pointer,
+*     d.h. es liegt ein "echter" physischer Pointer vor
+*     => Kennzeichnung in TB_BUFFER, daß zugehöriger Tabellenteil
+*        gelöscht werden muß
+      CLEAR tb_buffer.
+      tb_buffer-infty = fetch_wplog-infty.
+      tb_buffer-mandt = rhap_client.
+      tb_buffer-tabnr = ft_tabnr.
+      tb_buffer-opera = del_marker.
+      APPEND tb_buffer.
+    ENDIF.
+  ENDIF.
+ENDFORM.                               " FETCH_TDATA
+
+*---------------------------------------------------------------------*
+*       FORM COPY_TDATA                                               *
+*---------------------------------------------------------------------*
+*       Übertragen Tabellenteile in Tabellenpuffer und Vergabe        *
+*       eines neuen Tabellenpointers                                  *
+*       Anwendung:                                                    *
+*       - Planvorschlagen sprachabhängiger Tabelleninfotypen          *
+*       - Aufsplitten umfassenden Satz                                *
+*---------------------------------------------------------------------*
+* <-->  CT_SET                     Infotypsatz                        *
+*---------------------------------------------------------------------*
+FORM copy_tdata USING ct_set.
+
+  DATA : ct_temp_tabnr LIKE hrtdbtab-tabnr. "temp. Pointer (TABNR)
+  DATA : ct_old_tabnr LIKE hrtdbtab-tabnr.  "best. Pointer (TABNR)
+  DATA : BEGIN OF ct_tb_tab OCCURS 0.
+          INCLUDE STRUCTURE hrtdbtab.
+  DATA : END OF ct_tb_tab.
+
+  DATA : BEGIN OF ct_pointer.
+          INCLUDE STRUCTURE hrpointer.
+  DATA : END OF ct_pointer.
+
+  DATA : BEGIN OF ct_wplog.
+          INCLUDE STRUCTURE wplog.
+  DATA : END OF ct_wplog.
+
+  DATA : ct_tb_tab_count TYPE p.
+  DATA : ct_subrc LIKE sy-subrc.
+
+  DATA: tbtab_type TYPE REF TO data.                          "ANDUNI
+  FIELD-SYMBOLS: <ct_tb_tab> TYPE STANDARD TABLE,             "ANDUNI
+                 <ct_tb_tab_wa> TYPE ANY.                     "ANDUNI
+
+  ct_wplog = ct_set.
+  CHECK NOT pppar-tbtab IS INITIAL.
+
+  PERFORM client_set.
+* Ermitteln nächsten temporären Pointer
+  PERFORM get_next_temp_tabnr USING ct_temp_tabnr.
+* Lesen bestehenden Pointer
+  PERFORM get_tabnr USING ct_set pppar-ppnnn
+                          ct_old_tabnr ct_subrc.
+
+  ct_pointer = ct_old_tabnr.
+
+  CREATE DATA tbtab_type TYPE STANDARD TABLE OF (pppar-tbtab)."ANDUNI
+  ASSIGN tbtab_type->* TO <ct_tb_tab>.                        "ANDUNI
+
+* Tabellenteil aus TB_BUFFER lesen
+  REFRESH ct_tb_tab.
+  CLEAR ct_tb_tab.
+  LOOP AT tb_buffer
+  WHERE infty = ct_wplog-infty
+    AND mandt = rhap_client
+    AND tabnr = ct_old_tabnr
+    AND opera = space.
+    ct_tb_tab-mandt    = rhap_client.
+    ct_tb_tab-tabnr    = tb_buffer-tabnr.
+    ct_tb_tab-tabseqnr = tb_buffer-tabseqnr.
+    ct_tb_tab-tdata    = tb_buffer-tdata.
+    APPEND ct_tb_tab.
+  ENDLOOP.
+
+  IF sy-subrc NE 0.
+    IF ct_pointer-flag NE '$'.
+*   kein temporärer Pointer
+*   Tabellenteil aus HRTnnnn lesen
+      SELECT * FROM (pppar-tbtab) CLIENT SPECIFIED
+*        INTO TABLE CT_TB_TAB                                 "ANDUNI
+        INTO TABLE <ct_tb_tab>                                "ANDUNI
+        WHERE mandt = rhap_client
+          AND tabnr = ct_old_tabnr.
+    ENDIF.
+  ENDIF.
+
+  CLEAR ct_tb_tab.                                            "ANDUNI
+  ASSIGN ct_tb_tab TO <ct_tb_tab_wa>                          "ANDUNI
+                             CASTING TYPE (pppar-tbtab).      "ANDUNI
+  LOOP AT <ct_tb_tab> INTO <ct_tb_tab_wa>.                    "ANDUNI
+    APPEND ct_tb_tab.                                         "ANDUNI
+  ENDLOOP.                                                    "ANDUNI
+
+  DESCRIBE TABLE ct_tb_tab LINES ct_tb_tab_count.
+  IF ct_tb_tab_count > 0.
+* Tabellenteil in TB_BUFFER übertragen
+    CLEAR tb_buffer.
+    tb_buffer-infty = ct_wplog-infty.
+    tb_buffer-mandt = rhap_client.
+    tb_buffer-tabnr = ct_temp_tabnr.
+    tb_buffer-opera = ins_marker.
+    LOOP AT ct_tb_tab.
+      tb_buffer-tabseqnr = sy-tabix.
+      tb_buffer-tdata = ct_tb_tab-tdata.
+      APPEND tb_buffer.
+    ENDLOOP.
+  ELSE.
+*   Tabellenteil leer
+*   => temporären Pointerwert auf leeren Pointer zurücksetzen
+    CLEAR ct_temp_tabnr.
+  ENDIF.
+* Schreiben temporären Pointer in einzufügenden Satz
+  PERFORM set_tabnr USING ct_set pppar-ppnnn
+                          ct_temp_tabnr ct_subrc.
+
+ENDFORM.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  UPDATE_TB_BUFFER
+*&---------------------------------------------------------------------*
+*       Übertragen Tabellenpuffer nach TB_PLOG_TAB                     *
+*----------------------------------------------------------------------*
+*       Update auf TB_BUFFER                                           *
+*       Je nach Kennzeichnung der Saetze wird die entsprechende        *
+*       Aktion in die TaBELLE TB_PLOG_TAB eingetragen,                 *
+*       von der aus die Datenbank verändert wird                       *
+*       TB_BUFFER-OPERA = 'D' --> DELETE                               *
+*       TB_BUFFER-OPERA = 'I' --> INSERT                               *
+*       TB_BUFFER-OPERA = 'U' --> UPDATE                               *
+*       Nach dem Datenbank-Update entspricht der TB_BUFFER-Inhalt      *
+*       der DB (bis auf logische TABNR)                                *
+*----------------------------------------------------------------------*
+FORM update_tb_buffer.
+  DATA: utb_last_tabnr LIKE hrtdbtab-tabnr.
+  CLEAR   : pre_tb_plog_tab.
+  REFRESH : pre_tb_plog_tab.
+  LOOP AT tb_buffer.
+    IF tb_buffer-opera NE space.
+      pre_tb_plog_tab = tb_buffer.
+      APPEND pre_tb_plog_tab.
+    ENDIF.
+    CASE tb_buffer-opera.
+      WHEN space.
+      WHEN upd_marker.
+        tb_buffer-opera = space.
+        MODIFY tb_buffer.
+      WHEN del_marker.
+        DELETE tb_buffer.
+      WHEN ins_marker.
+        tb_buffer-opera = space.
+        MODIFY tb_buffer.
+    ENDCASE.
+  ENDLOOP.
+* Übertragen PRE_TB_PLOG_TAB nach TB_PLOG_TAB, dabei:
+* Löschen evtl. bestehende Einträge zur gleichen TABNR in TB_PLOG_TAB
+* (Bei aufeinanderfolgenden UPDATE-UPDATE-Folgen auf bestehende Sätze
+* muß die letzte gewinnen, d.h. die alten Tabellenwerte sind
+* bedeutungslos)
+  CLEAR utb_last_tabnr.
+  LOOP AT pre_tb_plog_tab.
+    IF pre_tb_plog_tab-tabnr NE utb_last_tabnr.
+      utb_last_tabnr = pre_tb_plog_tab-tabnr.
+      IF pre_tb_plog_tab-opera = upd_marker AND
+        NOT pre_tb_plog_tab-tabnr IS INITIAL.
+        CLEAR hrpointer.
+        hrpointer = pre_tb_plog_tab-tabnr.
+        IF hrpointer-flag NE '$'.
+*         Überprüfung auf bestehende Sätze nicht bei temporärem Pointer
+          LOOP AT tb_plog_tab
+          WHERE infty = pre_tb_plog_tab-infty
+            AND mandt = pre_tb_plog_tab-mandt
+            AND tabnr = pre_tb_plog_tab-tabnr
+            AND opera = upd_marker.
+            DELETE tb_plog_tab.
+          ENDLOOP.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+    tb_plog_tab = pre_tb_plog_tab.
+    APPEND tb_plog_tab.
+  ENDLOOP.
+* Nur wenn PPPAR-VTASK EQ 'B' oder Listbild oder Schnellerfassung
+* oder PPPAR-UPDAT EQ OFF kann TB_BUFFER weuterbenutzt werden
+  IF pppar-vtask EQ 'B' OR pppar-listb EQ on
+                        OR pppar-fcode EQ quick
+                        OR pppar-updat EQ off.
+    DESCRIBE TABLE tb_buffer LINES tb_buffer_count.
+  ELSE.
+    PERFORM clear_tb_buffer.
+  ENDIF.
+
+ENDFORM.                               " UPDATE_TB_BUFFER
+
+*---------------------------------------------------------------------*
+*       FORM CLEAR_TB_BUFFER                                          *
+*---------------------------------------------------------------------*
+*       Rücksetzen des Tabellenpuffers                                *
+*---------------------------------------------------------------------*
+FORM clear_tb_buffer.
+  CLEAR tb_buffer.
+  REFRESH tb_buffer.
+  tb_buffer_count = 0.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM CLEAR_TB_PLOG_TAB                                        *
+*---------------------------------------------------------------------*
+*       REFRESH auf TB_PLOG_TAB                                       *
+*---------------------------------------------------------------------*
+FORM clear_tb_plog_tab.
+  CLEAR tb_plog_tab.
+  REFRESH tb_plog_tab.
+  tb_plog_tab_count = 0.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM STORE_TB_BUFFER                                          *
+*---------------------------------------------------------------------*
+*       Sichern Tabellenpuffer                                        *
+*---------------------------------------------------------------------*
+*       Keine USING-Parameter                                         *
+*---------------------------------------------------------------------*
+FORM store_tb_buffer.
+  CLEAR store_tb_buffer.
+  store_tb_buffer[] = tb_buffer[].
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM STORE_TB_PLOG_TAB                                        *
+*---------------------------------------------------------------------*
+*       Sichern TB_PLOG_TAB                                           *
+*---------------------------------------------------------------------*
+*       Keine USING-Parameter                                         *
+*---------------------------------------------------------------------*
+FORM store_tb_plog_tab.
+  CLEAR store_tb_plog_tab.
+  store_tb_plog_tab[] = tb_plog_tab[].
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM RESTORE_TB_BUFFER                                        *
+*---------------------------------------------------------------------*
+*       Zurücksichern Puffer                                          *
+*---------------------------------------------------------------------*
+*       Keine USING-Parameter                                         *
+*---------------------------------------------------------------------*
+FORM restore_tb_buffer.
+  CLEAR tb_buffer.
+  tb_buffer[] = store_tb_buffer[].
+  DESCRIBE TABLE tb_buffer LINES tb_buffer_count.
+  FREE store_tb_buffer.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*       FORM RESTORE_TB_PLOG_TAB                                      *
+*---------------------------------------------------------------------*
+*       Zurücksichern TB_PLOG_TAB                                     *
+*---------------------------------------------------------------------*
+*       Keine USING-Parameter                                         *
+*---------------------------------------------------------------------*
+FORM restore_tb_plog_tab.
+  CLEAR tb_plog_tab.
+  tb_plog_tab[] = store_tb_plog_tab[].
+  DESCRIBE TABLE tb_plog_tab LINES tb_plog_tab_count.
+  FREE store_tb_plog_tab.
+ENDFORM.
+
+
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_TB_BUFFER
+*&---------------------------------------------------------------------*
+*       Löschen zugehörige Sätze zum Puffersatz im Tabellenpuffer      *
+*----------------------------------------------------------------------*
+*  -->  VALUE(DTB_BUFFER)         Puffersatz
+*----------------------------------------------------------------------*
+FORM delete_tb_buffer USING value(dtb_buffer) STRUCTURE hrbuffer.
+  DATA: dtb_subrc LIKE sy-subrc,
+        dtb_tabnr LIKE hrtbuffer-tabnr.
+  CLEAR t777d.
+  SELECT SINGLE * FROM t777d WHERE infty = dtb_buffer-infty.
+  IF sy-subrc = 0.
+    IF NOT t777d-tbtab IS INITIAL.
+      PERFORM get_tabnr USING dtb_buffer t777d-ppnnn
+                              dtb_tabnr dtb_subrc.
+      IF dtb_subrc = 0.
+        LOOP AT tb_buffer
+        WHERE mandt = dtb_buffer-mandt
+          AND tabnr = dtb_tabnr.
+          DELETE tb_buffer.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+ENDFORM.                               " DELETE_TB_BUFFER
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_TABNR
+*&---------------------------------------------------------------------*
+*       Ermitteln Pointer-Wert (Feld TABNR) im Tabelleninfotypsatz     *
+*----------------------------------------------------------------------*
+*  -->  VALUE(GT_SET)        Tabelleninfotypsatz (Schlüsselsatz)       *
+*  -->  VALUE(GT_PPNNN)      Infotypstruktur                           *
+*  <--  GT_TABNR             gesetzter Pointer-Wert                    *
+*  <--  GT_SUBRC             = 4  Pointer nicht gefunden               *
+*----------------------------------------------------------------------*
+FORM get_tabnr USING value(gt_set)
+                     value(gt_ppnnn)
+                     gt_tabnr LIKE hrtdbtab-tabnr
+                     gt_subrc LIKE sy-subrc.
+
+  FIELD-SYMBOLS: <gt_set_char> TYPE c.                      "ANDUNI
+  DATA: gt_offset LIKE dfies-offset.
+
+  CLEAR gt_subrc.
+  CLEAR gt_tabnr.
+  PERFORM get_tabnr_offset USING gt_ppnnn gt_offset gt_subrc.
+  IF gt_subrc = 0.
+    CLEAR gt_tabnr.
+*   GT_TABNR = GT_SET+GT_OFFSET(TABNR_INTLEN).              "ANDUNI
+    ASSIGN gt_set TO <gt_set_char> CASTING.                 "ANDUNI
+    gt_tabnr = <gt_set_char>+gt_offset(tabnr_intlen).       "ANDUNI
+  ENDIF.
+
+ENDFORM.                               " GET_TABNR
+
+*---------------------------------------------------------------------*
+*       FORM GET_TABNR_OFFSET                                         *
+*---------------------------------------------------------------------*
+*       Ermitteln Offset des Pointers in Struktur GTO_PPNNN           *
+*---------------------------------------------------------------------*
+*  -->  VALUE(GTO_PPNNN)          Infotypstruktur                     *
+*  -->  GTO_OFFSET                Offset des Pointers in Struktur     *
+*  -->  GTO_SUBRC                 = 4 Pointer nicht gefunden          *
+*---------------------------------------------------------------------*
+*46A ANDBCEK008264 Veralteter FB get_fieldtab ersetzen
+FORM get_tabnr_offset USING value(gto_ppnnn)
+                            gto_offset LIKE dfies-offset
+                            gto_subrc LIKE sy-subrc.
+
+  DATA: any_field TYPE REF TO data.                         "ANDUNI
+  DATA: tablength LIKE x030l-tablen.                        "ANDUNI
+  FIELD-SYMBOLS: <char_field> TYPE c,                       "ANDUNI
+                 <any_field> TYPE ANY.                      "ANDUNI
+
+
+  CLEAR gto_subrc.
+* Prüfung, ob Offset schon in interner Tabelle
+  tabnr_offset_tab_key = gto_ppnnn.
+  READ TABLE tabnr_offset_tab WITH KEY tabnr_offset_tab_key
+                              BINARY SEARCH.
+  IF sy-subrc = 0.
+    gto_offset = tabnr_offset_tab-offset.
+  ELSE.
+** Lesen Offset aus NAMETAB
+**    CALL FUNCTION 'GET_FIELDTAB'                        "ANDBCEk008264
+**         EXPORTING                                      "ANDBCEk008264
+**              LANGU               = SY-LANGU            "ANDBCEK008264
+**              TABNAME             = TABNR_OFFSET_TAB_KEY"ANDBCEK008264
+**         TABLES                                         "ANDBCEK008264
+**              FIELDTAB            = RHAP_FIELDTAB       "ANDBCEK008264
+**         EXCEPTIONS                                     "ANDBCEK008264
+**              INTERNAL_ERROR      = 01                  "ANDBCEK008264
+**              NO_TEXTS_FOUND      = 02                  "ANDBCEK008264
+**              TABLE_HAS_NO_FIELDS = 03                  "ANDBCEK008264
+**              TABLE_NOT_ACTIV     = 04.                 "ANDBCEK008264
+*
+*    CALL FUNCTION 'DDIF_FIELDINFO_GET'                   "ANDBCEK008264
+*         EXPORTING                                       "ANDBCEK008264
+*              TABNAME        = TABNR_OFFSET_TAB_KEY      "ANDBCEK008264
+**             FIELDNAME      = ' '                       "ANDBCEK008264
+**             LANGU          = SY-LANGU                  "ANDBCEK008264
+**             LFIELDNAME     = ' '                       "ANDBCEK008264
+**             ALL_TYPES      = ' '                       "ANDBCEK008264
+**        IMPORTING                                       "ANDBCEK008264
+**             X030L_WA       =                           "ANDBCEK008264
+**             DDOBJTYPE      =                           "ANDBCEK008264
+**             DFIES_WA       =                           "ANDBCEK008264
+*        TABLES                                           "ANDBCEK008264
+*             DFIES_TAB      = RHAP_FIELDTAB              "ANDBCEK008264
+*        EXCEPTIONS                                       "ANDBCEK008264
+*             NOT_FOUND      = 1                          "ANDBCEK008264
+*             INTERNAL_ERROR = 2                          "ANDBCEK008264
+*             OTHERS         = 3.                         "ANDBCEK008264
+*
+*    IF SY-SUBRC NE 0.
+*      GTO_SUBRC = 4.
+*      EXIT.
+*    ELSE.
+*
+**   Lesen Offset aus Feldtabelle
+*      SORT RHAP_FIELDTAB.
+*      RHAP_FIELDTAB_KEY-TABNAME   = GTO_PPNNN.
+*      RHAP_FIELDTAB_KEY-FIELDNAME = TABNR_FIELDNAME.
+*      RHAP_FIELDTAB_KEY-LANGU     = SY-LANGU.
+*      READ TABLE RHAP_FIELDTAB WITH KEY RHAP_FIELDTAB_KEY BINARY SEARCH
+.
+*      IF SY-SUBRC = 0.
+**     Versorgen Parameter
+*        GTO_OFFSET = RHAP_FIELDTAB-OFFSET.
+**     Aufnahme Offset in interne Tabelle
+*        TABNR_OFFSET_TAB-TABNAME = GTO_PPNNN.
+*        TABNR_OFFSET_TAB-OFFSET  = RHAP_FIELDTAB-OFFSET.
+*        APPEND TABNR_OFFSET_TAB.
+*        SORT TABNR_OFFSET_TAB.
+*      ELSE.
+*        GTO_SUBRC = 4.
+*        EXIT.
+*      ENDIF.
+*    ENDIF.
+
+
+    CREATE DATA any_field TYPE (gto_ppnnn).                "ANDUNI
+    ASSIGN any_field->* TO <any_field>.                    "ANDUNI
+
+*   we need a character view of <any_field> !!!            "ANDUNI
+    ASSIGN <any_field> TO <char_field> CASTING TYPE c.     "ANDUNI
+
+    DESCRIBE FIELD <char_field> LENGTH tablength           "ANDUNI
+                                IN CHARACTER MODE.         "ANDUNI
+
+    tabnr_offset_tab-tabname = gto_ppnnn.                  "ANDUNI
+    tabnr_offset_tab-offset  = tablength - tabnr_intlen.   "ANDUNI
+    gto_offset = tabnr_offset_tab-offset.                  "ANDUNI
+
+    APPEND tabnr_offset_tab.                               "ANDUNI
+    SORT tabnr_offset_tab.                                 "ANDUNI
+
+  ENDIF.
+
+ENDFORM.                               " GET_TABNR_OFFSET
+
+
+*&---------------------------------------------------------------------*
+*&      Form  SET_TABNR
+*&---------------------------------------------------------------------*
+*       Setzen Pointer-Wert (Feld TABNR) im Tabelleninfotypsatz        *
+*----------------------------------------------------------------------*
+*  <->  ST_SET               Tabelleninfotypsatz (Schlüsselsatz)       *
+*  -->  VALUE(ST_PPNNN)      Infotypstruktur                           *
+*  -->  VALUE(ST_TABNR)      zu setzender Pointer-Wert                 *
+*  <--  ST_SUBRC             = 4  Pointer nicht gefunden               *
+*----------------------------------------------------------------------*
+FORM set_tabnr USING st_set
+                     value(st_ppnnn)
+                     value(st_tabnr)
+                     st_subrc LIKE sy-subrc.
+
+  FIELD-SYMBOLS: <st_set_char> TYPE c.                         "ANDUNI
+  DATA: st_offset LIKE dfies-offset.
+
+  CLEAR st_subrc.
+  PERFORM get_tabnr_offset USING st_ppnnn st_offset st_subrc.
+  IF st_subrc = 0.
+*   st_set+st_offset(tabnr_intlen) = st_tabnr.                 "ANDUNI
+    ASSIGN st_set TO <st_set_char> CASTING.                    "ANDUNI
+    <st_set_char>+st_offset(tabnr_intlen) = st_tabnr.          "ANDUNI
+  ENDIF.
+ENDFORM.                               " SET_TABNR
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_NEXT_TEMP_TABNR
+*&---------------------------------------------------------------------*
+*       Ermitteln nächsten Wert für temporären Pointer                 *
+*----------------------------------------------------------------------*
+*  <->  GNTT_TABNR           nächster Pointer-Wert
+*----------------------------------------------------------------------*
+FORM get_next_temp_tabnr USING gntt_tabnr STRUCTURE hrpointer.
+  DATA: gntt_new.                                          "VWM777MBINPT
+  WHILE gntt_new IS INITIAL.                               "VWM777MBINPT
+    CLEAR gntt_tabnr.
+    rhap_temp_pointer = rhap_temp_pointer + 1.
+    gntt_tabnr-pointer = rhap_temp_pointer.
+    gntt_tabnr-flag    = '$'.            "Kennzeichen temporärer Pointer
+*   Prüfung, ob temporärer Pointer schon vergeben          "VWM777MBINPT
+    LOOP AT tb_buffer WHERE tabnr = gntt_tabnr.            "VWM777MBINPT
+      EXIT.                                                "VWM777MBINPT
+    ENDLOOP.                                               "VWM777MBINPT
+    IF sy-subrc NE 0.                                      "VWM777MBINPT
+      LOOP AT tb_plog_tab WHERE tabnr = gntt_tabnr.        "VWMBUFDIALG
+        EXIT.                                              "VWMBUFDIALG
+      ENDLOOP.                                             "VWMBUFDIALG
+      IF sy-subrc NE 0.                                    "VWMBUFDIALG
+        gntt_new = 'X'.                                    "VWM777MBINPT
+      ENDIF.                                               "VWMBUFDIALG
+    ENDIF.                                                 "VWM777MBINPT
+  ENDWHILE.                                                "VWM777MBINPT
+ENDFORM.                               " GET_NEXT_TEMP_TABNR
+
+*---------------------------------------------------------------------*
+*       FORM FILL_PPNNN_TABINFTY                                      *
+*---------------------------------------------------------------------*
+*       Fülle FP_PPNNNN mit Infotypstruktur aus gegebenem Satz (SET)  *
+*       Dies funktioniert nur für Tabelleninfotypen                   *
+*---------------------------------------------------------------------*
+*  -->  VALUE(FPT_SET)                                                *
+*  -->  FPT_PPNNN                                                     *
+*---------------------------------------------------------------------*
+FORM fill_ppnnn_tabinfty USING value(fpt_set) TYPE any
+                               fpt_ppnnn      TYPE t777d-ppnnn.
+
+  STATICS: fpt_i777d LIKE t777d.
+
+*  DATA: FPT_WPLOG LIKE WPLOG.                        "ANDUNI
+
+  FIELD-SYMBOLS: <hripkey> TYPE hripkey.              "ANDUNI
+
+  IF fpt_ppnnn IS INITIAL.
+*   FPT_WPLOG = FPT_SET.                              "ANDUNI
+   ASSIGN fpt_set TO <hripkey> CASTING.               "ANDUNI
+
+*    IF FPT_I777D-INFTY <> FPT_WPLOG-INFTY.           "ANDUNI
+    IF fpt_i777d-infty <> <hripkey>-infty.            "ANDUNI
+      SELECT SINGLE * FROM t777d INTO fpt_i777d
+*                     WHERE INFTY = FPT_WPLOG-INFTY.  "ANDUNI
+                      WHERE infty = <hripkey>-infty.  "ANDUNI
+
+      IF sy-subrc > 0.
+        CLEAR fpt_i777d.
+      ENDIF.
+    ENDIF.
+
+    IF fpt_i777d-tbtab <> space.
+      fpt_ppnnn = fpt_i777d-ppnnn.
+    ENDIF.
+  ENDIF.
+ENDFORM.                               " FILL_PPNNN
+
+
+*---------------------------------------------------------------------*
+*       FORM INSERT_TB_BUFFER                            "VWMBUFDIALG *
+*---------------------------------------------------------------------*
+*       Lesen Tabellenteile in Tabellenpuffer                         *
+*---------------------------------------------------------------------*
+*  -->  VALUE(ITB_BUFFER)          Primärsatz im BUFFER               *
+*---------------------------------------------------------------------*
+FORM insert_tb_buffer USING value(itb_buffer) STRUCTURE hrbuffer.
+                                                          "VWMBUFDIALG
+  DATA: itb_subrc LIKE sy-subrc,
+        itb_tabnr LIKE hrtbuffer-tabnr.
+
+*  DATA : BEGIN OF ITB_TB_TAB OCCURS 0.                      "ANDUNI
+*          INCLUDE STRUCTURE HRTDBTAB.                       "ANDUNI
+*  DATA : END OF ITB_TB_TAB.                                 "ANDUNI
+
+  DATA : BEGIN OF itb_pointer.
+          INCLUDE STRUCTURE hrpointer.
+  DATA : END OF itb_pointer.
+
+  DATA: tbtab_type TYPE REF TO data,                         "ANDUNI
+        hrtdbtab_wa TYPE hrtdbtab.                           "ANDUNI
+
+  FIELD-SYMBOLS: <itb_tb_tab> TYPE STANDARD TABLE,           "ANDUNI
+                 <itb_tb_tab_wa> TYPE ANY.                   "ANDUNI
+
+  CHECK NOT rhap_tb_buffer_fill IS INITIAL.
+
+  SELECT SINGLE * FROM t777d
+  WHERE infty = buffer-infty.
+
+  CHECK sy-subrc = 0
+    AND NOT t777d-tbtab IS INITIAL.
+
+  PERFORM client_set.
+
+* Lesen bestehenden Pointer
+  PERFORM get_tabnr USING buffer t777d-ppnnn
+                          itb_tabnr itb_subrc.
+
+  itb_pointer = itb_tabnr.
+
+* Tabellenteil bereits in TB_BUFFER
+  LOOP AT tb_buffer
+  WHERE infty = itb_buffer-infty
+    AND mandt = rhap_client
+    AND tabnr = itb_tabnr.
+    EXIT.
+  ENDLOOP.
+
+  IF sy-subrc NE 0 AND
+     itb_pointer-flag NE '$'.
+*   kein temporärer Pointer
+*   Ist Tabellenteil zum Löschen vorgemerkt?
+    LOOP AT tb_plog_tab
+    WHERE infty = itb_buffer-infty
+      AND mandt = rhap_client
+      AND tabnr = itb_tabnr
+      AND opera = del_marker.
+      EXIT.
+    ENDLOOP.
+
+    IF sy-subrc NE 0.
+*   Tabellenteil ist nicht zum Löschen vorgemerkt
+*   Tabellenteil aus HRTnnnn lesen
+
+      CREATE DATA tbtab_type
+                        TYPE STANDARD TABLE OF (pppar-tbtab). "ANDUNI
+      ASSIGN tbtab_type->* TO <itb_tb_tab>.                   "ANDUNI
+
+      SELECT * FROM (t777d-tbtab) CLIENT SPECIFIED
+*        INTO TABLE ITB_TB_TAB                                "ANDUNI
+        INTO TABLE <itb_tb_tab>                               "ANDUNI
+        WHERE mandt = rhap_client
+          AND tabnr = itb_tabnr.
+
+      IF sy-subrc = 0.
+*       Tabellenteil in TB_BUFFER übertragen
+        CLEAR tb_buffer.
+        tb_buffer-infty = buffer-infty.
+        tb_buffer-mandt = rhap_client.
+        tb_buffer-tabnr = itb_tabnr.
+*        LOOP AT ITB_TB_TAB.                                  "ANDUNI
+*          TB_BUFFER-TABSEQNR = ITB_TB_TAB-TABSEQNR.          "ANDUNI
+*          TB_BUFFER-TDATA = ITB_TB_TAB-TDATA.                "ANDUNI
+*          APPEND TB_BUFFER.                                  "ANDUNI
+*        ENDLOOP.                                             "ANDUNI
+
+        ASSIGN hrtdbtab_wa TO <itb_tb_tab_wa>                 "ANDUNI
+                              CASTING TYPE (t777d-tbtab).     "ANDUNI
+        LOOP AT <itb_tb_tab> INTO <itb_tb_tab_wa>.            "ANDUNI
+          tb_buffer-tabseqnr = hrtdbtab_wa-tabseqnr.          "ANDUNI
+          tb_buffer-tdata = hrtdbtab_wa-tdata.                "ANDUNI
+          APPEND tb_buffer.                                   "ANDUNI
+        ENDLOOP.                                              "ANDUNI
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                                                   "VWMBUFDIALG

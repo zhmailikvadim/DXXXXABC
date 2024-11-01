@@ -1,0 +1,654 @@
+class CL_HRRCF_M_USER definition
+  public
+  final
+  create public .
+
+*"* public components of class CL_HRRCF_M_USER
+*"* do not include other source files here!!!
+public section.
+  type-pools ABAP .
+
+  class-methods CLASS_CONSTRUCTOR .
+  class-methods REGISTER
+    importing
+      !IS_REGISTER_RECORD type RCF_S_MDL_REG_REGISTER_USER
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION
+      CX_HRRCF_REGISTRATION .
+  class-methods DEREGISTER
+    importing
+      !IS_CAND_HROBJECT type HROBJECT
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  class-methods CHANGE_ALIAS
+    importing
+      !IS_CAND_HROBJECT type HROBJECT
+      !IS_ALIAS type BAPIALIAS
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+protected section.
+*"* protected components of class CL_HRRCF_M_USER
+*"* do not include other source files here!!!
+private section.
+*"* private components of class CL_HRRCF_M_USER
+*"* do not include other source files here!!!
+
+  class-data SV_CUA_DESTINATION type RFCDEST .
+  class-data SV_CUA_AVAILABLE type WDY_BOOLEAN .
+
+  class-methods REGISTER_WITHOUT_CUA
+    importing
+      !IS_REGISTER_RECORD type RCF_S_MDL_REG_REGISTER_USER
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION
+      CX_HRRCF_REGISTRATION .
+  class-methods REGISTER_WITH_CUA
+    importing
+      !IS_REGISTER_RECORD type RCF_S_MDL_REG_REGISTER_USER
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION
+      CX_HRRCF_REGISTRATION .
+  class-methods DEREGISTER_WITHOUT_CUA
+    importing
+      !IS_CAND_HROBJECT type HROBJECT
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  class-methods DEREGISTER_WITH_CUA
+    importing
+      !IS_CAND_HROBJECT type HROBJECT
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  class-methods CREATE_LOCAL_USER
+    importing
+      !IV_USER type XUBNAME
+      !IV_DEST type RFCDEST
+      !IS_REGISTER_RECORD type RCF_S_MDL_REG_REGISTER_USER
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_REGISTRATION
+      CX_HRRCF_RFC_COMMUNICATION .
+  class-methods CHANGE_ALIAS_WITH_CUA
+    importing
+      !IS_HROBJECT type HROBJECT
+      !IS_ALIAS type BAPIALIAS
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+  class-methods CHANGE_ALIAS_WITHOUT_CUA
+    importing
+      !IS_HROBJECT type HROBJECT
+      !IS_ALIAS type BAPIALIAS
+    exporting
+      !ET_MESSAGES type BAPIRETTAB
+    raising
+      CX_HRRCF_RFC_COMMUNICATION .
+ENDCLASS.
+
+
+
+CLASS CL_HRRCF_M_USER IMPLEMENTATION.
+
+
+METHOD change_alias.
+
+  IF cl_hrrcf_m_user=>sv_cua_available = abap_true.
+*   central user administration available
+    CALL METHOD cl_hrrcf_m_user=>change_alias_with_cua
+      EXPORTING
+        is_hrobject = is_cand_hrobject
+        is_alias    = is_alias
+      IMPORTING
+        et_messages = et_messages.
+  ELSE.
+*   no central user administration available
+    CALL METHOD cl_hrrcf_m_user=>change_alias_without_cua
+      EXPORTING
+        is_hrobject = is_cand_hrobject
+        is_alias    = is_alias
+      IMPORTING
+        et_messages = et_messages.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD change_alias_without_cua.
+
+* no central user administration available
+* -> changes to UI and BL server are supposed to be done manually
+
+  DATA: lv_dest        TYPE rfcdest,
+        lt_messages    TYPE bapirettab,
+        ls_user_logon  TYPE uslogond,
+        ls_bapi_logon  TYPE bapilogond,
+        lv_aliasx      TYPE bapialiasx,
+        lv_message(80) TYPE c.
+
+* retrieve rfc destination
+  CALL METHOD cl_hrrcf_wd_services=>get_bl_destination
+    RECEIVING
+      rfc_dest = lv_dest.
+
+* update BL server
+  CALL FUNCTION 'HRRCF_MDL_ADMN_ALIAS_SAVE'
+    DESTINATION lv_dest
+    EXPORTING
+      cand_hrobject         = is_hrobject
+      alias                 = is_alias
+    IMPORTING
+      messages              = lt_messages
+    EXCEPTIONS
+      system_failure        = 1  MESSAGE lv_message
+      communication_failure = 2  MESSAGE lv_message.
+
+  IF sy-subrc <> 0.
+*   problem with rfc connection
+    CASE sy-subrc.
+      WHEN 1.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING
+            textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+      WHEN 2.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING
+            textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+    ENDCASE.
+  ENDIF.
+
+  APPEND LINES OF lt_messages TO et_messages.
+
+  cl_hrrcf_m_rfc_services=>commit_and_refresh( lv_dest ).
+
+  IF lv_dest <> 'NONE' AND
+     lv_dest IS NOT INITIAL AND
+     lt_messages IS INITIAL.
+*   update UI server
+    CALL FUNCTION 'SUSR_USER_LOGONDATA_GET'
+      EXPORTING
+        user_name      = sy-uname
+      IMPORTING
+        user_logondata = ls_user_logon.
+
+    MOVE-CORRESPONDING ls_user_logon TO ls_bapi_logon.
+
+    lv_aliasx-bapialias = abap_true.
+    CALL FUNCTION 'SUSR_BAPI_USER_CHANGE'
+      EXPORTING
+        username  = sy-uname
+        logondata = ls_bapi_logon
+        no_checks = 'X'
+        alias     = is_alias
+        aliasx    = lv_aliasx
+      TABLES
+        return    = lt_messages.
+
+    APPEND LINES OF lt_messages TO et_messages.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD change_alias_with_cua.
+
+* Central User Administration (CUA) is supposed to apply change to UI server...
+* However, either CUA is not maintained to update the alias or it may take some time...
+* Hence, we already try to update the alias...
+
+  DATA: lv_dest        TYPE rfcdest,
+        ls_user_logon  TYPE uslogond,
+        ls_bapi_logon  TYPE bapilogond,
+        lv_aliasx      TYPE bapialiasx,
+        lv_message(80) TYPE c,
+        lt_messages    TYPE bapirettab.
+
+* retrieve rfc destination
+  CALL METHOD cl_hrrcf_wd_services=>get_bl_destination
+    RECEIVING
+      rfc_dest = lv_dest.
+
+  CALL FUNCTION 'HRRCF_MDL_ADMN_ALIAS_SAVE'
+    DESTINATION lv_dest
+    EXPORTING
+      cand_hrobject         = is_hrobject
+      alias                 = is_alias
+    IMPORTING
+      messages              = et_messages
+    EXCEPTIONS
+      system_failure        = 1  MESSAGE lv_message
+      communication_failure = 2  MESSAGE lv_message.
+
+  IF sy-subrc <> 0.
+*   problem with rfc connection
+    CASE sy-subrc.
+      WHEN 1.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING
+            textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+      WHEN 2.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING
+            textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+    ENDCASE.
+  ENDIF.
+
+  cl_hrrcf_m_rfc_services=>commit_and_refresh( lv_dest ).
+
+  IF lv_dest <> 'NONE' AND
+       lv_dest IS NOT INITIAL AND
+       et_messages IS INITIAL.
+*   update UI server
+    CALL FUNCTION 'SUSR_USER_LOGONDATA_GET'
+      EXPORTING
+        user_name      = sy-uname
+      IMPORTING
+        user_logondata = ls_user_logon.
+
+    MOVE-CORRESPONDING ls_user_logon TO ls_bapi_logon.
+
+    lv_aliasx-bapialias = abap_true.
+    CALL FUNCTION 'SUSR_BAPI_USER_CHANGE'
+      EXPORTING
+        username  = sy-uname
+        logondata = ls_bapi_logon
+        no_checks = 'X'
+        alias     = is_alias
+        aliasx    = lv_aliasx
+      TABLES
+        return    = lt_messages.
+
+*  we ignore the return messages: it might be that an error message is raised
+*  since CUA settings might forbid to change the user name...
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD class_constructor.
+
+* Tochtersystem in einer Zentralen Benutzerpflege?
+  CALL FUNCTION 'SUSR_ZBV_CHECK_IF_ACTIVE'
+    EXCEPTIONS
+      active        = 1
+      not_active    = 2
+      invalid_model = 3
+      OTHERS        = 4.
+  IF sy-subrc = 1.
+    CL_HRRCF_M_USER=>sv_cua_available = abap_true.
+  ELSE.
+    CL_HRRCF_M_USER=>sv_cua_available = abap_false.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD create_local_user.
+  DATA ls_user_logon_data TYPE bapilogond.
+  DATA ls_user_logon_data_x TYPE bapilogonx.
+
+
+  CALL FUNCTION 'USER_EXISTENCE_CHECK'
+    EXPORTING
+      user_name           = iv_user
+    EXCEPTIONS
+      user_name_not_found = 1
+      OTHERS              = 2.
+  IF sy-subrc <> 0.
+
+    CALL FUNCTION 'HRRCF_WD_CREATE_FRONTEND_USER'
+      EXPORTING
+        iv_user               = iv_user
+        iv_alias              = is_register_record-alias
+        iv_firstname          = is_register_record-firstname
+        iv_lastname           = is_register_record-lastname
+        iv_middlename         = is_register_record-middlename
+        iv_email              = is_register_record-e_mail
+        iv_password           = is_register_record-password
+      IMPORTING
+        et_messages           = et_messages
+      EXCEPTIONS
+        system_failure        = 1
+        communication_failure = 2
+        registration_error    = 3
+        OTHERS                = 4.
+
+    IF sy-subrc = 1 OR sy-subrc = 2.
+      RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication.
+    ELSEIF sy-subrc = 3.
+      RAISE EXCEPTION TYPE cx_hrrcf_registration.
+    ENDIF.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD deregister.
+
+  IF cl_hrrcf_m_user=>sv_cua_available = abap_true.
+    CALL METHOD cl_hrrcf_m_user=>deregister_with_cua
+      EXPORTING
+        is_cand_hrobject = is_cand_hrobject
+      IMPORTING
+        et_messages      = et_messages.
+  ELSE.
+    CALL METHOD cl_hrrcf_m_user=>deregister_without_cua
+      EXPORTING
+        is_cand_hrobject = is_cand_hrobject
+      IMPORTING
+        et_messages      = et_messages.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD deregister_without_cua.
+
+  DATA: lv_dest        TYPE rfc_dest,
+        lv_message(80) TYPE c,
+        lt_messages    TYPE bapirettab.
+
+  lv_dest = cl_hrrcf_wd_services=>get_bl_destination( ).
+
+* deregister candidate in BL system
+  CALL FUNCTION 'HRRCF_MDL_ADMN_DEREGISTER'
+    DESTINATION lv_dest
+    EXPORTING
+      cand_hrobject         = is_cand_hrobject
+    IMPORTING
+      messages              = et_messages
+    EXCEPTIONS
+      system_failure        = 1  MESSAGE lv_message
+      communication_failure = 2  MESSAGE lv_message.
+
+  IF sy-subrc <> 0.
+*   problem with rfc connection
+    CASE sy-subrc.
+      WHEN 1.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+      WHEN 2.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+    ENDCASE.
+  ENDIF.
+* check if everything is fine...
+  LOOP AT et_messages TRANSPORTING NO FIELDS WHERE type = cl_hrrcf_wd_ui_constants=>gc_message_type_a OR
+                                                   type = cl_hrrcf_wd_ui_constants=>gc_message_type_e.
+    RETURN.
+  ENDLOOP.
+
+  cl_hrrcf_m_rfc_services=>commit_and_refresh( lv_dest ).
+
+* if BL is running on a seperate instance then user gets locked on UI system via workflow, too
+*  IF lv_dest NE 'NONE' AND
+*     lv_dest IS NOT INITIAL.
+**   BL is running on a seperate instance -> lock user on UI system...
+*    CALL FUNCTION 'BAPI_USER_LOCK'
+*      EXPORTING
+*        username = sy-uname
+*      TABLES
+*        return   = lt_messages.
+*
+*    DELETE lt_messages WHERE type = cl_hrrcf_wd_ui_constants=>gc_message_type_s OR
+*                             type = cl_hrrcf_wd_ui_constants=>gc_message_type_i.
+*    APPEND LINES OF lt_messages TO et_messages.
+*  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD deregister_with_cua.
+
+  CALL METHOD cl_hrrcf_m_user=>deregister_without_cua
+    EXPORTING
+      is_cand_hrobject = is_cand_hrobject
+    IMPORTING
+      et_messages      = et_messages.
+
+ENDMETHOD.
+
+
+method REGISTER.
+
+  if cl_hrrcf_m_user=>sv_cua_available = abap_true.
+    CALL METHOD cl_hrrcf_m_user=>register_with_cua
+      EXPORTING
+        is_register_record = is_register_record
+      IMPORTING
+        ET_MESSAGES        = et_messages.
+  else.
+    CALL METHOD cl_hrrcf_m_user=>register_without_cua
+      EXPORTING
+        is_register_record = is_register_record
+      IMPORTING
+        ET_MESSAGES        = et_messages.
+  endif.
+
+endmethod.
+
+
+METHOD register_without_cua.
+
+  DATA: lv_dest         TYPE rfcdest,
+        lv_user         TYPE xubname,
+        lv_message(80)  TYPE c,
+        lt_messages     TYPE bapirettab.
+
+  CLEAR et_messages.
+
+  CALL METHOD cl_hrrcf_wd_services=>get_bl_destination
+    RECEIVING
+      rfc_dest = lv_dest.
+
+  CALL FUNCTION 'HRRCF_MDL_REG_NAMED_USR_CREATE'
+    DESTINATION lv_dest
+    EXPORTING
+      record                = is_register_record
+    IMPORTING
+      messages              = et_messages
+      user                  = lv_user
+    EXCEPTIONS
+      system_failure        = 1  MESSAGE lv_message
+      communication_failure = 2  MESSAGE lv_message.
+
+  IF sy-subrc <> 0.
+*   problem with rfc connection
+    CASE sy-subrc.
+      WHEN 1.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+      WHEN 2.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+    ENDCASE.
+  ENDIF.
+
+  LOOP AT et_messages TRANSPORTING NO FIELDS WHERE type = cl_hrrcf_wd_ui_constants=>gc_message_type_a OR
+                                                   type = cl_hrrcf_wd_ui_constants=>gc_message_type_e.
+    RETURN.
+  ENDLOOP.
+
+  cl_hrrcf_m_rfc_services=>commit_and_refresh( lv_dest ).
+
+* some special handling for distributed environment
+  IF lv_dest NE 'NONE' AND
+     lv_dest IS NOT INITIAL.
+*   user needs to be created locally, too
+    create_local_user( EXPORTING iv_user = lv_user
+                                 iv_dest = lv_dest
+                                 is_register_record = is_register_record
+                       IMPORTING et_messages = et_messages ).
+    LOOP AT et_messages TRANSPORTING NO FIELDS WHERE type = cl_hrrcf_wd_ui_constants=>gc_message_type_a OR
+                                                     type = cl_hrrcf_wd_ui_constants=>gc_message_type_e.
+      RETURN.
+    ENDLOOP.
+  ENDIF.
+
+* everything fine -> user switch
+  CALL FUNCTION 'SUSR_INTERNET_USERSWITCH'
+    EXPORTING
+      alias                       = is_register_record-alias
+      password                    = is_register_record-password
+    TABLES
+      return                      = lt_messages
+    EXCEPTIONS
+      current_user_not_servicetyp = 1
+      more_than_one_mode          = 2
+      internal_error              = 3
+      OTHERS                      = 4.
+
+  IF sy-subrc <> 0.
+*   do something
+    APPEND LINES OF lt_messages TO et_messages.
+    RETURN.
+  ENDIF.
+
+* close rfc destination because rfc is still working under service user
+  IF lv_dest NE 'NONE' AND
+    lv_dest IS NOT INITIAL.
+
+    CALL FUNCTION 'RFC_CONNECTION_CLOSE'
+      EXPORTING
+        destination = lv_dest.
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD register_with_cua.
+
+* Registration in a CUA environment
+*1) User will be created on BL server -> CUA active -> User creation on CUA
+*2) BL server notifies CUA that user should be available on UI server, too
+*3) Check on UI server if user is existing -> if not, create locally
+*4) Internet user switch
+
+  DATA: lv_message(80)    TYPE c,
+        ls_message        TYPE bapiret2,
+        lt_messages       TYPE bapirettab,
+        lv_dest           TYPE rfcdest,
+        lv_user           TYPE xubname,
+        lv_logsys         TYPE logsys.
+
+* get destination to bl system
+  CALL METHOD cl_hrrcf_wd_services=>get_bl_destination
+    RECEIVING
+      rfc_dest = lv_dest.
+
+* get logical system of ui system --> needed for CUA
+  CALL FUNCTION 'OWN_LOGICAL_SYSTEM_GET'
+    IMPORTING
+      own_logical_system             = lv_logsys
+    EXCEPTIONS
+      own_logical_system_not_defined = 1
+      OTHERS                         = 2.
+  IF sy-subrc <> 0.
+*   raise message that no logical system has been defined
+    IF 1 EQ 0.
+      MESSAGE a124(hrrcf0002).
+    ENDIF.
+    CALL FUNCTION 'BALW_BAPIRETURN_GET2'
+      EXPORTING
+        type   = 'A'
+        cl     = 'HRRCF0002'
+        number = '124'
+      IMPORTING
+        return = ls_message.
+    APPEND ls_message TO et_messages.
+    RETURN.
+  ENDIF.
+
+* call user creation/registration on bl server
+* --> bl server notifies the CUA that the user needs to be created on ui server...
+  CALL FUNCTION 'HRRCF_MDL_REG_NAMED_USR_CREATE'
+    DESTINATION lv_dest
+    EXPORTING
+      record                = is_register_record
+      logsys                = lv_logsys
+    IMPORTING
+      messages              = et_messages
+      user                  = lv_user
+    EXCEPTIONS
+      system_failure        = 1  MESSAGE lv_message
+      communication_failure = 2  MESSAGE lv_message.
+
+  IF sy-subrc <> 0.
+*   problem with rfc connection
+    CASE sy-subrc.
+      WHEN 1.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_SYSTEM_FAILURE'.
+      WHEN 2.
+        RAISE EXCEPTION TYPE cx_hrrcf_rfc_communication
+          EXPORTING textid = 'CX_HRRCF_RFC_COMM_FAILURE'.
+    ENDCASE.
+  ENDIF.
+
+  cl_hrrcf_m_rfc_services=>commit_and_refresh( lv_dest ).
+
+  IF lv_user IS NOT INITIAL.
+*   check existence of user in UI system
+    CALL FUNCTION 'SUSR_USER_CHECK_EXISTENCE'
+      EXPORTING
+        user_name            = lv_user
+      EXCEPTIONS
+        user_name_not_exists = 1
+        OTHERS               = 2.
+    IF sy-subrc <> 0.
+*   create temporarily local user (-> it will be overwritten by CUA later on)
+      create_local_user( EXPORTING iv_user = lv_user
+                                   iv_dest = lv_dest
+                                   is_register_record = is_register_record
+                             IMPORTING et_messages = et_messages ).
+      LOOP AT et_messages TRANSPORTING NO FIELDS WHERE type = cl_hrrcf_wd_ui_constants=>gc_message_type_a OR
+                                                       type = cl_hrrcf_wd_ui_constants=>gc_message_type_e.
+        RETURN.
+      ENDLOOP.
+    ENDIF.
+*   switch internet user to newly created user
+* everything fine -> user switch
+    CALL FUNCTION 'SUSR_INTERNET_USERSWITCH'
+      EXPORTING
+        alias                       = is_register_record-alias
+        password                    = is_register_record-password
+      TABLES
+        return                      = lt_messages
+      EXCEPTIONS
+        current_user_not_servicetyp = 1
+        more_than_one_mode          = 2
+        internal_error              = 3
+        OTHERS                      = 4.
+
+    IF sy-subrc <> 0.
+*     user switch failed
+      APPEND LINES OF lt_messages TO et_messages.
+      RETURN.
+    ENDIF.
+
+* close rfc destination because rfc is still working under service user
+    IF lv_dest NE 'NONE' AND
+       lv_dest IS NOT INITIAL.
+
+      CALL FUNCTION 'RFC_CONNECTION_CLOSE'
+        EXPORTING
+          destination = lv_dest.
+    ENDIF.
+  ENDIF.
+
+ENDMETHOD.
+ENDCLASS.

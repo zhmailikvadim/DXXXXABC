@@ -1,0 +1,292 @@
+CLASS zcl_fi_ovos_liz_amdp DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    INTERFACES if_amdp_marker_hdb.
+    TYPES:
+      BEGIN OF gty_s_data,
+        zz_partner TYPE string,     " Наименование контрагента
+        nd_dog     TYPE string,     " № и дата договора
+        name_obj   TYPE string,     " Наименование объекта
+        anln1      TYPE anln1,      " Системный номер
+        anln2      TYPE anln2,      " Cубномер
+        invnr      TYPE invnr,      " Инвентарный номер
+        vid_stoim  TYPE string,     " Вид стоимости
+        beg_pr_st  TYPE acdoca-hsl, " ПС на начало периода
+        beg_amort  TYPE acdoca-hsl, " Накопленная сумма амортизации на начало периода
+        beg_ost_st TYPE acdoca-hsl, " Остаточная стоимость на начало периода
+        belnr_post TYPE bkpf-xblnr, " Номер документа поступления
+        budat_post TYPE bkpf-budat, " Дата документа поступления
+        st_post    TYPE acdoca-hsl, " Стоимость поступления
+        belnr_vib  TYPE bkpf-xblnr, " Номер документа выбытия
+        budat_vib  TYPE bkpf-budat, " Дата документа выбытия
+        st_vib     TYPE acdoca-hsl, " Стоимость выбытия
+        end_pr_st  TYPE acdoca-hsl, " ПС на конец периода
+        end_amort  TYPE acdoca-hsl, " Накопленная сумма амортизации на конец периода
+        end_ost_st TYPE acdoca-hsl, " Остаточная стоимость на конец периода
+        waers      TYPE t001-waers,
+        bukrs      TYPE bukrs,
+        anlkl      TYPE anlkl,
+        abnnr      TYPE abnnr,
+        nm_ord     TYPE char1,      " Порядок сортировки
+      END OF gty_s_data,
+      gty_t_data TYPE STANDARD TABLE OF gty_s_data WITH EMPTY KEY,
+      BEGIN OF gty_s_header,
+        bukrs TYPE bukrs,
+        nm1   TYPE char100,
+        nm2   TYPE char100,
+      END OF gty_s_header,
+      gty_t_header TYPE STANDARD TABLE OF gty_s_header WITH EMPTY KEY.
+
+    CLASS-METHODS:
+      get_data IMPORTING VALUE(iv_beg_date)    TYPE sy-datum
+                         VALUE(iv_end_date)    TYPE sy-datum
+                         VALUE(iv_bukrs)       TYPE bukrs
+                         VALUE(iv_flt)         TYPE string
+                         VALUE(iv_anlan1_0001) TYPE string
+                         VALUE(iv_anlan1_0002) TYPE string
+                         VALUE(iv_anlan1_0003) TYPE string          " #27428 G.Domanikova 21/03/2023 Вид стоимости
+               EXPORTING VALUE(et_data)        TYPE gty_t_data
+                         VALUE(et_header)      TYPE gty_t_header
+               RAISING   cx_amdp_error.
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZCL_FI_OVOS_LIZ_AMDP IMPLEMENTATION.
+
+
+  METHOD get_data BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT
+                              OPTIONS READ-ONLY
+                              USING anla zanlu zcase but000 zafull "zaa_utils_hdb=>get_asset_values
+                              ZAA_UTILS_HDB=>GET_ASSET_VALUES_Y t001 zaa_v0_move tabw tabwg but000.
+    DECLARE lv_mandt CHAR(3) := session_context('CLIENT');
+    DECLARE lv_spras CHAR(1) := session_context('LOCALE_SAP');
+    DECLARE lv_end_date CHAR(8);
+    DECLARE lv_date_vals CHAR(8);
+
+    lv_end_date = to_dats(add_days(last_day( :iv_end_date ) ,1)); -- дата окончания отчета
+
+    lt_data =
+        SELECT DISTINCT
+            --Наименование контрагента
+            zcase.zz_partner || CHAR(32) || but.name_org1 || CHAR(32) || but.name_org2 || CHAR(32) || but.name_org3 || CHAR(32) || but.name_org4 AS zz_partner,
+            --№ и дата договора
+            zcase.zz_ndoc || CHAR(32) ||
+                CASE WHEN zcase.zz_dcdoc <> 0 THEN RIGHT(zcase.zz_dcdoc,2) || '.' || LPAD( MONTH(zcase.zz_dcdoc), 2, '0') || '.' || LEFT(zcase.zz_dcdoc,4)
+                END AS nd_dog,
+            --Наименование объекта
+             CASE WHEN zaf.txtf1 IS NULL AND zaf.txtf2 IS NULL THEN zaf1.txtf1 || CHAR(32) || zaf1.txtf2  ELSE zaf.txtf1 || CHAR(32) || zaf.txtf2 END AS name_obj,
+            anla.anln1,     --Системный номер
+            anla.anln2,     --Cубномер
+            anla.invnr,     --Инвентарный номер
+            --Вид стоимости
+            CAST(
+            CASE WHEN anla.anln2 = '0001' THEN iv_anlan1_0001 --'контрактная'
+                 WHEN anla.anln2 = '0002' THEN iv_anlan1_0002 --'присоединенная'
+                 WHEN anla.anln2 = '0002' THEN iv_anlan1_0003 -- 'Неотделимые улучшения' #27428 G.Domanikova 21/03/2023 Вид стоимости
+            END AS VARCHAR ) AS vid_stoim,
+            t001.waers,
+            anla.bukrs,
+            anla.anlkl,
+            zanlu.abnnr
+        FROM anla AS anla
+          LEFT OUTER JOIN zanlu AS zanlu ON zanlu.mandt = anla.mandt
+                                        AND zanlu.invnr = anla.invnr
+          LEFT OUTER JOIN zcase AS zcase ON zcase.mandt = anla.mandt
+                                        AND zcase.ext_key = zanlu.abnnr
+                                        AND zcase.langu = :lv_spras
+          LEFT OUTER JOIN but000 AS but ON but.client = zcase.mandt
+                                       AND but.partner = zcase.zz_partner
+          LEFT OUTER JOIN zafull AS zaf ON zaf.mandt = anla.mandt
+                                       AND zaf.bukrs = anla.bukrs
+                                       AND zaf.anln1 = anla.anln1
+                                       AND zaf.anln2 = anla.anln2
+          LEFT OUTER JOIN zafull AS zaf1 ON zaf1.mandt = anla.mandt
+                                       AND zaf1.bukrs = anla.bukrs
+                                       AND zaf1.anln1 = anla.anln1
+                                       AND zaf1.anln2 = '0000'
+
+          LEFT OUTER JOIN t001 AS t001 ON t001.bukrs = anla.bukrs   --данные бе
+                                      AND t001.mandt = :lv_mandt
+        WHERE anla.mandt = :lv_mandt
+          AND zcase.ext_key <> ''
+          AND zcase.zz_partner <> ''
+          AND ( anla.anln2 = 1 OR anla.anln2 = 2 OR anla.anln2 = 3 )    -- #27428 G.Domanikova 20/03/2023 Учитываем субномер = 3
+          AND ( anla.deakt >= :iv_beg_date  OR anla.deakt < '19000101'  )
+          AND anla.zugdt > '19000101'
+          AND anla.zugdt <= :lv_end_date
+          ORDER BY bukrs, anla.anln1, anla.anln2 ;
+
+    lt_data = APPLY_FILTER (:lt_data, :iv_flt);
+
+    IF iv_bukrs IS NOT NULL THEN
+       --заголовок в ALV
+       et_header =
+           SELECT DISTINCT
+              iv_bukrs as bukrs,
+              but000.name_org3 || but000.name_org4 AS nm1,
+              but000.name_org1 || but000.name_org2 AS nm2
+           FROM but000 AS but000
+             WHERE client = :lv_mandt
+               AND partner = lpad( iv_bukrs,10,'0' );
+    END IF;
+
+    IF IS_EMPTY ( :lt_data ) THEN RETURN; END IF;
+    --на начало периода
+    lt_data_beg =
+        SELECT
+          lt_data.zz_partner,
+          lt_data.nd_dog,
+          lt_data.name_obj,
+          lt_data.anln1,
+          lt_data.anln2,
+          lt_data.invnr,
+          vid_stoim,
+          vals.kansw AS beg_pr_st, --Первоначальная стоимость на начало периода
+-- begin #27428 G.Domanikova 20/03/2023 Изменение рассчета Амортизации и Остаточной стоимости ZFI_STOCK_ASSETS -> ZFI_STOCK_ASSETS_Y
+          ( VALS.KNAFA + VALS.KAAFA + VALS.KAUFN ) * -1 AS BEG_AMORT, --НАКОПЛЕННАЯ СУММА АМОРТИЗАЦИИ НА НАЧАЛО ПЕРИОДА = ТИПОВАЯ + ОСОБАЯ ( КОРЕКЦИОННАЯ ) И ВНЕПЛАНОВАЯ АМОРТИЗАЦИЯ
+          ( COALESCE( ABS( VALS.KANSW ), 0 ) - COALESCE( ABS( VALS.KNAFA + VALS.KAAFA + VALS.KAUFN ), 0 ) ) AS BEG_OST_ST, --ОСТАТОЧНАЯ СТОИМОСТЬ НА НАЧАЛО ПЕРИОДА
+--          -vals.knafa AS beg_amort, --Накопленная сумма амортизации на начало периода
+--          ( COALESCE( ABS( vals.kansw ), 0 ) - COALESCE( ABS( vals.knafa ), 0 ) ) AS beg_ost_st, --Остаточная стоимость на начало периода
+-- end G.Domanikova
+          '' AS belnr_post,
+          '' AS budat_post,
+          0 AS st_post,
+          '' AS belnr_vib,
+          '' AS budat_vib,
+          0 AS st_vib,
+          0 AS end_pr_st,
+          0 AS end_amort,
+          0 AS end_ost_st,
+          lt_data.waers,
+          lt_data.bukrs,
+          anlkl,
+          abnnr,
+          '0' AS nm_ord
+        FROM :lt_data AS lt_data
+-- begin #27428 G.Domanikova 20/03/2023 Изменение рассчета Амортизации и Остаточной стоимости ZFI_STOCK_ASSETS -> ZFI_STOCK_ASSETS_Y
+          LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES_Y" ( :lv_mandt, :iv_beg_date,  ' ' ) AS vals ON vals.bukrs = lt_data.bukrs
+          --LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES" ( :lv_mandt, :iv_beg_date, '') AS vals ON vals.bukrs = lt_data.bukrs
+-- end G.Domanikova
+                                                                                                  AND vals.anln1 = lt_data.anln1
+                                                                                                  AND vals.anln2 = lt_data.anln2
+                                                                                                  AND vals.afabe = '01';
+
+    --Выборка Бух доков с видом движения для группы поступления = 1, 3, 5 и выбытия = 2, 4
+    lt_movs =
+        SELECT DISTINCT
+          lt_data.zz_partner,
+          lt_data.nd_dog,
+          lt_data.name_obj,
+          lt_data.invnr,
+          lt_data.vid_stoim,
+          0 AS beg_pr_st,
+          0 AS beg_amort,
+          0 AS beg_ost_st,
+          lt_data.bukrs AS bukrs,
+          lt_data.anln1 AS anln1,
+          lt_data.anln2 AS anln2,
+          -- поступления
+          CASE WHEN ( tabwg.gitcol in ( '1', '3', '5') ) THEN movs.xblnr ELSE '' END AS belnr_post,
+          CASE WHEN ( tabwg.gitcol in ( '1', '3', '5') ) THEN movs.budat ELSE '' END AS budat_post,
+          CASE WHEN ( tabwg.gitcol in ( '1', '3', '5') ) THEN movs.kansw ELSE 0 END AS st_post,
+          -- выбытие
+          CASE WHEN ( tabwg.gitcol in ( '2', '4' ) ) THEN movs.xblnr ELSE '' END AS belnr_vib,
+          CASE WHEN ( tabwg.gitcol in ( '2', '4' ) ) THEN movs.budat ELSE '' END AS budat_vib,
+          CASE WHEN ( tabwg.gitcol in ( '2', '4' ) ) THEN - ( movs.kansw ) ELSE 0 END AS st_vib,
+          0 AS end_pr_st,
+          0 AS end_amort,
+          0 AS end_ost_st,
+          lt_data.waers,
+          lt_data.anlkl,
+          lt_data.abnnr,
+          movs.bwasl AS anbwa,
+          tabwg.gitcol,
+          CASE WHEN ( tabwg.gitcol in ( '1', '3', '5') ) THEN '1' ELSE '2' END AS nm_ord
+        FROM :lt_data AS lt_data
+            INNER JOIN zaa_v0_move AS movs ON movs.mandt = :lv_mandt
+                                          AND movs.bukrs = lt_data.bukrs       -- движения ОС
+                                          AND movs.anln1 = lt_data.anln1
+                                          AND movs.anln2 = lt_data.anln2
+                                          AND movs.gjahr = YEAR (:iv_beg_date)
+                                          AND movs.afabe = '01'
+                                          AND movs.lnsan = '00000'
+                                          AND movs.monat BETWEEN MONTH( :iv_beg_date ) AND MONTH( :iv_end_date )
+          INNER JOIN tabw AS tabw ON tabw.bwasl = movs.bwasl
+                                 AND tabw.mandt = movs.mandt
+          INNER JOIN tabwg AS tabwg ON tabwg.bwagrp = tabw.bwagrp
+                                   AND tabwg.mandt  = tabw.mandt
+                        -- выбытие
+                                   AND ( tabwg.gitcol IN ( '2', '4' )
+                        -- поступления
+                                    OR tabwg.gitcol IN ( '1', '3', '5' ) )
+     ORDER BY bukrs, anln1, anln2, st_post DESC;
+
+    lv_date_vals = to_dats(last_day( :iv_end_date ));        -- #27428 G.Domanikova 20/03/2023 дата окончания для стоимостей
+
+    --на конец периода
+    lt_data_end =
+        SELECT
+          lt_data.zz_partner,
+          lt_data.nd_dog,
+          lt_data.name_obj,
+          lt_data.anln1,
+          lt_data.anln2,
+          lt_data.invnr,
+          vid_stoim,
+          0 AS beg_pr_st,
+          0 AS beg_amort,
+          0 AS beg_ost_st,
+          '' AS belnr_post,
+          '' AS budat_post,
+          0 AS st_post,
+          '' AS belnr_vib,
+          '' AS budat_vib,
+          0 AS st_vib,
+          vals.kansw AS end_pr_st, --Первоначальная стоимость на конец периода
+-- begin #27428 G.Domanikova 20/03/2023 Изменение рассчета Амортизации и Остаточной стоимости ZFI_STOCK_ASSETS -> ZFI_STOCK_ASSETS_Y
+          ( VALS.KNAFA + VALS.KAAFA + VALS.KAUFN ) * -1 AS END_AMORT, --НАКОПЛЕННАЯ СУММА АМОРТИЗАЦИИ НА КОНЕЦ ПЕРИОДА = ТИПОВАЯ + ОСОБАЯ ( КОРЕКЦИОННАЯ ) И ВНЕПЛАНОВАЯ АМОРТИЗАЦИЯ
+          ( COALESCE( ABS( VALS.KANSW ), 0 ) - COALESCE( ABS( VALS.KNAFA + VALS.KAAFA + VALS.KAUFN ), 0 ) ) AS END_OST_ST, --ОСТАТОЧНАЯ СТОИМОСТЬ НА КОНЕЦ ПЕРИОДА
+--          -vals.knafa AS end_amort, --Накопленная сумма амортизации на конец периода
+--          ( COALESCE( ABS( vals.kansw ), 0 ) - COALESCE( ABS( vals.knafa ), 0 ) ) AS end_ost_st, --Остаточная стоимость на конец периода
+-- end G.Domanikova
+          lt_data.waers,
+          lt_data.bukrs,
+          anlkl,
+          abnnr,
+          '3' AS nm_ord
+        FROM :lt_data AS lt_data
+-- begin #27428 G.Domanikova 20/03/2023 Изменение рассчета Амортизации и Остаточной стоимости ZFI_STOCK_ASSETS -> ZFI_STOCK_ASSETS_Y
+          LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES_Y" ( :lv_mandt, :lv_date_vals, ' ') AS vals ON vals.bukrs = lt_data.bukrs
+          --LEFT OUTER JOIN "ZAA_UTILS_HDB=>GET_ASSET_VALUES" ( :lv_mandt, :lv_end_date, 'X') AS vals ON vals.bukrs = lt_data.bukrs
+-- end G.Domanikova
+                                                                                                  AND vals.anln1 = lt_data.anln1
+                                                                                                  AND vals.anln2 = lt_data.anln2
+                                                                                                  AND vals.afabe = '01'
+       ORDER BY bukrs, anln1, anln2, beg_pr_st DESC;
+
+    et_data =
+          SELECT
+            zz_partner, nd_dog, name_obj, anln1, anln2, invnr, vid_stoim, beg_pr_st, beg_amort, beg_ost_st, belnr_post,
+            budat_post, st_post, belnr_vib, budat_vib, st_vib, end_pr_st, end_amort, end_ost_st, waers, bukrs, anlkl, abnnr, nm_ord
+            FROM :lt_data_beg as lt_beg
+            WHERE lt_beg.beg_pr_st <> 0
+          UNION SELECT
+            zz_partner, nd_dog, name_obj, anln1, anln2, invnr, vid_stoim, beg_pr_st, beg_amort, beg_ost_st, belnr_post,
+            budat_post, st_post, belnr_vib, budat_vib, st_vib, end_pr_st, end_amort, end_ost_st, waers, bukrs, anlkl, abnnr, nm_ord
+            FROM :lt_movs
+            --WHERE belnr_post <> '' OR belnr_vib <> ''
+          UNION SELECT
+            zz_partner, nd_dog, name_obj, anln1, anln2, invnr, vid_stoim, beg_pr_st, beg_amort, beg_ost_st, belnr_post,
+            budat_post, st_post, belnr_vib, budat_vib, st_vib, end_pr_st, end_amort, end_ost_st, waers, bukrs, anlkl, abnnr, nm_ord
+            FROM :lt_data_end AS lt_end
+            WHERE lt_end.end_pr_st <> 0
+          ORDER BY bukrs, anln1, anln2, nm_ord;
+
+  ENDMETHOD.
+ENDCLASS.

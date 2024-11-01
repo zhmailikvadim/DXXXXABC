@@ -1,0 +1,145 @@
+CLASS zcl_recruitment_static DEFINITION
+  PUBLIC FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    TYPES ty_lt_bapiret2 TYPE STANDARD TABLE OF bapiret2 WITH DEFAULT KEY.
+
+    CLASS-METHODS get_hr_master_data.
+
+    CLASS-METHODS copy_roles_from_user_to_user
+      IMPORTING iv_user_from TYPE uname
+                iv_user_to   TYPE uname.
+
+
+    CLASS-METHODS send_email
+      CHANGING  cs_candidate         TYPE zhr_s_sync_btw_erp_and_hr
+      RETURNING VALUE(rt_bapirettab) TYPE bapirettab
+      RAISING   cx_send_req_bcs
+                cx_document_bcs
+                cx_address_bcs.
+
+
+    CLASS-METHODS change_user_alias.
+
+private section.
+
+  constants GC_MAILSUBJECT type CHAR50 value 'Регистрационные данные кандидата - beloil.by' ##NO_TEXT.
+  constants GC_SAP_MAIL type UNAME value 'SAP_MAIL' ##NO_TEXT.
+ENDCLASS.
+
+
+
+CLASS ZCL_RECRUITMENT_STATIC IMPLEMENTATION.
+
+
+  METHOD change_user_alias.
+    DATA ls_alias      TYPE bapialias.
+    DATA ls_aliasx     TYPE bapialiasx.
+    DATA lt_bapirettab TYPE bapirettab.
+
+    SELECT * INTO TABLE @DATA(lt_usrefus)
+      FROM usrefus AS useralias
+      WHERE useralias <> ( SELECT bname FROM usrefus WHERE bname = useralias~bname AND refuser = '' ) "#EC CI_BUFFSUBQ
+      ORDER BY useralias.
+    LOOP AT lt_usrefus ASSIGNING FIELD-SYMBOL(<ls_userfus>).
+      ls_alias-useralias = <ls_userfus>-bname.
+      ls_aliasx-bapialias = abap_true.
+
+      CALL FUNCTION 'BAPI_USER_CHANGE'
+        EXPORTING username = <ls_userfus>-bname
+                  aliasx   = ls_aliasx
+                  alias    = ls_alias
+        TABLES    return   = lt_bapirettab.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+
+
+
+  METHOD copy_roles_from_user_to_user.
+    " TODO: variable is assigned but never used (ABAP cleaner)
+    DATA ls_logon_data TYPE bapilogond.
+    DATA lt_ag         TYPE STANDARD TABLE OF bapiagr.
+    DATA lt_return     TYPE STANDARD TABLE OF bapiret2.
+
+    CALL FUNCTION 'BAPI_USER_GET_DETAIL'
+      EXPORTING username       = iv_user_from
+      IMPORTING logondata      = ls_logon_data
+      TABLES    activitygroups = lt_ag
+                return         = lt_return.
+
+    " Write list of roles back to user, including new one
+    CALL FUNCTION 'BAPI_USER_ACTGROUPS_ASSIGN'
+      EXPORTING username       = iv_user_to
+      TABLES    activitygroups = lt_ag
+                return         = lt_return.
+
+    CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+      EXPORTING wait = 'X'.
+  ENDMETHOD.
+
+
+  METHOD get_hr_master_data.
+    DATA lt_hrp1001        TYPE TABLE OF hrp1001.
+    DATA lt_hrp1000        TYPE TABLE OF hrp1000.
+    DATA lt_t591s          TYPE TABLE OF t591s.
+    DATA lt_t77rcf_contty  TYPE TABLE OF zt77rcf_contty.
+    DATA lt_zhr_c_org_recr TYPE TABLE OF zhr_c_org_recr.
+    DATA lt_t535n          TYPE TABLE OF t535n.
+
+    CALL FUNCTION 'ZHR_FM_GET_HR_MASTER_DATA'
+      DESTINATION 'HRDCLNT300'
+      IMPORTING et_hrp1001        = lt_hrp1001
+                et_hrp1000        = lt_hrp1000
+                et_t591s          = lt_t591s
+                et_t77rcf_contty  = lt_t77rcf_contty
+                et_zhr_c_org_recr = lt_zhr_c_org_recr
+                et_t535n          = lt_t535n.
+
+    DELETE FROM zhrp1000.                               "#EC CI_NOWHERE
+    DELETE FROM zhrp1001.                               "#EC CI_NOWHERE
+    DELETE FROM zt591s.                                 "#EC CI_NOWHERE
+    DELETE FROM zt77rcf_contty.                         "#EC CI_NOWHERE
+    DELETE FROM zhr_c_org_recr.                         "#EC CI_NOWHERE
+    DELETE FROM t535n WHERE art = 'T'.
+
+    INSERT zhrp1000 FROM TABLE lt_hrp1000.
+    INSERT zhrp1001 FROM TABLE lt_hrp1001.
+    INSERT zt591s FROM TABLE lt_t591s.
+    INSERT zt77rcf_contty FROM TABLE lt_t77rcf_contty.
+    INSERT zhr_c_org_recr FROM TABLE lt_zhr_c_org_recr.
+    INSERT t535n FROM TABLE lt_t535n.
+  ENDMETHOD.
+
+
+
+
+
+
+
+
+  METHOD send_email.
+    DATA(lo_send_request) = cl_bcs=>create_persistent( ).
+    lo_send_request->set_document(
+        cl_document_bcs=>create_document(
+            i_type    = 'HTM'
+            i_text    = VALUE #(
+                ( line = |<style>table \{  border-collapse: collapse;  width: 100%;\} tr \{  border-bottom: 1px solid #ddd; \} </style>| )
+                ( line = |<table style="width:100%"><tr><td>Имя пользователя: </td><td> { cs_candidate-candidate_header-useralias } </td></tr>| )
+                ( line = cl_abap_char_utilities=>newline )
+                ( line = |<tr><td>Пароль: </td><td> { cs_candidate-candidate_header-password }</td></tr> | )
+                ( line = cl_abap_char_utilities=>newline )
+                ( line = |<tr><td>Ссылка для входа в систему: </td><td> <a href="URL">https://sapbpc-dev.beloil.by/sap/bc/ui5_ui5/sap/zhr_cand_recrui/index.html?sap-client=400&sap-ui-language=RU</a></p></td></tr>| )
+                ( line = cl_abap_char_utilities=>newline )
+                ( line = |<tr><td>Имя пользователя внутр.: </td><td> { cs_candidate-candidate_header-zsap_user }</td></tr></table>| ) )
+            i_subject = gc_mailsubject ) ).
+    lo_send_request->set_sender( cl_sapuser_bcs=>create( gc_sap_mail ) ).
+    lo_send_request->add_recipient( cl_cam_address_bcs=>create_internet_address( CONV #( 'v.zhmajlik@beloil.by' ) ) ). " cs_candidate-candidate_header-num01_email
+*    lo_send_request->add_recipient(
+*        cl_cam_address_bcs=>create_internet_address( CONV #( cs_candidate-candidate_header-num01_email ) ) ).
+    lo_send_request->set_send_immediately( 'X' ).
+    lo_send_request->send( ).
+  ENDMETHOD.
+ENDCLASS.

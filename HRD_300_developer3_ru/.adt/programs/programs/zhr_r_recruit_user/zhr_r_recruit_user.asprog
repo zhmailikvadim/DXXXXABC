@@ -1,0 +1,158 @@
+*&---------------------------------------------------------------------*
+*& Report  ZHR_R_RECRUIT_USER
+*&
+*&---------------------------------------------------------------------*
+*&
+*&
+*&---------------------------------------------------------------------*
+
+REPORT zhr_r_recruit_user.
+
+DATA: p_first     LIKE bapibus1006_central_person-firstname,
+      p_last      LIKE bapibus1006_central_person-lastname,
+      p_user      TYPE syuname,
+      p_pernr     TYPE pernr_d,
+      p_plans     TYPE plans,
+      p_email     TYPE ad_smtpadr,
+      p_role      TYPE t77rcf_role-role,
+      lt_hrp1001  TYPE TABLE OF p1001,
+      ls_hrp1001  TYPE p1001,
+      lt_objec    TYPE TABLE OF objec,
+      lt_struc    TYPE TABLE OF struc,
+      lo_om       TYPE REF TO zcl_hr_om_o,
+      lo_employee TYPE REF TO cl_hrrcf_employee,
+      lo_empl     TYPE REF TO zcl_hr_employee,
+      lv_name     TYPE string,
+      lv_surname  TYPE string,
+      lt_user     TYPE pernr_us_tab,
+      lv_fakemail TYPE i,
+      ls_user     TYPE LINE OF pernr_us_tab.
+
+
+* Получим список объектов для анализа
+CALL FUNCTION 'RH_STRUC_GET'
+  EXPORTING
+    act_otype      = zif_hr_om_con=>gc_object_type-o
+    act_objid      = zif_hr_om_con=>gc_id_rup_po_neft
+    act_wegid      = zif_hr_om_con=>gc_wegid-oosp
+    act_plvar      = zif_hr_om_con=>gc_active_plvar
+    act_begda      = sy-datum
+    act_endda      = zif_hr_om_con=>gc_date_31129999
+  TABLES
+    result_objec   = lt_objec
+    result_struc   = lt_struc
+  EXCEPTIONS
+    no_plvar_found = 1
+    no_entry_found = 2
+    OTHERS         = 3.
+IF sy-subrc <> 0.
+  RAISE EXCEPTION TYPE zcx_hr_om
+    EXPORTING
+      textid = zcx_hr_om=>msg_023.
+ENDIF.
+
+LOOP AT lt_struc ASSIGNING FIELD-SYMBOL(<ls_struct>).
+  READ TABLE lt_objec ASSIGNING FIELD-SYMBOL(<ls_obj>)
+    WITH KEY otype = <ls_struct>-otype
+             objid = <ls_struct>-objid.
+
+  IF <ls_struct>-otype = zif_hr_om_con=>gc_object_type-o.
+    TRY.
+        lo_om = NEW #( iv_objid = <ls_obj>-objid
+                            iv_plvar = zif_hr_om_con=>gc_active_plvar ).
+      CATCH zcx_hr.
+    ENDTRY.
+
+    lo_om->get_boss(
+      EXPORTING
+        iv_objid      =  <ls_obj>-objid   " Идентификатор объекта
+        iv_begda      =   sy-datum  " Дата
+*       iv_endda      =     " Дата
+      IMPORTING
+        ev_pernr      =  p_pernr   " Табельный номер
+        ev_dolzhn     =  p_plans
+    ).
+
+    IF p_pernr IS NOT INITIAL.
+
+
+
+      CALL FUNCTION 'HR_GET_USER_FROM_EMPLOYEE'    " получаем лицо по логину
+        EXPORTING
+          pernr = p_pernr
+        IMPORTING
+          user  = p_user.
+
+*    READ TABLE lt_user INTO ls_user INDEX 1.
+*    p_user = ls_user-user.
+
+      IF p_user IS NOT INITIAL AND p_user+0(2) <> 'EE'.
+         TRY.
+        CALL METHOD cl_hrrcf_employee=>get
+          EXPORTING
+            user     = p_user
+          IMPORTING
+            employee = lo_employee.
+      CATCH cx_hrrcf.
+* no reaction, existence check only (xdp)
+         ENDTRY.
+        IF lo_employee IS NOT INITIAL.
+
+             SUBMIT rcf_user_role WITH p_user = p_user
+                           WITH p_role = '2'. "руководство
+
+        ELSE.
+             TRY.
+          CREATE OBJECT lo_empl
+            EXPORTING
+              iv_pernr = p_pernr.
+        CATCH zcx_hr.
+             ENDTRY.
+
+      lv_name = lo_empl->get_ename(
+          iv_date  = sy-datum
+          iv_frmt  = '03'
+      ).
+      lv_surname = lo_empl->get_ename(
+          iv_date  = sy-datum
+          iv_frmt  = '02'
+      ).
+
+      DATA(lt_emails) = lo_empl->get_email( ).
+      READ TABLE lt_emails INTO DATA(ls_emails) INDEX 1.
+      p_email = ls_emails.
+      IF ls_emails IS INITIAL.
+        lv_fakemail = lv_fakemail + 1.
+        DATA(lv_temp) = CONV string( lv_fakemail ).
+        CONCATENATE 'fakemail'  lv_temp '@mail.tt' INTO p_email.
+      ENDIF.
+      SUBMIT rcf_create_user WITH p_first = lv_name
+                       WITH p_last =  lv_surname
+                       WITH p_user =  p_user
+                       WITH p_pernr = p_pernr
+                       WITH p_plans = p_plans
+                       WITH p_email = p_email AND RETURN.
+
+      SUBMIT rcf_user_role WITH p_user = p_user
+                           WITH p_role = '2'. "руководство
+
+      ENDIF.
+
+
+  ENDIF.
+  ENDIF.
+ ENDIF.
+ENDLOOP.
+
+*SELECT objid FROM hrp1001 INTO CORRESPONDING FIELDS OF TABLE lt_hrp1001
+*                    WHERE rsign = 'A' AND relat = '012' .
+*
+*  LOOP AT lt_hrp1001 INTO ls_hrp1001.
+*    IF lo_om_s IS INITIAL.
+*        TRY .
+*            lo_om_s = NEW #( iv_objid = ls_hrp1001-objid
+*                             iv_plvar = zif_hr_om_con=>gc_active_plvar ).
+*          CATCH zcx_hr.
+*        ENDTRY.
+*      ENDIF.
+*  ENDLOOP.

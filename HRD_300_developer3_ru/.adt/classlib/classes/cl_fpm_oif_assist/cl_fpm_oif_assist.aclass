@@ -1,0 +1,2552 @@
+class CL_FPM_OIF_ASSIST definition
+  public
+  inheriting from CL_FPM_OIF_GAF_BASE_ASSIST
+  final
+  create public .
+
+public section.
+
+  data MO_CNR type ref to CL_FPM_CNR_OIF .
+  data MV_CNR_ENTERED type WDY_BOOLEAN .
+
+  methods REQUEST_FOCUS_ON_FIRST_FIELD
+    importing
+      !IT_UIBB type FPM_T_UIBB_KEY .
+  methods CREATE_TOOLBAR_ELEMENTS
+    importing
+      !IO_VIEW type ref to IF_WD_VIEW
+      !IV_NAVIGATION_STATE type FPM_FLOORPLAN_STATE optional
+      !IO_FPM_ND_TOOLBAR type ref to IF_FPM_NODE optional
+      !IV_COMPONENT_NAME type STRING optional
+      !IO_FPM_HCT_TOOLBAR_ASSIST type ref to CL_FPM_HCT_TOOLBAR_ASSIST optional .
+  methods RENDER_HEADER
+    importing
+      value(FIRST_TIME) type WDY_BOOLEAN
+      !IO_VIEW type ref to IF_WD_VIEW
+      !IV_STATE type FPM_FLOORPLAN_STATE .
+  methods RENDER_TOOLBAR
+    importing
+      !IO_VIEW type ref to IF_WD_VIEW
+      !IO_CONTEXT type ref to IF_WD_CONTEXT_NODE optional
+      !IV_NAVIGATION_STATE type FPM_FLOORPLAN_STATE optional
+      !IO_FPM_ND_TOOLBAR type ref to IF_FPM_NODE optional
+      !IV_COMPONENT_NAME type STRING optional
+      !IO_FPM_HCT_TOOLBAR_ASSIST type ref to CL_FPM_HCT_TOOLBAR_ASSIST optional
+      !IV_GUIDELINE_VERSION type FPM_GUIDELINE_VERSION optional .
+  methods SET_DUPLICATE_TOOLBAR
+    importing
+      !IO_VIEW type ref to IF_WD_VIEW
+      !IV_ACTIVATE_BOTTOM_TOOLBAR type WDY_BOOLEAN .
+  methods SET_INITIAL_VIEWS .
+  methods SORT_OIF_NODES .
+
+  methods CHECK_VALIDATION_DEPENDENCY
+    redefinition .
+protected section.
+
+  methods GET_NODE_NAME_APPLICATION
+    redefinition .
+  methods INITIALIZE_CONTEXT_MANAGER
+    redefinition .
+  methods INITIALIZE_FLOORPLAN_HANDLER
+    redefinition .
+  methods INITIALIZE_RUNTIME_API
+    redefinition .
+  methods MODIFY_FPM_CONTEXT
+    redefinition .
+  methods INITIALIZE_RUNTIME_INFO_OBJECT
+    redefinition .
+*"* protected components of class CL_FPM_OIF_ASSIST
+*"* do not include other source files here!!!
+private section.
+
+  methods REQUEST_FOCUS_ON_FIRST_TB_ELEM
+    importing
+      !IO_TOOLBAR type ref to CL_WD_TOOLBAR
+      !IV_CONSIDER_ALL_ENABLED_FIELDS type BOOLE_D .
+  methods REQUEST_FOCUS_ON_TB_ELEM
+    importing
+      !IV_ELEMENT type FPM_ELEMENT_ID
+      !IO_TOOLBAR type ref to CL_WD_TOOLBAR
+    returning
+      value(RV_FOCUS_REQUESTED) type BOOLE_D .
+  methods DETERMINE_TB_ELEMENT_TYPE
+    importing
+      !IV_BUTTON_NAME type STRING
+      !IV_TEXT type WDR_TEXT_KEY
+      !IV_ID type STRING
+      !IV_BUTTON_CHOICE_NAME type STRING
+      !IV_ENTRY_NAME type STRING
+      !IO_FPM_ND_TOOLBAR type ref to IF_FPM_NODE
+      !IO_VIEW type ref to IF_WD_VIEW
+      !IO_FPM_HCT_TOOLBAR_ASSIST type ref to CL_FPM_HCT_TOOLBAR_ASSIST optional .
+ENDCLASS.
+
+
+
+CLASS CL_FPM_OIF_ASSIST IMPLEMENTATION.
+
+
+METHOD check_validation_dependency.
+
+
+  DATA: lo_nd_application TYPE REF TO if_fpm_node.
+  DATA: lo_nd_variant TYPE REF TO if_fpm_node.
+  DATA: lv_action_type TYPE fpm_view_switch_action_type,
+        lo_el_variant TYPE REF TO if_fpm_element.
+
+
+  CHECK co_action IS BOUND.
+  IF co_action->name = if_fpm_constants_internal=>gc_wd_action-switch_view.
+    lo_nd_application = io_floorplan_data->get_fpm_root_node( ).
+    lo_nd_variant = lo_nd_application->get_child_node( name = if_fpm_constants_internal=>gc_nodes-variant ).
+    lo_el_variant = lo_nd_variant->get_element( ).
+    lo_el_variant->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_type
+                                  IMPORTING value = lv_action_type ).
+    IF lv_action_type = if_fpm_constants=>gc_action_type-standard.
+      co_action->set( validating = abap_true ).
+    ELSE.
+      co_action->set( validating = abap_false ).
+    ENDIF.
+  ELSE.
+    CALL METHOD super->check_validation_dependency
+      EXPORTING
+        iv_floorplan_info = iv_floorplan_info
+        iv_floorplan      = iv_floorplan
+        io_floorplan_data = io_floorplan_data
+      CHANGING
+        co_action         = co_action.
+  ENDIF.
+
+
+ENDMETHOD.
+
+
+METHOD create_toolbar_elements.
+
+
+  DATA lo_fpm_nd_button TYPE REF TO if_fpm_node.
+  DATA lo_fpm_el_button TYPE REF TO if_fpm_element.
+  DATA lv_label TYPE string.
+  DATA lv_enabled TYPE boole_d.
+  DATA lv_visibility TYPE wdui_visibility.
+  DATA lv_explanation TYPE string.
+  DATA lv_tooltip TYPE string.
+  DATA lv_hotkey TYPE fpm_hotkey.
+  DATA lv_design TYPE fpm_button_design.
+  DATA lv_image TYPE fpm_image.
+  DATA: lo_nd_activation_functions TYPE REF TO if_fpm_node,
+        lt_elements                TYPE if_fpm_element=>ty_t_fpm_element,
+        lo_element                 LIKE LINE OF lt_elements,
+        lv_index                   TYPE string,
+        lv_tabix                   TYPE string,
+        lv_fpm_index               TYPE fpm_index,
+        lv_button_id               TYPE string.
+  DATA lo_nd_alternate_functions TYPE REF TO if_fpm_node.
+  DATA lv_button_name TYPE string.
+  DATA lv_text TYPE wdr_text_key.
+  DATA lv_id TYPE string.
+  DATA lv_button_choice_name TYPE string.
+  DATA lv_entry_name TYPE string.
+  DATA lv_suffix TYPE string.
+  DATA lv_primary_attribute TYPE string.
+  DATA lv_element TYPE string.
+  DATA lv_id_found TYPE boole_d.
+  DATA lv_context_id TYPE string.
+  DATA lv_node_index TYPE string.
+  DATA lo_fpm_el_toolbar TYPE REF TO if_fpm_element.
+  DATA lv_element_id TYPE string.
+  DATA lv_action_id TYPE fpm_action_id.
+  DATA lv_event_id TYPE fpm_event_id.
+  DATA lv_instance_style TYPE fpm_instance_style.
+
+  TYPES: BEGIN OF s_sequence,
+           table_index TYPE i,
+           node_index  TYPE i,
+         END OF s_sequence.
+
+  DATA lt_ordered_buttons TYPE STANDARD TABLE OF s_sequence.
+  DATA ls_ordered_buttons TYPE s_sequence.
+  DATA ls_runtime_info TYPE fpm_s_runtime_info.
+  DATA lo_oif_info TYPE REF TO if_fpm_oif_info.
+  DATA ls_oif_info TYPE fpm_s_oif_info.
+
+  CHECK io_fpm_nd_toolbar IS BOUND.
+
+  IF mo_fpm IS BOUND.
+    ls_runtime_info = mo_fpm->get_runtime_info( ).
+    lo_oif_info ?= ls_runtime_info-floorplan_info.
+    TRY.
+        ls_oif_info = lo_oif_info->get_target_state( ).
+      CATCH cx_fpm_floorplan ##NO_HANDLER.
+    ENDTRY.
+
+    IF ls_oif_info IS INITIAL.
+      ls_oif_info = ms_oif_info.
+    ENDIF.
+
+    ms_oif_info = ls_oif_info.
+  ENDIF.
+
+  mv_new_button_section = abap_false.
+
+  lo_fpm_el_toolbar = io_fpm_nd_toolbar->get_element( ).
+
+  IF io_fpm_hct_toolbar_assist IS BOUND.
+    IF io_view->get_element( id = 'TOOLBAR' ) IS BOUND AND io_view->name = 'V_OIF_TOOLBAR'.
+      io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                  iv_view_element_id = 'TOOLBAR'
+                                  io_element_ref = lo_fpm_el_toolbar->get_ref_wd_context_element( )
+                                  iv_has_drop_trgt_middle = abap_true
+                                  iv_tags                 = if_fpm_hct_repository=>gc_floorplan_tbar_tag_global ).
+    ENDIF.
+    IF io_view->get_element( id = 'TOOLBAR_FOOTER' ) IS BOUND AND io_view->name = 'V_OIF_TOOLBAR_BTM'.
+      io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                  iv_view_element_id = 'TOOLBAR_FOOTER'
+                                  io_element_ref = lo_fpm_el_toolbar->get_ref_wd_context_element( )
+                                  iv_has_drop_trgt_middle = abap_true
+                                  iv_tags                 = if_fpm_hct_repository=>gc_floorplan_tbar_tag_global ).
+    ENDIF.
+  ENDIF.
+
+
+************************
+* BUTTON_CONTAINER_1 ***
+************************
+
+* For the init screen the functionality of OTHER_FUNCTIONS is used, so the other buttons have to be excluded!
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area.
+
+*___Button PREVIOUS_OBJECT___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'PREVIOUS_OBJECT' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-label
+                                         IMPORTING value = lv_label ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                         IMPORTING value = lv_tooltip ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+        IF lv_label IS INITIAL OR lv_label CO ' '.
+          lv_label = if_wd_component_assistance~get_text( key = '018' ).
+        ENDIF.
+
+* dynamic creation of previous button
+        define_button( iv_id = 'PREVIOUS_OBJECT'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_design = cl_wd_button=>e_design-previous
+                       iv_tooltip = lv_tooltip
+                       iv_enabled = lv_enabled
+                       iv_visibility = lv_visibility
+                       iv_explanation = lv_explanation
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_action_category = if_fpm_constants=>gc_action_category-processing_closing
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'PREVIOUS_OBJECT' iv_uielement_id = 'PREVIOUS_OBJECT' ).
+
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'PREVIOUS_OBJECT' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'PREVIOUS_OBJECT'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+
+*___Button NEXT_OBJECT___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'NEXT_OBJECT' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-label
+                                         IMPORTING value = lv_label ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                         IMPORTING value = lv_tooltip ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        IF lv_label IS INITIAL OR lv_label CO ' '.
+          lv_label = if_wd_component_assistance~get_text( key = '019' ).
+        ENDIF.
+
+* dynamic creation of next button
+        define_button( iv_id = 'NEXT_OBJECT'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_tooltip = lv_tooltip
+                       iv_design = cl_wd_button=>e_design-next
+                       iv_enabled = lv_enabled
+                       iv_visibility = lv_visibility
+                       iv_explanation = lv_explanation
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_action_category = if_fpm_constants=>gc_action_category-processing_closing
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'NEXT_OBJECT' iv_uielement_id = 'NEXT_OBJECT' ).
+
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'NEXT_OBJECT' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'NEXT_OBJECT'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+************************
+* BUTTON_CONTAINER_2 ***
+************************
+  mv_new_button_section = abap_true.
+
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area.
+
+*___Activation_function buttons___
+
+    lo_nd_activation_functions = io_fpm_nd_toolbar->get_child_node( name = 'ACTIVATION_FUNCTIONS' ).
+    IF lo_nd_activation_functions IS NOT INITIAL.
+      lt_elements = lo_nd_activation_functions->get_elements( ).
+
+      CLEAR mt_tb_elements_temp.
+      LOOP AT lt_elements INTO lo_element.
+        lv_tabix = sy-tabix.
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-fpm_primary_attribute
+                                 IMPORTING value = lv_primary_attribute ).
+        TRANSLATE lv_primary_attribute TO UPPER CASE.
+        IF lv_primary_attribute IS NOT INITIAL.
+          APPEND lv_primary_attribute TO mt_tb_elements_temp.
+        ENDIF.
+
+* determine sequence
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-index
+                                 IMPORTING value = lv_index ).
+        ls_ordered_buttons-node_index = lv_tabix.
+        ls_ordered_buttons-table_index = lv_index.
+        APPEND ls_ordered_buttons TO lt_ordered_buttons.
+
+      ENDLOOP.
+
+      SORT lt_ordered_buttons ASCENDING BY table_index.
+
+      LOOP AT lt_ordered_buttons INTO ls_ordered_buttons.
+        lv_node_index = ls_ordered_buttons-node_index.
+        CONCATENATE 'ACTIVATION_FUNCTIONS_' lv_node_index INTO lv_context_id.
+        CONDENSE lv_context_id NO-GAPS.
+
+        lo_element = lo_nd_activation_functions->get_element( ls_ordered_buttons-node_index ).
+
+* The Primary Attribute of the buttons is taken to store a unique ID for the Button-ID
+* Earlier there was a logic with defining own IDs and indexes, this was not stable for Ecatt
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-fpm_primary_attribute
+                                   IMPORTING value = lv_primary_attribute ).
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-element_id
+                                   IMPORTING value = lv_element_id ).
+        TRANSLATE lv_primary_attribute TO UPPER CASE.
+        IF lv_primary_attribute IS INITIAL.
+          DO.
+            lv_tabix = sy-index.
+            lv_fpm_index = lv_tabix.
+            lv_id_found = abap_false.
+
+            CALL METHOD create_id_for_dyn_elems
+              EXPORTING
+                is_oif_info   = ms_oif_info
+                iv_element_id = lv_element_id
+                iv_index      = lv_fpm_index
+                iv_elem_type  = 'ACTIVATION_FUNCTIONS'
+              RECEIVING
+                rv_id         = lv_button_id.
+            LOOP AT mt_tb_elements_temp INTO lv_element.
+              IF lv_button_id = lv_element.
+                lv_id_found = abap_true.
+                EXIT.
+              ENDIF.
+            ENDLOOP.
+            IF lv_id_found = abap_false.
+              APPEND lv_button_id TO mt_tb_elements_temp.
+              EXIT.
+            ENDIF.
+            IF lv_tabix > '999'.
+              EXIT.
+            ENDIF.
+          ENDDO.
+          lo_element->set_attribute( name = if_fpm_constants_internal=>gc_attributes-fpm_primary_attribute
+                                       value = lv_button_id ).
+        ELSE.
+          lv_button_id = lv_primary_attribute.
+        ENDIF.
+
+        IF lv_element_id IS INITIAL.
+          lo_element->set_attribute( name = if_fpm_constants_internal=>gc_attributes-element_id
+                                     value = lv_button_id ).
+        ENDIF.
+
+* get all declared attributes
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-label
+                                   IMPORTING value = lv_label ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                   IMPORTING value = lv_enabled ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                   IMPORTING value = lv_visibility ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-design
+                                   IMPORTING value = lv_design ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                   IMPORTING value = lv_explanation ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                   IMPORTING value = lv_tooltip ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                   IMPORTING value = lv_hotkey ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-image
+                                   IMPORTING value = lv_image ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                   IMPORTING value = lv_instance_style ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-event_id
+                                   IMPORTING value = lv_event_id ).
+
+        lv_action_id = lv_event_id.
+
+        IF lv_design IS INITIAL.
+          lv_design = cl_wd_button=>e_design-emphasized.
+        ENDIF.
+
+* dynamic creation of a certain activation function button
+        define_button( iv_id = lv_button_id
+                       io_view = io_view
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_text = lv_label
+                       iv_enabled = lv_enabled
+                       iv_visibility = lv_visibility
+                       iv_design = lv_design
+                       iv_explanation = lv_explanation
+                       iv_tooltip = lv_tooltip
+                       iv_hotkey = lv_hotkey
+                       iv_context_id = lv_context_id
+                       iv_image = lv_image
+                       iv_instance_style = lv_instance_style
+                       iv_action_id = lv_action_id ).
+        register_btn_id( iv_element_id = lv_element_id iv_uielement_id = lv_button_id ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = lv_button_id ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = lv_button_id
+                                      io_element_ref = lo_element->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDLOOP.
+
+    ENDIF.
+
+
+*___Alternate Activation_function buttons___
+
+    lo_nd_alternate_functions = io_fpm_nd_toolbar->get_child_node( name = 'ALTERNATE_FUNCTIONS' ).
+
+    IF lo_nd_alternate_functions IS NOT INITIAL.
+      lt_elements = lo_nd_alternate_functions->get_elements( ).
+
+      CLEAR mt_tb_elements_temp.
+      CLEAR lt_ordered_buttons.
+      LOOP AT lt_elements INTO lo_element.
+        lv_tabix = sy-tabix.
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-fpm_primary_attribute
+                                 IMPORTING value = lv_primary_attribute ).
+        TRANSLATE lv_primary_attribute TO UPPER CASE.
+        IF lv_primary_attribute IS NOT INITIAL.
+          APPEND lv_primary_attribute TO mt_tb_elements_temp.
+        ENDIF.
+
+* determine sequence
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-index
+                                 IMPORTING value = lv_index ).
+        ls_ordered_buttons-node_index = lv_tabix.
+        ls_ordered_buttons-table_index = lv_index.
+        APPEND ls_ordered_buttons TO lt_ordered_buttons.
+      ENDLOOP.
+
+      SORT lt_ordered_buttons ASCENDING BY table_index.
+
+*      LOOP AT lt_elements INTO lo_element.
+      LOOP AT lt_ordered_buttons INTO ls_ordered_buttons.
+*        lv_tabix = sy-tabix.
+*        CONCATENATE 'ALTERNATE_FUNCTIONS_' lv_tabix INTO lv_context_id.
+        lv_node_index = ls_ordered_buttons-node_index.
+        CONCATENATE 'ALTERNATE_FUNCTIONS_' lv_node_index INTO lv_context_id.
+        CONDENSE lv_context_id NO-GAPS.
+
+        lo_element = lo_nd_alternate_functions->get_element( ls_ordered_buttons-node_index ).
+
+* The Primary Attribute of the buttons is taken to store a unique ID for the Button-ID
+* Earlier there was a logic with defining own IDs and indexes, this was not stable for Ecatt
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-fpm_primary_attribute
+                                   IMPORTING value = lv_primary_attribute ).
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-element_id
+                                   IMPORTING value = lv_element_id ).
+        TRANSLATE lv_primary_attribute TO UPPER CASE.
+        IF lv_primary_attribute IS INITIAL.
+          DO.
+            lv_tabix = sy-index.
+            lv_fpm_index = lv_tabix.
+            lv_id_found = abap_false.
+            CALL METHOD create_id_for_dyn_elems
+              EXPORTING
+                is_oif_info   = ms_oif_info
+                iv_element_id = lv_element_id
+                iv_index      = lv_fpm_index
+                iv_elem_type  = 'ALTERNATE_FUNCTIONS'
+              RECEIVING
+                rv_id         = lv_button_id.
+            LOOP AT mt_tb_elements_temp INTO lv_element.
+              IF lv_button_id = lv_element.
+                lv_id_found = abap_true.
+                EXIT.
+              ENDIF.
+            ENDLOOP.
+            IF lv_id_found = abap_false.
+              APPEND lv_button_id TO mt_tb_elements_temp.
+              EXIT.
+            ENDIF.
+          ENDDO.
+          lo_element->set_attribute( name = if_fpm_constants_internal=>gc_attributes-fpm_primary_attribute
+                                       value = lv_button_id ).
+        ELSE.
+          lv_button_id = lv_primary_attribute.
+        ENDIF.
+
+        IF lv_element_id IS INITIAL.
+          lo_element->set_attribute( name = if_fpm_constants_internal=>gc_attributes-element_id
+                                     value = lv_button_id ).
+        ENDIF.
+
+* get all declared attributes
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-label
+                                   IMPORTING value = lv_label ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                   IMPORTING value = lv_explanation ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                   IMPORTING value = lv_visibility ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                   IMPORTING value = lv_enabled ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-design
+                                   IMPORTING value = lv_design ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                   IMPORTING value = lv_tooltip ).
+        lo_element->get_attribute( EXPORTING name = if_fpm_constants_internal=>gc_attributes-hotkey
+                                   IMPORTING value = lv_hotkey ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-image
+                                   IMPORTING value = lv_image ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                   IMPORTING value = lv_instance_style ).
+        lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-event_id
+                                   IMPORTING value = lv_event_id ).
+
+        lv_action_id = lv_event_id.
+
+* dynamic creation of a certain alternate activation function button
+        define_button( iv_id = lv_button_id
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_explanation = lv_explanation
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_tooltip = lv_tooltip
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_design = lv_design
+                       iv_hotkey = lv_hotkey
+                       iv_context_id = lv_context_id
+                       iv_image = lv_image
+                       iv_instance_style = lv_instance_style
+                       iv_action_id = lv_action_id ).
+        register_btn_id( iv_element_id = lv_element_id iv_uielement_id = lv_button_id ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = lv_button_id ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = lv_button_id
+                                      io_element_ref = lo_element->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDLOOP.
+
+    ENDIF.
+
+*___Button EDIT___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'EDIT' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                         IMPORTING value = lv_tooltip ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '001' ).
+
+* dynamic creation of EDIT button
+        define_button( iv_id = 'EDIT'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_explanation = lv_explanation
+                       iv_tooltip = lv_tooltip
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'EDIT' iv_uielement_id = 'EDIT' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'EDIT' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'EDIT'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDIF.
+
+* The CLOSE button always has to be visible (if technically possible, see also WDDOMODIFYVIEW of CNR_VIEW in OIF and GAF)
+
+  IF ( iv_navigation_state <> if_fpm_constants=>gc_floorplan_state-init_screen
+  OR iv_navigation_state = if_fpm_constants=>gc_floorplan_state-error_screen )
+  AND iv_component_name IS INITIAL.
+* if we are in a GAF MAINSTEP or in an OIF or on the confirmation screen, create button CLOSE
+    IF mv_hide_close_button = abap_false.
+      CLEAR lv_hotkey.
+      lv_label = if_wd_component_assistance~get_text( key = '021' ).
+      lv_tooltip = if_wd_component_assistance~get_text( key = '033' ).
+      lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'CLOSE' ).
+      IF lo_fpm_nd_button IS NOT INITIAL.
+        lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+        IF lo_fpm_el_button IS NOT INITIAL.
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                           IMPORTING value = lv_hotkey ).
+        ENDIF.
+      ENDIF.
+* dynamic creation of close button
+      define_button( iv_id = 'CLOSE'
+                     iv_text = lv_label
+                     io_view = io_view
+                     iv_on_action = 'BUTTON_PRESSED'
+                     iv_visibility = wdyn_ui_visibility_visible
+                     iv_enabled = abap_true
+                     iv_tooltip = lv_tooltip
+                     iv_hotkey = lv_hotkey
+                     iv_action_category = if_fpm_constants=>gc_action_category-processing_closing ).
+      register_btn_id( iv_element_id = 'CLOSE' iv_uielement_id = 'CLOSE' ).
+    ENDIF.
+  ENDIF.
+
+
+
+************************
+* BUTTON_CONTAINER_3 ***
+************************
+
+  mv_new_button_section = abap_true.
+
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area.
+
+*___Button READ_ONLY___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'READ_ONLY' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                         IMPORTING value = lv_tooltip ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '004' ).
+
+* dynamic creation of READ ONLY button
+        define_button( iv_id = 'READ_ONLY'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_explanation = lv_explanation
+                       iv_tooltip = lv_tooltip
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'READ_ONLY' iv_uielement_id = 'READ_ONLY' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'READ_ONLY' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'READ_ONLY'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*___Button SAVE_AS___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'SAVE_AS' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '005' ).
+
+* dynamic creation of SAVE AS button
+        define_button( iv_id = 'SAVE_AS'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_explanation = lv_explanation
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_action_category = if_fpm_constants=>gc_action_category-processing_closing
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'SAVE_AS' iv_uielement_id = 'SAVE_AS' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'SAVE_AS' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'SAVE_AS'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+
+    IF iv_navigation_state <> if_fpm_constants=>gc_floorplan_state-conf_screen.
+*___Button SAVE_DRAFT___
+      lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'SAVE_DRAFT' ).
+      IF lo_fpm_nd_button IS NOT INITIAL.
+        lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+        IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                           IMPORTING value = lv_explanation ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                           IMPORTING value = lv_visibility ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                           IMPORTING value = lv_enabled ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                           IMPORTING value = lv_hotkey ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                           IMPORTING value = lv_action_id ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                           IMPORTING value = lv_instance_style ).
+
+          lv_label = if_wd_component_assistance~get_text( key = '006' ).
+
+* dynamic creation of SAVE DRAFT button
+          define_button( iv_id = 'SAVE_DRAFT'
+                         iv_text = lv_label
+                         io_view = io_view
+                         iv_explanation = lv_explanation
+                         iv_on_action = 'BUTTON_PRESSED'
+                         iv_visibility = lv_visibility
+                         iv_enabled = lv_enabled
+                         iv_hotkey = lv_hotkey
+                         iv_action_id = lv_action_id
+                         iv_instance_style = lv_instance_style ).
+          register_btn_id( iv_element_id = 'SAVE_DRAFT' iv_uielement_id = 'SAVE_DRAFT' ).
+          IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                                AND io_view->get_element( id = 'SAVE_DRAFT' ) IS BOUND.
+            io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                        iv_view_element_id = 'SAVE_DRAFT'
+                                        io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+
+*___Button LOAD_DRAFT___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'LOAD_DRAFT' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '007' ).
+
+* dynamic creation of LOAD DRAFT button
+        define_button( iv_id = 'LOAD_DRAFT'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_explanation = lv_explanation
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'LOAD_DRAFT' iv_uielement_id = 'LOAD_DRAFT' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'LOAD_DRAFT' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'LOAD_DRAFT'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area.
+*___Buttons PRINT_PREVIEW, PRINT, SEND___
+* This button is either a button or a button choice
+* If there is an entry for the button AND the button choice, the button is to be preferred
+
+    DO 3 TIMES.
+      lv_index = sy-index.
+
+      CASE lv_index.
+        WHEN 1.
+          lv_button_name = 'PP_BUTTON'.
+          lv_text = '008'.
+          lv_id = 'PRINT_PREVIEW'.
+          lv_button_choice_name = 'PP_BUTTON_CHOICE'.
+          lv_entry_name = 'PP_ENTRY'.
+        WHEN 2.
+          lv_button_name = 'P_BUTTON'.
+          lv_text = '009'.
+          lv_id = 'PRINT'.
+          lv_button_choice_name = 'P_BUTTON_CHOICE'.
+          lv_entry_name = 'P_ENTRY'.
+        WHEN 3.
+          lv_button_name = 'S_BUTTON'.
+          lv_text = '010'.
+          lv_id = 'SEND'.
+          lv_button_choice_name = 'S_BUTTON_CHOICE'.
+          lv_entry_name = 'S_ENTRY'.
+      ENDCASE.
+
+      determine_tb_element_type( iv_button_name = lv_button_name
+                                 iv_text = lv_text
+                                 iv_id = lv_id
+                                 iv_button_choice_name = lv_button_choice_name
+                                 iv_entry_name = lv_entry_name
+                                 io_fpm_nd_toolbar = io_fpm_nd_toolbar
+                                 io_view = io_view
+                                 io_fpm_hct_toolbar_assist = io_fpm_hct_toolbar_assist ).
+      register_btn_id( iv_element_id = lv_id iv_uielement_id = lv_id ).
+    ENDDO.
+  ENDIF.
+
+************************
+* BUTTON_CONTAINER_4 ***
+************************
+
+  mv_new_button_section = abap_true.
+
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area.
+
+*___Button Start_Over___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'START_OVER' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '011' ).
+
+* dynamic creation of START OVER button
+        define_button( iv_id = 'START_OVER'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_explanation = lv_explanation
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_action_category = if_fpm_constants=>gc_action_category-processing_closing
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'START_OVER' iv_uielement_id = 'START_OVER' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'START_OVER' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'START_OVER'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*___Button Refresh___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'REFRESH' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '012' ).
+
+* dynamic creation of REFRESH button
+        define_button( iv_id = 'REFRESH'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_explanation = lv_explanation
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'REFRESH' iv_uielement_id = 'REFRESH' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'REFRESH' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'REFRESH'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*___Button Undo___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'UNDO' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '013' ).
+
+* dynamic creation of UNDO button
+        define_button( iv_id = 'UNDO'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_explanation = lv_explanation
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'UNDO' iv_uielement_id = 'UNDO' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'UNDO' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'UNDO'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*___Button Redo___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'REDO' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        lv_label = if_wd_component_assistance~get_text( key = '014' ).
+
+* dynamic creation of REDO button
+        define_button( iv_id = 'REDO'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_explanation = lv_explanation
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'REDO' iv_uielement_id = 'REDO' ).
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'REDO' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'REDO'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+
+************************
+* BUTTON_CONTAINER_5 ***
+************************
+    mv_new_button_section = abap_true.
+
+    IF iv_navigation_state <> if_fpm_constants=>gc_floorplan_state-conf_screen
+        AND iv_navigation_state <> if_fpm_constants=>gc_floorplan_state-init_screen .
+*___Button Check___
+      lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'CHECK' ).
+      IF lo_fpm_nd_button IS NOT INITIAL.
+        lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+        IF lo_fpm_el_button IS NOT INITIAL.
+
+* get all declared attributes
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                           IMPORTING value = lv_explanation ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                           IMPORTING value = lv_visibility ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                           IMPORTING value = lv_enabled ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-label
+                                           IMPORTING value = lv_label ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                           IMPORTING value = lv_tooltip ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                           IMPORTING value = lv_hotkey ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                           IMPORTING value = lv_action_id ).
+          lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                           IMPORTING value = lv_instance_style ).
+
+          IF lv_label IS INITIAL OR lv_label CO ' '.
+            lv_label = if_wd_component_assistance~get_text( key = '015' ).
+          ENDIF.
+
+* dynamic creation of CHECK button
+          define_button( iv_id = 'CHECK'
+                         iv_text = lv_label
+                         io_view = io_view
+                         iv_explanation = lv_explanation
+                         iv_on_action = 'BUTTON_PRESSED'
+                         iv_tooltip = lv_tooltip
+                         iv_enabled = lv_enabled
+                         iv_visibility = lv_visibility
+                         iv_hotkey = lv_hotkey
+                         iv_action_id = lv_action_id
+                         iv_instance_style = lv_instance_style ).
+          register_btn_id( iv_element_id = 'CHECK' iv_uielement_id = 'CHECK' ).
+          IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                                AND io_view->get_element( id = 'CHECK' ) IS BOUND.
+            io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                        iv_view_element_id = 'CHECK'
+                                        io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                        iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                        iv_has_drop_trgt_begin = abap_false
+                                        iv_has_drop_trgt_end   = abap_false
+                                        iv_is_drag_handle      = abap_true ).
+
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+*___ButtonChoice NEW___
+      lv_button_name = 'N_BUTTON'.
+      lv_text = '016'.
+      lv_id = 'NEW'.
+      lv_button_choice_name = 'N_BUTTON_CHOICE'.
+      lv_entry_name = 'N_ENTRY'.
+
+      determine_tb_element_type( iv_button_name = lv_button_name
+                                 iv_text = lv_text
+                                 iv_id = lv_id
+                                 iv_button_choice_name = lv_button_choice_name
+                                 iv_entry_name = lv_entry_name
+                                 io_fpm_nd_toolbar = io_fpm_nd_toolbar
+                                 io_view = io_view
+                                 io_fpm_hct_toolbar_assist = io_fpm_hct_toolbar_assist ).
+      register_btn_id( iv_element_id = lv_id iv_uielement_id = lv_id ).
+    ENDIF.
+  ENDIF.
+
+* Other Functions Area (application-specific)
+
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-init_screen.
+    lv_suffix = '_I'.
+  ENDIF.
+  create_other_function_elements( io_fpm_nd_toolbar = io_fpm_nd_toolbar
+                                  io_view = io_view
+                                  iv_navigation_state = iv_navigation_state
+                                  iv_suffix = lv_suffix
+                                  io_fpm_hct_toolbar_assist = io_fpm_hct_toolbar_assist ).
+
+
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area.
+*___Button DELETE_OBJECT___
+    lo_fpm_nd_button = io_fpm_nd_toolbar->get_child_node( name = 'DELETE_OBJECT' ).
+    IF lo_fpm_nd_button IS NOT INITIAL.
+      lo_fpm_el_button = lo_fpm_nd_button->get_element(  ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+* get all declared attributes
+
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                         IMPORTING value = lv_explanation ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-label
+                                         IMPORTING value = lv_label ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-tooltip
+                                         IMPORTING value = lv_tooltip ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                         IMPORTING value = lv_action_id ).
+        lo_fpm_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                         IMPORTING value = lv_instance_style ).
+
+        IF lv_label IS INITIAL OR lv_label CO ' '.
+          lv_label = if_wd_component_assistance~get_text( key = '017' ).
+        ENDIF.
+
+* dynamic creation of DELETE_OBJECT button
+        define_button( iv_id = 'DELETE_OBJECT'
+                       iv_text = lv_label
+                       io_view = io_view
+                       iv_explanation = lv_explanation
+                       iv_on_action = 'BUTTON_PRESSED'
+                       iv_tooltip = lv_tooltip
+                       iv_visibility = lv_visibility
+                       iv_enabled = lv_enabled
+                       iv_hotkey = lv_hotkey
+                       iv_action_id = lv_action_id
+                       iv_action_category = if_fpm_constants=>gc_action_category-processing_closing
+                       iv_instance_style = lv_instance_style ).
+        register_btn_id( iv_element_id = 'DELETE_OBJECT' iv_uielement_id = 'DELETE_OBJECT' ).
+
+        IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                              AND io_view->get_element( id = 'DELETE_OBJECT' ) IS BOUND.
+          io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                      iv_view_element_id = 'DELETE_OBJECT'
+                                      io_element_ref = lo_fpm_el_button->get_ref_wd_context_element( )
+                                      iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                      iv_has_drop_trgt_begin = abap_false
+                                      iv_has_drop_trgt_end   = abap_false
+                                      iv_is_drag_handle      = abap_true ).
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDIF.
+
+  create_menubar( io_fpm_nd_toolbar = io_fpm_nd_toolbar
+                  io_view = io_view
+                  iv_navigation_state = iv_navigation_state
+                  io_fpm_hct_toolbar_assist = io_fpm_hct_toolbar_assist ).
+
+
+ENDMETHOD.
+
+
+METHOD determine_tb_element_type.
+
+  DATA lo_nd_parent TYPE REF TO if_fpm_node.
+  DATA lo_nd_button TYPE REF TO if_fpm_node.
+  DATA lo_nd_button_choice TYPE REF TO if_fpm_node.
+  DATA lo_el_button_choice TYPE REF TO if_fpm_element.
+  DATA lo_nd_entry TYPE REF TO if_fpm_node.
+  DATA lo_el_button TYPE REF TO if_fpm_element.
+  DATA lv_visibility TYPE wdui_visibility.
+  DATA lv_enabled TYPE boole_d.
+  DATA lv_explanation TYPE string.
+  DATA lv_hotkey TYPE wdui_hotkey.
+  DATA lv_label TYPE string.
+  DATA lt_elements TYPE if_fpm_element=>ty_t_fpm_element.
+  DATA lo_element TYPE REF TO if_fpm_element.
+  DATA lv_repeat_sel_action TYPE boole_d.
+  DATA lv_selected_item TYPE string.
+  DATA lv_tabix TYPE string.
+  DATA lv_item_id TYPE string.
+  DATA lv_visibility_bool TYPE boole_d.
+  DATA lv_action_id TYPE fpm_action_id.
+  DATA lv_instance_style TYPE fpm_instance_style.
+
+
+  CLEAR lv_visibility.
+
+  lo_nd_parent = io_fpm_nd_toolbar->get_child_node( name = iv_id ).
+  IF lo_nd_parent IS NOT INITIAL.
+    lo_nd_button = lo_nd_parent->get_child_node( name = iv_button_name ).
+    IF lo_nd_button IS NOT INITIAL.
+      lo_el_button = lo_nd_button->get_element( ).
+      IF lo_el_button IS NOT INITIAL.
+        lo_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                     IMPORTING value = lv_visibility ).
+      ENDIF.
+    ENDIF.
+* if the button is visible then create it, else have a look at visibility of the button choice
+    IF lv_visibility = cl_wd_button=>e_visible-visible.
+
+* get all declared attributes of PRINT_PREVIEW
+      lo_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                   IMPORTING value = lv_enabled ).
+      lo_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-explanation
+                                   IMPORTING value = lv_explanation ).
+      lo_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                   IMPORTING value = lv_hotkey ).
+      lo_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-action_id
+                                   IMPORTING value = lv_action_id ).
+      lo_el_button->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                   IMPORTING value = lv_instance_style ).
+
+      lv_label = if_wd_component_assistance~get_text( key = iv_text ).
+* dynamic creation of PRINT_PREVIEW button
+      define_button( iv_id = iv_id
+                     iv_text = lv_label
+                     io_view = io_view
+                     iv_explanation = lv_explanation
+                     iv_on_action = 'BUTTON_PRESSED'
+                     iv_visibility = lv_visibility
+                     iv_enabled = lv_enabled
+                     iv_hotkey = lv_hotkey
+                     iv_action_id = lv_action_id
+                     iv_instance_style = lv_instance_style ).
+
+      IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                            AND io_view->get_element( id = iv_id ) IS BOUND.
+        io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                    iv_view_element_id = iv_id
+                                    io_element_ref = lo_el_button->get_ref_wd_context_element( )
+                                    iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                    iv_has_drop_trgt_begin = abap_false
+                                    iv_has_drop_trgt_end   = abap_false
+                                    iv_is_drag_handle      = abap_true ).
+
+      ENDIF.
+
+    ELSE.
+* Else create a button choice if it is visible and entries exist
+      define_button( iv_id = iv_id
+                     iv_on_action = 'BUTTON_PRESSED'
+                     iv_visibility = cl_wd_button=>e_visible-none
+                     io_view = io_view ).
+
+      CLEAR lt_elements[].
+      CLEAR lo_element.
+
+      lo_nd_button_choice = lo_nd_parent->get_child_node( name = iv_button_choice_name ).
+      IF lo_nd_button_choice IS NOT INITIAL.
+        lo_nd_entry = lo_nd_button_choice->get_child_node( name = iv_entry_name ).
+        IF lo_nd_button_choice->get_element_count( ) <= 0.
+          RETURN.
+        ENDIF.
+        lo_nd_button_choice->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                            IMPORTING value = lv_visibility ).
+
+        IF lv_visibility = cl_wd_button_choice=>e_visible-visible.
+          IF lo_nd_entry IS NOT INITIAL.
+            lt_elements = lo_nd_entry->get_elements( ).
+          ENDIF.
+
+          IF lt_elements IS NOT INITIAL.
+* dynamic creation of PRINT PREVIEW main button
+            lv_label = if_wd_component_assistance~get_text( key = iv_text ).
+* get all declared attributes of PRINT PREVIEW
+            lo_nd_button_choice->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                                IMPORTING value = lv_enabled ).
+            lo_nd_button_choice->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-repeat_selected_action
+                                                IMPORTING value = lv_repeat_sel_action ).
+            lo_nd_button_choice->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-selected_action_item
+                                                IMPORTING value = lv_selected_item ).
+            lo_nd_button_choice->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-instance_style
+                                                IMPORTING value = lv_instance_style ).
+            lo_el_button_choice = lo_nd_button_choice->get_element( ).
+            define_button_choice( io_view = io_view
+                                  iv_id = iv_id
+                                  iv_text = lv_label
+                                  iv_visibility = lv_visibility
+                                  iv_enabled = lv_enabled
+                                  iv_repeat_selected_action = lv_repeat_sel_action
+                                  iv_selected_action_item = lv_selected_item
+                                  iv_instance_style = lv_instance_style ).
+
+            IF io_fpm_hct_toolbar_assist IS BOUND AND lv_visibility = wdyn_ui_visibility_visible
+                                                  AND io_view->get_element( id = iv_id ) IS BOUND.
+              io_fpm_hct_toolbar_assist->add_element_to_dta(
+                                          iv_view_element_id = iv_id
+                                          io_element_ref = lo_el_button_choice->get_ref_wd_context_element( )
+                                          iv_tags                = if_fpm_hct_repository=>gc_floorplan_tbar_rev
+                                          iv_has_drop_trgt_begin = abap_false
+                                          iv_has_drop_trgt_end   = abap_false
+                                          iv_is_drag_handle      = abap_true ).
+
+            ENDIF.
+
+            LOOP AT lt_elements INTO lo_element.
+              lv_tabix = sy-tabix.
+              CONCATENATE iv_id '_ITEM_' lv_tabix INTO lv_item_id.
+              CONDENSE lv_item_id NO-GAPS.
+* get all declared attributes
+              lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-label
+                                         IMPORTING value = lv_label ).
+              lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-enabled
+                                         IMPORTING value = lv_enabled ).
+              lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-visibility
+                                         IMPORTING value = lv_visibility ).
+              lo_element->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hotkey
+                                         IMPORTING value = lv_hotkey ).
+
+              IF lv_visibility <> wdyn_ui_visibility_none.
+                lv_visibility_bool = abap_true.
+              ELSE.
+                lv_visibility_bool = abap_false.
+              ENDIF.
+
+              define_menu_action_item( io_view = io_view
+                                       iv_id = lv_item_id
+                                       iv_on_action = 'BUTTON_PRESSED'
+                                       iv_text = lv_label
+                                       iv_button_choice = iv_id
+                                       iv_enabled = lv_enabled
+                                       iv_visibility = lv_visibility_bool
+                                       iv_hotkey = lv_hotkey ).
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+
+ENDMETHOD.
+
+
+METHOD get_node_name_application.
+
+
+  rv_node_name = if_fpm_constants_internal=>gc_nodes-oif_application.
+
+
+ENDMETHOD.
+
+
+METHOD initialize_context_manager.
+
+
+* Call super method
+  super->initialize_context_manager( io_wd_context_node = io_wd_context_node ).
+
+* Modify FPM context
+  modify_fpm_context( ).
+
+
+ENDMETHOD.
+
+
+METHOD initialize_floorplan_handler.
+
+
+* Ensure that floorplan handler can be initialized
+  ASSERT mo_component IS BOUND.
+
+* Instanciate handler for communication between FPM runtime and floorplan component
+  CREATE OBJECT ro_floorplan_handler TYPE cl_fpm_oif_internal
+    EXPORTING
+      ir_floorplan_component = mo_component
+      ir_controller          = io_floorplan_comp_controller.
+
+
+ENDMETHOD.
+
+
+METHOD initialize_runtime_api.
+
+
+* Ensure that the OIF runtime API can be initialized
+  ASSERT mo_floorplan_data IS BOUND AND
+         mo_fpm            IS BOUND.
+
+
+* Instantiate OIF runtime API
+  CREATE OBJECT ro_fpm_floorplan_runtime_api TYPE cl_fpm_oif
+    EXPORTING
+      io_floorplan_data         = mo_floorplan_data
+      io_floorplan_state        = mo_floorplan_state
+      io_floorplan_target_state = mo_floorplan_target_state
+      io_fpm                    = mo_fpm.
+
+* Instantiate and register OIF CNR runtime API
+  IF mo_cnr IS NOT BOUND.
+    CREATE OBJECT mo_cnr
+      EXPORTING
+        io_floorplan_data = mo_floorplan_data
+        io_fpm            = mo_fpm.
+    cl_fpm_service_manager=>register_service( iv_service_key       = cl_fpm_service_manager=>gc_key_cnr_oif
+                                              ir_service_interface = mo_cnr
+                                              io_fpm               = mo_fpm ).
+  ENDIF.
+
+
+ENDMETHOD.
+
+
+METHOD initialize_runtime_info_object.
+
+
+* Call super method
+  ro_fpm_runtime_info_object = super->initialize_runtime_info_object( ).
+
+* Create floorplan runtime info object if it does'nt exist yet
+  IF ro_fpm_runtime_info_object IS NOT BOUND.
+    CREATE OBJECT ro_fpm_runtime_info_object TYPE cl_fpm_oif_info.
+  ENDIF.
+
+
+ENDMETHOD.
+
+
+METHOD modify_fpm_context.
+
+
+* Call super method
+  super->modify_fpm_context( ).
+
+* Sort FPM context nodes
+  sort_oif_nodes( ).
+
+
+ENDMETHOD.
+
+
+METHOD render_header.
+
+  IF mo_idr IS INITIAL.
+    mo_idr ?=  cl_fpm_service_manager=>get_service(
+      iv_service_key = cl_fpm_service_manager=>gc_key_idr
+      io_fpm = mo_fpm ).
+  ENDIF.
+
+  IF mo_idr IS NOT BOUND.
+    RETURN.
+  ENDIF.
+
+  DATA: lv_rerender TYPE wdy_boolean.
+  IF first_time = abap_true OR mv_next_state <> mv_last_state.
+    lv_rerender = abap_true.
+  ENDIF.
+
+* render title
+  DATA: lo_page_header TYPE REF TO cl_wd_page_header.
+  lo_page_header ?= io_view->get_element( 'MAIN_PAGE_HEADER' ).
+  mo_idr->render_title( io_page_header = lo_page_header
+                        iv_rerender    = lv_rerender ).
+
+* render items
+  DATA: lo_cont_items  TYPE REF TO cl_wd_transparent_container.
+  lo_cont_items ?= io_view->get_element( 'LABEL_VALUES' ).
+  DATA: lo_context TYPE REF TO if_wd_context_node.
+  lo_context = io_view->if_wd_controller~get_context( )->root_node.
+  IF iv_state = if_fpm_constants=>gc_floorplan_state-main_area AND
+     io_view->name = 'CNR_VIEW'.
+    mo_idr->render_items( io_items_cont = lo_cont_items
+                          io_context    = lo_context ).
+  ENDIF.
+
+* render ticket
+  DATA: lo_cont_ticket TYPE REF TO cl_wd_transparent_container.
+  lo_cont_ticket ?= io_view->get_element( 'TICKET' ).
+  mo_idr->render_ticket( io_cont_ticket = lo_cont_ticket
+                         iv_rerender    = first_time ).
+
+* render aca (additional component area) uibbs (if state and view are consistent)
+  IF ( io_view->name = 'INITIAL_SCREEN' AND iv_state = if_fpm_constants=>gc_floorplan_state-init_screen )
+    OR ( io_view->name = 'CNR_VIEW' AND iv_state = if_fpm_constants=>gc_floorplan_state-main_area ).
+    mo_idr->render_aca_uibbs( io_view ).
+  ENDIF.
+
+* Render title content
+  DATA: lo_cont TYPE REF TO cl_wd_uielement_container.
+  lo_cont ?= io_view->get_element( 'PAGE_HEADER_LINKS' ).
+  render_title_content( EXPORTING io_title_content_container = lo_cont ).
+
+  DATA: lo_pharea TYPE REF TO cl_wd_page_header_area.
+  IF first_time = abap_true.
+    lo_pharea ?= io_view->get_element( 'MESSAGE_AREA' ).
+    IF mv_hide_message_area = abap_true.
+      lo_pharea->set_visible( abap_false ).
+    ENDIF.
+  ENDIF.
+
+* =========================================================================
+* rendering for toolbar
+* =========================================================================
+  DATA: lo_nd_oif_application TYPE REF TO if_fpm_node,
+        lo_nd_variant         TYPE REF TO if_fpm_node,
+        lo_nd_toolbar         TYPE REF TO if_fpm_node,
+        lo_nd_initial_screen  TYPE REF TO if_fpm_node,
+        lv_yca_changed        TYPE wdy_boolean,
+        lv_rl_changed         TYPE wdy_boolean.
+  DATA lo_toolbar        TYPE REF TO cl_wd_toolbar.
+  DATA lo_toolbar_footer TYPE REF TO cl_wd_toolbar.
+
+*Check for which screen the button is rendered.
+  IF iv_state = if_fpm_constants=>gc_floorplan_state-init_screen
+     AND io_view->name = 'INITIAL_SCREEN'. "Initial Screen
+
+* render buttons
+    mo_cnr->render_buttons( ).
+* render button choices
+    mo_cnr->render_button_choices( ).
+* render separators
+    mo_cnr->render_separators( ).
+
+    DATA: lv_close_supported TYPE wdy_boolean.
+    IF first_time = abap_true.
+*     Determine the visibility of the CLOSE button
+      mv_hide_close_button = mo_cnr->mv_hide_close_button.
+      lv_close_supported = check_if_close_available( ).
+      IF lv_close_supported = abap_false.
+        mv_hide_close_button = abap_true.
+      ENDIF.
+    ENDIF.
+
+    DATA: lo_nd_state TYPE REF TO if_fpm_node.
+    lo_nd_initial_screen = mo_floorplan_data->get_fpm_root_node( )->get_child_node( name = if_fpm_constants_internal=>gc_nodes-initial_screen ).
+    lo_nd_state = mo_floorplan_state->get_fpm_root_node( ).
+    lo_nd_toolbar = lo_nd_initial_screen->get_child_node( name = if_fpm_constants_internal=>gc_nodes-init_screen_toolbar ).
+
+** clean-up toolbar container
+    lo_toolbar ?= io_view->get_element( 'TOOLBAR' ).
+    lo_toolbar_footer ?= io_view->get_element( 'TOOLBAR_FOOTER' ).
+
+    IF lo_toolbar IS BOUND.
+      lo_toolbar->remove_all_toolbar_items( ).
+    ENDIF.
+    IF lo_toolbar_footer IS BOUND.
+      lo_toolbar_footer->remove_all_toolbar_items( ).
+      lo_toolbar_footer->remove_all_toolbar_right_items( ).
+    ENDIF.
+
+    modify_view_initial_screen(
+      io_view = io_view
+      io_fpm_nd_initial_screen = lo_nd_initial_screen
+      io_fpm_nd_state = lo_nd_state
+      iv_first_time = first_time ).
+
+    IF mv_nav_state IS INITIAL.
+      mo_view = io_view.
+      mo_toolbar_node = lo_nd_toolbar.
+    ENDIF.
+
+  ELSE. "All other screens
+
+    TRY.
+        lv_yca_changed = mo_navigation_yca->is_anything_changed( ).
+        lv_rl_changed = mo_navigation_rl->is_anything_changed( ).
+      CATCH cx_sy_ref_is_initial.                       "#EC NO_HANDLER
+    ENDTRY.
+
+    IF ( iv_state = if_fpm_constants=>gc_floorplan_state-main_area
+       AND io_view->name = 'CNR_VIEW' ) OR
+      ( iv_state = if_fpm_constants=>gc_floorplan_state-conf_screen
+       AND io_view->name = 'CONF_SCREEN' ).
+* Rerender toolbars only if needed!
+      IF ms_change_flags_roundtrip-toolbar_changed = abap_false.
+        IF mo_cnr->mv_toolbar_changed_by_api = abap_true
+          OR lv_yca_changed = abap_true
+          OR lv_rl_changed = abap_true.
+          ms_change_flags_roundtrip-toolbar_changed = abap_true.
+        ELSEIF first_time = abap_true.
+          ms_change_flags_roundtrip-toolbar_changed = abap_true.
+        ENDIF.
+      ENDIF.
+
+      IF ms_change_flags_roundtrip-toolbar_changed = abap_true.
+
+* render buttons
+        mo_cnr->render_buttons( ).
+* render button choices
+        mo_cnr->render_button_choices( ).
+* render separators
+        mo_cnr->render_separators( ).
+* render YOU CAN ALSO
+        mo_cnr->render_you_can_also( ).
+* render RELATED_LINKS
+        mo_cnr->render_related_links( ).
+
+        IF first_time = abap_true.
+*       Determine the visibility of the CLOSE button
+          mv_hide_close_button = mo_cnr->mv_hide_close_button.
+          lv_close_supported = check_if_close_available( ).
+          IF lv_close_supported = abap_false.
+            mv_hide_close_button = abap_true.
+          ENDIF.
+        ENDIF.
+
+* navigate from <CONTEXT> to <OIF_APPLICATION> via lead selection
+        lo_nd_oif_application = mo_floorplan_data->get_fpm_root_node( ).
+
+* navigate from <OIF_APPLICATION> to <VARIANT> via lead selection
+        lo_nd_variant = lo_nd_oif_application->get_child_node( name = if_fpm_constants_internal=>gc_nodes-variant ).
+
+* navigate from <VARIANT> to <MAINVIEW> via lead selection
+        lo_nd_toolbar = lo_nd_variant->get_child_node( name = if_fpm_constants_internal=>gc_nodes-toolbar ).
+
+** clean-up toolbar container
+        lo_toolbar ?= io_view->get_element( 'TOOLBAR' ).
+        lo_toolbar_footer ?= io_view->get_element( 'TOOLBAR_FOOTER' ).
+
+** Delete all elements of the toolbar and rebuild it afterwards
+        IF lo_toolbar IS BOUND.
+          lo_toolbar->remove_all_toolbar_items( ).
+          lo_toolbar->remove_toolbar_right_item( id = 'PRINT' ). "Special Case: Print is only confable button on right
+        ENDIF.
+        IF lo_toolbar_footer IS BOUND.
+          lo_toolbar_footer->remove_all_toolbar_items( ).
+          lo_toolbar_footer->remove_all_toolbar_right_items( ).
+        ENDIF.
+
+        IF iv_state = if_fpm_constants=>gc_floorplan_state-conf_screen.
+          render_toolbar( io_view = io_view
+                                     iv_navigation_state = if_fpm_constants=>gc_floorplan_state-conf_screen
+                                     io_fpm_nd_toolbar   = lo_nd_toolbar ).
+        ELSE.
+          render_toolbar( io_view = io_view
+                                     iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area
+                                     io_fpm_nd_toolbar   = lo_nd_toolbar ).
+        ENDIF.
+        mo_view = io_view.
+        mo_toolbar_node = lo_nd_toolbar.
+
+        IF NOT mv_focus_uielement_id IS INITIAL.
+          DATA: lo_view_element TYPE REF TO if_wd_view_element.
+          lo_view_element = io_view->get_element( mv_focus_uielement_id ).
+          IF lo_view_element IS BOUND.
+            io_view->request_focus_on_view_elem( view_element = lo_view_element ).
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+  ENDIF.
+
+** Delete separator, if it is the last element in the toolbar.
+  DATA: lt_toolbar_items     TYPE if_wd_toolbar_item=>tt_toolbar_item,
+        lo_toolbar_separator TYPE REF TO cl_wd_toolbar_separator,
+        lo_toolbar_item      TYPE REF TO if_wd_toolbar_item.
+  IF lo_toolbar IS BOUND.
+    CLEAR lt_toolbar_items.
+    lt_toolbar_items = lo_toolbar->get_toolbar_items( ).
+    READ TABLE lt_toolbar_items INTO lo_toolbar_item INDEX lines( lt_toolbar_items ).
+
+    TRY.
+        lo_toolbar_separator ?= lo_toolbar_item.
+      CATCH  cx_sy_move_cast_error ##NO_HANDLER.
+    ENDTRY.
+
+    IF lo_toolbar_separator IS BOUND.
+      lo_toolbar->remove_toolbar_item( index = lines( lt_toolbar_items ) ).
+    ENDIF.
+  ENDIF.
+
+* ------------------------------------------------------------------------
+* Sync Designtime Area mode
+* ------------------------------------------------------------------------
+  DATA lo_nd_view_data TYPE REF TO if_wd_context_node.
+
+  DATA lo_el_view_data TYPE REF TO if_wd_context_element.
+  DATA lv_designtime_mode TYPE wdy_boolean.
+
+  lo_nd_view_data = lo_context->get_child_node( name = 'VIEW_DATA' ).
+  lo_el_view_data = lo_nd_view_data->get_element( ).
+  lv_designtime_mode = mo_fpm->mv_designtime_mode.
+* set single attribute
+  lo_el_view_data->set_attribute(
+    name =  `DESIGNTIME_MODE`
+    value = lv_designtime_mode ).
+
+* ------------------------------------------------------------------------
+* render the help icon + actions within the help menu
+* ------------------------------------------------------------------------
+  DATA: lv_tooltip    TYPE string,
+        lv_image      TYPE fpm_image,
+        lv_visibility TYPE fpm_visibility,
+        lo_button     TYPE REF TO cl_wd_toolbar_button.
+
+  IF lo_toolbar IS INITIAL.
+    lo_toolbar ?= io_view->get_element( 'TOOLBAR' ).
+  ENDIF.
+
+* Render Side Panel link (only in case of SAP_BELIZE)
+  IF get_ui_guideline_version( ) = if_fpm_constants_internal=>gc_guideline_version-fiori.
+    render_side_panel_link( EXPORTING io_toolbar = lo_toolbar ).
+  ENDIF.
+
+  render_config_ui_elems_in_tb( EXPORTING io_toolbar = lo_toolbar
+                                          io_view    = io_view ).
+
+*   check whether the link for config editor needs to be displayed
+    DATA lo_pers_manager TYPE REF TO if_wd_personalization.
+    lo_pers_manager = io_view->if_wd_controller~get_personalization_manager( ).
+    cl_fpm_config_editor=>display_editor_link( EXPORTING io_pers_manager = lo_pers_manager ).
+
+* Application Hierarchy
+    CLEAR: lv_visibility, lv_tooltip.
+  IF lo_toolbar->get_toolbar_right_item( id = 'BT_APP_HIERARCHY' ) IS NOT BOUND.
+    get_app_hierarchy_button_attr( IMPORTING ev_visibility = lv_visibility
+                                             ev_tooltip    = lv_tooltip
+                                             ev_image      = lv_image ).
+    CALL METHOD cl_wd_toolbar_button=>new_toolbar_button
+      EXPORTING
+        id           = 'BT_APP_HIERARCHY'
+        image_source = lv_image
+        on_action    = 'ON_APP_HIERARCHY'
+        tooltip      = lv_tooltip
+        visible      = lv_visibility
+      RECEIVING
+        control      = lo_button.
+    lo_toolbar->add_toolbar_right_item( lo_button ).
+  ENDIF.
+
+* Help Center Button-Choice/Button
+    render_help_center_in_toolbar( lo_toolbar ).
+
+
+  change_quick_help_text( io_view ).
+
+* ------------------------------------------------------------------------
+* do some additional IDR stuff here, because it depends that method
+* wd_assist->modify_view_initial_screen() has already been called
+* ------------------------------------------------------------------------
+
+* render area visibility
+  IF mv_cnr_entered = abap_false OR mo_idr->mv_api_called = abap_true
+    OR iv_state = 'CONF'.
+    "Set header correctly for main view
+    IF iv_state ='MAIN'.
+      mo_idr->set_header_only( abap_false ).
+      mv_cnr_entered = abap_true.
+    ELSE.
+      mo_idr->set_header_only( abap_true ).
+    ENDIF.
+    DATA: lo_page_header_area TYPE REF TO cl_wd_page_header_area.
+    lo_page_header_area ?= io_view->get_element( 'IDR_EXTENDED_AREA' ).
+    mo_idr->render_area_visibility( io_page_header      = lo_page_header
+                                             io_cont_ticket      = lo_cont_ticket
+                                             io_cont_items       = lo_cont_items
+                                             io_page_header_area = lo_page_header_area ).
+  ENDIF.
+  IF mo_idr->mv_aca_uibb_exists = abap_true.
+    lo_page_header_area ?= io_view->get_element( 'IDR_EXTENDED_AREA' ).
+    IF lo_page_header_area->get_visible( ) = abap_false.
+      lo_page_header_area->set_visible( abap_true ).
+    ENDIF.
+  ENDIF.
+
+  CLEAR mo_cnr->mv_toolbar_changed_by_api.
+
+  " -----------------------------------------------------------------
+  " the following coding is relevant for note: 1875006 and 1941927
+  " note 1875006 fixed a issue RTL rendering by setting width of
+  " container LABEL_VALUES to 100%. But that caused a side effect
+  " and note 1941927 fixes that by removing the width in case ACA
+  " II3 is in use.
+  " -----------------------------------------------------------------
+  DATA: lo_tc_ii1 TYPE REF TO if_wd_view_element,
+        lo_tc_ii2 TYPE REF TO if_wd_view_element,
+        lo_tc_ii3 TYPE REF TO if_wd_view_element.
+  lo_tc_ii1 = io_view->get_element( id = 'TC_II1' ).
+  lo_tc_ii2 = io_view->get_element( id = 'TC_II2' ).
+  lo_tc_ii3 = io_view->get_element( id = 'TC_II3' ).
+  IF lo_tc_ii1 IS BOUND OR
+     lo_tc_ii2 IS BOUND OR
+     lo_tc_ii3 IS BOUND.
+    DATA: lo_label_values TYPE REF TO cl_wd_transparent_container,
+          lo_matrix_data  TYPE REF TO cl_wd_matrix_data.
+    lo_label_values ?= io_view->get_element( id = 'LABEL_VALUES' ).
+    IF lo_label_values IS BOUND.
+      lo_label_values->set_width( '' ).
+      lo_matrix_data ?= lo_label_values->get_layout_data( ).
+      IF lo_matrix_data IS BOUND.
+        lo_matrix_data->set_width( '' ).
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  IF is_header_notif_icon_required( io_page_header     = lo_page_header
+                                    io_view            = io_view
+                                    iv_floorplan_state = iv_state ) = abap_true.
+    mo_message_manager->set_page_header( lo_page_header ).
+  ENDIF.
+
+* Focus requests
+  IF ( iv_state = if_fpm_constants=>gc_floorplan_state-init_screen AND io_view->name = 'INITIAL_SCREEN' )
+    OR ( iv_state = if_fpm_constants=>gc_floorplan_state-main_area AND io_view->name = 'CNR_VIEW' )
+    OR ( iv_state = if_fpm_constants=>gc_floorplan_state-conf_screen AND io_view->name = 'CONF_SCREEN' ).
+    IF NOT mo_cnr->ms_focus_request IS INITIAL.
+      IF mo_cnr->ms_focus_request-on_page_header = abap_true.
+        io_view->request_focus_on_view_elem( view_element = lo_page_header ).
+      ELSEIF mo_cnr->ms_focus_request-on_label_values = abap_true AND lo_cont_items IS BOUND.
+        io_view->request_focus_on_view_elem( view_element = lo_cont_items ).
+      ELSEIF mo_cnr->ms_focus_request-on_ticket = abap_true AND lo_cont_ticket IS BOUND.
+        io_view->request_focus_on_view_elem( view_element = lo_cont_ticket ).
+      ELSEIF mo_cnr->ms_focus_request-on_first_tb_elem = abap_true.
+        request_focus_on_first_tb_elem( io_toolbar = CAST cl_wd_toolbar( io_view->get_element( 'TOOLBAR' ) )
+                                        iv_consider_all_enabled_fields = mo_cnr->ms_focus_request-consider_all_enabled_fields ).
+      ELSEIF mo_cnr->ms_focus_request-tb_elem IS NOT INITIAL.
+        DATA(lv_focus_set) = request_focus_on_tb_elem( io_toolbar = CAST cl_wd_toolbar( io_view->get_element( 'TOOLBAR' ) )
+                                                       iv_element = mo_cnr->ms_focus_request-tb_elem ).
+        IF lv_focus_set = abap_false.
+          request_focus_on_tb_elem( io_toolbar = CAST cl_wd_toolbar( io_view->get_element( 'TOOLBAR_FOOTER' ) )
+                                                                     iv_element = mo_cnr->ms_focus_request-tb_elem ).
+        ENDIF.
+      ENDIF.
+      CLEAR mo_cnr->ms_focus_request-on_ticket.
+      CLEAR mo_cnr->ms_focus_request-on_label_values.
+      CLEAR mo_cnr->ms_focus_request-on_page_header.
+    ENDIF.
+  ENDIF.
+
+
+ENDMETHOD.
+
+
+METHOD render_toolbar.
+
+**********************************************************************
+* dynamically determine which buttons should be inserted into the CNR toolbar
+
+* go through the toolbar context to determine which buttons should be activated
+
+* on CNR_VIEW we have 5 transparent containers where the buttons should be assigned to,
+* so that it can be easier defined where to set the separators
+
+* Separators are set between two transparent containers if they have both buttons assigned
+**********************************************************************
+
+
+  DATA lo_button_container TYPE REF TO cl_wd_transparent_container.
+  DATA lt_ui_elements TYPE cl_wd_uielement=>tt_uielement.
+  DATA lo_ui_element TYPE REF TO cl_wd_uielement.
+  DATA lv_name TYPE string.
+  DATA lo_toolbar_top TYPE REF TO cl_wd_transparent_container.
+  DATA lo_toolbar_bottom TYPE REF TO cl_wd_transparent_container.
+  DATA lo_horizontal_gutter TYPE REF TO cl_wd_horizontal_gutter.
+  DATA lo_horizontal_gutter_2 TYPE REF TO cl_wd_horizontal_gutter.
+  DATA lo_horizontal_gutter_3 TYPE REF TO cl_wd_horizontal_gutter.
+  DATA lo_button TYPE REF TO cl_wd_abstract_button.
+  DATA lo_button_choice TYPE REF TO cl_wd_button_choice.
+  DATA lv_index TYPE string.
+  DATA lv_button_name TYPE string.
+  DATA lv_default TYPE fpm_default_button.
+  DATA lo_fpm_nd_toolbar TYPE REF TO if_fpm_node.
+  DATA lo_context_manager TYPE REF TO cl_fpm_context_manager.
+  DATA lv_counter TYPE i.
+  DATA lv_visible_children TYPE wdy_boolean.
+  DATA lo_menu_bar TYPE REF TO cl_wd_menu_bar.
+  DATA lo_current_container TYPE REF TO cl_wd_transparent_container.
+  DATA lo_link TYPE REF TO cl_wd_link_to_action.
+  DATA lv_number_of_children TYPE i.
+  DATA lo_explanation TYPE REF TO cl_wd_explanation.
+  DATA lo_fpm_nd_button TYPE REF TO if_fpm_node.
+  DATA lo_fpm_el_button TYPE REF TO if_fpm_element.
+  DATA lo_toolbar TYPE REF TO cl_wd_toolbar.
+  DATA lo_toolbar_footer TYPE REF TO cl_wd_toolbar.
+
+  IF io_context IS BOUND.
+* transfer to FPM Context Manager
+    CREATE OBJECT lo_context_manager
+      EXPORTING
+        io_wd_context_root_node = io_context.
+    lo_fpm_nd_toolbar = lo_context_manager->get_fpm_root_node( ).
+  ELSE.
+    lo_fpm_nd_toolbar = io_fpm_nd_toolbar.
+  ENDIF.
+
+  IF lo_fpm_nd_toolbar IS NOT BOUND.
+    RETURN.
+  ENDIF.
+
+  check_toolbar_duplication( io_fpm_nd_toolbar = lo_fpm_nd_toolbar ).
+
+* set guideline if provided via FLUID
+  IF iv_guideline_version IS SUPPLIED.
+    mv_ui_guideline_version_extern = iv_guideline_version.
+  ENDIF.
+
+* clean-up toolbar container
+  lo_button_container ?= io_view->get_element( 'BUTTON_CONTAINER' ).
+  lo_toolbar ?= io_view->get_element( 'TOOLBAR' ).
+  lo_toolbar_footer ?= io_view->get_element( 'TOOLBAR_FOOTER' ).
+
+* Delete all elements of the toolbar and rebuild it afterwards
+  CASE iv_navigation_state.
+    WHEN if_fpm_constants=>gc_floorplan_state-init_screen.
+      "on the Initial Screen only remove the Other_Functions buttons
+      IF lo_button_container IS BOUND.
+        lt_ui_elements = lo_button_container->get_children( ).
+        LOOP AT lt_ui_elements INTO lo_ui_element.
+          lv_name = lo_ui_element->get_id( ).
+          IF NOT lv_name CS 'BTN_'.
+            lo_button_container->remove_child( id = lv_name ).
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    WHEN if_fpm_constants=>gc_floorplan_state-error_screen.
+      lo_button_container->remove_all_children( ).
+    WHEN OTHERS.
+      IF lo_button_container IS BOUND.
+        lo_button_container->remove_all_children( ).
+      ENDIF.
+      lo_button_container ?= io_view->get_element( 'BUTTON_CONTAINER_CP' ).
+      IF lo_button_container IS BOUND.
+        lo_button_container->remove_all_children( ).
+      ENDIF.
+      IF lo_toolbar IS BOUND.
+        lo_toolbar->remove_all_toolbar_items( ).
+        lo_toolbar->remove_all_toolbar_right_items( ).
+        IF mo_idr IS BOUND.
+          mo_idr->set_side_panel_changed( ).
+        ENDIF.
+      ENDIF.
+      IF lo_toolbar_footer IS BOUND.
+        lo_toolbar_footer->remove_all_toolbar_items( ).
+        lo_toolbar_footer->remove_all_toolbar_right_items( ).
+*___Don't render the footer toolbar in FLUID when not in FIORI (DTA)
+        IF iv_guideline_version IS SUPPLIED AND iv_guideline_version <> if_fpm_constants_internal=>gc_guideline_version-fiori.
+          RETURN.
+        ENDIF.
+      ENDIF.
+  ENDCASE.
+
+**********************************************************************
+*** CREATE TOOLBAR ELEMENTS ******************************************
+**********************************************************************
+
+  create_toolbar_elements( io_view = io_view
+                           iv_navigation_state = iv_navigation_state
+                           io_fpm_nd_toolbar = lo_fpm_nd_toolbar
+                           iv_component_name = iv_component_name
+                           io_fpm_hct_toolbar_assist = io_fpm_hct_toolbar_assist ).
+
+********************************************************************************
+*** set the TOOLBARS and LINE_2/3 to visible when we are in a normal scenario***
+********************************************************************************
+  lo_horizontal_gutter_2 ?= io_view->get_element( 'LINE_2' ).
+  lo_horizontal_gutter_3 ?= io_view->get_element( 'LINE_3' ).
+  IF lo_toolbar_top IS NOT INITIAL.
+    lo_toolbar_top->set_visible( cl_wd_transparent_container=>e_visible-visible ).
+  ENDIF.
+  IF lo_toolbar_bottom IS NOT INITIAL.
+    lo_toolbar_bottom->set_visible( cl_wd_transparent_container=>e_visible-visible ).
+  ENDIF.
+  IF lo_horizontal_gutter_2 IS NOT INITIAL.
+    lo_horizontal_gutter_2->set_visible( cl_wd_horizontal_gutter=>e_visible-visible ).
+  ENDIF.
+  IF lo_horizontal_gutter_3 IS NOT INITIAL.
+    lo_horizontal_gutter_3->set_visible( cl_wd_horizontal_gutter=>e_visible-visible ).
+  ENDIF.
+
+* also set LINE_1 by default to visible
+  lo_horizontal_gutter ?= io_view->get_element( 'LINE_1' ).
+  IF lo_horizontal_gutter IS NOT INITIAL.
+    lo_horizontal_gutter->set_visible( cl_wd_horizontal_gutter=>e_visible-visible ).
+  ENDIF.
+
+***************************************************************************************************
+* if the toolbar shouldn't be duplicated the bottom toolbar and gutters have to be made invisible *
+***************************************************************************************************
+
+  IF me->mv_duplicate_toolbar <> abap_true
+    OR iv_navigation_state <> if_fpm_constants=>gc_floorplan_state-main_area.
+* set the bottom toolbar and the horizontal gutter to invisible
+    IF lo_toolbar_bottom IS NOT INITIAL.
+      lo_toolbar_bottom->set_visible( cl_wd_transparent_container=>e_visible-none ).
+      lo_horizontal_gutter_2->set_visible( cl_wd_horizontal_gutter=>e_visible-none ).
+    ENDIF.
+  ELSE.
+    IF lo_toolbar_bottom IS NOT INITIAL.
+      lo_toolbar_bottom->set_visible( cl_wd_transparent_container=>e_visible-visible ).
+    ENDIF.
+    IF lo_horizontal_gutter_2 IS NOT INITIAL.
+      lo_horizontal_gutter_2->set_visible( cl_wd_horizontal_gutter=>e_visible-visible ).
+    ENDIF.
+  ENDIF.
+
+****************************************************************************************
+*** Remove HorizontalGutter 'LINE_1' and 'LINE_2' if no buttons are displayed at all ***
+*** and the menubars are both invisible (only relevant for OIF)                      ***
+****************************************************************************************
+
+  lv_counter = 1.
+  lv_visible_children = abap_false.
+  lo_toolbar_top ?= io_view->get_element( 'TOOLBAR_TOP' ).
+  lo_toolbar_bottom ?= io_view->get_element( 'TOOLBAR_BOTTOM' ).
+
+  IF get_ui_guideline_version( ) = if_fpm_constants_internal=>gc_guideline_version-one.
+    WHILE lv_counter <= lo_toolbar_top->number_of_children( ).
+
+      CLEAR lo_menu_bar.
+      CLEAR lo_current_container.
+      CLEAR lo_link.
+
+      TRY.
+          lo_menu_bar ?= lo_toolbar_top->get_child( index = lv_counter ).
+        CATCH cx_sy_move_cast_error.
+          TRY.
+              lo_current_container ?= lo_toolbar_top->get_child( index = lv_counter ).
+            CATCH cx_sy_move_cast_error.
+              TRY.
+                  lo_link ?= lo_toolbar_top->get_child( index = lv_counter ).
+                CATCH cx_sy_move_cast_error ##NO_HANDLER.
+              ENDTRY.
+          ENDTRY.
+      ENDTRY.
+
+      IF lo_current_container IS NOT INITIAL.
+        IF lo_current_container->has_children( ) = abap_true.
+          lv_number_of_children = lo_current_container->number_of_children( ).
+
+* if current container has visible children search for the next filled container
+          DO lv_number_of_children TIMES.
+            TRY.
+                lo_button ?= lo_current_container->get_child( index = sy-index ).
+                IF lo_button->get_visible( ) = cl_wd_button=>e_visible-visible.
+                  lv_visible_children = abap_true.
+                  EXIT.
+                ENDIF.
+              CATCH cx_sy_move_cast_error.
+                TRY.
+                    lo_button_choice ?= lo_current_container->get_child( index = sy-index ).
+                    IF lo_button_choice->get_visible( ) = cl_wd_button_choice=>e_visible-visible.
+                      lv_visible_children = abap_true.
+                      EXIT.
+                    ENDIF.
+                  CATCH cx_sy_move_cast_error ##NO_HANDLER.
+                ENDTRY.
+            ENDTRY.
+          ENDDO.
+        ENDIF.
+* else we have a menubar; when the menubar is visible then show toolbar and the lines
+      ELSEIF lo_menu_bar IS NOT INITIAL.
+        IF lo_menu_bar->get_visible( ) = cl_wd_menu_bar=>e_visible-visible.
+          lv_visible_children = abap_true.
+          EXIT.
+        ENDIF.
+* else we have a link to action (Config Editor); when the menubar is visible then show toolbar and the lines
+      ELSEIF lo_link IS NOT INITIAL.
+        IF lo_link->get_visible( ) = cl_wd_link_to_action=>e_visible-visible.
+          lv_visible_children = abap_true.
+          EXIT.
+        ENDIF.
+      ENDIF.
+
+      IF lv_visible_children = abap_true.
+        EXIT.
+      ENDIF.
+      ADD 1 TO lv_counter.
+    ENDWHILE.
+  ENDIF.
+
+
+  IF lv_visible_children = abap_false.
+* set toolbars and horizontal gutters to invisible if
+*** 1) no children are included inside the toolbar
+*** Removed because of the close-button: 2) we are on an OIF conf screen
+    lo_toolbar_top ?= io_view->get_element( 'TOOLBAR_TOP' ).
+    lo_toolbar_bottom ?= io_view->get_element( 'TOOLBAR_BOTTOM' ).
+    lo_horizontal_gutter ?= io_view->get_element( 'LINE_1' ).
+    IF lo_horizontal_gutter IS NOT INITIAL.
+      lo_horizontal_gutter->set_visible( cl_wd_horizontal_gutter=>e_visible-none ).
+    ENDIF.
+    lo_horizontal_gutter ?= io_view->get_element( 'LINE_2' ).
+    IF lo_horizontal_gutter IS NOT INITIAL.
+      lo_horizontal_gutter->set_visible( cl_wd_horizontal_gutter=>e_visible-none ).
+    ENDIF.
+    IF lo_toolbar_top IS NOT INITIAL.
+      lo_toolbar_top->set_visible( cl_wd_transparent_container=>e_visible-none ).
+    ENDIF.
+    IF lo_toolbar_bottom IS NOT INITIAL.
+      lo_toolbar_bottom->set_visible( cl_wd_transparent_container=>e_visible-none ).
+    ENDIF.
+  ENDIF.
+
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-conf_screen.
+    lo_explanation ?= io_view->get_element( 'EXPLANATION' ).
+    IF lo_explanation IS NOT INITIAL.
+      lo_explanation->set_visible( cl_wd_explanation=>e_visible-none ).
+    ENDIF.
+  ENDIF.
+
+
+  IF iv_component_name IS INITIAL.
+    lo_button_container ?= io_view->get_element('ROOTUIELEMENTCONTAINER').
+    IF lo_button_container IS NOT INITIAL.
+      lo_button_container->set_default_button_id( '' ).
+    ENDIF.
+  ENDIF.
+
+* activate DEFAULT BUTTON in OIF if configured (only Check and Refresh Button)
+  IF iv_navigation_state = if_fpm_constants=>gc_floorplan_state-main_area
+    AND iv_component_name IS INITIAL.
+
+    DO 2 TIMES.
+      lv_index = sy-index.
+      CASE lv_index.
+        WHEN 1. lv_button_name = 'CHECK'.
+        WHEN 2. lv_button_name = 'REFRESH'.
+      ENDCASE.
+      lo_fpm_nd_button = lo_fpm_nd_toolbar->get_child_node( name = lv_button_name ).
+      lo_fpm_el_button = lo_fpm_nd_button->get_element( ).
+      IF lo_fpm_el_button IS NOT INITIAL.
+        lo_fpm_el_button->get_attribute(
+        EXPORTING
+          name =  'DEFAULT_BUTTON'
+        IMPORTING
+          value = lv_default ).
+
+
+        lo_button ?= io_view->get_element( lv_button_name ).
+
+        IF lo_button IS NOT INITIAL AND lv_default = abap_true.
+          lo_button_container->set_default_button_id( lv_button_name ).
+          EXIT.
+        ENDIF.
+      ENDIF.
+
+    ENDDO.
+  ENDIF.
+
+
+ENDMETHOD.
+
+
+  METHOD request_focus_on_first_field.
+
+    IF mo_cnr->ms_focus_request-on_first_field = abap_false.
+      RETURN.
+    ENDIF.
+
+    DATA: lo_component_info TYPE REF TO iwci_if_fpm_component_info.
+    LOOP AT it_uibb ASSIGNING FIELD-SYMBOL(<uibb>).
+      CHECK <uibb>-component <> if_fpm_constants=>gc_components-bics_grid. "BICS Grid cannot be supported currently because it belongs to another software layer
+      TRY.
+          lo_component_info ?= mo_fpm->mo_component_manager->get_component_interface( iv_component_name = |{ <uibb>-component }|
+                                                                                      is_config_key     = <uibb>-config_key
+                                                                                      iv_instance_id    = <uibb>-instance_id ).
+          IF lo_component_info IS BOUND AND lo_component_info->request_focus_on_first_field( iv_consider_all_enabled_fields = mo_cnr->ms_focus_request-consider_all_enabled_fields ) = abap_true.
+            EXIT.
+          ENDIF.
+        CATCH cx_sy_move_cast_error.
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD request_focus_on_first_tb_elem.
+
+    IF NOT io_toolbar IS BOUND.
+      RETURN.
+    ENDIF.
+
+    DATA(lt_toolbar_elements) = io_toolbar->get_toolbar_items( ).
+    LOOP AT lt_toolbar_elements ASSIGNING FIELD-SYMBOL(<tt_element>).
+      TRY.
+          DATA(lo_uielement) = CAST cl_wd_uielement( <tt_element> ).
+          IF lo_uielement->get_visible( ) NE cl_wd_uielement=>e_visible-visible.
+            CONTINUE.
+          ENDIF.
+          DATA(lv_cid) = lo_uielement->_cid.
+          CASE lv_cid.
+            WHEN cl_wd_toolbar_separator=>cid_toolbar_separator.
+              CONTINUE.
+            WHEN OTHERS.
+              IF iv_consider_all_enabled_fields = abap_false AND lo_uielement->get_enabled( ) = abap_false.
+                CONTINUE.
+              ENDIF.
+              io_toolbar->get_view( )->request_focus_on_view_elem( lo_uielement ).
+              EXIT.
+          ENDCASE.
+        CATCH cx_sy_move_cast_error.
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+  METHOD request_focus_on_tb_elem.
+
+    CHECK NOT iv_element IS INITIAL.
+    CHECK NOT io_toolbar IS INITIAL.
+
+    DATA: lo_uielement TYPE REF TO cl_wd_uielement.
+    READ TABLE mt_btn_id ASSIGNING FIELD-SYMBOL(<btn_id>) WITH TABLE KEY element_id = iv_element.
+    IF sy-subrc = 0.
+      lo_uielement ?= io_toolbar->get_toolbar_item( id = <btn_id>-uielement_id ).
+      IF NOT lo_uielement IS BOUND.
+        lo_uielement ?= io_toolbar->get_toolbar_right_item( id = <btn_id>-uielement_id ).
+      ENDIF.
+    ENDIF.
+
+    IF lo_uielement IS BOUND.
+      io_toolbar->get_view( )->request_focus_on_view_elem( lo_uielement ).
+      rv_focus_requested = abap_true.
+    ENDIF.
+
+
+
+  ENDMETHOD.
+
+
+METHOD set_duplicate_toolbar.
+
+
+  DATA:
+    lo_container         TYPE REF TO cl_wd_transparent_container,
+    lo_horizontal_gutter TYPE REF TO cl_wd_horizontal_gutter.
+
+  DATA:
+    lv_old_visibility TYPE wdui_visibility.
+
+
+  lo_container ?= io_view->get_element( 'TOOLBAR_BOTTOM' ).
+  lo_horizontal_gutter ?= io_view->get_element( 'LINE_2' ).
+
+  IF lo_container IS NOT INITIAL AND lo_horizontal_gutter IS NOT INITIAL.
+    lv_old_visibility = lo_container->get_visible( ).
+    IF iv_activate_bottom_toolbar <> 'X' AND lv_old_visibility = cl_wd_transparent_container=>e_visible-visible.
+      lo_container->set_visible( cl_wd_transparent_container=>e_visible-none ).
+      lo_horizontal_gutter->set_visible( cl_wd_horizontal_gutter=>e_visible-none ).
+    ELSEIF iv_activate_bottom_toolbar = abap_true AND lv_old_visibility = cl_wd_transparent_container=>e_visible-none.
+      lo_container->set_visible( cl_wd_transparent_container=>e_visible-visible ).
+      lo_horizontal_gutter->set_visible( cl_wd_horizontal_gutter=>e_visible-visible ).
+    ENDIF.
+  ENDIF.
+
+
+ENDMETHOD.
+
+
+METHOD set_initial_views.
+
+
+  DATA:
+    lt_variant  TYPE if_fpm_element=>ty_t_fpm_element,
+    lt_mainview TYPE if_fpm_element=>ty_t_fpm_element,
+    lt_subview  TYPE if_fpm_element=>ty_t_fpm_element.
+
+  DATA:
+    lv_index  TYPE sytabix,
+    lv_hidden TYPE fpm_hidden.
+
+  FIELD-SYMBOLS:
+    <ls_variant>  LIKE LINE OF lt_variant,
+    <ls_mainview> LIKE LINE OF lt_mainview,
+    <ls_subview>  LIKE LINE OF lt_mainview.
+
+
+* Ensure that initial main and sub views can be set
+  ASSERT mo_floorplan_data IS BOUND.
+
+* Set initial main view and sub views
+  lt_variant = mo_floorplan_data->get_fpm_root_node( )->get_child_node( name = if_fpm_constants_internal=>gc_nodes-variant )->get_elements( ).
+  LOOP AT lt_variant ASSIGNING <ls_variant>.
+    lt_mainview = <ls_variant>->get_child_node( name = if_fpm_constants_internal=>gc_nodes-mainview )->get_elements( ).
+    LOOP AT lt_mainview ASSIGNING <ls_mainview>.
+      lv_index = sy-tabix.
+      <ls_mainview>->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hidden
+                                    IMPORTING value = lv_hidden ).
+      IF lv_hidden = abap_false.
+        <ls_variant>->get_child_node( name = if_fpm_constants_internal=>gc_nodes-mainview )->set_lead_selection_index( lv_index ).
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    IF <ls_mainview> IS NOT ASSIGNED.
+      EXIT.
+    ENDIF.
+    lt_subview = <ls_mainview>->get_child_node( name = if_fpm_constants_internal=>gc_nodes-subview )->get_elements( ).
+    LOOP AT lt_subview ASSIGNING <ls_subview>.
+      lv_index = sy-tabix.
+      <ls_subview>->get_attribute( EXPORTING name  = if_fpm_constants_internal=>gc_attributes-hidden
+                                   IMPORTING value = lv_hidden ).
+      IF lv_hidden = abap_false.
+        <ls_mainview>->get_child_node( name = if_fpm_constants_internal=>gc_nodes-subview )->set_lead_selection_index( lv_index ).
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDLOOP.
+
+
+ENDMETHOD.
+
+
+METHOD sort_oif_nodes.
+
+
+  DATA:
+    lo_oif_application        TYPE REF TO if_fpm_node,
+    lo_nd_variant             TYPE REF TO if_fpm_node,
+    lo_nd_mainview            TYPE REF TO if_fpm_node,
+    lo_nd_subview             TYPE REF TO if_fpm_node,
+    lo_nd_uibb                TYPE REF TO if_fpm_node,
+    lo_nd_initial_screen      TYPE REF TO if_fpm_node,
+    lo_nd_initial_screen_uibb TYPE REF TO if_fpm_node,
+    lo_element_variant        TYPE REF TO if_fpm_element,
+    lo_element_mainview       TYPE REF TO if_fpm_element,
+    lo_element_subview        TYPE REF TO if_fpm_element,
+    lo_element_initial_screen TYPE REF TO if_fpm_element.
+
+  DATA:
+    lv_elem_count_variant  TYPE i,
+    lv_elem_count_mainview TYPE i,
+    lv_elem_count_subview  TYPE i,
+    lv_index_variant       TYPE i,
+    lv_index_mainview      TYPE i,
+    lv_index_subview       TYPE i.
+
+
+  lo_oif_application = mo_floorplan_data->get_fpm_root_node( ).
+  lo_nd_variant = lo_oif_application->get_child_node( name = if_fpm_constants_internal=>gc_nodes-variant ).
+  IF NOT lo_nd_variant IS INITIAL.
+
+* ------------------------------------------------------------------------
+*   variant node
+* ------------------------------------------------------------------------
+
+    lv_elem_count_variant = lo_nd_variant->get_element_count( ).
+    lv_index_variant = 1.
+    DO lv_elem_count_variant TIMES.
+      lo_element_variant = lo_nd_variant->get_element( lv_index_variant ).
+      lo_nd_mainview = lo_element_variant->get_child_node( name = if_fpm_constants_internal=>gc_nodes-mainview ).
+      IF NOT lo_nd_mainview IS INITIAL.
+
+* ------------------------------------------------------------------------
+*       mainview node
+* ------------------------------------------------------------------------
+
+        lv_elem_count_mainview = lo_nd_mainview->get_element_count( ).
+        lv_index_mainview = 1.
+        DO lv_elem_count_mainview TIMES.
+          lo_element_mainview = lo_nd_mainview->get_element( lv_index_mainview ).
+          lo_nd_subview = lo_element_mainview->get_child_node( name = if_fpm_constants_internal=>gc_nodes-subview ).
+          IF NOT lo_nd_subview IS INITIAL.
+
+* ------------------------------------------------------------------------
+*           subview node
+* ------------------------------------------------------------------------
+
+            lv_elem_count_subview = lo_nd_subview->get_element_count( ).
+            lv_index_subview = 1.
+            DO lv_elem_count_subview TIMES.
+              lo_element_subview = lo_nd_subview->get_element( lv_index_subview ).
+              lo_nd_uibb = lo_element_subview->get_child_node( name = if_fpm_constants_internal=>gc_nodes-uibb ).
+              IF NOT lo_nd_uibb IS INITIAL.
+
+* ------------------------------------------------------------------------
+*               substep node
+* ------------------------------------------------------------------------
+
+                sort_node_elements( io_fpm_node = lo_nd_uibb ).
+              ENDIF.
+              lv_index_subview = lv_index_subview + 1.
+            ENDDO.
+            sort_node_elements( io_fpm_node = lo_nd_subview ).
+          ENDIF.
+          lv_index_mainview = lv_index_mainview + 1.
+        ENDDO.
+        sort_node_elements( io_fpm_node = lo_nd_mainview ).
+      ENDIF.
+      lv_index_variant = lv_index_variant + 1.
+    ENDDO.
+  ENDIF.
+  lo_nd_initial_screen = lo_oif_application->get_child_node( name = if_fpm_constants_internal=>gc_nodes-initial_screen ).
+  IF NOT lo_nd_initial_screen IS INITIAL.
+    lo_element_initial_screen = lo_nd_initial_screen->get_element( 1 ).
+    IF  NOT lo_element_initial_screen IS INITIAL.
+      lo_nd_initial_screen_uibb = lo_element_initial_screen->get_child_node( name = if_fpm_constants_internal=>gc_nodes-initial_screen_uibb ).
+      IF NOT lo_nd_initial_screen_uibb IS INITIAL.
+
+* ------------------------------------------------------------------------
+*       initial_screen_uibb node
+* ------------------------------------------------------------------------
+
+        sort_node_elements( io_fpm_node = lo_nd_initial_screen_uibb ).
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+
+ENDMETHOD.
+ENDCLASS.

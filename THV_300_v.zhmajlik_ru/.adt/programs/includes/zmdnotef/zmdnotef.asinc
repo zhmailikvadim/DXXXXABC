@@ -1,0 +1,5117 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZMDNOTEF
+*&---------------------------------------------------------------------*
+*********************************************************************
+* Изменения
+* Дата         Автор             Заявка  Характер и причина изменения
+*********************************************************************
+* 14.03.2020  Бутвиловская Д  8000000046    Разработка роли для просмотра Z-транзакций по сбыту
+*********************************************************************
+*&---------------------------------------------------------------------*
+*&      Form  GET_DOC_NUMBER
+*&---------------------------------------------------------------------*
+*       Номер для нового документа
+*----------------------------------------------------------------------*
+*      <-- docnum   Номер документа
+*----------------------------------------------------------------------*
+FORM get_doc_number  CHANGING docnum TYPE zdeliv_note_h-vbeln.
+  DATA: lv_nrrangenr TYPE nriv-nrrangenr.
+
+*--> Логвинович Г.   МТО RM#25575 убрана лишняя проверка на поиск интервала
+* поиск номера интервала
+*  SELECT SINGLE nrrangenr
+*    FROM nriv
+*    INTO lv_nrrangenr
+*    WHERE object    = 'Z_DELNOTE'
+*      AND subobject = bukrs
+*      AND toyear    = gjahr.
+*  IF lv_nrrangenr IS INITIAL.
+*    MESSAGE e033 WITH bukrs.
+*  ENDIF.
+*  следующий номер в найденном интервале
+*<-- Логвинович Г.   МТО RM#25575 убрана лишняя проверка на поиск интервала
+
+  CALL FUNCTION 'NUMBER_GET_NEXT'
+    EXPORTING
+      nr_range_nr = '01' "lv_nrrangenr *Логвинович Г.   МТО RM#25575 убрана лишняя проверка на поиск интервала
+      object      = 'Z_DELNOTE'
+      quantity    = '1'
+      subobject   = bukrs
+      toyear      = gjahr
+    IMPORTING
+      number      = docnum
+    EXCEPTIONS
+      OTHERS      = 1.
+  IF sy-subrc <> 0.
+    MESSAGE e033 WITH bukrs.
+  ENDIF.
+
+ENDFORM.                    " GET_DOC_NUMBER
+
+
+*&---------------------------------------------------------------------*
+*&      Form  FILL_FIELDNAMES
+*&---------------------------------------------------------------------*
+*       Поля для F4-help
+*----------------------------------------------------------------------*
+FORM fill_fieldnames USING VALUE(tabname)
+                           VALUE(fname).
+  APPEND VALUE #( tabname  = tabname
+                  fieldname = fname
+  ) TO fieldtab.
+ENDFORM.                    " FILL_FIELDNAMES
+
+*&---------------------------------------------------------------------*
+*&      Form  F4HELP
+*&---------------------------------------------------------------------*
+*       Вызов F4-help
+*----------------------------------------------------------------------*
+FORM f4help TABLES tt_valtab
+            USING p_field
+                  p_dynprofield
+                  p_rc.
+
+  CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+    EXPORTING
+      retfield        = p_field
+      dynprofield     = p_dynprofield
+      dynpprog        = sy-repid
+      dynpnr          = sy-dynnr
+      value_org       = 'S'
+    TABLES
+      value_tab       = tt_valtab
+      return_tab      = returntab
+    EXCEPTIONS
+      parameter_error = 1
+      no_values_found = 2
+      OTHERS          = 3.
+  p_rc = sy-subrc.
+ENDFORM.                                                    " F4HELP
+
+*&---------------------------------------------------------------------*
+*&      Form  INITIAL_CHECK
+*&---------------------------------------------------------------------*
+*       Пустая (условно пуста) строка?
+*----------------------------------------------------------------------*
+FORM initial_check .
+  IF xpostable-maktx IS INITIAL AND
+     xpostable-menge IS INITIAL AND
+     xpostable-zmenge_dm IS INITIAL AND
+     xpostable-price IS INITIAL AND
+     xpostable-brate IS INITIAL AND
+     xpostable-vrate IS INITIAL AND
+     xpostable-zvidt IS INITIAL AND
+     xpostable-zkolm IS INITIAL AND
+     xpostable-zkolp IS INITIAL AND
+     xpostable-zkodg IS INITIAL AND
+     xpostable-zklgr IS INITIAL AND
+     xpostable-brgew IS INITIAL AND
+     xpostable-zdocs IS INITIAL AND
+ ( ( xpostable-meins IS INITIAL AND   " У драг. металлов ЕИ по умолчанию
+   ( ztype EQ 'RM' OR ztype EQ 'VP' OR ztype EQ 'VZ' OR ztype EQ 'OT' ) ) OR
+     ztype EQ 'DM' OR ztype EQ 'SO' )
+    OR ( ztype EQ 'SO' AND xpostable-anln1 IS INITIAL ).
+    MOVE 'X' TO empty.
+  ELSE.
+    CLEAR empty.
+  ENDIF.
+ENDFORM.                    " INITIAL_CHECK
+
+*&---------------------------------------------------------------------*
+*&      Form  CONFIRM
+*&---------------------------------------------------------------------*
+*       Закончить обработку?
+*----------------------------------------------------------------------*
+FORM confirm .
+  CALL FUNCTION 'POPUP_TO_CONFIRM'
+    EXPORTING
+      titlebar              = TEXT-004
+      text_question         = TEXT-005
+      icon_button_1         = 'ICON_OKAY'
+      icon_button_2         = 'ICON_CANCEL'
+      default_button        = '2'
+      display_cancel_button = ' '
+      popup_type            = 'ICON_MESSAGE_WARNING'
+    IMPORTING
+      answer                = answer.
+  IF answer = '2'.
+    SET SCREEN sy-dynnr.
+  ELSE.
+    SET SCREEN '1001'.
+  ENDIF.
+  LEAVE SCREEN.
+ENDFORM.                    " CONFIRM
+
+*&---------------------------------------------------------------------*
+*&      Form  READ_DOCS
+*&---------------------------------------------------------------------*
+*       Поиск релевантных документов
+*----------------------------------------------------------------------*
+FORM read_docs .
+  TYPES:
+    BEGIN OF lty_s_storno,                                                 "{Hubenka 05.03.2013 #1411
+      smbln TYPE mblnr,
+      sjahr TYPE mjahr,
+    END OF lty_s_storno.                                                   "}Hubenka 05.03.2013 #1411
+
+  FIELD-SYMBOLS: <header>    TYPE deliv_list,
+                 <ls_storno> TYPE lty_s_storno.                                "Hubenka 05.03.2013 #1411
+  DATA: name1      TYPE adrc-name1,
+        name2      TYPE adrc-name2,
+        lt_storno  TYPE STANDARD TABLE OF lty_s_storno,                         "Hubenka 05.03.2013 #1411
+        lt_storno1 TYPE STANDARD TABLE OF lty_s_storno,                         "Hubenka 05.03.2013 #1411
+        ls_storno  TYPE lty_s_storno.
+
+  CLEAR header.
+  REFRESH header.
+
+  SELECT vbeln                                                                 "{Hubenka 12.03.2013 #1411
+         ztype
+         zdate
+         zstate
+         cdat
+         cnam
+         zkunnr
+         pernr
+         pertxt
+         zblank
+         deleted
+         mblnr
+         mjahr
+         zdelivery                                                             "}Hubenka 12.03.2013 #1411
+      FROM zdeliv_note_h
+      INTO CORRESPONDING FIELDS OF TABLE header
+      WHERE bukrs EQ bukrs
+        AND gjahr EQ gjahr
+        AND ztype IN ztype_set
+        AND vbeln IN vbeln_set
+        AND zdate IN zdate_set
+        AND zstate IN zstate_set
+        AND zblank IN zblank_set.                                          "Hubenka 21.02.2013 #1411
+
+  LOOP AT header WHERE mblnr IS NOT INITIAL.                                   "{Hubenka 12.03.2013 #1411
+    ls_storno-smbln = header-mblnr.
+    ls_storno-sjahr = header-mjahr.
+    APPEND ls_storno TO lt_storno1.
+  ENDLOOP.
+  IF lt_storno1[] IS NOT INITIAL.
+    SELECT smbln sjahr                                                           "{Hubenka 05.03.2013 #1411
+    FROM mseg
+    INTO TABLE lt_storno
+    FOR ALL ENTRIES IN lt_storno1"header
+    WHERE smbln = lt_storno1-smbln"header-mblnr
+      AND sjahr = lt_storno1-sjahr."header-mjahr.
+  ENDIF.
+  CLEAR: lt_storno1[].
+  LOOP AT header WHERE zdelivery IS NOT INITIAL.
+    ls_storno-smbln = header-zdelivery.
+    APPEND ls_storno TO lt_storno1.
+  ENDLOOP.
+  IF lt_storno1[] IS NOT INITIAL.
+    SELECT vbeln AS smbln
+      FROM likp
+      APPENDING CORRESPONDING FIELDS OF TABLE lt_storno
+      FOR ALL ENTRIES IN lt_storno1
+      WHERE vbeln = lt_storno1-smbln.                                            "}Hubenka 05.03.2013 #1411
+  ENDIF.
+  FREE lt_storno1.                                                             "}Hubenka 12.03.2013 #1411
+  "Название/Имя заказчика
+  LOOP AT header ASSIGNING <header>.
+    IF <header>-zkunnr IS NOT INITIAL.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = <header>-zkunnr
+        IMPORTING
+          output = <header>-zkunnr.
+      "Наименование из дебитора
+      SELECT SINGLE name1 FROM kna1
+                          INTO <header>-kunnrtxt
+                          WHERE kunnr EQ <header>-zkunnr.
+    ELSEIF <header>-ztype EQ 'VP' OR <header>-ztype EQ 'VZ'.
+      "Заказчик = Грузоотправитель = БЕ
+      CLEAR: name1, name2.
+
+      SELECT SINGLE adrnr INTO adrnr
+                          FROM t001
+                          WHERE bukrs EQ bukrs.
+      SELECT name1 name2
+        FROM adrc
+        INTO (name1, name2)
+        UP TO 1 ROWS
+        WHERE addrnumber EQ adrnr AND
+               date_from LE <header>-zdate AND
+                 date_to GE <header>-zdate.
+      ENDSELECT.
+
+      CONCATENATE name1 ' ' name2 INTO <header>-kunnrtxt RESPECTING BLANKS.
+      CONDENSE <header>-kunnrtxt.
+
+    ELSEIF <header>-pernr NE 0.
+      "ФИО из табельного номера
+      PERFORM get_name USING <header>-pernr
+                             <header>-zdate
+                       CHANGING <header>-kunnrtxt.
+    ELSE.
+      "Все текстовое поле с данными о заказчике
+      MOVE <header>-pertxt TO <header>-kunnrtxt.
+    ENDIF.
+    IF <header>-mblnr IS NOT INITIAL.
+      <header>-sap_doc = <header>-mblnr.
+      READ TABLE lt_storno ASSIGNING <ls_storno> WITH KEY smbln = <header>-mblnr "{Hubenka 05.03.2013 #1411
+                                                          sjahr = <header>-mjahr.
+      IF sy-subrc = 0.
+        <header>-storno = 'X'.
+      ENDIF.                                                                     "}Hubenka 05.03.2013 #1411
+    ELSEIF <header>-zdelivery IS NOT INITIAL.
+      <header>-sap_doc = <header>-zdelivery.
+      READ TABLE lt_storno ASSIGNING <ls_storno> WITH KEY smbln = <header>-zdelivery."{Hubenka 05.03.2013 #1411
+      IF sy-subrc <> 0.
+        <header>-storno = 'X'.
+      ENDIF.                                                                         "}Hubenka 05.03.2013 #1411
+    ENDIF.
+  ENDLOOP.
+ENDFORM.                    " READ_DOCS
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY
+*&---------------------------------------------------------------------*
+*       Вывод документа
+*----------------------------------------------------------------------*
+FORM display .
+  CLEAR: header_prop, tabs.
+
+  IF aktyp EQ 'C'.
+    " Блокировка документа
+    PERFORM lock.
+  ENDIF.
+
+  " Чтение документа
+  PERFORM get_doc.
+
+  SET SCREEN '1010'.
+  LEAVE SCREEN.
+ENDFORM.                    " DISPLAY
+
+*&---------------------------------------------------------------------*
+*&      Form  DATA_LOSS_CHECK
+*&---------------------------------------------------------------------*
+*       Проверить, были ли произведены какие-либо изменения.           *
+*       Если да, то в диаоговом окне спросить, сохранить ли изменения  *
+*----------------------------------------------------------------------*
+FORM data_loss_check .
+  CLEAR retcode.
+  PERFORM check_change.
+  CHECK retcode EQ 4.
+
+  "Вопрос в диалоговом окне
+  CALL FUNCTION 'POPUP_TO_CONFIRM'
+    EXPORTING
+      titlebar      = TEXT-007
+      text_question = TEXT-006
+    IMPORTING
+      answer        = answer.
+
+  "Обработать ответ
+  CASE answer.
+    WHEN 'A'.
+      SET SCREEN '1010'.
+      LEAVE SCREEN.
+    WHEN '1'.
+      PERFORM save.
+  ENDCASE.
+ENDFORM.                    " DATA_LOSS_CHECK
+
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_CHANGE
+*&---------------------------------------------------------------------*
+*       Проверить, были ли изменения.                                  *
+*----------------------------------------------------------------------*
+FORM check_change .
+  FIELD-SYMBOLS: <ls_xpostable> TYPE pos_t.
+  CLEAR retcode.
+  "Заголовок изменен?
+  IF xheader NE yheader OR xheader-zstate = 'P'.
+    retcode = 4.
+    EXIT.
+  ENDIF.
+  "Записи изменены или удалены ?
+  LOOP AT ypostable INTO gs_ypostable.
+    READ TABLE xpostable ASSIGNING <ls_xpostable> WITH KEY buzei = gs_ypostable-buzei.
+    IF sy-subrc = 0.
+      IF gs_ypostable NE <ls_xpostable>.
+        retcode = 4.
+        EXIT.
+      ENDIF.
+    ELSE.
+      retcode = 4.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+  CHECK retcode = 0.
+
+* ------ Записи добавлены ? ---------------------------------------------
+  DESCRIBE TABLE ypostable LINES lines.
+  DESCRIBE TABLE xpostable LINES lines2.
+  IF lines2 > lines.
+    retcode = 4.
+  ENDIF.
+ENDFORM.                    " CHECK_CHANGE
+
+*&---------------------------------------------------------------------*
+*&      Form  INITIALIZATION
+*&---------------------------------------------------------------------*
+*       Инициализация
+*----------------------------------------------------------------------*
+FORM initialization .
+  CLEAR: xheader,
+         yheader,
+         xpostable,
+         gs_ypostable,
+         header_prop,
+         tabs,
+         snumber,
+         currdoc.
+
+  REFRESH: xpostable,
+           ypostable.
+ENDFORM.                    " INITIALIZATION
+
+*&---------------------------------------------------------------------*
+*&      Form  SAVE_PREPARATION
+*&---------------------------------------------------------------------*
+*       Подготовка к сохранению.
+*----------------------------------------------------------------------*
+FORM save_preparation .
+  DATA: ls_xpostable TYPE pos_t.
+  " Все существующие строки
+  LOOP AT xpostable INTO ls_xpostable.
+    retcode = 4.
+
+    " ... ищем в SAVE-таблице :
+    LOOP AT ypostable INTO gs_ypostable WHERE buzei EQ ls_xpostable-buzei.
+      retcode = 0.
+      index = sy-tabix.
+      EXIT.
+    ENDLOOP.
+
+    " ... Нашли
+    IF retcode = 0.
+      " ... измененная: записываем признак U (Update)
+      IF ls_xpostable NE gs_ypostable.
+        ls_xpostable-aktyp = 'U'.
+        MODIFY xpostable FROM ls_xpostable.
+        DELETE ypostable INDEX index.
+        " и неизменная: удаляем из обеих внутренних таблиц
+      ELSE.
+        DELETE xpostable.
+        DELETE ypostable INDEX index.
+      ENDIF.
+
+      " ... Не нашли
+    ELSE.
+      ls_xpostable-aktyp = 'U'.
+      MODIFY xpostable FROM ls_xpostable.
+    ENDIF.
+  ENDLOOP.
+
+  " Удаленные записи в YPOSTABLE ?
+  LOOP AT ypostable INTO gs_ypostable.
+    retcode = 4.
+    LOOP AT xpostable INTO ls_xpostable WHERE buzei EQ gs_ypostable-buzei.
+      retcode = 0.
+      EXIT.
+    ENDLOOP.
+
+    "... пометить в XPOSTABLE
+    IF retcode = 0.
+      DELETE ypostable.
+    ELSE.
+      ls_xpostable = gs_ypostable.
+      ls_xpostable-aktyp = 'D'.
+      APPEND ls_xpostable TO xpostable.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.                    " SAVE_PREPARATION
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_FIRST
+*&---------------------------------------------------------------------*
+*       Вывод на экран первого документа из списка
+*----------------------------------------------------------------------*
+FORM display_first .
+  DATA: ls_selection TYPE deliv_list-vbeln,
+        ls_header    TYPE deliv_list.
+
+  CLEAR ls_selection.
+  REFRESH selection.
+
+  "Собираем выбранные документы
+  LOOP AT header INTO ls_header.
+    IF ls_header-select IS NOT INITIAL.
+      MOVE ls_header-vbeln TO ls_selection.
+      APPEND ls_selection TO selection.
+    ENDIF.
+  ENDLOOP.
+
+  DESCRIBE TABLE selection LINES snumber.
+  "Выбран хоть один?
+  IF snumber IS INITIAL.
+    MESSAGE e040.
+  ELSE.
+    "Выводим на экран первый документ
+    READ TABLE selection INTO ls_selection INDEX 1.
+    MOVE: bukrs TO xheader-bukrs,
+          gjahr TO xheader-gjahr,
+          ls_selection TO xheader-vbeln.
+    "Запоминаем позицию отображаемого документа
+    MOVE 1 TO currdoc.
+  ENDIF.
+ENDFORM.                    " DISPLAY_FIRST
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_ONLY
+*&---------------------------------------------------------------------*
+*       Все поля лишь для просмотра
+*----------------------------------------------------------------------*
+FORM display_only .
+  "Просмотр?
+  IF aktyp EQ 'D'.
+    LOOP AT SCREEN.
+      screen-input = '0'.
+      MODIFY SCREEN.
+    ENDLOOP.
+  ENDIF.
+ENDFORM.                    " DISPLAY_ONLY
+
+*&---------------------------------------------------------------------*
+*&      Form  EXCL_STANDARD
+*&---------------------------------------------------------------------*
+*       Заполняем excl
+*----------------------------------------------------------------------*
+FORM excl_standard .
+  DATA: ls_excl TYPE gty_excl.
+  REFRESH excl.
+  ls_excl-okcode = 'DETAIL'. APPEND ls_excl TO excl.
+
+  IF aktyp EQ 'N'.
+    "Режим нового документа
+    ls_excl-okcode = 'DC'.     APPEND ls_excl TO excl.
+    ls_excl-okcode = 'PRINT'.  APPEND ls_excl TO excl.
+    ls_excl-okcode = 'PRINT2'. APPEND ls_excl TO excl.
+    ls_excl-okcode = 'DDEL'.   APPEND ls_excl TO excl.
+    ls_excl-okcode = 'PROP'.   APPEND ls_excl TO excl.
+  ELSEIF aktyp EQ 'D'.
+    "Режим просмотра
+    ls_excl-okcode = 'DDEL'. APPEND ls_excl TO excl.
+  ENDIF.
+
+  "В зависимоти от количества документов
+  "скрываем лишние кнопки Следующий/Предыдущий
+  IF snumber LE 1.
+    ls_excl-okcode = 'PREV'. APPEND ls_excl TO excl.
+    ls_excl-okcode = 'NEXT'. APPEND ls_excl TO excl.
+  ELSE.
+    IF currdoc EQ 1.  " первый документ из списка
+      ls_excl-okcode = 'PREV'. APPEND ls_excl TO excl.
+    ELSEIF currdoc EQ snumber. " последний документ из списка
+      ls_excl-okcode = 'NEXT'. APPEND ls_excl TO excl.
+    ENDIF.
+  ENDIF.
+
+  " 8000000046 AK_BUTVILOVS
+  AUTHORITY-CHECK OBJECT 'ZSD_DISPLA' ID 'ACTVT' FIELD '02'.
+  IF sy-subrc <> 0.
+    IF NOT line_exists( excl[ okcode = 'PRINT' ] ).
+      excl = VALUE #( BASE excl ( okcode = 'PRINT' ) ).
+    ENDIF.
+
+    IF NOT line_exists( excl[ okcode = 'PRINT2' ] ).
+      excl = VALUE #( BASE excl ( okcode = 'PRINT2' ) ).
+    ENDIF.
+  ENDIF.
+  " end 8000000046
+ENDFORM.                    " EXCL_STANDARD
+
+*&---------------------------------------------------------------------*
+*&      Form  EXCL_LIST
+*&---------------------------------------------------------------------*
+*       Заполняем excl
+*----------------------------------------------------------------------*
+FORM excl_list.
+  DATA: ls_excl TYPE gty_excl.
+  REFRESH excl.
+  ls_excl-okcode = 'PREV'.   APPEND ls_excl TO excl.
+  ls_excl-okcode = 'NEXT'.   APPEND ls_excl TO excl.
+  ls_excl-okcode = 'DC'.     APPEND ls_excl TO excl.
+  ls_excl-okcode = 'PROP'.   APPEND ls_excl TO excl.
+  ls_excl-okcode = 'DDEL'.   APPEND ls_excl TO excl.
+  ls_excl-okcode = 'PRINT'.  APPEND ls_excl TO excl.
+  ls_excl-okcode = 'PRINT2'. APPEND ls_excl TO excl.
+  ls_excl-okcode = 'PICK'.   APPEND ls_excl TO excl.
+
+  " 8000000046 AK_BUTVILOVS
+  AUTHORITY-CHECK OBJECT 'ZSD_DISPLA' ID 'ACTVT' FIELD '02'.
+  IF sy-subrc <> 0 AND NOT line_exists( excl[ okcode = 'SAVE' ] ).
+    excl = VALUE #( BASE excl ( okcode = 'SAVE' ) ).
+  ENDIF.
+ENDFORM.                    " EXCL_STANDARD
+
+*&---------------------------------------------------------------------*
+*&      Form  CALL_SCREEN
+*&---------------------------------------------------------------------*
+*       Вызов экрана.
+*----------------------------------------------------------------------*
+FORM call_screen  USING VALUE(code).
+  CASE code.
+    WHEN 'COPY'.
+      CALL SCREEN '1002'
+        STARTING AT 20 10
+        ENDING   AT 60 18.
+    WHEN 'VP' OR 'VZ'.
+      CALL SCREEN '1005'
+        STARTING AT 20 10
+        ENDING   AT 60 13.
+    WHEN 'OP'.
+      CALL SCREEN '1006'
+        STARTING AT 20 10
+        ENDING   AT 60 13.
+    WHEN 'PROP'.
+      CALL SCREEN '1007'
+        STARTING AT 20 10
+        ENDING   AT 70 13.
+  ENDCASE.
+ENDFORM.                    " CALL_SCREEN
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_NEW_DOC
+*&---------------------------------------------------------------------*
+*       Вывод документа со скопированными реквизитами
+*----------------------------------------------------------------------*
+FORM display_new_doc .
+  CHECK ok_code = 'ENT'.
+  CLEAR ok_code.
+  MOVE 'N' TO aktyp. " новый документ
+
+  CLEAR:  header_prop,
+          yheader,
+          gs_ypostable,
+          tabs.
+  REFRESH ypostable.
+  "Заголовок
+  SELECT SINGLE * FROM zdeliv_note_h
+                  INTO xheader
+                  WHERE bukrs EQ bukrs AND
+                        vbeln EQ vbeln_low AND
+                        gjahr EQ gjahr.
+  "Атрибуты
+  CLEAR: xheader-cdat,
+         xheader-cnam,
+         xheader-udat,
+         xheader-unam.
+
+  "Позиции
+  SELECT * FROM zdeliv_note_p
+       INTO TABLE xpostable
+       WHERE bukrs EQ bukrs AND
+             vbeln EQ vbeln_low AND
+             gjahr EQ gjahr.
+
+  "Подменяем значения
+  MOVE 'N' TO xheader-zstate.
+  MOVE: bukrs_copy TO bukrs,
+        gjahr_copy TO gjahr.
+  MOVE xheader-ztype TO ztype.
+
+  SET SCREEN '1010'.
+  LEAVE SCREEN.
+ENDFORM.                    " DISPLAY_NEW_DOC
+
+*&---------------------------------------------------------------------*
+*&      Form  BUKRS_CHECK
+*&---------------------------------------------------------------------*
+*       Проверка БЕ
+*----------------------------------------------------------------------*
+FORM bukrs_check  USING  bukrs TYPE bukrs.
+  SELECT SINGLE butxt FROM t001
+                      INTO bukrstxt
+                     WHERE bukrs = bukrs.
+  IF sy-subrc NE 0.
+    MESSAGE e008 WITH bukrs.
+  ENDIF.
+
+*---------------- Проверка полномочий на балансовую единицу ------------
+  AUTHORITY-CHECK OBJECT 'F_BKPF_BUK' ID 'BUKRS' FIELD bukrs
+                                      ID 'ACTVT' DUMMY.
+  IF sy-subrc <> 0.
+    MESSAGE e007 WITH bukrs.
+  ENDIF.
+ENDFORM.                    " BUKRS_CHECK
+
+*&---------------------------------------------------------------------*
+*&      Form  DB_SAVE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM db_save .
+  TYPES:
+    BEGIN OF lty_s_vbfa,
+      vbeln TYPE vbfa-vbeln,
+      mjahr TYPE vbfa-mjahr,
+    END OF lty_s_vbfa.
+  DATA: ls_xpostable TYPE pos_t,
+        ls_bapisdh1  TYPE bapisdh1,
+        ls_bapisdh1x TYPE bapisdh1x,
+        lt_return    TYPE TABLE OF bapiret2,
+        ls_return    TYPE bapiret2,
+        ls_mkpf      TYPE mkpf,
+        lt_vbfa      TYPE STANDARD TABLE OF lty_s_vbfa,
+        lt_mkpf      TYPE TABLE OF mkpf,
+        lt_mseg      TYPE TABLE OF mseg,
+        lv_zblank    TYPE zdeliv_note_h-zblank,
+        lv_msg1      TYPE sy-msgv1,
+        lv_msg2      TYPE sy-msgv1.
+
+  FIELD-SYMBOLS:
+                 <ls_vbfa> TYPE lty_s_vbfa.
+  "Сохранение изменений заголовка
+  IF aktyp EQ 'N'.  " новый документ
+    MOVE: bukrs TO xheader-bukrs,
+          gjahr TO xheader-gjahr,
+          ztype TO xheader-ztype,
+          'P'   TO xheader-zstate. " статус: новый
+
+    "Кем и когда создан
+    MOVE: sy-uname TO xheader-cnam,
+          sy-datum TO xheader-cdat.
+
+    PERFORM get_doc_number CHANGING xheader-vbeln.
+
+    "PERFORM get_ncc_params CHANGING xheader. " V,Zaretsky.
+  ELSE.
+    "Кем и когда изменен
+    MOVE: sy-uname TO xheader-unam,
+          sy-datum TO xheader-udat.
+  ENDIF.
+  gs_nast-sort1 = xheader-bukrs.
+  gs_nast-sort2 = xheader-vbeln.
+  gs_nast-sort3 = xheader-gjahr.
+
+  IF ztype <> 'SO'.
+    xheader-zblank(2) = xheader-zser.                                          "{замена поля номер бланка для печати
+    xheader-zblank+2 = xheader-zblnk.
+  ENDIF.
+  lv_zblank = xheader-zblank.                                                "}замена поля номер бланка для печати
+
+
+""""""""""  MODIFY zdeliv_note_h FROM xheader.
+  DATA(lv_subrc) = zcl_pe_z_db_tables_updates=>modify_single_zdeliv_note_h( is_zdeliv_note_h = xheader ).
+
+  "БЕ, номер документа, год
+  LOOP AT xpostable INTO ls_xpostable.
+    MOVE: xheader-bukrs TO ls_xpostable-bukrs,
+          xheader-vbeln TO ls_xpostable-vbeln,
+          xheader-gjahr TO ls_xpostable-gjahr.
+    MODIFY xpostable FROM ls_xpostable.
+  ENDLOOP.
+
+  "Сохранение изменений позиций
+  LOOP AT xpostable INTO ls_xpostable.
+    MOVE-CORRESPONDING ls_xpostable TO postable.
+    CASE ls_xpostable-aktyp.
+      WHEN 'D'.
+*        DELETE zdeliv_note_p FROM postable.
+*        IF sy-subrc <> 0.
+*          retcode = sy-subrc.
+*        ENDIF.
+        retcode = zcl_pe_z_db_tables_updates=>delete_single_zdeliv_note_p( postable ).
+      WHEN 'U'.
+        IF aktyp EQ 'N'.
+          MOVE xheader-vbeln TO postable-vbeln.
+        ENDIF.
+        "MODIFY zdeliv_note_p FROM postable.
+*        IF sy-subrc <> 0.
+*          retcode = sy-subrc.
+*        ENDIF.
+        retcode = zcl_pe_z_db_tables_updates=>modify_single_zdeliv_note_p( postable ).
+    ENDCASE.
+  ENDLOOP.
+  zcl_pe_z_db_tables_updates=>after_update_zdeliv_note( iv_bukrs = xheader-bukrs
+                                                        iv_vbeln = xheader-vbeln
+                                                        iv_gjahr = xheader-gjahr ).
+  MOVE xpostable[] TO ypostable[].
+  TRY.
+      IF xheader-ztype = 'OP'.
+        UPDATE likp SET xabln = lv_zblank                                                         "{замена поля номер бланка для печати
+                        lifex = lv_zblank
+                        xblnr = lv_zblank                                                         "}замена поля номер бланка для печати
+          WHERE vbeln = xheader-zdelivery.
+        IF sy-subrc <> 0.
+          RAISE EXCEPTION TYPE cx_sy_no_handler.
+        ENDIF.
+        SELECT SINGLE vbeln FROM vkdfs INTO xheader-zdelivery WHERE vbeln = xheader-zdelivery.
+        IF sy-subrc = 0.
+          UPDATE vkdfs SET sortkri = lv_zblank                                                    "замена поля номер бланка для печати
+                       WHERE vbeln = xheader-zdelivery.
+          IF sy-subrc <> 0.
+            RAISE EXCEPTION TYPE cx_sy_no_handler.
+          ENDIF.
+        ENDIF.
+
+        SELECT DISTINCT vbfa~vbeln
+                        vbfa~mjahr
+          FROM vbfa
+          INTO TABLE lt_vbfa
+          WHERE vbelv   = xheader-zdelivery
+           AND  vbtyp_n = 'R'
+           AND  vbtyp_v = 'J'.
+        IF sy-subrc = 0.
+          LOOP AT lt_vbfa ASSIGNING <ls_vbfa>.
+            SELECT SINGLE * FROM mkpf
+              INTO ls_mkpf
+              WHERE mblnr = <ls_vbfa>-vbeln
+                AND mjahr = <ls_vbfa>-mjahr.
+            IF sy-subrc = 0.
+              ls_mkpf-frbnr = lv_zblank.                                                           "замена поля номер бланка для печати
+              APPEND ls_mkpf TO lt_mkpf.
+            ENDIF.
+          ENDLOOP.
+          IF lt_vbfa IS NOT INITIAL.
+            SELECT * FROM mseg
+              INTO TABLE lt_mseg
+              FOR ALL ENTRIES IN lt_vbfa
+              WHERE mblnr = lt_vbfa-vbeln
+                AND mjahr = lt_vbfa-mjahr.
+          ENDIF.
+
+          CALL FUNCTION 'MB_CHANGE_DOCUMENT'
+            TABLES
+              zmkpf = lt_mkpf
+              zmseg = lt_mseg.
+          IF sy-subrc <> 0.
+            RAISE EXCEPTION TYPE cx_sy_no_handler.
+          ENDIF.
+          UPDATE ekbe SET xblnr = lv_zblank                                                  "замена поля номер бланка для печати
+            WHERE xblnr    = xheader-zdelivery
+              AND vbeln_st = xheader-zdelivery.
+        ENDIF.
+
+      ELSEIF xheader-ztype = 'VP' OR xheader-ztype = 'VZ'.
+        SELECT SINGLE * FROM mkpf
+          INTO ls_mkpf
+          WHERE mblnr = xheader-mblnr
+            AND mjahr = xheader-mjahr.
+        SELECT * FROM mseg
+          INTO TABLE lt_mseg
+          WHERE mblnr = xheader-mblnr
+            AND mjahr = xheader-mjahr.
+        ls_mkpf-frbnr = ls_mkpf-xblnr = lv_zblank.                                             "замена поля номер бланка для печати
+        APPEND ls_mkpf TO lt_mkpf.
+
+        CALL FUNCTION 'MB_CHANGE_DOCUMENT'
+          TABLES
+            zmkpf = lt_mkpf
+            zmseg = lt_mseg.
+
+      ENDIF.
+
+      lv_msg1 = gs_nast-pfld1 = 'SAVED'.
+      lv_msg2 = lv_zblank.                                                               "замена поля номер бланка для печати
+      gs_nast-vstat = 1.
+      gs_nast-datvr = sy-datum.
+      gs_nast-uhrvr = sy-uzeit.
+      gs_nast-usnam = sy-uname.
+      gs_nast-sort1 = xheader-bukrs.
+      gs_nast-sort2 = xheader-vbeln.
+      gs_nast-sort3 = xheader-gjahr.
+
+      CALL FUNCTION 'NAST_PROTOCOL_INITIALIZE'.
+      CALL FUNCTION 'NAST_PROTOCOL_UPDATE'
+        EXPORTING
+          msg_arbgb              = 'ZFI'
+          msg_nr                 = 065
+          msg_ty                 = 'S'
+          msg_v1                 = lv_msg1
+          msg_v2                 = lv_msg2
+        EXCEPTIONS
+          message_type_not_valid = 1
+          no_sy_message          = 2
+          OTHERS                 = 3.
+      IF sy-subrc <> 0.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+      CALL FUNCTION 'NAST_PROTOCOL_STORE'
+        IMPORTING
+          msg_cmfpnr         = gs_nast-cmfpnr
+        EXCEPTIONS
+          no_protocol_update = 1
+          OTHERS             = 2.
+      IF sy-subrc <> 0.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+      CALL FUNCTION 'RV_MESSAGE_UPDATE_SINGLE'
+        EXPORTING
+          msg_nast = gs_nast.
+    CATCH cx_sy_no_handler.
+      retcode = 1.
+      ROLLBACK WORK.
+      RETURN.
+  ENDTRY.
+  COMMIT WORK AND WAIT.
+  IF aktyp NE 'N'.
+    MESSAGE s039 WITH xheader-vbeln.
+    retcode = 0.
+  ELSE.
+    MOVE 'C' TO aktyp.
+* Блокируем созданный документ
+    PERFORM lock.
+    MESSAGE s034 WITH xheader-vbeln.
+    retcode = 0.
+  ENDIF.
+ENDFORM.                    " DB_SAVE
+
+*&---------------------------------------------------------------------*
+*&      Form  SAVE_CHECK
+*&---------------------------------------------------------------------*
+*       Проверки перед сохранением
+*----------------------------------------------------------------------*
+FORM save_check .
+  DATA: lv_zblank         TYPE zdeliv_note_h-zblank,
+        ls_vttk           TYPE vttk,
+        ls_shipmentheader TYPE bapishipmentheader,
+        ls_deadline       TYPE bapishipmentheaderdeadline,
+        lt_deadline       TYPE TABLE OF bapishipmentheaderdeadline,
+        ls_deadlineact    TYPE bapishipmentheaderdeadlineact,
+        lt_deadlineact    TYPE TABLE OF bapishipmentheaderdeadlineact,
+        ls_header_action  TYPE bapishipmentheaderaction,
+        lv_time_begin_v   TYPE tzntstmps, "дата и время начала отгрузки в VTTK
+        lv_time_begin_x   TYPE tzntstmps, "дата и время начала отгрузки в xheader
+        lv_time_end_v     TYPE tzntstmps, "дата и время конца отгрузки в VTTK
+        lv_time_end_x     TYPE tzntstmps, "дата и время конца отгрузки в xheader
+        lv_time_reg_v     TYPE tzntstmps, "дата и время регистрации трансп. средства в VTTK
+        lv_time_transp_v  TYPE tzntstmps, "дата и время транспортировки в VTTK
+        lt_return         TYPE TABLE OF bapiret2,
+        ls_return         TYPE bapiret2,
+        ls_header         TYPE zdeliv_note_h.
+  "Не все закладки пройдены
+  IF tabs-tab1 IS INITIAL OR
+     tabs-tab2 IS INITIAL OR
+     tabs-tab3 IS INITIAL .
+    retcode = 2.
+    MESSAGE e043.
+  ENDIF.
+
+  xheader-zblank(2) = xheader-zser.
+  xheader-zblank+2  = xheader-zblnk.
+
+  SELECT SINGLE bukrs vbeln gjahr zblank
+    FROM zdeliv_note_h
+    INTO CORRESPONDING FIELDS OF ls_header
+    WHERE zdeliv_note_h~ztype = ztype
+      AND ( ( ztype <> 'SO' AND zblnk  = xheader-zblnk ) OR ( ztype = 'SO' AND zblank  = xheader-zblank ) )
+      AND ( ( ztype <> 'SO' AND zser  = xheader-zser ) OR ( ztype = 'SO'  ) )
+      AND deleted = ''.
+
+  IF sy-subrc = 0 AND ( xheader-bukrs <> ls_header-bukrs
+                     OR xheader-vbeln <> ls_header-vbeln
+                     OR xheader-gjahr <> ls_header-gjahr ).
+    retcode = 2.
+    MESSAGE TEXT-017 TYPE 'S' DISPLAY LIKE 'E'." DISPLAY LIKE 'W'.
+    RETURN.
+  ENDIF.
+  IF xheader-ztknum IS NOT INITIAL AND
+  xheader-zdpribit IS NOT INITIAL AND
+  xheader-zdubitie IS NOT INITIAL.
+    SELECT SINGLE * FROM vttk
+      INTO ls_vttk WHERE tknum = xheader-ztknum.
+
+    ls_shipmentheader-shipment_num = xheader-ztknum.
+    ls_deadline-time_zone          = sy-zonlo.
+
+    MOVE 'C' TO: ls_deadlineact-time_stamp_utc,
+                 ls_deadlineact-time_type,
+                 ls_deadlineact-time_zone.
+
+    "запись данных в формат "ГГГГММДДччммсс"
+    CALL FUNCTION 'CONVERT_INTO_TIMESTAMP':
+      EXPORTING
+        i_datlo     = xheader-zdpribit
+        i_timlo     = xheader-ztpribit
+        i_tzone     = sy-zonlo
+      IMPORTING e_timestamp = lv_time_begin_x,
+
+      EXPORTING
+        i_datlo     = ls_vttk-dalbg
+        i_timlo     = ls_vttk-ualbg
+        i_tzone     = sy-zonlo
+      IMPORTING e_timestamp = lv_time_begin_v,
+
+      EXPORTING
+        i_datlo     = ls_vttk-dareg
+        i_timlo     = ls_vttk-uareg
+        i_tzone     = sy-zonlo
+      IMPORTING e_timestamp = lv_time_reg_v,
+
+      EXPORTING
+        i_datlo     = ls_vttk-datbg
+        i_timlo     = ls_vttk-uatbg
+        i_tzone     = sy-zonlo
+      IMPORTING e_timestamp = lv_time_transp_v,
+
+      EXPORTING
+        i_datlo     = xheader-zdubitie
+        i_timlo     = xheader-ztubitie
+        i_tzone     = sy-zonlo
+      IMPORTING e_timestamp = lv_time_end_x,
+
+      EXPORTING
+        i_datlo     = ls_vttk-dalen
+        i_timlo     = ls_vttk-ualen
+        i_tzone     = sy-zonlo
+      IMPORTING e_timestamp = lv_time_end_v.
+
+    IF lv_time_transp_v IS NOT INITIAL.
+      IF lv_time_end_v > lv_time_end_x AND
+         lv_time_end_x <= lv_time_transp_v.
+        ls_deadline-time_stamp_utc = lv_time_end_x.
+      ELSEIF lv_time_end_v < lv_time_end_x AND
+              lv_time_end_v <= lv_time_transp_v.
+        lv_time_end_x = lv_time_end_v.
+      ELSE.
+        retcode = 2.
+        MESSAGE e062.
+        RETURN.
+      ENDIF.
+      ls_deadline-time_stamp_utc = lv_time_end_x.
+      ls_deadline-time_type = 'HDRSTCPDT'.
+      APPEND ls_deadline TO lt_deadline.
+      APPEND ls_deadlineact TO lt_deadlineact.
+    ENDIF.
+
+    IF lv_time_begin_v > lv_time_begin_x AND
+       lv_time_begin_x <= lv_time_end_x   AND
+       lv_time_begin_x >= lv_time_reg_v.
+      ls_deadline-time_type = 'HDRSTLSADT'.
+      ls_deadline-time_stamp_utc = lv_time_begin_x.
+      APPEND ls_deadline TO lt_deadline.
+      APPEND ls_deadlineact TO lt_deadlineact.
+    ELSEIF lv_time_begin_v > lv_time_begin_x AND
+           lv_time_begin_x > lv_time_end_x.
+      MESSAGE e063.
+      retcode = 2.
+      RETURN.
+    ELSEIF lv_time_begin_v > lv_time_begin_x AND
+           lv_time_begin_x < lv_time_reg_v.
+      MESSAGE e064.
+      retcode = 2.
+      RETURN.
+    ENDIF.
+
+    IF lt_deadline IS NOT INITIAL.
+      CALL FUNCTION 'BAPI_SHIPMENT_CHANGE'
+        EXPORTING
+          headerdata           = ls_shipmentheader
+          headerdataaction     = ls_header_action
+        TABLES
+          headerdeadline       = lt_deadline
+          headerdeadlineaction = lt_deadlineact
+          return               = lt_return.
+      READ TABLE lt_return INTO ls_return WITH KEY type = 'E'.
+      IF sy-subrc = 0.
+        MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+                   WITH ls_return-message_v1 ls_return-message_v2
+                        ls_return-message_v3 ls_return-message_v4.
+        retcode = 2.
+        RETURN.
+      ELSE.
+        CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+          EXPORTING
+            wait = 'X'.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+ENDFORM.                    " SAVE_CHECK
+
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_LIST
+*&---------------------------------------------------------------------*
+*       Вывод на экран документа #ind  из списка
+*----------------------------------------------------------------------*
+FORM display_list USING ind TYPE i.
+  READ TABLE selection INDEX ind INTO gs_selection.
+  MOVE gs_selection TO xheader-vbeln.
+  PERFORM display.
+ENDFORM.                    " DISPLAY_LIST
+
+*&---------------------------------------------------------------------*
+*&      Form  CALCULATE_TOTAL
+*&---------------------------------------------------------------------*
+*       Расчет итоговых сумм позиций
+*----------------------------------------------------------------------*
+FORM calculate_total .
+  DATA:
+    ls_spell            TYPE spell,
+    lv_spell_massa      TYPE string,
+    lv_result_structure TYPE zbc_spell_curr_results.
+
+  CLEAR all.
+
+  READ TABLE xpostable TRANSPORTING NO FIELDS WITH KEY drm = 'X'.
+
+  IF sy-subrc <> 0.
+    LOOP AT xpostable INTO xpostable WHERE drm IS INITIAL.
+      ADD: xpostable-cost TO all-cost,
+           xpostable-vatsm TO all-vatsm,
+           xpostable-total TO all-total,
+           xpostable-zkolm TO all-zkolm,
+           xpostable-brgew TO all-brgew.
+    ENDLOOP.
+  ELSE.
+    LOOP AT xpostable INTO xpostable WHERE drm IS NOT INITIAL.
+      ADD: xpostable-cost TO all-cost,
+           xpostable-vatsm TO all-vatsm,
+           xpostable-total TO all-total.
+    ENDLOOP.
+    LOOP AT xpostable INTO xpostable WHERE drm IS INITIAL.
+      ADD: xpostable-zkolm TO all-zkolm,
+           xpostable-brgew TO all-brgew.
+    ENDLOOP.
+  ENDIF.
+
+  "кол-во грузовых мест прописью
+  IF all-zkolm > 0.
+    zbc_spell_amount=>amount_to_words( EXPORTING iv_amount           = all-zkolm         " <-- Сумма
+                                                   iv_currency         = ''              " <-- Валюта
+                                                   iv_language         = ''              " <-- Язык
+                                                   iv_short            = ''              " <-- Краткое наименование валюты
+                                                   iv_dec_digits       = 'X'             " <-- копейки цифрами
+                                         IMPORTING es_result_structure = lv_result_structure ).
+    xheader-zkolm  = lv_result_structure-main_part_amount. " целая часть суммы строкой
+    xheader-zkolm2 = all-zkolm. " целая часть суммы строкой
+  ENDIF.
+
+  all-waers = xpostable-waers.
+
+  CALL FUNCTION 'SPELL_AMOUNT'
+    EXPORTING
+      amount    = all-brgew
+      currency  = 'BHD' "Просто левая валюта но с тремя разрядами после запятой, как у тонн
+    IMPORTING
+      in_words  = ls_spell
+    EXCEPTIONS
+      not_found = 1
+      too_large = 2
+      OTHERS    = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+  PERFORM get_spell_massa
+              USING ls_spell 'TO' "xpostable-gewei
+              CHANGING lv_spell_massa.
+
+  all-spell_brgew = lv_spell_massa.
+  xheader-zzelpr  = lv_spell_massa.
+
+ENDFORM.                    " CALCULATE_TOTAL
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZSOTP
+*&---------------------------------------------------------------------*
+*       Сдал отправитель (отпуск произвел)
+*----------------------------------------------------------------------*
+FORM get_zsotp .
+  READ TABLE it_mm_pos INTO gs_mm_pos WITH KEY shkzg = 'H'.
+  IF sy-subrc EQ 0.
+    SELECT SINGLE adrnr FROM twlad
+                        INTO adrnr
+                        WHERE werks EQ gs_mm_pos-werks AND
+                              lgort EQ gs_mm_pos-lgort AND
+                              lfdnr EQ '1'. " Отвечающий за склад
+    IF sy-subrc EQ 0.
+      SELECT name1 FROM adrc
+                   INTO txt
+                   UP TO 1 ROWS
+                   WHERE addrnumber EQ adrnr.
+      ENDSELECT.
+
+      MOVE txt TO xheader-zsotp.
+    ENDIF.
+  ENDIF.
+ENDFORM.                    " GET_ZSOTP
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZPPOL
+*&---------------------------------------------------------------------*
+*       Принял получатель (товар получил)
+*----------------------------------------------------------------------*
+FORM get_zppol .
+  TYPES: BEGIN OF pernr_list,
+           bdatu TYPE anlz-bdatu,
+           pernr TYPE anlz-pernr,
+           stort TYPE anlz-stort,
+         END OF pernr_list.
+
+  DATA: it_pernr   TYPE TABLE OF pernr_list, " WITH HEADER LINE.
+        ls_pernr   TYPE pernr_list,
+        p0002      TYPE TABLE OF p0002, "WITH HEADER LINE,
+        ls_p0002   TYPE p0002,
+        city1      TYPE adrc-city1,
+        street     TYPE adrc-street,
+        house_num1 TYPE adrc-house_num1.
+
+  READ TABLE it_mm_pos INTO gs_mm_pos WITH KEY shkzg = 'H'.
+  CHECK sy-subrc EQ 0.
+
+  "Табельный номер из ОС
+  SELECT bdatu pernr stort FROM anlz
+                           INTO CORRESPONDING FIELDS OF TABLE it_pernr
+                           WHERE bukrs EQ bukrs AND
+                                 anln1 EQ gs_mm_pos-anln1 AND
+                                 anln2 EQ gs_mm_pos-anln2.
+  IF sy-subrc EQ 0.
+    SORT it_pernr BY bdatu.
+    LOOP AT it_pernr INTO ls_pernr.
+      IF xheader-zdate <= ls_pernr-bdatu.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    "Находим ФИО по табельному номеру
+    CALL FUNCTION 'HR_READ_INFOTYPE'
+      EXPORTING
+        pernr           = ls_pernr-pernr
+        infty           = '0002'
+      TABLES
+        infty_tab       = p0002
+      EXCEPTIONS
+        infty_not_found = 1
+        OTHERS          = 2.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+    READ TABLE p0002 INTO ls_p0002 INDEX 1.
+    CONCATENATE ls_p0002-nachn ' ' ls_p0002-vorna ' ' ls_p0002-nach2 INTO txt RESPECTING BLANKS.
+    CONDENSE txt.
+    MOVE txt TO xheader-zppol.
+  ENDIF.
+
+  SELECT adrc~city1
+         adrc~street
+         adrc~house_num1
+   FROM adrc INNER JOIN kna1 ON adrc~addrnumber = kna1~adrnr
+   UP TO 1 ROWS
+   INTO (city1, street, house_num1)
+   WHERE kunnr = gs_mm_pos-kunnr.
+  ENDSELECT.
+  CONCATENATE city1 street house_num1 INTO xheader-zvstel2txt SEPARATED BY ', '.
+
+ENDFORM.                    " GET_ZPPOL
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ZPPOL2
+*&---------------------------------------------------------------------*
+*       Принял получатель (товар получил)
+*----------------------------------------------------------------------*
+FORM get_zppol2 USING iv_vbeln TYPE likp-vbeln
+                      iv_kunnr TYPE likp-kunnr.
+  DATA:
+    lv_text  TYPE string,
+    lv_kunnr TYPE kunnr.
+
+  "Пункт разгрузки
+  "Пункт разгрузки возьмем из записи получателя материала
+
+  SELECT SINGLE kunnr
+    INTO lv_kunnr
+    FROM vbpa
+    WHERE vbeln = iv_vbeln
+      AND parvw = 'АП'.
+  IF sy-subrc <> 0.
+    lv_kunnr = iv_kunnr.
+  ENDIF.
+
+  SELECT adrc~city1,
+         adrc~street,
+         adrc~house_num1
+    FROM adrc
+      INNER JOIN kna1 ON adrc~addrnumber = kna1~adrnr
+    INTO @DATA(ls_adr)
+    UP TO 1 ROWS
+    WHERE kunnr = @lv_kunnr.
+  ENDSELECT.
+
+  CONCATENATE ls_adr-city1 ls_adr-street ls_adr-house_num1 INTO xheader-zvstel2txt SEPARATED BY ', '.
+  CONDENSE xheader-zvstel2txt.
+  lv_text = xheader-zvstel2txt.
+  PERFORM format_text IN PROGRAM z_delivery_print CHANGING lv_text.
+  xheader-zvstel2txt = lv_text.
+ENDFORM.                    " GET_ZPPOL2
+
+*&---------------------------------------------------------------------*
+*&      Form  READ_LGORT
+*&---------------------------------------------------------------------*
+*       Пункт погрузки/ разгрузки
+*----------------------------------------------------------------------*
+*      --> lgort  Склад
+*      <-- id     Код склада
+*      <-- text   Наименование склада
+*----------------------------------------------------------------------*
+FORM read_lgort  USING    lgort TYPE t001l-lgort
+                          werks TYPE t001w-werks
+                 CHANGING id TYPE t001l-lgort
+                 text.
+  DATA:
+    lv_city1      TYPE adrc-city1,
+    lv_name3      TYPE adrc-name3,
+    lv_name1      TYPE adrc-name1,
+    lv_name2      TYPE adrc-name2,
+    lv_street     TYPE adrc-street,
+    lv_house_num1 TYPE adrc-house_num1,
+    lv_text       TYPE string.
+
+  MOVE lgort TO id.
+  CLEAR text.
+
+  IF ztype = 'VZ'.
+    CLEAR id.
+  ENDIF.
+  SELECT SINGLE adrc~name1
+                adrc~city1
+                adrc~street
+                adrc~house_num1
+    FROM adrc
+      INNER JOIN twlad ON adrc~addrnumber = twlad~adrnr
+    INTO (lv_name1,
+          lv_city1,
+          lv_street,
+          lv_house_num1)
+    WHERE twlad~werks = werks
+      AND twlad~lgort = lgort
+      AND twlad~lfdnr = '10'.
+  CHECK sy-subrc EQ 0.
+  CONCATENATE lv_name1 lv_city1 lv_street lv_house_num1 INTO text SEPARATED BY ' , '.
+  CONDENSE text.
+  lv_text = text.
+  PERFORM format_text IN PROGRAM z_delivery_print CHANGING lv_text.
+  text = lv_text.
+ENDFORM.                    " READ_LGORT
+
+*&---------------------------------------------------------------------*
+*&      Form  READ_VSTEL
+*&---------------------------------------------------------------------*
+*       Пункт отгрузки
+*----------------------------------------------------------------------*
+*      --> vstel  Склад
+*      <-- id     Код пункта отгрузки
+*      <-- text   Наименование пункта отгрузки
+*----------------------------------------------------------------------*
+FORM read_vstel  USING    vstel TYPE tvst-vstel
+                 CHANGING id TYPE tvst-vstel
+                 text.
+  MOVE vstel TO id.
+  "Наименование склада не нужно
+  SELECT SINGLE vtext
+    FROM tvstt
+    INTO text
+    WHERE vstel EQ vstel
+      AND spras EQ sy-langu.
+ENDFORM.                    " READ_VSTEL
+
+*&---------------------------------------------------------------------*
+*&      Form  READ_FIO
+*&---------------------------------------------------------------------*
+*       Отправитель/получатель
+*----------------------------------------------------------------------*
+*      --> lgort  Склад
+*      <-- text   ФИО
+*----------------------------------------------------------------------*
+FORM read_fio USING    lgort TYPE t001l-lgort werks TYPE t001l-werks
+              CHANGING text.
+  IF sy-subrc EQ 0.
+    SELECT SINGLE name1
+      FROM twlad INNER JOIN adrc ON adrc~addrnumber = twlad~adrnr
+      INTO txt
+      WHERE werks EQ werks AND
+            lgort EQ lgort AND
+            lfdnr EQ '1'. " Отвечающий за склад
+    IF sy-subrc EQ 0.
+      MOVE txt TO text.
+    ENDIF.
+  ENDIF.
+ENDFORM.                    " READ_FIO
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_HEADER1
+*&---------------------------------------------------------------------*
+*       Заполняем заголовок из MM-документа
+*----------------------------------------------------------------------*
+FORM get_header1 .
+  " Перемещение со склада, cписание
+  " Пункт погрузки (склад)
+  READ TABLE it_mm_pos INDEX 1 INTO gs_mm_pos.
+  PERFORM read_lgort USING gs_mm_pos-lgort
+                           gs_mm_pos-werks
+                     CHANGING xheader-zvstel
+                              xheader-zvsteltxt.
+  " Сдал отправитель (отпуск произвел)
+  READ TABLE it_mm_pos INTO gs_mm_pos WITH KEY shkzg = 'H'.
+  IF sy-subrc EQ 0.
+    PERFORM read_fio USING gs_mm_pos-lgort gs_mm_pos-werks
+                     CHANGING xheader-zsotp.
+  ENDIF.
+  " Принял получатель (товар получил) + Пункт разгрузки
+  PERFORM get_zppol.
+
+  "Грузополучатель, из записи клиента
+  IF gs_mm_pos-kunnr IS NOT INITIAL.
+    xheader-zkunag  = gs_mm_pos-kunnr.
+  ENDIF.
+
+ENDFORM.                    " GET_HEADER1
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_HEADER2
+*&---------------------------------------------------------------------*
+*        Заполняем заголовок из MM-документа
+*----------------------------------------------------------------------*
+FORM get_header2 .
+  DATA: lv_lgort TYPE lgort_d,
+        lv_werks TYPE werks_d,
+        lv_bukrs TYPE bukrs.
+
+  READ TABLE it_mm_pos INTO gs_mm_pos WITH KEY shkzg = 'H'.
+
+  "Пункт разгрузки (склад-получатель)
+  IF gs_mm_pos-umlgo IS INITIAL.
+    lv_werks =  gs_mm_pos-werks.
+    lv_lgort =  gs_mm_pos-lgort.
+  ELSE.
+    lv_werks =  gs_mm_pos-umwrk.
+    lv_lgort =  gs_mm_pos-umlgo.
+  ENDIF.
+  PERFORM read_lgort USING lv_lgort
+                           lv_werks
+                     CHANGING xheader-zvstel2
+                              xheader-zvstel2txt.
+  "Принял получатель
+  PERFORM read_fio USING lv_lgort lv_werks
+                   CHANGING xheader-zppol.
+  SELECT SINGLE sort2
+      FROM twlad INNER JOIN adrc ON adrc~addrnumber = twlad~adrnr
+      INTO lv_kunnr
+      WHERE werks EQ lv_werks AND
+            lgort EQ lv_lgort AND
+            lfdnr EQ '10'.
+  IF sy-subrc = 0.
+    SELECT SINGLE kunnr
+      FROM kna1
+      INTO xheader-zkunag
+      WHERE kunnr = lv_kunnr.
+    IF sy-subrc <> 0.
+      xheader-zkunag = xheader-zkunnr.
+    ENDIF.
+  ENDIF.
+  "Пункт погрузки (склад-отправитель)
+  lv_werks =  gs_mm_pos-werks.
+  lv_lgort =  gs_mm_pos-lgort.
+  PERFORM read_lgort USING lv_lgort
+                           lv_werks
+                     CHANGING xheader-zvstel
+                              xheader-zvsteltxt.
+
+  "Сдал отправитель (отпуск произвел)
+  PERFORM read_fio USING lv_lgort lv_werks
+                   CHANGING xheader-zsotp.
+
+  IF gs_mm_pos-umwrk = gs_mm_pos-werks.
+    xheader-zkunnr = xheader-zvkorg = xheader-bukrs.
+    IF xheader-zkunag IS INITIAL.
+      xheader-zkunag = xheader-zkunnr.
+    ENDIF.
+  ELSE.
+    SELECT SINGLE bukrs FROM t001k INTO lv_bukrs WHERE bwkey = gs_mm_pos-umwrk.
+    xheader-zkunnr = lv_bukrs."= xheader-zkunag = lv_bukrs.
+    IF xheader-zkunag IS INITIAL.
+      xheader-zkunag = xheader-zkunnr.
+    ENDIF.
+  ENDIF.
+
+
+  SELECT SINGLE sort2
+      FROM twlad INNER JOIN adrc ON adrc~addrnumber = twlad~adrnr
+      INTO lv_kunnr
+      WHERE werks EQ lv_werks AND
+            lgort EQ lv_lgort AND
+            lfdnr EQ '10'.
+  IF sy-subrc = 0.
+    SELECT SINGLE kunnr
+      FROM kna1
+      INTO xheader-zvkorg
+      WHERE kunnr = lv_kunnr.
+    IF sy-subrc <> 0.
+    ENDIF.
+  ENDIF.
+  IF ztype = 'VZ'.
+    xheader-zkunnr = xheader-zkunag = gs_mm_pos-kunnr.
+  ENDIF.
+ENDFORM.                    " GET_HEADER2
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_HEADER3
+*&---------------------------------------------------------------------*
+*       Заполняем заголовок из документа исходящей поставки
+*----------------------------------------------------------------------*
+FORM get_header3.
+  DATA:
+    lv_vsteltxt TYPE string.
+  "Перемещение со склада, cписание
+  "Пункт отгрузки (адрес)                                                       "{Изменение формирование пункта отгрузки: склад на адрес
+  xheader-zvstel = likp-vstel.
+  PERFORM read_vstel IN PROGRAM z_delivery_print
+                     USING xheader-zvstel
+                           likp-wadat_ist
+                     CHANGING lv_vsteltxt.
+  xheader-zvsteltxt = lv_vsteltxt.                                             "}Изменение формирование пункта отгрузки: склад на адрес
+  "Сдал отправитель (отпуск произвел)
+  READ TABLE it_delivery_pos INDEX 1 INTO gs_delivery_pos.
+  PERFORM read_fio USING gs_delivery_pos-lgort gs_delivery_pos-werks
+                     CHANGING xheader-zsotp.
+  "Принял получатель (товар получил) + Пункт разгрузки
+  PERFORM get_zppol2 USING likp-vbeln
+                           likp-kunnr.
+
+  "Грузополучатель, из записи клиента
+  xheader-zkunag  = likp-kunnr.
+  xheader-zkunnr  = likp-vkorg.
+ENDFORM.                    "get_header3
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_POS1
+*&---------------------------------------------------------------------*
+*       Позиции из MM-документа
+*----------------------------------------------------------------------*
+FORM get_pos1 .
+
+  DATA: lt_tlines    TYPE TABLE OF tline,
+        ls_tlines    TYPE tline,
+        lv_name      TYPE thead-tdname,
+        ls_xpostable TYPE pos_t,
+        lt_mat_text  TYPE ztb_mat_text,
+        ls_mat_text  TYPE zst_mat_text,
+        lt_pdrm      TYPE gty_t_pdrm.
+
+  FIELD-SYMBOLS:
+    <ls_pdrm> TYPE gty_s_pdrm.
+
+  lt_mat_text = zcl_text_for_material=>get_text_mat_v1( iv_triger  = 'X'
+                                                        it_table = it_mm_pos ).
+
+  LOOP AT it_mm_pos INTO gs_mm_pos.
+    CLEAR: lt_tlines[], lt_tlines, ls_xpostable.
+
+    MOVE: gs_mm_pos-matnr TO ls_xpostable-matnr,
+          gs_mm_pos-menge TO ls_xpostable-menge,
+          gs_mm_pos-meins TO ls_xpostable-meins,
+          gs_mm_pos-dmbtr TO ls_xpostable-cost,
+          gs_mm_pos-dmbtr TO ls_xpostable-total,
+          gs_mm_pos-waers TO ls_xpostable-waers,
+          gs_mm_pos-zeile TO ls_xpostable-buzei.
+
+    ls_xpostable-price = ls_xpostable-cost / ls_xpostable-menge.
+    ls_xpostable-charg = gs_mm_pos-charg.
+
+    PERFORM get_mat_weight
+             USING ls_xpostable-matnr ls_xpostable-charg
+                   ls_xpostable-menge ls_xpostable-meins
+             CHANGING ls_xpostable-brgew.
+
+    READ TABLE lt_mat_text INTO ls_mat_text WITH KEY matnr = ls_xpostable-matnr
+                                                     charg = ls_xpostable-charg.
+    ls_xpostable-maktx = ls_mat_text-text.
+    APPEND ls_xpostable TO xpostable.
+
+    APPEND INITIAL LINE TO lt_pdrm ASSIGNING <ls_pdrm>.                        "{Обработка драг.металлов производится после формирования списка позиций
+    <ls_pdrm>-buzei = ls_xpostable-buzei.
+    <ls_pdrm>-dats = gs_mm_pos-bldat.
+
+    <ls_pdrm>-objek = gs_mm_pos-matnr.
+    <ls_pdrm>-objek+18 = gs_mm_pos-charg.
+
+    IF ls_xpostable-price IS NOT INITIAL.
+      <ls_pdrm>-price = 'X'.
+    ENDIF.                                                                     "}Обработка драг.металлов производится после формирования списка позиций
+  ENDLOOP.
+
+  IF lt_pdrm IS NOT INITIAL.                                                   "{Измененная обработка драг.металлов
+    PERFORM fill_drm USING lt_pdrm.
+  ENDIF.                                                                       "}Измененная обработка драг.металлов
+ENDFORM.                                                    " GET_POS1
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_POS2
+*&---------------------------------------------------------------------*
+*       Позиции из MM-документа
+*----------------------------------------------------------------------*
+FORM get_pos2 .
+  DATA: verpr TYPE mbew-verpr,  " Средняя скользящая цена/периодическая учетная цена
+        peinh TYPE mbew-peinh.  " Единица цены
+
+  DATA: lt_tlines       TYPE TABLE OF tline, "WITH HEADER LINE,
+        ls_tlines       TYPE tline,
+        ls_xpostable    TYPE pos_t,
+        lv_name         TYPE thead-tdname,
+        lt_class        TYPE TABLE OF sclass,
+        lt_objectdat    TYPE TABLE OF clobjdat,
+        ls_objectdat    TYPE clobjdat,
+        lv_basequantity TYPE menge_d,
+        lv_unit_in      TYPE t006-msehi,
+        lt_mat_text     TYPE ztb_mat_text,
+        ls_mat_text     TYPE zst_mat_text,
+        lv_date_ext     TYPE char10,
+        lt_pdrm         TYPE gty_t_pdrm.
+
+  FIELD-SYMBOLS:
+    <ls_pdrm> TYPE gty_s_pdrm.
+
+  lt_mat_text = zcl_text_for_material=>get_text_mat_v1( iv_triger  = 'X'
+                                                        it_table = it_mm_pos ).
+  IF gv_shkzg IS INITIAL.
+    gv_shkzg = 'S'.
+  ENDIF.
+  LOOP AT it_mm_pos INTO gs_mm_pos WHERE shkzg EQ gv_shkzg.
+    CLEAR: lt_tlines[], ls_tlines, ls_xpostable.
+    MOVE: gs_mm_pos-matnr TO ls_xpostable-matnr,
+          gs_mm_pos-menge TO ls_xpostable-menge,
+          gs_mm_pos-meins TO ls_xpostable-meins,
+          gs_mm_pos-waers TO ls_xpostable-waers,
+          gs_mm_pos-zeile TO ls_xpostable-buzei,
+          gs_mm_pos-charg TO ls_xpostable-charg.
+
+    READ TABLE lt_mat_text INTO ls_mat_text WITH KEY matnr = ls_xpostable-matnr
+                                                     charg = ls_xpostable-charg.
+    ls_xpostable-maktx = ls_mat_text-text.
+
+    IF gs_mm_pos-sobkz IS INITIAL AND gs_mm_pos-ps_psp_pnr IS INITIAL.
+      SELECT SINGLE verpr peinh FROM mbew
+                                INTO (verpr, peinh)
+                                WHERE matnr EQ ls_xpostable-matnr AND
+                                      bwkey EQ gs_mm_pos-werks AND
+                                      bwtar EQ gs_mm_pos-charg.
+    ELSE.
+      SELECT SINGLE verpr peinh FROM qbew
+                              INTO (verpr, peinh)
+                              WHERE matnr EQ ls_xpostable-matnr AND
+                                    bwkey EQ gs_mm_pos-werks AND
+                                    bwtar EQ gs_mm_pos-charg AND
+                                    sobkz EQ gs_mm_pos-sobkz AND
+                                    pspnr EQ gs_mm_pos-ps_psp_pnr.
+    ENDIF.
+    ls_xpostable-vrate = 0.
+    ls_xpostable-vatsm = 0.
+    IF gs_mm_pos-dmbtr IS INITIAL.
+      ls_xpostable-price = verpr / peinh.
+      ls_xpostable-cost  = ls_xpostable-menge * verpr / peinh.
+    ELSE.
+      ls_xpostable-cost = gs_mm_pos-dmbtr.
+      ls_xpostable-price = ls_xpostable-cost / ls_xpostable-menge.
+    ENDIF.
+    ls_xpostable-total = ls_xpostable-cost + ls_xpostable-vatsm.
+
+    CALL FUNCTION 'CLAF_CLASSIFICATION_OF_OBJECTS'
+      EXPORTING
+        classtype       = '023'
+        object          = CONV ausp-objek(
+                            VALUE mch1_key(
+                              matnr = gs_mm_pos-matnr
+                              charg = gs_mm_pos-charg ) )
+        objecttable     = 'MCH1'
+        initial_charact = ''
+      TABLES
+        t_class         = lt_class[]
+        t_objectdata    = lt_objectdat[]
+      EXCEPTIONS
+        OTHERS          = 0.
+* #11671 Корников Л. Добавить Инв.№ {
+    READ TABLE lt_objectdat INTO ls_objectdat WITH KEY atnam = 'Z_INV'.
+    IF sy-subrc = 0.
+      ls_xpostable-maktx = ls_xpostable-maktx && `, ` && ls_objectdat-ausp1.
+    ENDIF. " }
+
+    READ TABLE lt_objectdat INTO ls_objectdat WITH KEY atnam = 'Z_BRUTTO'.
+    IF sy-subrc = 0.
+      CALL FUNCTION 'MATERIAL_UNIT_CONVERSION'
+        EXPORTING
+          input    = ls_xpostable-menge
+          kzmeinh  = 'X'
+          matnr    = ls_xpostable-matnr
+          meinh    = ls_xpostable-meins
+          type_umr = '3'
+        IMPORTING
+          output   = lv_basequantity
+        EXCEPTIONS
+          OTHERS   = 1.
+      IF sy-subrc <> 0.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+
+      ls_objectdat-atflv = ls_objectdat-atflv * lv_basequantity.
+      lv_unit_in = ls_objectdat-dime1.
+      CALL FUNCTION 'UNIT_CONVERSION_SIMPLE'
+        EXPORTING
+          input    = ls_objectdat-atflv
+          unit_in  = lv_unit_in
+          unit_out = 'TO'
+        IMPORTING
+          output   = ls_xpostable-brgew.
+    ELSE.
+      PERFORM get_mat_weight
+                 USING ls_xpostable-matnr ls_xpostable-charg
+                       ls_xpostable-menge ls_xpostable-meins
+                 CHANGING ls_xpostable-brgew.
+    ENDIF.
+    READ TABLE lt_objectdat INTO ls_objectdat WITH KEY atnam = 'Z_NUM_DOC'.
+    DATA(lv_num_doc) = ls_objectdat-ausp1.
+    IF lv_num_doc IS NOT INITIAL AND lv_num_doc  <> '?'
+      AND gs_mm_pos-werks IS NOT INITIAL AND gs_mm_pos-werks = '1020'.
+        SELECT SINGLE budat_mkpf
+          FROM mseg
+          WHERE xblnr_mkpf = @lv_num_doc
+          AND zeile = '0001'
+          AND werks LIKE '__10'
+          INTO @DATA(lv_date).
+      IF sy-subrc = 0.
+         lv_date_ext = |{ lv_date DATE = ENVIRONMENT }|.
+         CONCATENATE lv_num_doc 'от' lv_date_ext INTO ls_xpostable-zprim SEPARATED BY space.
+      ELSE.
+        ls_xpostable-zprim = lv_num_doc.
+      ENDIF.
+    ENDIF.
+    APPEND ls_xpostable TO xpostable.
+
+    APPEND INITIAL LINE TO lt_pdrm ASSIGNING <ls_pdrm>.                        "{Обработка драг.металлов производится после формирования списка позиций
+    <ls_pdrm>-buzei = ls_xpostable-buzei.
+    <ls_pdrm>-dats = gs_mm_pos-bldat.
+    <ls_pdrm>-objectdata = lt_objectdat.
+
+    IF ls_xpostable-price IS NOT INITIAL.
+      <ls_pdrm>-price = 'X'.
+    ENDIF.                                                                     "}Обработка драг.металлов производится после формирования списка позиций
+  ENDLOOP.
+
+  IF lt_pdrm IS NOT INITIAL.
+    PERFORM fill_drm USING lt_pdrm.
+  ENDIF.
+ENDFORM.                                                    " GET_POS2
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_POS3
+*&---------------------------------------------------------------------*
+*       Позиции из документа исходящей поставки
+*----------------------------------------------------------------------*
+FORM get_pos3.
+  TYPES: BEGIN OF lty_s_ekpo,
+           ebeln TYPE ekpo-ebeln,
+           ebelp TYPE ekpo-ebelp,
+           bukrs TYPE ekpo-bukrs,
+           netpr TYPE ekpo-netpr,
+           netwr TYPE ekpo-netwr,
+           mwskz TYPE ekpo-mwskz,
+           bprme TYPE ekpo-bprme,
+           menge TYPE ekpo-menge,
+           brtwr TYPE ekpo-brtwr,
+           waers TYPE waers,
+         END OF lty_s_ekpo,
+         BEGIN OF lty_s_mseg,
+           mblnr      TYPE mseg-mblnr,
+           mjahr      TYPE mseg-mjahr,
+           zeile      TYPE mseg-zeile,
+           budat_mkpf TYPE mseg-budat_mkpf,
+           dmbtr      TYPE mseg-dmbtr,
+           menge      TYPE mseg-menge,
+           meins      TYPE mseg-meins,
+         END OF lty_s_mseg,
+         BEGIN OF lty_s_vbfa,
+           vbelv TYPE vbfa-vbelv,
+           posnv TYPE vbfa-posnv,
+           vbeln TYPE vbfa-vbeln,
+           mjahr TYPE vbfa-mjahr,
+           posnn TYPE vbfa-posnn,
+         END OF lty_s_vbfa,
+         "--> D.Kruhliakou 01.01.2022
+         BEGIN OF lty_s_vbap,
+           vbeln  TYPE vbap-vbeln,  " заказ
+           posnr  TYPE vbap-posnr,  " позиция
+           waerk  TYPE vbap-waerk,  " Валюта документа сбыта
+           kwmeng TYPE vbap-kwmeng, " Кумулятивное количество заказа в продажной ед. измерения
+           netpr  TYPE vbap-netpr,  " Цена нетто
+           kzwi2  TYPE vbap-kzwi2,
+           kzwi3  TYPE vbap-kzwi3,
+           kzwi4  TYPE vbap-kzwi4,
+           kzwi5  TYPE vbap-kzwi5,
+           knumv  TYPE knumv,  " Номер условия
+           kbetr  TYPE kbetr,  " Цена (сумма или процент)
+           kwert  TYPE kwert,  " Стоимость условия
+           text   TYPE string,
+         END OF lty_s_vbap.
+  "<-- D.Kruhliakou 01.01.2022
+  DATA: lt_tlines    TYPE TABLE OF tline, "WITH HEADER LINE,
+        ls_tlines    TYPE tline,
+        ls_xpostable TYPE pos_t,
+        lv_name      TYPE thead-tdname,
+        lv_stat_up   TYPE vbup-pksta,
+        lt_vbfa      TYPE TABLE OF vbelv, "vbfa,
+        lt_mat_text  TYPE ztb_mat_text,
+        ls_mat_text  TYPE zst_mat_text,
+        lv_tn_cost   TYPE z_tn_cost,
+        lt_ekpo      TYPE TABLE OF lty_s_ekpo,
+        ls_ekpo      TYPE lty_s_ekpo,
+        lv_quantity  TYPE f,
+        lv_fwste     TYPE bset-fwste,
+        lt_mwdat     TYPE TABLE OF rtax1u15,
+        ls_mwdat     TYPE rtax1u15,
+        lv_vbeln     TYPE vbfa-vbeln,
+        lv_verpr     TYPE mbew-verpr,
+        lv_peinh     TYPE mbew-peinh,
+        lt_mseg      TYPE STANDARD TABLE OF lty_s_mseg,
+        lt_vbfa1     TYPE STANDARD TABLE OF lty_s_vbfa,
+        lv_waers     TYPE waers,
+        lt_pdrm      TYPE gty_t_pdrm,
+        "--> D.Kruhliakou 01.01.2022
+        lt_lines     TYPE STANDARD TABLE OF tline,
+        lt_vbap      TYPE STANDARD TABLE OF lty_s_vbap,
+        ls_vbap      TYPE lty_s_vbap,
+        lv_tdname    TYPE tdobname.
+  "<-- D.Kruhliakou 01.01.2022
+
+  DATA: ls_dp TYPE lips.
+
+  " корректировка деления на 100 для валют после деноминации в РБ
+  DATA: currdec TYPE tcurx-currdec. " Кол-во знаков после запятой в бел.руб.
+  DATA: k TYPE p VALUE 1. " коэф.преобразования
+  SELECT SINGLE currdec
+    INTO currdec
+    FROM tcurx INNER JOIN t001
+      ON tcurx~currkey = t001~waers
+    WHERE t001~bukrs = '01'. " ориентируемся на БЕ ЦА
+  IF sy-subrc NE 0.
+    k = 1.   " валюта бел.руб. имеет два знака после запятой
+  ELSE.
+    k = 100. " валюта бел.руб. не имеет знаков после запятой
+  ENDIF.
+
+  FIELD-SYMBOLS:
+    <ls_mseg>  TYPE lty_s_mseg,
+    <ls_vbfa1> TYPE lty_s_vbfa,
+    <ls_pdrm>  TYPE gty_s_pdrm.
+
+  SELECT SINGLE waers FROM t001 INTO lv_waers WHERE bukrs = likp-vkorg.
+
+  LOOP AT it_delivery_pos ASSIGNING FIELD-SYMBOL(<ls_pos>).
+    READ TABLE lt_mat_text TRANSPORTING NO FIELDS WITH KEY matnr = <ls_pos>-matnr
+                                                           charg = <ls_pos>-charg.
+    IF sy-subrc <> 0.
+      " APPEND VALUE #( matnr = <ls_pos>-matnr charg = <ls_pos>-charg ) TO lt_mat_text.
+      INSERT VALUE #( matnr = <ls_pos>-matnr charg = <ls_pos>-charg ) INTO TABLE lt_mat_text.
+    ENDIF.
+  ENDLOOP.
+  zcl_text_for_material=>get_text_mat_v4( EXPORTING it_table = lt_mat_text CHANGING ct_table = lt_mat_text ).
+
+  SELECT SINGLE zz_tn_cost FROM tvlk INTO lv_tn_cost WHERE lfart = likp-lfart.
+
+  IF likp-lfart = 'RL' OR likp-lfart = 'RLL'.
+    SELECT ekpo~ebeln
+           ekpo~ebelp
+           ekpo~bukrs
+           ekpo~netpr
+           ekpo~netwr
+           ekpo~mwskz
+           ekpo~bprme
+           ekpo~menge
+           ekpo~brtwr
+           ekko~waers
+      FROM ekpo
+        INNER JOIN ekko ON ekko~ebeln = ekpo~ebeln
+      INTO CORRESPONDING FIELDS OF TABLE lt_ekpo
+      FOR ALL ENTRIES IN it_delivery_pos
+      WHERE ekpo~ebeln = it_delivery_pos-vgbel
+        AND ekpo~ebelp = it_delivery_pos-vgpos+1.
+  ELSE.
+    READ TABLE it_delivery_pos
+      INTO ls_dp
+      INDEX 1.
+    IF ls_dp-bwart = '541'.
+      SELECT vbfa~vbelv
+             vbfa~posnv
+             vbfa~vbeln
+             vbfa~mjahr
+             vbfa~posnn
+       FROM vbfa
+       INTO TABLE lt_vbfa1
+       FOR ALL ENTRIES IN it_delivery_pos
+       WHERE vbfa~vbelv = it_delivery_pos-vbeln
+         AND vbfa~posnv = it_delivery_pos-posnr
+         AND vbfa~vbtyp_n = 'R'
+         AND vbfa~bwart = '541'.
+
+      SORT lt_vbfa1 BY vbeln mjahr posnn.
+      DELETE ADJACENT DUPLICATES FROM lt_vbfa1 COMPARING ALL FIELDS.
+      SELECT  mseg~mblnr
+              mseg~mjahr
+              mseg~zeile
+              mseg~budat_mkpf
+              mseg~dmbtr
+       FROM mseg
+       INTO CORRESPONDING FIELDS OF TABLE lt_mseg
+       FOR ALL ENTRIES IN lt_vbfa1
+        WHERE mseg~mblnr = lt_vbfa1-vbeln
+          AND mseg~mjahr = lt_vbfa1-mjahr
+          AND mseg~zeile = lt_vbfa1-posnn+2(4)
+          AND mseg~bustw = 'WA04'
+          AND mseg~shkzg = 'H'.
+
+    ELSEIF ls_dp-bwart = 'ZR5' OR
+           ls_dp-bwart = 'ZR7' OR
+           ls_dp-bwart = 'ZRC'.
+      SELECT vbfa~vbelv
+             vbfa~posnv
+             vbfa~vbeln
+             vbfa~mjahr
+             vbfa~posnn
+       FROM vbfa
+       INTO TABLE lt_vbfa1
+       FOR ALL ENTRIES IN it_delivery_pos
+       WHERE vbfa~vbelv = it_delivery_pos-vbeln
+         AND vbfa~posnv = it_delivery_pos-posnr
+         AND vbfa~vbtyp_n = 'R'
+         AND ( vbfa~bwart = 'ZR5' OR vbfa~bwart = 'ZR7' OR vbfa~bwart = 'ZRC').
+
+      SORT lt_vbfa1 BY vbeln mjahr posnn.
+      DELETE ADJACENT DUPLICATES FROM lt_vbfa1 COMPARING ALL FIELDS.
+      SELECT  mseg~mblnr
+              mseg~mjahr
+              mseg~zeile
+              mseg~budat_mkpf
+              mseg~dmbtr
+              mseg~menge
+              mseg~meins
+       FROM mseg
+       INTO CORRESPONDING FIELDS OF TABLE lt_mseg
+       FOR ALL ENTRIES IN lt_vbfa1
+        WHERE mseg~mblnr = lt_vbfa1-vbeln
+          AND mseg~mjahr = lt_vbfa1-mjahr
+          AND mseg~zeile = lt_vbfa1-posnn+2(4)
+          AND mseg~shkzg = 'H'.
+
+    ELSE.
+      SELECT vbfa~vbelv
+             vbfa~posnv
+             vbfa~vbeln
+             vbfa~mjahr
+             vbfa~posnn
+       FROM vbfa
+       INTO TABLE lt_vbfa1
+       FOR ALL ENTRIES IN it_delivery_pos
+       WHERE vbfa~vbelv = it_delivery_pos-vbeln
+         AND vbfa~posnv = it_delivery_pos-posnr
+         AND vbfa~vbtyp_n = 'R'
+         AND vbfa~bwart = '683'.
+
+      SORT lt_vbfa1 BY vbeln mjahr posnn.
+      DELETE ADJACENT DUPLICATES FROM lt_vbfa1 COMPARING ALL FIELDS.
+      SELECT  mseg~mblnr
+              mseg~mjahr
+              mseg~zeile
+              mseg~budat_mkpf
+              mseg~dmbtr
+       FROM mseg
+       INTO CORRESPONDING FIELDS OF TABLE lt_mseg
+       FOR ALL ENTRIES IN lt_vbfa1
+        WHERE  mseg~mblnr = lt_vbfa1-vbeln
+         AND mseg~mjahr = lt_vbfa1-mjahr
+         AND mseg~zeile = lt_vbfa1-posnn+2(4)
+         AND mseg~bustw = 'WA01'.
+    ENDIF.
+    SORT: lt_mseg  BY mblnr mjahr zeile budat_mkpf DESCENDING,
+          lt_vbfa1 BY vbelv posnv vbeln DESCENDING.
+  ENDIF.
+  IF NOT it_delivery_pos IS INITIAL.
+    SELECT
+        vbap~vbeln,  " заказ
+        vbap~posnr,  " позиция
+        vbap~waerk,  " Валюта документа сбыта
+        vbap~kwmeng, " Кумулятивное количество заказа в продажной ед. измерения
+        vbap~netpr,  " Цена нетто
+        vbap~kzwi2,
+        vbap~kzwi3,
+        vbap~kzwi4,
+        vbap~kzwi5,
+        prcd~knumv,  " Номер условия
+        prcd~kbetr,  " Цена (сумма или процент)
+        prcd~kwert   " Стоимость условия
+      " INTO TABLE @DATA(lt_vbap) " Закомментированно D.Kruhliakou 01.09.2022
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vbap
+      FROM vbap
+        INNER JOIN vbak ON vbap~vbeln = vbak~vbeln
+        INNER JOIN prcd_elements AS prcd ON prcd~knumv = vbak~knumv
+                                        AND prcd~kposn = vbap~posnr
+                                        AND prcd~kschl = 'MWST'
+      FOR ALL ENTRIES IN @it_delivery_pos
+      WHERE vbap~vbeln = @it_delivery_pos-vgbel
+        AND vbap~posnr = @it_delivery_pos-vgpos.
+
+    "--> Получение текстов позиции D.Kruhliakou 01.09.2022
+    LOOP AT lt_vbap ASSIGNING FIELD-SYMBOL(<fs_vbap>).
+      CONCATENATE <fs_vbap>-vbeln <fs_vbap>-posnr INTO lv_tdname.
+
+      CALL FUNCTION 'READ_TEXT'
+        EXPORTING
+          client   = sy-mandt
+          id       = '0001'
+          language = sy-langu
+          name     = lv_tdname
+          object   = 'VBBP'
+        TABLES
+          lines    = lt_lines
+        EXCEPTIONS
+          OTHERS   = 9.
+
+      IF sy-subrc = 0.
+        LOOP AT lt_lines INTO DATA(ls_line).
+          CONCATENATE <fs_vbap>-text ls_line-tdline INTO <fs_vbap>-text SEPARATED BY space.
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+    "<-- D.Kruhliakou 01.09.2022
+  ENDIF.
+  LOOP AT it_delivery_pos INTO gs_delivery_pos.
+    CLEAR: lt_tlines[], ls_tlines, ls_xpostable.", ls_vbap.
+
+    MOVE: gs_delivery_pos-matnr TO ls_xpostable-matnr,
+          gs_delivery_pos-lfimg TO ls_xpostable-menge,
+          gs_delivery_pos-vrkme TO ls_xpostable-meins,
+          likp-waerk            TO ls_xpostable-waers,
+          gs_delivery_pos-posnr TO ls_xpostable-buzei,
+          gs_delivery_pos-charg TO ls_xpostable-charg.
+
+
+    IF gs_delivery_pos-brgew IS NOT INITIAL AND gs_delivery_pos-gewei IS NOT INITIAL .
+      CALL FUNCTION 'UNIT_CONVERSION_SIMPLE'
+        EXPORTING
+          input    = gs_delivery_pos-brgew
+          unit_in  = gs_delivery_pos-gewei
+          unit_out = 'TO'
+        IMPORTING
+          output   = ls_xpostable-brgew.
+    ELSE.
+      PERFORM get_mat_weight
+             USING ls_xpostable-matnr ls_xpostable-charg
+                   ls_xpostable-menge ls_xpostable-meins
+             CHANGING ls_xpostable-brgew.
+    ENDIF.
+
+    READ TABLE lt_mat_text INTO ls_mat_text WITH KEY matnr = ls_xpostable-matnr
+                                                     charg = ls_xpostable-charg.
+    ls_xpostable-maktx = ls_mat_text-text.
+
+    "количество грузовых мест
+    SELECT SINGLE pksta FROM vbup INTO lv_stat_up
+      WHERE vbeln = gs_delivery_pos-vbeln AND posnr = gs_delivery_pos-posnr.
+
+    IF  lv_stat_up > 'A'.
+      SELECT vbelv FROM vbfa INTO TABLE lt_vbfa
+        WHERE vbeln = gs_delivery_pos-vbeln
+          AND posnv = gs_delivery_pos-posnr
+          AND vbtyp_n = 'X'
+          AND vbtyp_v = 'J'.
+
+      ls_xpostable-zkolm = lines( lt_vbfa ).
+
+      "   VL03N, обход CX_SY_CONVERSION_OVERFLOW при
+      "   больших количествах
+    ELSEIF ls_xpostable-menge < 256.
+
+      ls_xpostable-zkolm = ls_xpostable-menge.
+    ENDIF.
+
+    "vgtyp = 'C' - сбытовой заказ, vgtyp = 'V' - заказ на поставку
+
+    CLEAR lv_vbeln.
+    SELECT SINGLE vbeln
+      FROM vbfa
+      INTO lv_vbeln
+      WHERE vbelv = gs_delivery_pos-vbeln
+        AND posnv = gs_delivery_pos-posnr
+        AND bwart = '541'.
+
+    IF likp-kalsp IS NOT INITIAL OR lv_vbeln IS INITIAL.
+      IF gs_delivery_pos-vgtyp = 'C'.
+        ASSIGN lt_vbap[ vbeln = gs_delivery_pos-vgbel posnr = gs_delivery_pos-vgpos ] TO FIELD-SYMBOL(<ls_vbap>).
+        IF sy-subrc = 0.
+          ls_xpostable-price = <ls_vbap>-netpr.
+          ls_xpostable-vrate = <ls_vbap>-kbetr. " Ставка НДС
+          ls_xpostable-cost  = COND #( WHEN <ls_vbap>-kzwi3 IS NOT INITIAL THEN <ls_vbap>-kzwi3 ELSE <ls_vbap>-kzwi2 ).
+          IF gs_delivery_pos-lfimg = <ls_vbap>-kwmeng.
+            ls_xpostable-vatsm = <ls_vbap>-kzwi5.
+            ls_xpostable-total = <ls_vbap>-kzwi4.
+          ELSE.
+            ls_xpostable-cost  = ls_xpostable-price * gs_delivery_pos-lfimg.
+            CATCH SYSTEM-EXCEPTIONS arithmetic_errors = 4
+                                      OTHERS            = 8.
+              ls_xpostable-vatsm = <ls_vbap>-kbetr * ls_xpostable-cost / 100 / k.
+            ENDCATCH.
+            ls_xpostable-total = ls_xpostable-cost + ls_xpostable-vatsm.
+          ENDIF.
+          ls_xpostable-waers = <ls_vbap>-waerk.
+
+          "--> D.Kruhliakou 01.09.2022
+          ls_xpostable-zprim = <ls_vbap>-text.
+          "<-- D.Kruhliakou 01.09.2022
+        ENDIF.
+      ELSEIF gs_delivery_pos-vgtyp = 'V' OR gs_delivery_pos-vgtyp = ''.
+        "если поставка возвратная
+        IF likp-lfart = 'RL' OR likp-lfart = 'RLL'."lv_vbtyp = 'T'.
+          READ TABLE lt_ekpo INTO ls_ekpo WITH KEY ebeln = gs_delivery_pos-vgbel
+                                                   ebelp = gs_delivery_pos-vgpos+1.
+          "если кода ставки НДС нет, то код НДС 0% (схема TAXBY)
+          IF ls_ekpo-mwskz IS INITIAL.
+            ls_ekpo-mwskz = 'V0'.
+          ENDIF.
+          lv_quantity = 1.
+          IF gs_delivery_pos-vrkme <> ls_ekpo-bprme.
+            CALL FUNCTION 'MATERIAL_UNIT_CONVERSION'
+              EXPORTING
+                input    = lv_quantity
+                kzmeinh  = 'X'
+                matnr    = gs_delivery_pos-matnr
+                meinh    = ls_ekpo-bprme
+                type_umr = '3'
+              IMPORTING
+                output   = lv_quantity
+              EXCEPTIONS
+                OTHERS   = 1.
+            IF sy-subrc <> 0.
+              MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                        WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+            ENDIF.
+          ENDIF.
+          "цена
+          ls_xpostable-price = ls_ekpo-netpr * lv_quantity.
+          ls_xpostable-waers = ls_ekpo-waers.
+          CALL FUNCTION 'CALCULATE_TAX_FROM_NET_AMOUNT'
+            EXPORTING
+              i_bukrs = ls_ekpo-bukrs
+              i_mwskz = ls_ekpo-mwskz
+              i_waers = ls_ekpo-waers
+              i_wrbtr = ls_xpostable-price
+            IMPORTING
+              e_fwste = lv_fwste
+            TABLES
+              t_mwdat = lt_mwdat
+            EXCEPTIONS
+              OTHERS  = 1.
+          IF sy-subrc <> 0.
+            MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+          ENDIF.
+          READ TABLE lt_mwdat INTO ls_mwdat INDEX 1.
+          "ндс
+          ls_xpostable-vrate = ls_mwdat-msatz.
+          "если возвращается полное количество
+          IF  ls_ekpo-menge = gs_delivery_pos-lfimg
+          AND ls_ekpo-bprme = gs_delivery_pos-vrkme.
+            ls_xpostable-cost  = ls_ekpo-netwr.
+            ls_xpostable-vatsm = ls_ekpo-brtwr - ls_ekpo-netwr.
+            ls_xpostable-total = ls_ekpo-brtwr.
+          ELSE.
+            ls_xpostable-cost  = ls_xpostable-price * gs_delivery_pos-lfimg.
+            ls_xpostable-vatsm = lv_fwste.
+            ls_xpostable-total = ls_xpostable-cost + ls_xpostable-vatsm.
+          ENDIF.
+        ELSE.
+          READ TABLE lt_vbfa1 ASSIGNING <ls_vbfa1> WITH KEY vbelv = gs_delivery_pos-vbeln "{31.01.2014 Hubenka #1411
+                                                            posnv = gs_delivery_pos-posnr
+                                                 BINARY SEARCH.
+          IF sy-subrc = 0.
+            READ TABLE lt_mseg ASSIGNING <ls_mseg> WITH KEY mblnr = <ls_vbfa1>-vbeln
+                                                            mjahr = <ls_vbfa1>-mjahr
+                                                            zeile = <ls_vbfa1>-posnn+2(4)
+                                                   BINARY SEARCH.
+            IF sy-subrc = 0.
+              ls_xpostable-cost = <ls_mseg>-dmbtr.
+            ENDIF.
+          ENDIF.
+          IF sy-subrc <> 0.
+            MESSAGE TEXT-e11 TYPE 'E'.
+          ENDIF.                                                                          "}31.01.2014 Hubenka #1411
+          IF lv_tn_cost = 'X'.
+            ls_xpostable-vrate = 0.
+            CATCH SYSTEM-EXCEPTIONS arithmetic_errors = 4
+                                    OTHERS            = 8.
+              ls_xpostable-price = ls_xpostable-cost / ls_xpostable-menge.
+            ENDCATCH.
+            ls_xpostable-vatsm = 0.
+            ls_xpostable-total = ls_xpostable-cost.
+          ELSE.
+            CATCH SYSTEM-EXCEPTIONS OTHERS  = 4.
+              " Ставка НДС
+              ls_xpostable-vrate = lt_vbap[ vbeln = gs_delivery_pos-vgbel posnr = gs_delivery_pos-vgpos ]-kbetr.
+            ENDCATCH.
+            ls_xpostable-cost  = gs_delivery_pos-kzwi3.
+            ls_xpostable-vatsm = gs_delivery_pos-kzwi5.
+            ls_xpostable-total = gs_delivery_pos-kzwi4.
+          ENDIF."lv_tn_cost = 'X'.
+        ENDIF.
+      ENDIF.
+    ELSEIF likp-kalsp IS INITIAL.                                              "VSasnouski 06.08.2013 note #194
+      IF lv_vbeln IS INITIAL.
+        MESSAGE TEXT-e11 TYPE 'E'.
+      ELSE.
+        IF gs_delivery_pos-sobkz IS INITIAL AND gs_delivery_pos-ps_psp_pnr IS INITIAL.
+          SELECT SINGLE verpr peinh FROM mbew
+                                    INTO (lv_verpr, lv_peinh)
+                                    WHERE matnr EQ ls_xpostable-matnr AND
+                                          bwkey EQ gs_delivery_pos-werks AND
+                                          bwtar EQ gs_delivery_pos-charg.
+        ELSE.
+          SELECT SINGLE verpr peinh FROM qbew
+                                  INTO (lv_verpr, lv_peinh)
+                                  WHERE matnr EQ ls_xpostable-matnr AND
+                                        bwkey EQ gs_delivery_pos-werks AND
+                                        bwtar EQ gs_delivery_pos-charg AND
+                                        sobkz EQ gs_delivery_pos-sobkz AND
+                                        pspnr EQ gs_delivery_pos-ps_psp_pnr.
+        ENDIF.
+        ls_xpostable-vrate = 0.
+        ls_xpostable-vatsm = 0.
+        IF likp-waerk IS NOT INITIAL.
+          ls_xpostable-waers = likp-waerk.
+        ELSE.
+          ls_xpostable-waers = lv_waers.
+        ENDIF.
+
+        IF gs_mm_pos-dmbtr IS INITIAL.                                             "{Hubenka #1411 09.04.2013
+          ls_xpostable-price = lv_verpr / lv_peinh.
+          ls_xpostable-cost  = ls_xpostable-menge * lv_verpr / lv_peinh.
+        ELSE.
+          ls_xpostable-cost = gs_delivery_pos-netpr.
+          ls_xpostable-price = ls_xpostable-cost / ls_xpostable-menge.
+        ENDIF.                                                                     "}Hubenka #1411 09.04.2013
+        ls_xpostable-total = ls_xpostable-cost + ls_xpostable-vatsm.
+      ENDIF.
+
+      IF ls_dp-bwart = '541'.
+        READ TABLE lt_vbfa1
+          ASSIGNING <ls_vbfa1>
+          WITH KEY vbelv = gs_delivery_pos-vbeln
+                   posnv = gs_delivery_pos-posnr
+          BINARY SEARCH.
+        IF sy-subrc = 0.
+          READ TABLE lt_mseg
+            ASSIGNING <ls_mseg>
+            WITH KEY mblnr = <ls_vbfa1>-vbeln
+                     mjahr = <ls_vbfa1>-mjahr
+                     zeile = <ls_vbfa1>-posnn+2(4)
+            BINARY SEARCH.
+          IF sy-subrc = 0.
+            ls_xpostable-cost = <ls_mseg>-dmbtr.
+            ls_xpostable-total = ls_xpostable-cost.
+            CATCH SYSTEM-EXCEPTIONS arithmetic_errors = 4
+                                    OTHERS            = 8.
+
+              CASE ls_dp-bwart.
+                WHEN '541'.
+                  ls_xpostable-price = ls_xpostable-cost / ls_xpostable-menge.
+              ENDCASE.
+            ENDCATCH.
+          ENDIF.
+        ENDIF.
+        IF sy-subrc <> 0.
+          MESSAGE TEXT-e11 TYPE 'E'.
+        ENDIF.                                                                          "}31.01.2014 Hubenka #1411
+      ENDIF.
+    ENDIF.
+
+    IF ls_dp-bwart = 'ZR5' OR
+       ls_dp-bwart = 'ZR7' OR
+       ls_dp-bwart = 'ZRC'. "# 8000000081
+      READ TABLE lt_vbfa1
+        ASSIGNING <ls_vbfa1>
+        WITH KEY vbelv = gs_delivery_pos-vbeln
+                 posnv = gs_delivery_pos-posnr
+        BINARY SEARCH.
+      IF sy-subrc = 0.
+        READ TABLE lt_mseg
+          ASSIGNING <ls_mseg>
+          WITH KEY mblnr = <ls_vbfa1>-vbeln
+                   mjahr = <ls_vbfa1>-mjahr
+                   zeile = <ls_vbfa1>-posnn+2(4)
+          BINARY SEARCH.
+        IF sy-subrc = 0.
+          ls_xpostable-cost = <ls_mseg>-dmbtr.
+          ls_xpostable-total = ls_xpostable-cost.
+          CATCH SYSTEM-EXCEPTIONS arithmetic_errors = 4
+                                  OTHERS            = 8.
+
+            ls_xpostable-price = ls_xpostable-cost / <ls_mseg>-menge.
+          ENDCATCH.
+        ENDIF.
+      ENDIF.
+      IF sy-subrc <> 0.
+        MESSAGE TEXT-e11 TYPE 'E'.
+      ENDIF.                                                                          "}31.01.2014 Hubenka #1411
+    ENDIF.
+
+    APPEND ls_xpostable TO xpostable.
+
+    APPEND INITIAL LINE TO lt_pdrm ASSIGNING <ls_pdrm>.                        "{05.03.2014 VSasnouski Обработка драг.металлов производится после формирования списка позиций
+    <ls_pdrm>-buzei = ls_xpostable-buzei.
+    <ls_pdrm>-dats = likp-wadat_ist.
+
+    <ls_pdrm>-objek = VALUE mch1_key( matnr = ls_xpostable-matnr charg = ls_xpostable-charg ).
+    IF ls_xpostable-price IS NOT INITIAL.
+      <ls_pdrm>-price = 'X'.
+    ENDIF.                                                                     "}05.03.2014 VSasnouski Обработка драг.металлов производится после формирования списка позиций
+  ENDLOOP.
+
+  IF lt_pdrm IS NOT INITIAL.                                                   "{05.03.2014 VSasnouski Измененная обработка драг.металлов
+    PERFORM fill_drm USING lt_pdrm.
+  ENDIF.                                                                       "}05.03.2014 VSasnouski Измененная обработка драг.металлов
+
+  PERFORM comb_data.
+
+ENDFORM.                                                    " GET_POS1
+
+FORM comb_data.
+  TYPES:
+    BEGIN OF lty_s_post,
+      matnr TYPE inob-objek,
+      charg TYPE charg_d,
+      maktx TYPE char250,
+      buzei TYPE buzei,
+      meins TYPE meins,
+      menge TYPE menge_d,
+      waers TYPE waers,
+    END OF lty_s_post,
+    lty_post TYPE lty_s_post.
+
+  DATA: lv_dec        TYPE prcd_elements-kawrt,
+        lv_brgew      TYPE brgew,
+        lv_meins      TYPE meins,
+        lv_str        TYPE char70,
+        lt_class      TYPE STANDARD TABLE OF sclass,
+        lt_objectdata TYPE STANDARD TABLE OF clobjdat,
+        lt_post       TYPE TABLE OF lty_post,
+        lv_strana     TYPE clobjdat-ausp1,
+        lv_num_doc    TYPE clobjdat-ausp1,
+        lv_excise_txt TYPE clobjdat-ausp1.
+
+  IF NOT xheader-zdelivery IS INITIAL.
+    SELECT
+        vbfa~vbeln,  " заказ
+        vbap~matnr,
+        prcd~knumv,  " Номер условия
+        prcd~kwert,  " Стоимость условия
+        prcd~kawrt,  " значение условия                                                    "{11.04.2018  #12798 note #212
+        prcd~kpein,  " единица условия
+        prcd~kschl,  " единица условия
+        vbap~kwmeng  " Кумулят.кол-во заказа в продажной ед. измерения                     "}11.04.2018  #12798 note #212
+      INTO TABLE @DATA(lt_vbfa)
+      FROM vbfa
+        INNER JOIN vbap AS vbap ON vbap~vbeln = vbfa~vbelv
+                               AND vbap~posnr = vbfa~posnv
+        INNER JOIN vbak AS vbak ON vbak~vbeln = vbfa~vbelv
+        INNER JOIN prcd_elements AS prcd ON prcd~knumv = vbak~knumv
+                                        AND ( prcd~kschl = 'ZAKC' OR prcd~kschl = 'ZAKD' ) "11.04.2018  #12798 note #212
+      WHERE vbfa~vbeln = @xheader-zdelivery
+        AND ( vbfa~vbtyp_v = 'C' OR vbfa~vbtyp_v = 'H' ).
+  ENDIF.
+
+  " если партии пустой нет в xpostable, то метод не должен отработать.
+  SORT xpostable BY charg.
+  READ TABLE xpostable TRANSPORTING NO FIELDS WITH KEY charg = ''
+                                              BINARY SEARCH.
+  IF sy-subrc <> 0.
+    DATA(lv_flag) = 'X'.
+  ENDIF.
+
+  lt_post = CORRESPONDING #( xpostable[] ).
+  " получение номеров класса и типов для класификации партии
+  SELECT inob~objek AS matnr, klah~class, klah~klart
+    FROM inob
+     INNER JOIN kssk ON kssk~objek = inob~cuobj
+     INNER JOIN klah ON klah~clint = kssk~clint
+    INTO TABLE @DATA(lt_cl)
+    FOR ALL ENTRIES IN @lt_post
+   WHERE inob~objek = @lt_post-matnr.
+  FREE lt_post[].
+
+  SELECT SINGLE lfart                                                          "{24.04.2018  #12798 note #223
+    INTO @DATA(lv_lfart)
+    FROM likp
+   WHERE vbeln EQ @xheader-zdelivery.
+
+  IF lv_lfart IS NOT INITIAL.
+    SELECT sign,
+           opti AS option,
+           low,
+           high
+      FROM tvarvc
+     WHERE name = 'ZSD_TTN_AKC'
+      INTO TABLE @DATA(lt_sel).
+    IF lt_sel[] IS INITIAL OR  lv_lfart NOT IN lt_sel.
+      CLEAR lv_lfart.
+    ENDIF.
+  ENDIF.                                                                       "}24.04.2018  #12798 note #223
+
+  SELECT SINGLE atinn
+    INTO @lv_excise_txt
+    FROM cabn
+    WHERE atnam = 'Z_EXCISE_IND'.
+
+  SELECT
+       atzhl,
+       atwtb
+    INTO TABLE @DATA(lt_excise)
+    FROM cawnt
+    WHERE atinn = @lv_excise_txt
+      AND spras = @sy-langu.
+  CLEAR lv_excise_txt.
+  LOOP AT xpostable ASSIGNING FIELD-SYMBOL(<ls_curr>).
+    DATA(lv_index) = sy-tabix.
+    IF <ls_curr>-charg IS INITIAL.
+      CONTINUE.
+    ENDIF.
+    TRY.
+        DATA(lv_class) = lt_cl[ matnr = <ls_curr>-matnr ]-class.
+        DATA(lv_klart) = lt_cl[ matnr = <ls_curr>-matnr ]-klart.
+      CATCH cx_sy_itab_line_not_found.
+        sy-subrc = 0.
+    ENDTRY.
+
+    CLEAR: lv_str, lv_excise_txt, lv_meins, lv_strana.
+
+    "Получение значения признака из классификации
+    CALL FUNCTION 'CLAF_CLASSIFICATION_OF_OBJECTS'
+      EXPORTING
+        class        = lv_class
+        classtype    = lv_klart
+        object       = CONV ausp-objek( VALUE mch1_key( matnr = <ls_curr>-matnr charg = <ls_curr>-charg ) )
+        objecttable  = 'MCH1'
+      TABLES
+        t_class      = lt_class
+        t_objectdata = lt_objectdata
+      EXCEPTIONS
+        OTHERS       = 4.
+
+    IF sy-subrc = 0.
+      TRY.
+          lv_str = lt_objectdata[ atnam = 'Z_BRUTTO' ]-ausp1.
+          IF lv_lfart IS NOT INITIAL.                                          "{ 11.04.2018  #12798 note #212
+            lv_excise_txt = lt_excise[ atwtb = lt_objectdata[ atnam = 'Z_EXCISE_IND' ]-ausp1 ]-atzhl.
+            CASE lt_excise[ atwtb = lt_objectdata[ atnam = 'Z_EXCISE_IND' ]-ausp1 ]-atzhl.
+              WHEN 1.
+                DATA(ls_vbfa) = lt_vbfa[ matnr = <ls_curr>-matnr kschl = 'ZAKC' ].
+                lv_dec = ls_vbfa-kawrt.
+              WHEN 2.
+                ls_vbfa = lt_vbfa[ matnr = <ls_curr>-matnr kschl = 'ZAKD' ].
+                lv_dec = ls_vbfa-kwmeng.
+            ENDCASE.                                                           "}11.04.2018  #12798 note #212
+            lv_dec  = COND #( WHEN lv_dec  <> 0 THEN ls_vbfa-kwert / lv_dec
+                              ELSE ls_vbfa-kwert ).
+          ENDIF.
+        CATCH cx_sy_itab_line_not_found.
+          CLEAR: lv_excise_txt.
+      ENDTRY.
+       TRY.
+          lv_strana = lt_objectdata[ atnam = 'Z_STRANA' ]-ausp1.
+          IF lv_strana <> '?'.
+            IF xheader-zblnk = '0000000'.
+              CONCATENATE <ls_curr>-maktx lv_strana INTO <ls_curr>-maktx SEPARATED BY space.
+            ENDIF.
+            <ls_curr>-z_strana = lv_strana.
+          ENDIF.
+        CATCH cx_sy_itab_line_not_found.
+          CLEAR: lv_strana.
+      ENDTRY.
+    ENDIF.
+
+    IF lv_str <> '?'.
+      SPLIT lv_str AT space INTO lv_str lv_meins.
+      REPLACE ALL OCCURRENCES OF '.' IN lv_str WITH ''. "#36541 V.Zaretsky 05.02.2024
+      REPLACE ',' IN lv_str WITH '.'.
+      lv_brgew = CONV #( lv_str ).
+      lv_brgew = lv_brgew / 1000. "перевод в тонны
+    ENDIF.
+
+    IF lv_flag IS INITIAL.
+      READ TABLE xpostable ASSIGNING FIELD-SYMBOL(<ls_xpostable>)
+                           WITH KEY matnr = <ls_curr>-matnr.
+      IF sy-subrc = 0 AND lv_index <> sy-tabix.
+        <ls_xpostable>-brgew = <ls_xpostable>-brgew + <ls_curr>-menge * lv_brgew .
+        <ls_xpostable>-menge = <ls_xpostable>-menge + <ls_curr>-menge.
+        <ls_xpostable>-brate = <ls_xpostable>-brate + <ls_curr>-brate.
+        <ls_xpostable>-cost  = <ls_xpostable>-cost  + <ls_curr>-cost.
+        <ls_xpostable>-vatsm = <ls_xpostable>-vatsm + <ls_curr>-vatsm.
+        <ls_xpostable>-total = <ls_xpostable>-total + <ls_curr>-total.
+        <ls_xpostable>-zkolm = <ls_xpostable>-zkolm + <ls_curr>-zkolm.     "Количество мест
+        <ls_xpostable>-zkolp = <ls_xpostable>-zkolp + <ls_curr>-zkolp.     "Количество продукции в одном грузовом месте
+        <ls_xpostable>-matnr = <ls_curr>-matnr.
+        <ls_xpostable>-maktx = <ls_curr>-maktx.
+        <ls_xpostable>-z_strana    = <ls_curr>-z_strana.
+        <ls_xpostable>-name_excise = TEXT-000.
+        <ls_xpostable>-excise_ind  = COND #( WHEN lv_dec IS NOT INITIAL THEN lv_dec * <ls_xpostable>-menge ELSE '' ).   "11.04.2018  #12798 note #212
+        DELETE xpostable INDEX lv_index.
+      ENDIF.
+    ELSE.
+      IF <ls_curr>-brgew IS INITIAL.
+        <ls_curr>-brgew = <ls_curr>-menge * lv_brgew .
+      ENDIF.
+      IF lv_excise_txt = 1 OR lv_excise_txt = 2.
+        <ls_curr>-name_excise = TEXT-000.
+        SHIFT <ls_curr>-name_excise RIGHT BY 8 PLACES.
+        <ls_curr>-excise_ind = COND #( WHEN lv_dec IS NOT INITIAL THEN lv_dec * <ls_curr>-menge ELSE '' ).             "11.04.2018  #12798 note #212
+      ELSE.
+        CLEAR: <ls_curr>-name_excise, <ls_curr>-excise_ind.
+      ENDIF.
+    ENDIF.
+
+    CLEAR: lv_brgew, lv_excise_txt.
+*    FREE lt_cl[].
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  PRINT_PREPARATION_HEADER
+*&---------------------------------------------------------------------*
+*       Подготовка к печати (заголовок)
+*----------------------------------------------------------------------*
+FORM print_preparation_header .
+  DATA: ls_xpostable        TYPE pos_t,
+        lv_ktokd            TYPE kna1-ktokd,
+        lv_words_total      TYPE char255,
+        lv_vkorg            TYPE kunnr,
+        lv_org_name         TYPE string,
+        lv_ttn              TYPE rkepobj,
+        lv_ttn_p            TYPE rkepobj,
+        lv_zvkorg_p         TYPE rkepobj,
+        lv_zkunag_p         TYPE rkepobj,
+        lv_low              TYPE char10,
+        lv_high             TYPE char10,
+        lv_z_ttn_org        TYPE char255,
+        lv_lfart            TYPE likp-lfart,
+        lv_result_structure TYPE zbc_spell_curr_results.
+
+  CLEAR: print_header,
+         print_pos.
+  REFRESH print_pos.
+
+
+
+  MOVE: xheader-zblank        TO print_header-znumber," Номер бланка для печати
+        '1'                   TO print_header-znumpr, " Номер приложения
+        xheader-zauto         TO print_header-z000,   " Автомобиль
+        xheader-zplist        TO print_header-z002,   " № путевого листа
+        xheader-zvtrnsn       TO print_header-z003,   " Владелец транспорта
+        xheader-zvodit        TO print_header-z004,   " Водитель
+        xheader-ztprin        TO print_header-z005,   " Товар к первозке принял
+        xheader-zosnot        TO print_header-z012,   " Основание отпуска
+        xheader-zzelpr        TO print_header-z006,   " Масса груза прописью
+        xheader-zvstel2txt    TO print_header-z007,   " Пункт разгрузки материала
+        xheader-zkolm         TO print_header-z013,   " Количество мест прописью
+        xheader-zpadres       TO print_header-z008,   " Переадресовка
+        xheader-zprizp        TO print_header-z001,   " Прицеп
+        xheader-zgrzh         TO print_header-z014,   " Количество ездок
+        xheader-zrazr         TO print_header-z016,   " Отпуск разрешил
+        xheader-zrazr1        TO print_header-z029,   " Отпуск разрешил1
+        xheader-zsotp         TO print_header-z015,   " Сдал отправитель
+        xheader-zppol         TO print_header-z011,   " Принял грузополучатель
+        xheader-zdover        TO print_header-z009,   " Номер и дата доверенности
+        xheader-zvidan        TO print_header-z010,   " Выдана (организация)
+        xheader-zvsteltxt     TO print_header-z017,   " Пункт погрузки материала
+        xheader-zdocper       TO print_header-z019,   " Документы переданы
+        xheader-zsposob       TO print_header-z021,   " Способ погрузки
+        xheader-ztruslugi     TO print_header-z023,   " Транспортные услуги
+        xheader-ztimeoper     TO print_header-z024,   " Время операции
+        xheader-zoper         TO print_header-z025,   " Вид операции
+        xheader-zinstance     TO print_header-zinstance. " Наименование объекта
+  IF xheader-zinstance IS NOT INITIAL.
+    CONCATENATE xheader-zosnot xheader-zinstance INTO print_header-z012 SEPARATED BY space.
+  ENDIF.
+  IF xheader-zdpribit <> xheader-zdubitie.
+    MOVE:
+        xheader-zdpribit   TO print_header-z026,   " Время прибытия
+        xheader-zdubitie   TO print_header-z027.   " Время убытия
+  ENDIF.
+  MOVE:
+        xheader-ztpribit   TO print_header-z126,   " Время прибытия
+        xheader-ztubitie   TO print_header-z127,   " Время убытия
+        xheader-zprostoy   TO print_header-z028,   " Время простоя
+        xheader-zdate      TO print_header-wadat_ist,
+        xheader-zplomb     TO print_header-zplomb,
+        xheader-zdeliv_proxy TO print_header-zdeliv_proxy.
+
+  SELECT DISTINCT mseg~mblnr, mseg~mjahr, mseg~werks, mseg~lgort, mkpf~budat
+    FROM mseg
+      INNER JOIN mkpf ON mkpf~mblnr = mseg~mblnr
+                     AND mkpf~mjahr = mseg~mjahr
+      INNER JOIN ztipost AS post ON mseg~werks = post~werks
+                                AND mseg~lgort = post~lgort
+    INTO TABLE @DATA(lt_reestr)
+    WHERE mseg~mblnr = @xheader-mblnr
+      AND mseg~mjahr = @xheader-mjahr
+      AND post~tpost = 'ZRZN'.
+  IF lt_reestr IS NOT INITIAL.
+    print_header-use_sertif2 = 'X'.
+  ENDIF.
+
+
+  IF xheader-zdelivery IS NOT INITIAL.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+      EXPORTING
+        input  = xheader-zdelivery
+      IMPORTING
+        output = print_header-sap_doc.
+    CONCATENATE TEXT-p01 print_header-sap_doc INTO print_header-sap_doc SEPARATED BY space.
+  ELSEIF xheader-mblnr IS NOT INITIAL.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+      EXPORTING
+        input  = xheader-mblnr
+      IMPORTING
+        output = print_header-sap_doc.
+    CONCATENATE TEXT-p02 print_header-sap_doc INTO print_header-sap_doc SEPARATED BY space.
+  ENDIF.
+  CONDENSE print_header-sap_doc.
+
+  IF xheader-zblank IS NOT INITIAL.                                             "номер бланка
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+      EXPORTING
+        input  = xheader-zblank
+      IMPORTING
+        output = print_header-zblank.
+    CONCATENATE TEXT-p03 print_header-zblank INTO print_header-zblank SEPARATED BY space.
+    CONDENSE print_header-zblank.
+  ENDIF.
+
+
+  "Дата (месяц - прописью)
+  PERFORM convert_date IN PROGRAM z_delivery_print
+                       USING    xheader-zdate
+                       CHANGING print_header-datetxt.
+
+  MOVE: header_prop-zkunnrtxt TO print_header-kunnrtxt,
+        header_prop-zkunagtxt TO print_header-kunagtxt,
+        header_prop-zkunagcd1 TO print_header-kunagcd1,
+        header_prop-zkunagcd1 TO print_header-kunagcd3,                            "header_prop-zkunagcd3 TO print_header-kunagcd3,
+        header_prop-zvkorgcd1 TO print_header-vkorgcd1,
+        header_prop-zvkorgcd3 TO print_header-vkorgcd3.
+
+  "Доработка для печати ТТН Грузоотправитель/грузополучатель
+  DATA: lv_vtrans  TYPE kunnr,
+        lv_zvkorg  TYPE kunnr,
+        lv_zvkorg2 TYPE kunnr,
+        lv_zkunag  TYPE kunnr,
+        lv_kunnr   TYPE kunnr,
+        adress     TYPE kna1-name3,
+        stras      TYPE kna1-stras,
+        text       TYPE char100,
+        lv_waers   TYPE waers.
+
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING
+      input  = xheader-zvkorg
+    IMPORTING
+      output = lv_zvkorg.
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING
+      input  = xheader-zkunag
+    IMPORTING
+      output = lv_zkunag.
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING
+      input  = xheader-zkunnr
+    IMPORTING
+      output = lv_kunnr.
+  SELECT SINGLE ktokd FROM kna1 INTO lv_zvkorg2 WHERE kunnr = lv_zvkorg.
+  SELECT SINGLE ktokd FROM kna1 INTO lv_zkunag  WHERE kunnr = lv_zkunag.
+  SELECT SINGLE ktokd FROM kna1 INTO lv_kunnr   WHERE kunnr = lv_kunnr.
+
+  "Если заказчик = БЕ
+  IF lv_kunnr = 'BNOP'.
+*--> #36069 ТТН-1 V.Zaretsky 25.01.2024
+*    PERFORM read_kunnr_txt USING '0000000001'
+*                        CHANGING print_header-kunnrtxt
+*                                 print_header-kunnrcd1
+*                                 print_header-kunnrcd3.
+*<-- #36069 ТТН-1 V.Zaretsky 25.01.2024
+    print_header-kunnrtxt = ''.
+    "Если заказчик = грузополучатель
+  ELSEIF lv_kunnr = lv_zkunag.
+    "print_header-kunnrtxt = TEXT-018."'Грузополучатель'.
+    "Если заказчик =  грузоотправитель
+  ELSEIF lv_kunnr = lv_zvkorg2.
+    "print_header-kunnrtxt = TEXT-019."'Грузоотправитель'.
+  ELSE.
+    PERFORM read_kunnr_txt USING xheader-zkunnr "lv_kunnr
+                        CHANGING print_header-kunnrtxt
+                                 print_header-kunnrcd1
+                                 print_header-kunnrcd3.
+
+  ENDIF.
+
+  "Пункт отгрузки
+  PERFORM read_vstel IN PROGRAM z_delivery_print
+                     USING xheader-zvstel
+                           xheader-zdate
+                     CHANGING print_header-vsteltxt.
+
+
+  "пречать унп наименования и адреса грузоотправителя
+  lv_ttn = xheader-zkunnr.
+  lv_ttn_p = xheader-zkunag.
+  SELECT SINGLE low, high
+  INTO ( @lv_low, @lv_high )
+  FROM tvarvc
+  WHERE name = 'ZSD_TTN_TANSP'
+    AND type = 'S'.
+
+  IF ( lv_ttn  BETWEEN lv_low AND lv_high )
+    AND ( lv_ttn_p  BETWEEN lv_low AND lv_high ).
+    print_header-kunnrcd1 = ''.
+    print_header-kunnrcd3 = ''.
+    print_header-kunnrtxt = ''.
+  ELSE.
+    print_header-kunnrcd1 = header_prop-zkunnrcd1.
+    print_header-kunnrcd3 = header_prop-zkunnrcd1.                              "print_header-kunnrcd3 = header_prop-zkunnrcd3.
+  ENDIF.
+*-->  #36069 ТТН-1      V.Zaretsky 25.01.2024
+  IF print_header-kunnrtxt IS INITIAL AND print_header-kunnrcd3 IS NOT INITIAL.
+     print_header-kunnrcd3 = ''.
+  ENDIF.
+*<--  #36069 ТТН-1      V.Zaretsky 25.01.2024
+  SELECT SINGLE low
+  INTO ( @lv_z_ttn_org )
+  FROM tvarvc
+  WHERE name = 'Z_TTN_ORG'.
+
+  lv_zvkorg_p  = xheader-zvkorg.
+  lv_zkunag_p  = xheader-zkunag.
+  " Грузоотправитель, Грузополучатель - после наименования филиала -- печатаем наименование предприятия
+  IF ( lv_zvkorg_p  BETWEEN lv_low AND lv_high ).
+    print_header-vkorgtxt = |{ header_prop-zvkorgtxt }, { lv_z_ttn_org }|.
+  ELSE.
+    print_header-vkorgtxt = header_prop-zvkorgtxt.
+  ENDIF.
+
+  IF ( lv_zkunag_p  BETWEEN lv_low AND lv_high ).
+    print_header-kunagtxt = |{ header_prop-zkunagtxt }, { lv_z_ttn_org }|.
+  ELSE.
+    print_header-kunagtxt = header_prop-zkunagtxt.
+  ENDIF.
+
+
+*Суммы прописью
+  READ TABLE xpostable INTO ls_xpostable INDEX 1.
+  PERFORM calculate_total.
+
+  "НДС
+  IF xheader-ztype = 'VP'.
+    print_header-vattxt = ''."TEXT-tx1. "Без НДС (внутренний оборот)
+  ELSE.
+    print_header-vattxt = ''."TEXT-tx2. "Без НДС
+  ENDIF.
+
+  SELECT SINGLE lfart
+    INTO ( @lv_lfart )
+    FROM likp
+    WHERE vbeln = @xheader-zdelivery.
+
+
+  IF xpostable-waers = '' AND lv_lfart = 'NCCR'. "print_header-lfart = 'NCCR'.
+    SELECT SINGLE waers
+      INTO ( @lv_waers )
+      FROM t001
+    WHERE bukrs = @xpostable-bukrs.
+  ELSE.
+    lv_waers = xpostable-waers.
+  ENDIF.
+
+  IF all-vatsm NE 0.
+    zbc_spell_amount=>amount_to_words( EXPORTING iv_amount           = all-vatsm            " <-- Сумма
+                                                 iv_currency         = lv_waers             " <-- Валюта
+                                                 iv_language         = sy-langu             " <-- Язык
+                                                 iv_short            = ''                   " <-- Краткое наименование валюты
+                                                 iv_dec_digits       = 'X'                  " <-- копейки цифрами
+                                       IMPORTING ev_words            = lv_words_total
+                                                 es_result_structure = lv_result_structure ).
+
+    print_header-vattxt = |{ lv_result_structure-main_part_amount(1) CASE = UPPER }| &&     " целая часть суммы строкой
+                          substring( val = lv_result_structure-main_part_amount off = 1 ).
+    print_header-vatcoin = lv_result_structure-dec_part_amount. " дробная часть монет
+  ENDIF.
+
+  "Всего с НДС
+  IF all-total NE 0.
+    zbc_spell_amount=>amount_to_words( EXPORTING iv_amount           = all-total            " <-- Сумма
+                                                 iv_currency         = lv_waers             " <-- Валюта
+                                                 iv_language         = sy-langu             " <-- Язык
+                                                 iv_short            = ''                   " <-- Краткое наименование валюты
+                                                 iv_dec_digits       = 'X'                  " <-- копейки цифрами
+                                       IMPORTING ev_words            = lv_words_total
+                                                 es_result_structure = lv_result_structure ).
+
+    print_header-totaltxt = |{ lv_result_structure-main_part_amount(1) CASE = UPPER }| &&
+                          substring( val = lv_result_structure-main_part_amount off = 1 ).
+    print_header-totalcoin = lv_result_structure-dec_part_amount. " дробная часть монет
+
+  ENDIF.
+
+  "Наименование колонок с суммами
+  SELECT SINGLE mshort
+    FROM zbc_spell_curr
+    INTO @DATA(lv_mshort) "название целой части монет
+   WHERE spras = @sy-langu
+     AND waers = @lv_waers.
+
+  SELECT SINGLE dshort
+    FROM zbc_spell_curr
+    INTO @DATA(lv_dshort) "название дробной части монет
+   WHERE spras = @sy-langu
+     AND waers = @lv_waers.
+
+  print_header-mshort = lv_mshort.
+  print_header-dshort = lv_dshort.
+
+  print_header-zwaers_text1 = TEXT-c01 && ` ` && lv_mshort && lv_dshort.
+  print_header-zwaers_text2 = TEXT-c02 && ` ` && lv_mshort && lv_dshort.
+  print_header-zwaers_text3 = TEXT-c03 && ` ` && lv_mshort && lv_dshort.
+  print_header-zwaers_text4 = TEXT-c04 && ` ` && lv_mshort && lv_dshort.
+ENDFORM.                    " PRINT_PREPARATION_HEADER
+
+*&---------------------------------------------------------------------*
+*&      Form  PRINT_PREPARATION_POS
+*&---------------------------------------------------------------------*
+*       Подготовка к печати (позиции)
+*----------------------------------------------------------------------*
+FORM print_preparation_pos USING uv_no_merge.
+  TYPES: BEGIN OF lty_s_mat_tab,
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+         END OF lty_s_mat_tab.
+  DATA: BEGIN OF t_num,
+          matnr      TYPE i,
+          matnum(18) TYPE c,
+        END OF t_num.
+
+  DATA: lt_pos         TYPE z_delivery_pos, "WITH HEADER LINE,  " Позиции
+        e_value        TYPE atwrt,
+        ls_print_pos   TYPE zsd_delivery_pos,
+        lv_lines       TYPE i,
+        lt_mat_text    TYPE ztb_mat_text,
+        ls_mat_text    TYPE zst_mat_text,
+        lv_waers_ktext TYPE tcurt-ktext,
+        lt_mat_tab     TYPE STANDARD TABLE OF lty_s_mat_tab,
+        ls_mat_tab     TYPE lty_s_mat_tab,
+        lv_name        TYPE tdobname,
+        lt_lines       TYPE TABLE OF tline.
+  "lv_z_sertif2   TYPE string.
+
+  DATA: lt_sernr    TYPE gty_t_sernr.
+
+  FIELD-SYMBOLS: <ls_field_pos> TYPE zsd_delivery_pos.
+
+  IF xheader-ztype <> 'SO'.
+    LOOP AT xpostable INTO xpostable WHERE matnr IS NOT INITIAL "#12798-73
+                                       AND charg IS NOT INITIAL.
+      READ TABLE lt_mat_text TRANSPORTING NO FIELDS WITH TABLE KEY matnr = xpostable-matnr
+                                                                   charg = xpostable-charg.
+      IF sy-subrc <> 0.
+        "APPEND VALUE #( matnr = xpostable-matnr charg = xpostable-charg ) TO lt_mat_text.
+        INSERT VALUE #( matnr = xpostable-matnr charg = xpostable-charg ) INTO TABLE lt_mat_text.
+      ENDIF.
+    ENDLOOP.
+    IF lt_mat_text IS NOT INITIAL.
+      zcl_text_for_material=>get_text_mat_v4( EXPORTING it_table = lt_mat_text CHANGING ct_table = lt_mat_text ). "#12798-73
+    ENDIF.
+  ENDIF.
+  PERFORM f_get_sernr_data USING xheader
+                                 xpostable[]
+                        CHANGING lt_sernr.
+
+  "header
+  LOOP AT xpostable INTO xpostable.
+    READ TABLE lt_mat_text INTO ls_mat_text WITH TABLE KEY matnr = xpostable-matnr
+                                                           charg = xpostable-charg.
+    IF sy-subrc = 0.
+      ls_print_pos-matnr = xpostable-matnr.
+      t_num-matnr = t_num-matnr + 1."sy-tabix.
+      t_num-matnum = t_num-matnr.
+      SHIFT t_num-matnum BY 10 PLACES LEFT.
+      IF xheader-ztype = 'SO'.
+        CONCATENATE t_num-matnum  xpostable-maktx INTO ls_print_pos-arktx SEPARATED BY space.  " Наименование продукции
+      ELSE.
+        CONCATENATE t_num-matnum  ls_mat_text-text xpostable-z_strana INTO ls_print_pos-arktx SEPARATED BY space.  " Наименование продукции
+      ENDIF.
+    ELSE.
+      IF xheader-ztype = 'SO'.
+        t_num-matnr = sy-tabix.
+        t_num-matnum = t_num-matnr.
+        SHIFT t_num-matnum BY 10 PLACES LEFT.
+        CONCATENATE t_num-matnum '-' xpostable-maktx INTO ls_print_pos-arktx SEPARATED BY space.
+      ELSE.
+        MOVE xpostable-maktx TO ls_print_pos-arktx.
+      ENDIF.
+    ENDIF.
+
+    " #11671 Учёт труб в эксплуатации на отдельном заводе
+    " Если завод 0840, то в наименовании выводить инв.номер
+    IF gv_werks = '0840'.
+      MOVE xpostable-maktx TO ls_print_pos-arktx.
+      SHIFT ls_print_pos-arktx RIGHT BY 8 PLACES.
+    ENDIF.
+
+    MOVE:
+          xpostable-price TO ls_print_pos-price,   " Цена
+          xpostable-brate TO ls_print_pos-brate,   " Надбавка
+          xpostable-cost  TO ls_print_pos-cost,    " Стоимость
+          xpostable-vrate TO ls_print_pos-vrate,   " Ставка НДС
+          xpostable-vatsm TO ls_print_pos-vatsm,   " Сумма НДС
+          xpostable-total TO ls_print_pos-total,   " Всего с НДС
+          xpostable-zvidt TO ls_print_pos-zvidt,   " Вид тары
+          xpostable-zkolm TO ls_print_pos-zkolm,   " Количество мест
+          xpostable-zkolp TO ls_print_pos-zkolp,   " Количество продукции в одном грузовом месте
+          xpostable-zkodg TO ls_print_pos-zkodg,   " Код груза или опасного груза по ООН
+          xpostable-zklgr TO ls_print_pos-zklgr,   " Класс груза
+          xpostable-zdocs TO ls_print_pos-zdocs,   " С грузом следуют документы
+          xpostable-brgew TO ls_print_pos-brgew,   " Масса брутто
+          xpostable-fake  TO ls_print_pos-fakecur, " FAKE: для % ставок
+          xpostable-waers TO ls_print_pos-waers,   " Валюта
+          xpostable-zprim TO ls_print_pos-zprim,   " Примечание
+          xpostable-drm   TO ls_print_pos-drm,
+          xpostable-charg TO ls_print_pos-charg,
+          xpostable-name_excise TO ls_print_pos-name_excise,
+          xpostable-excise_ind TO ls_print_pos-excise_ind.
+
+    IF ls_print_pos-zprim IS NOT INITIAL.
+      ls_print_pos-zprim = |{ ls_print_pos-zprim }{ cl_abap_char_utilities=>cr_lf }|.
+    ENDIF.
+
+    IF print_header-use_sertif2 = 'X'.
+
+      lv_name(40) = xpostable-matnr.
+      lv_name+40(10) = xpostable-charg.
+
+      CALL FUNCTION 'READ_TEXT'
+        EXPORTING
+          id       = '0001'
+          language = sy-langu
+          name     = lv_name
+          object   = 'ZATTR'
+        TABLES
+          lines    = lt_lines
+        EXCEPTIONS
+          OTHERS   = 1.
+
+      ls_print_pos-z_sertif2 = ''.
+      IF sy-subrc = 0.
+        LOOP AT lt_lines ASSIGNING FIELD-SYMBOL(<ls_line>).
+          ls_print_pos-z_sertif2 =  ls_print_pos-z_sertif2 && <ls_line>-tdline.
+        ENDLOOP.
+      ENDIF.
+      "ls_print_pos-z_sertif2 = lv_z_sertif2.
+    ENDIF.
+
+    PERFORM f_get_zsod_data CHANGING ls_print_pos.
+
+    CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+      EXPORTING
+        input  = xpostable-meins
+      IMPORTING
+        output = ls_print_pos-meins
+      EXCEPTIONS
+        OTHERS = 1.
+    IF sy-subrc <> 0.
+      ls_print_pos-meins = xpostable-meins.
+    ENDIF.
+    CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+      EXPORTING
+        input  = xpostable-gewei
+      IMPORTING
+        output = ls_print_pos-gewei
+      EXCEPTIONS
+        OTHERS = 1.
+    IF sy-subrc <> 0.
+      ls_print_pos-gewei = xpostable-gewei.
+    ENDIF.
+    "Количество
+    IF xpostable-menge IS NOT INITIAL.
+      MOVE xpostable-menge TO ls_print_pos-lfimg.
+    ELSEIF xpostable-zmenge_dm IS NOT INITIAL.
+      MOVE xpostable-zmenge_dm TO ls_print_pos-lfimg.
+    ENDIF.
+
+    "Убираем знаки ,, - табуляцию
+    REPLACE ALL OCCURRENCES OF ',,' IN ls_print_pos-arktx WITH cl_abap_char_utilities=>horizontal_tab.
+    REPLACE ALL OCCURRENCES OF '<(>,<)>' IN ls_print_pos-arktx WITH ','.
+
+    APPEND ls_print_pos-arktx TO ls_print_pos-sernr.
+    "Серийные номера
+    PERFORM f_get_sernr_for_line USING lt_sernr
+                              CHANGING ls_print_pos.
+
+    APPEND ls_print_pos TO print_pos.
+
+    CLEAR ls_print_pos.
+  ENDLOOP.
+
+  IF xpostable-waers IS NOT INITIAL.
+    IF xpostable-waers = 'BYN'.                                                "{По требованию заказчика наименование валюты BYN печатается ввиде 'руб.коп.'
+      lv_waers_ktext = TEXT-c05.
+    ELSE.                                                                      "}По требованию заказчика наименование валюты BYN печатается ввиде 'руб.коп.'
+      SELECT SINGLE ktext
+        FROM tcurt
+        INTO lv_waers_ktext
+        WHERE spras = sy-langu
+          AND waers = xpostable-waers.
+    ENDIF.
+  ENDIF.
+
+*Расширение для Белаза.
+  IF gv_drm_flg IS INITIAL.
+    LOOP AT  print_pos INTO ls_print_pos.
+
+      "Cчитаем классификацию партии
+      CLEAR: e_value.
+      IF ls_print_pos-charg IS NOT INITIAL AND ls_print_pos-matnr IS NOT INITIAL.
+        PERFORM get_charg_classification
+                  USING ls_print_pos-matnr  ls_print_pos-charg
+                  CHANGING e_value.
+      ENDIF.
+
+      IF e_value IS NOT INITIAL. "Если указан номер шасси, то запишем его в примечание
+        CONCATENATE print_header-comment_tab_txt e_value
+          INTO  print_header-comment_tab_txt SEPARATED BY ','.
+      ENDIF.
+
+      "Схлопывание позиций с одинаковой ценой,
+      IF uv_no_merge = ''.
+        READ TABLE lt_pos WITH KEY matnr = ls_print_pos-matnr
+                                   price = ls_print_pos-price
+                                   arktx = ls_print_pos-arktx
+                                   ASSIGNING <ls_field_pos>.
+        IF sy-tabix  NE 0.
+          ADD:
+               ls_print_pos-lfimg TO <ls_field_pos>-lfimg,
+               ls_print_pos-cost  TO <ls_field_pos>-cost,
+               ls_print_pos-vatsm TO <ls_field_pos>-vatsm,
+               ls_print_pos-total TO <ls_field_pos>-total,
+               ls_print_pos-zkolm TO <ls_field_pos>-zkolm,
+               ls_print_pos-brgew TO <ls_field_pos>-brgew.
+          MODIFY lt_pos FROM <ls_field_pos> INDEX sy-tabix.
+        ELSE.
+          APPEND ls_print_pos TO lt_pos.
+        ENDIF.
+      ELSE.
+        APPEND ls_print_pos TO lt_pos.
+      ENDIF.
+    ENDLOOP.
+
+    CLEAR ls_print_pos.
+    t_num-matnr = 0.
+    LOOP AT lt_pos ASSIGNING <ls_field_pos>.
+      DATA(lv_index) = sy-tabix + 1.
+      t_num-matnr = t_num-matnr + 1.
+      t_num-matnum = t_num-matnr.
+      SHIFT t_num-matnum BY 10 PLACES LEFT.
+      IF <ls_field_pos>-arktx CA '1234567890'.
+        <ls_field_pos>-arktx+0(8) = t_num-matnum.
+      ENDIF.
+    ENDLOOP.
+    print_pos[] = lt_pos[].
+  ENDIF.
+ENDFORM.                    " PRINT_PREPARATION_POS
+*&---------------------------------------------------------------------*
+*&      Form  readcolpos
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM readcolpos CHANGING form_p  TYPE fpname.
+  DATA: lv_count TYPE i.
+  DESCRIBE TABLE  xpostable LINES lv_count.
+  IF lv_count <= 11.
+    MOVE 'Z_TN_2_NEW' TO form_p.
+  ELSE.
+    MOVE 'Z_TN_2_NEW_PR' TO form_p.
+    print_header-znumpr = '1'.
+  ENDIF.
+ENDFORM.                    "readcolpos
+
+
+*&---------------------------------------------------------------------*
+*&      Form  PRINT
+*&---------------------------------------------------------------------*
+*       Печать ТН
+*----------------------------------------------------------------------*
+FORM print.
+  DATA:
+    ls_pmm        TYPE zmm_s_pmm, "Драгметаллы
+    ls_reestr_prc TYPE zmm_s_reestr_prc.
+
+  "Статус накладной "Новый" должен меняться на "Обработан"
+  "  в случае запуска печати ТН-2 или ТТН-1
+  IF xheader-zstate = 'P'.        " статус: Новый
+    MOVE 'N'   TO xheader-zstate. " статус: Обработан
+    IF gv_ttn_type = gc_ttn_1.
+      xheader-zvddc = 'ТТН-1'.
+    ELSE.
+      xheader-zvddc = 'ТН-2'.
+    ENDIF.
+  ENDIF.
+
+  "заполнение кода формы
+  IF xheader-zkdf IS INITIAL.
+    SELECT SINGLE zkdf
+      INTO xheader-zkdf
+      FROM zsd_fkd_ttn
+      WHERE zprn = xheader-znumpr.
+
+    """"""""""""""""""MODIFY zdeliv_note_h FROM xheader.
+
+    DATA(lv_subrc) = zcl_pe_z_db_tables_updates=>modify_single_zdeliv_note_h( xheader ).
+  ENDIF.
+
+  "Иэизмененные данные (до сохранения) не печатаем
+  CLEAR retcode.
+  PERFORM check_change.
+  IF retcode EQ 4.
+    CALL FUNCTION 'POPUP_TO_CONFIRM'
+      EXPORTING
+        titlebar              = TEXT-009
+        text_question         = TEXT-008
+        display_cancel_button = ''
+      IMPORTING
+        answer                = answer.
+
+    CASE answer.
+      WHEN '1'.
+        "Сохранение
+        PERFORM save.
+        IF retcode = 0.
+          ok_code = 'DETAIL'.
+        ENDIF.
+        PERFORM get_doc.
+        retcode = 0.
+      WHEN '2'.
+        MESSAGE w048.
+        retcode = 7.
+        EXIT.
+    ENDCASE.
+  ENDIF.
+
+  "Подготовка к печати
+
+  PERFORM print_preparation_header.
+  PERFORM print_preparation_pos USING abap_false.
+  PERFORM print_preparation_pmm CHANGING ls_pmm.                               "15.09.2015 VSasnouski rm#8277 Получение данных по драгметаллам
+  PERFORM print_reestr_price CHANGING ls_reestr_prc.
+
+  IF gv_drm_flg IS INITIAL.
+    SORT print_pos BY posnr arktx.
+  ENDIF.
+  "Печать
+  PERFORM print IN PROGRAM z_delivery_print
+                USING form
+                      print_header
+                      print_pos[]
+                      ls_pmm                                                   "15.09.2015 VSasnouski rm#8277 Данные по драгметаллам
+                      ls_reestr_prc
+                      gs_nast.
+ENDFORM.                    " PRINT
+FORM print_reestr_price CHANGING cs_reestr_prc TYPE zmm_s_reestr_prc.
+  TYPES:
+    BEGIN OF lty_s_post,
+      matnr TYPE inob-objek,
+      charg TYPE charg_d,
+      maktx TYPE char250,
+      buzei TYPE buzei,
+      meins TYPE meins,
+      menge TYPE menge_d,
+      waers TYPE waers,
+    END OF lty_s_post,
+    lty_post TYPE lty_s_post.
+  DATA:
+    lt_post            TYPE TABLE OF lty_post,
+    ls_print           TYPE zmm_s_reestr_rozn_prc,
+    lt_allocvaluesnum  TYPE TABLE OF bapi1003_alloc_values_num,
+    lt_allocvalueschar TYPE TABLE OF bapi1003_alloc_values_char,
+    lt_allocvaluescurr TYPE TABLE OF bapi1003_alloc_values_curr,
+    lt_return          TYPE TABLE OF bapiret2,
+    lv_objectkey       TYPE bapi1003_key-object,
+    lv_object_long     TYPE bapi1003_key-object_long,
+    lv_outer_amount    TYPE bapicurr-bapicurr,
+    lv_name            TYPE tdobname,
+    lv_sum             TYPE verpr,
+    lt_lines           TYPE TABLE OF tline,
+    lv_z_sertif2       TYPE string.
+
+  IF xpostable[] IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT DISTINCT mseg~mblnr, mseg~mjahr, mseg~werks, mseg~lgort, mkpf~budat
+    FROM mseg
+      INNER JOIN mkpf ON mkpf~mblnr = mseg~mblnr
+                     AND mkpf~mjahr = mseg~mjahr
+      INNER JOIN ztipost AS post ON mseg~werks = post~werks
+                                AND mseg~lgort = post~lgort
+    INTO TABLE @DATA(lt_reestr)
+    WHERE mseg~mblnr = @xheader-mblnr
+      AND mseg~mjahr = @xheader-mjahr
+      AND post~tpost = 'ZRZN'.
+
+  IF lt_reestr IS INITIAL.
+    cs_reestr_prc-chk_reestr = 'X'.
+    RETURN.
+  ENDIF.
+
+  SELECT SINGLE round
+    FROM zmm_rozprc
+    INTO @DATA(lv_round)
+    WHERE ( budat < @xheader-zdate
+      OR budat = @xheader-zdate ).
+
+  lt_post = CORRESPONDING #( xpostable[] ).
+  " получение номеров класса и типов для класификации партии
+  SELECT inob~objek AS matnr, klah~class, klah~klart
+    FROM inob
+     INNER JOIN kssk ON kssk~objek = inob~cuobj
+     INNER JOIN klah ON klah~clint = kssk~clint
+    INTO TABLE @DATA(lt_class)
+    FOR ALL ENTRIES IN @lt_post
+   WHERE inob~objek = @lt_post-matnr.
+
+  LOOP AT lt_post ASSIGNING FIELD-SYMBOL(<ls_post>).
+    lv_object_long = <ls_post>-matnr.
+    lv_object_long+40 = <ls_post>-charg.
+    TRY.
+        DATA(lv_class) = lt_class[ matnr = <ls_post>-matnr ]-class.
+        DATA(lv_klart) = lt_class[ matnr = <ls_post>-matnr ]-klart.
+      CATCH cx_sy_itab_line_not_found.
+        sy-subrc = 0.
+    ENDTRY.
+    CALL FUNCTION 'BAPI_OBJCL_GETDETAIL'
+      EXPORTING
+        objectkey       = lv_objectkey
+        objecttable     = 'MCH1'
+        classnum        = lv_class
+        classtype       = lv_klart
+        objectkey_long  = lv_object_long
+      TABLES
+        allocvaluesnum  = lt_allocvaluesnum
+        allocvalueschar = lt_allocvalueschar
+        allocvaluescurr = lt_allocvaluescurr
+        return          = lt_return.
+
+    LOOP AT lt_return TRANSPORTING NO FIELDS WHERE type CA 'AEX'.
+      EXIT.
+    ENDLOOP.
+    " наименование материала - из партии, из самого материала
+
+    lv_name(44) = <ls_post>-matnr.
+    lv_name+44(10) = <ls_post>-charg.
+
+
+    CALL FUNCTION 'READ_TEXT'
+      EXPORTING
+        id       = 'VERM'
+        language = sy-langu
+        name     = lv_name
+        object   = 'CHARGE'
+      TABLES
+        lines    = lt_lines
+      EXCEPTIONS
+        OTHERS   = 1.
+    IF sy-subrc <> 0.
+      READ TABLE lt_allocvalueschar ASSIGNING FIELD-SYMBOL(<ls_char>)
+                                    WITH KEY charact = 'Z_MAT_POST'.
+      IF sy-subrc = 0.
+        <ls_post>-maktx = <ls_char>-value_char.  " наименование материала
+      ENDIF.
+    ELSE.
+      CLEAR <ls_post>-maktx.
+      LOOP AT lt_lines ASSIGNING FIELD-SYMBOL(<ls_lines>).
+        CONCATENATE <ls_post>-maktx <ls_lines>-tdline INTO <ls_post>-maktx.
+      ENDLOOP.
+    ENDIF.
+
+    READ TABLE lt_allocvaluescurr ASSIGNING FIELD-SYMBOL(<ls_curr>)
+                                  WITH KEY charact = 'Z_CENAPOST'.
+    IF sy-subrc = 0.
+      ls_print-z_cenapost = <ls_curr>-value_from.  "Цена поставщика
+    ENDIF.
+
+    LOOP AT lt_allocvaluesnum ASSIGNING FIELD-SYMBOL(<ls_num>) .
+      CASE <ls_num>-charact.
+        WHEN 'Z_OPTNAC'.
+          ls_print-z_optnac = <ls_num>-value_from.  "Оптовая надбавка
+        WHEN 'Z_TORGNAC'.
+          ls_print-z_torgnac = <ls_num>-value_from. "Торговая надбавка
+        WHEN 'Z_OBPNAC'.
+          ls_print-z_obpnac = <ls_num>-value_from.  "Наценка общепита
+        WHEN 'Z_NDS'.
+          ls_print-z_nds = <ls_num>-value_from.  "НДС
+        WHEN OTHERS.
+      ENDCASE.
+    ENDLOOP.
+
+    lv_sum = ls_print-z_cenapost * ( 1 + ls_print-z_torgnac / 100 ) * ( 1 + ls_print-z_nds / 100 ).
+
+    CALL FUNCTION 'ROUND'
+      EXPORTING
+        decimals = lv_round
+        input    = lv_sum
+        sign     = 'X'
+      IMPORTING
+        output   = lv_outer_amount
+      EXCEPTIONS
+        OTHERS   = 4.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+    CLEAR lv_sum.
+    lv_sum = ls_print-z_cenapost * ( 1 + ls_print-z_torgnac / 100 ) * ( 1 + ls_print-z_obpnac / 100 ) * ( 1 + ls_print-z_nds / 100 ).
+    APPEND VALUE #(
+         line_id    = |{ <ls_post>-buzei ALPHA = OUT }|
+         maktx      = <ls_post>-maktx
+         meins      = <ls_post>-meins
+         menge      = <ls_post>-menge
+         waers      = <ls_post>-waers
+         z_cenapost = ls_print-z_cenapost
+         z_optnac   = ls_print-z_optnac
+         z_torgnac  = ls_print-z_torgnac
+         z_obpnac   = ls_print-z_obpnac
+         z_nds      = ls_print-z_nds
+         z_rznpr    = lv_outer_amount
+         z_obppr    = lv_sum
+         z_valrzn   = <ls_post>-menge * lv_outer_amount
+         z_valobp   = <ls_post>-menge * lv_sum
+    ) TO cs_reestr_prc-reestr_rozn_prc.
+    CLEAR ls_print.
+  ENDLOOP.
+
+  zcl_names=>get_org_names( EXPORTING it_bukrs    = VALUE #( ( sign = 'I' option = 'EQ' low = bukrs ) )
+                            IMPORTING ev_butxt    = DATA(lv_butxt)
+                                      ev_org_name = DATA(lv_org_name) ).
+  cs_reestr_prc-name1 = lv_butxt.
+  cs_reestr_prc-name3 = lv_org_name.
+
+  SELECT twlad~werks, twlad~lgort, lfdnr, adrnr, adrc~name3, adrct~remark
+    FROM twlad
+      INNER JOIN adrc ON adrc~addrnumber = twlad~adrnr
+                     AND adrc~date_from <= @sy-datum
+      LEFT JOIN adrct ON adrct~addrnumber = adrc~addrnumber
+                     AND adrct~langu = @sy-langu
+                     AND adrct~date_from <= @sy-datum
+      INNER JOIN mseg ON mseg~mblnr = @xheader-mblnr
+                     AND mseg~mjahr = @xheader-mjahr
+                     AND mseg~werks = twlad~werks
+                     AND mseg~lgort = twlad~lgort
+    INTO TABLE @DATA(lt_name).
+
+  IF lt_name IS INITIAL.
+    RETURN.
+  ENDIF.
+  SORT lt_name BY werks lgort lfdnr.
+  DELETE ADJACENT DUPLICATES FROM lt_name COMPARING werks lgort.
+
+  IF NOT ( lines( lt_name ) ) = 1.
+    cs_reestr_prc-name2 = REDUCE #( INIT res = VALUE string( lt_name[ 1 ]-name3 )
+                             FOR <lv_name3> IN lt_name FROM 2
+                             NEXT res = res && `, ` && <lv_name3>-name3 ).
+  ELSE.
+    cs_reestr_prc-name2 = lt_name[ 1 ]-name3 .
+  ENDIF.
+  cs_reestr_prc-budat = xheader-zdate.
+  cs_reestr_prc-date = sy-datum+6(2).
+  cs_reestr_prc-month = sy-datum+4(2).
+  cs_reestr_prc-year = sy-datum+2(2).
+  cs_reestr_prc-remark = cs_reestr_prc-name2. "#35782 V.Zaretsky реестр розничных цен,доработка
+*  cs_reestr_prc-remark = lt_name[ 1 ]-remark. " место составления
+  "ФИО исполнителя
+  zcl_names=>get_fio_dolz( EXPORTING iv_uname = sy-uname
+                           IMPORTING et_fio   = DATA(lt_fio) ).
+  cs_reestr_prc-fio   = lt_fio[ 1 ]-fio.
+  cs_reestr_prc-dolgn = lt_fio[ 1 ]-stext.
+  cs_reestr_prc-zserblnk = xheader-zblank.
+
+  FREE: lt_reestr[], lt_post[].
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  PRINT_FROM_LIST
+*&---------------------------------------------------------------------*
+*       Печать ТН из списка документов
+*----------------------------------------------------------------------*
+FORM print_from_list .
+  DATA:
+    ls_pmm        TYPE zmm_s_pmm,
+    ls_reestr_prc TYPE zmm_s_reestr_prc.
+  " Документ выбран?
+  PERFORM display_first.
+  " Один?
+  IF snumber GT 1.
+    MESSAGE e060.
+  ENDIF.
+  " Чтение документа
+  PERFORM get_doc.
+  " Подготовка к печати
+  PERFORM print_preparation_header.
+  PERFORM print_preparation_pos USING abap_false.
+  " Печать
+  PERFORM print IN PROGRAM z_delivery_print
+                USING form
+                      print_header
+                      print_pos[]
+                      ls_pmm
+                      ls_reestr_prc
+                      gs_nast.
+ENDFORM.                    " PRINT_FROM_LIST
+*&---------------------------------------------------------------------*
+*&      Form  PRINT_FROM_LIST_TN2
+*&---------------------------------------------------------------------*
+*       Печать ТН из списка документов
+*----------------------------------------------------------------------*
+FORM print_from_list_tn2 .
+  DATA:
+    ls_pmm        TYPE zmm_s_pmm,
+    ls_reestr_prc TYPE zmm_s_reestr_prc.
+
+  " Документ выбран?
+  PERFORM display_first.
+  " Один?
+  IF snumber GT 1.
+    MESSAGE e060.
+  ENDIF.
+  " Чтение документа
+  PERFORM get_doc.
+  " Подготовка к печати
+  PERFORM print_preparation_header.
+  PERFORM print_preparation_pos USING abap_false.
+  " Печать
+  PERFORM readcolpos
+                 CHANGING form_p.
+  MOVE  form_p TO form.
+
+  PERFORM print IN PROGRAM z_delivery_print
+                USING form
+                      print_header
+                      print_pos[]
+                      ls_pmm
+                      ls_reestr_prc
+                      gs_nast.
+ENDFORM.                    " PRINT_FROM_LIST
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_DOC
+*&---------------------------------------------------------------------*
+*       Чтение документа (сохраненного в Z-таблице)
+*----------------------------------------------------------------------*
+FORM get_doc .
+  DATA: lv_kunnr     TYPE kunnr,
+        lv_zkunag    TYPE zkunag,
+        bel_cur_code TYPE waers. " (деноминация) код валюты РБ возьмём из данных нашей БЕ № 01
+  SELECT SINGLE waers FROM t001 INTO bel_cur_code
+    WHERE bukrs EQ '01'. " код валюты РБ возьмём из данных нашей БЕ №01 "ЦА", после деноминации код валюты изменится
+  IF sy-subrc NE 0.
+    MESSAGE e003(zbn).
+  ENDIF.
+
+  IF ok_code = 'DETAIL'.
+    CLEAR ok_code.
+    "Заголовок
+    SELECT SINGLE * FROM zdeliv_note_h
+                    INTO xheader
+                    WHERE bukrs EQ bukrs AND
+                          vbeln EQ xheader-vbeln AND
+                          gjahr EQ gjahr.
+    MOVE xheader-ztype TO ztype.
+    "Позиции
+    SELECT * FROM zdeliv_note_p
+         INTO TABLE xpostable
+         WHERE bukrs EQ xheader-bukrs AND
+               vbeln EQ xheader-vbeln AND
+               gjahr EQ xheader-gjahr.
+
+    DELETE xpostable WHERE matnr IS INITIAL AND maktx IS INITIAL.
+
+    "отправитель, получатель, заказчик
+    IF xheader-ztype EQ 'VP' OR xheader-ztype EQ 'VZ'.
+      IF header_prop-zvkorgtxt IS INITIAL.
+        "PERFORM read_vkorg IN PROGRAM z_delivery_print отрабатывает неправильно
+        lv_zkunag = xheader-zvkorg.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING lv_zkunag
+                           CHANGING txt
+                                    header_prop-zvkorgcd1
+                                    header_prop-zvkorgcd3.
+        MOVE txt TO header_prop-zvkorgtxt.
+      ENDIF.
+      IF xheader-zvkorg = xheader-zkunnr.
+        header_prop-zkunnrtxt = header_prop-zvkorgtxt.
+        header_prop-zkunnrcd1 = header_prop-zvkorgcd1.
+        header_prop-zkunnrcd3 = header_prop-zvkorgcd3.
+      ELSE.
+        CLEAR: txt.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                      USING xheader-zkunnr
+                      CHANGING txt
+                               header_prop-zkunnrcd1
+                               header_prop-zkunnrcd3.
+        MOVE txt TO header_prop-zkunnrtxt.
+      ENDIF.
+      IF xheader-zvkorg = xheader-zkunag.
+        header_prop-zkunagtxt = header_prop-zvkorgtxt.
+        header_prop-zkunagcd1 = header_prop-zvkorgcd1.
+        header_prop-zkunagcd3 = header_prop-zvkorgcd3.
+      ELSE.
+        SELECT SINGLE ktokd FROM kna1 INTO lv_ktokd WHERE kunnr = xheader-zkunag.
+        CLEAR: txt.
+        IF lv_ktokd = 'BNPM'.
+          PERFORM read_kunnr IN PROGRAM z_delivery_print
+                             USING xheader-zkunnr
+                             CHANGING txt
+                                      header_prop-zkunagcd1
+                                      header_prop-zkunagcd3.
+          MOVE txt TO header_prop-zkunagtxt.
+        ELSE.
+          PERFORM read_kunnr IN PROGRAM z_delivery_print
+                             USING xheader-zkunag
+                             CHANGING txt
+                                      header_prop-zkunagcd1
+                                      header_prop-zkunagcd3.
+          MOVE txt TO header_prop-zkunagtxt.
+        ENDIF.
+      ENDIF.
+    ELSEIF xheader-ztype = 'OP' OR xheader-ztype = 'VA'.
+      IF xheader-zvkorg IS NOT INITIAL.
+        CLEAR txt.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = xheader-zvkorg
+          IMPORTING
+            output = lv_kunnr.
+
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING lv_kunnr
+                           CHANGING txt
+                                    header_prop-zvkorgcd1
+                                    header_prop-zvkorgcd3.
+        MOVE txt TO header_prop-zvkorgtxt.
+      ENDIF.
+      IF xheader-zvkorg = xheader-zkunnr
+        AND header_prop-zkunnrcd1 IS INITIAL AND header_prop-zvkorgcd1 IS NOT INITIAL.
+        header_prop-zkunnrtxt = header_prop-zvkorgtxt.
+        header_prop-zkunnrcd1 = header_prop-zvkorgcd1.
+        header_prop-zkunnrcd3 = header_prop-zvkorgcd3.
+      ELSEIF xheader-zvkorg <> xheader-zkunnr AND xheader-zkunnr IS NOT INITIAL.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                        USING xheader-zkunnr
+                        CHANGING txt
+                                 header_prop-zkunnrcd1
+                                 header_prop-zkunnrcd3.
+        MOVE txt TO header_prop-zkunnrtxt.
+      ENDIF.
+      SELECT SINGLE ktokd FROM kna1 INTO lv_ktokd WHERE kunnr = xheader-zkunag.
+      CLEAR: txt, header_prop-zkunagtxt.
+      IF lv_ktokd = 'BNPM'.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING xheader-zkunnr
+                           CHANGING txt
+                                    header_prop-zkunagcd1
+                                    header_prop-zkunagcd3.
+        MOVE txt TO header_prop-zkunagtxt.
+      ELSE.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING xheader-zkunag
+                           CHANGING txt
+                                    header_prop-zkunagcd1
+                                    header_prop-zkunagcd3.
+        MOVE txt TO header_prop-zkunagtxt.
+      ENDIF.
+    ELSEIF ztype = 'SO'.
+      IF xheader-zvkorg IS NOT INITIAL.
+        CLEAR txt.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = xheader-zvkorg
+          IMPORTING
+            output = lv_kunnr.
+
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING lv_kunnr
+                           CHANGING txt
+                                    header_prop-zvkorgcd1
+                                    header_prop-zvkorgcd3.
+        MOVE txt TO header_prop-zvkorgtxt.
+        IF xheader-zvkorg = xheader-zkunnr.
+          header_prop-zkunnrtxt = header_prop-zvkorgtxt.
+          header_prop-zkunnrcd1 = header_prop-zvkorgcd1.
+          header_prop-zkunnrcd3 = header_prop-zvkorgcd3.
+        ELSE.
+          CLEAR: txt.
+          PERFORM read_kunnr IN PROGRAM z_delivery_print
+                        USING xheader-zkunnr
+                        CHANGING txt
+                                 header_prop-zkunnrcd1
+                                 header_prop-zkunnrcd3.
+          MOVE txt TO header_prop-zkunnrtxt.
+        ENDIF.
+      ENDIF.
+      SELECT SINGLE ktokd FROM kna1 INTO lv_ktokd WHERE kunnr = xheader-zkunag.
+      CLEAR: txt, header_prop-zkunagtxt.
+      IF lv_ktokd = 'BNPM'.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING xheader-zkunnr
+                           CHANGING txt
+                                    header_prop-zkunagcd1
+                                    header_prop-zkunagcd3.
+        MOVE txt TO header_prop-zkunagtxt.
+      ELSE.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING xheader-zkunag
+                           CHANGING txt
+                                    header_prop-zkunagcd1
+                                    header_prop-zkunagcd3.
+        MOVE txt TO header_prop-zkunagtxt.
+      ENDIF.
+    ELSE.                                                                      "{17.03.2014 VSasnouski Заполнение реквизитов для остальных видов операций
+      " Чтение данных грузоотправителя/получателя
+      IF xheader-zvkorg IS NOT INITIAL.
+        CLEAR txt.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = xheader-zvkorg
+          IMPORTING
+            output = lv_kunnr.
+
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING lv_kunnr
+                           CHANGING txt
+                                    header_prop-zvkorgcd1
+                                    header_prop-zvkorgcd3.
+        MOVE txt TO header_prop-zvkorgtxt.
+      ENDIF.
+      SELECT SINGLE ktokd FROM kna1 INTO lv_ktokd WHERE kunnr = xheader-zkunag.
+      CLEAR: txt, header_prop-zkunagtxt.
+      IF lv_ktokd = 'BNPM'.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING xheader-zkunnr
+                           CHANGING txt
+                                    header_prop-zkunagcd1
+                                    header_prop-zkunagcd3.
+        MOVE txt TO header_prop-zkunagtxt.
+      ELSE.
+        PERFORM read_kunnr IN PROGRAM z_delivery_print
+                           USING xheader-zkunag
+                           CHANGING txt
+                                    header_prop-zkunagcd1
+                                    header_prop-zkunagcd3.
+        MOVE txt TO header_prop-zkunagtxt.
+      ENDIF.                                                                   "}17.03.2014 VSasnouski Заполнение реквизитов для остальных видов операций
+    ENDIF.
+  ENDIF.
+
+  LOOP AT xpostable TRANSPORTING NO FIELDS WHERE zmenge_dm IS NOT INITIAL.
+    gv_drm_flg = 'X'.
+    EXIT.
+  ENDLOOP.
+
+  PERFORM comb_data.
+  SORT xpostable BY bukrs vbeln gjahr buzei.
+  "Статусы закладок
+  tabs-tab1 = tabs-tab2 = tabs-tab3 = tabs-tab4 = 'X'.
+
+  "Сохраниние старых значений
+  MOVE: xheader TO yheader,
+        xpostable[] TO ypostable[].
+ENDFORM.                    " GET_DOC
+*&---------------------------------------------------------------------*
+*&      Form  LOCK
+*&---------------------------------------------------------------------*
+*       Блокировка документа
+*----------------------------------------------------------------------*
+FORM lock .
+  CALL FUNCTION 'ENQUEUE_EZDELIVERY_NOTE'
+    EXPORTING
+      bukrs          = bukrs
+      vbeln          = xheader-vbeln
+      gjahr          = gjahr
+    EXCEPTIONS
+      foreign_lock   = 1
+      system_failure = 2
+      OTHERS         = 3.
+
+  "Обработка кода возврата
+  CASE sy-subrc.
+    WHEN 1.
+      aktyp = 'D'.
+      IF sy-uname = sy-msgv1.
+        MESSAGE s052.
+      ELSE.
+        MESSAGE s053 WITH sy-msgv1.
+      ENDIF.
+    WHEN 2 OR 3.
+      aktyp = 'D'.
+      MESSAGE e054 WITH sy-msgv2.
+  ENDCASE.
+ENDFORM.                    " LOCK
+
+*&---------------------------------------------------------------------*
+*&      Form  UNLOCK
+*&---------------------------------------------------------------------*
+*       Разблокировка документа
+*----------------------------------------------------------------------*
+FORM unlock .
+  CALL FUNCTION 'DEQUEUE_EZDELIVERY_NOTE'
+    EXPORTING
+      bukrs = bukrs
+      vbeln = xheader-vbeln
+      gjahr = gjahr.
+ENDFORM.                    " UNLOCK
+
+*&---------------------------------------------------------------------*
+*&      Form  PERNR_INFO
+*&---------------------------------------------------------------------*
+*       Инфа по табельному номеру
+*----------------------------------------------------------------------*
+FORM pernr_info .
+  DATA: ls_p0006 TYPE p0006.
+  CHECK ztype EQ 'OT'. " только для отпуска топлива
+
+  CLEAR    ls_p0006.
+  REFRESH  p0006.
+
+  PERFORM get_name USING xheader-pernr
+                         xheader-zdate
+                   CHANGING txt.
+
+  CALL FUNCTION 'HR_READ_INFOTYPE'
+    EXPORTING
+      pernr           = xheader-pernr
+      infty           = '0006'
+      begda           = xheader-zdate
+      endda           = xheader-zdate
+    TABLES
+      infty_tab       = p0006
+    EXCEPTIONS
+      infty_not_found = 1
+      OTHERS          = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+* Постоянное место жительства
+  READ TABLE p0006 INTO ls_p0006 WITH KEY subty = '1' .
+  IF ( sy-subrc NE 0 ) OR
+     ( ls_p0006-stras IS INITIAL AND
+       ls_p0006-hsnmr IS INITIAL AND
+       ls_p0006-bldng IS INITIAL AND
+       ls_p0006-posta IS INITIAL ).
+* Домашний адрес
+    READ TABLE p0006 INTO ls_p0006 WITH KEY subty = '3' .
+  ENDIF.
+  IF sy-subrc EQ 0.
+    IF ls_p0006-ort01 IS NOT INITIAL.
+      CONCATENATE txt ' , ' ls_p0006-ort01 INTO txt RESPECTING BLANKS.
+    ENDIF.
+    IF ls_p0006-stras IS NOT INITIAL.
+      CONCATENATE txt ' , ' ls_p0006-stras INTO txt RESPECTING BLANKS.
+    ENDIF.
+    IF ls_p0006-hsnmr IS NOT INITIAL.
+      CONCATENATE txt ', д.' ls_p0006-hsnmr INTO txt RESPECTING BLANKS.
+    ENDIF.
+    IF ls_p0006-bldng IS NOT INITIAL.
+      CONCATENATE txt ', к.' ls_p0006-bldng INTO txt RESPECTING BLANKS.
+    ENDIF.
+    IF ls_p0006-posta IS NOT INITIAL.
+      CONCATENATE txt ', кв.' ls_p0006-posta INTO txt RESPECTING BLANKS.
+    ENDIF.
+    CONDENSE txt.
+  ENDIF.
+
+  MOVE: txt TO header_prop-zkunnrtxt,
+        txt TO header_prop-zkunagtxt,
+        txt TO xheader-pertxt.
+ENDFORM.                    " PERNR_INFO
+
+*&---------------------------------------------------------------------*
+*&      Form  BDC_DYNPRO
+*&---------------------------------------------------------------------*
+FORM bdc_dynpro  USING    program
+                          dynpro.
+  DATA: ls_param TYPE bdcdata.
+  CLEAR ls_param.
+  ls_param-program  = program.
+  ls_param-dynpro   = dynpro.
+  ls_param-dynbegin = 'X'.
+  APPEND ls_param TO param.
+ENDFORM.                    " BDC_DYNPRO
+*&---------------------------------------------------------------------*
+*&      Form  BDC_FIELD
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_0091   text
+*      -->P_0092   text
+*----------------------------------------------------------------------*
+FORM bdc_field  USING fnam fval.
+  DATA: ls_param TYPE bdcdata.
+  CLEAR ls_param.
+  ls_param-fnam = fnam.
+  ls_param-fval = fval.
+  APPEND ls_param TO param.
+ENDFORM.                    " BDC_FIELD
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_NAME
+*&---------------------------------------------------------------------*
+*       ФИО из табельного номера
+*----------------------------------------------------------------------*
+*      -->pernr  Табельный номер
+*      -->date   Дата
+*      <--name   ФИО
+*----------------------------------------------------------------------*
+FORM get_name  USING    pernr TYPE pa0001-pernr
+                        date TYPE d
+               CHANGING name.
+  DATA: ls_p0001 TYPE p0001.
+  CLEAR: ls_p0001,
+         name.
+  REFRESH: p0001.
+
+  CALL FUNCTION 'HR_READ_INFOTYPE'
+    EXPORTING
+      pernr           = pernr
+      infty           = '0001'
+      begda           = date
+      endda           = date
+    TABLES
+      infty_tab       = p0001
+    EXCEPTIONS
+      infty_not_found = 1
+      OTHERS          = 2.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+  READ TABLE p0001 INTO ls_p0001 INDEX 1.
+  CHECK sy-subrc EQ 0.
+
+  MOVE ls_p0001-ename TO name.
+ENDFORM.                    " GET_NAME
+*&---------------------------------------------------------------------*
+*&      Form  GET_CHARG_CLASSIFICATION
+*&---------------------------------------------------------------------*
+*       Считывание классификации партии
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_charg_classification
+  USING matnr TYPE matnr  charg TYPE charg_d
+        CHANGING e_value TYPE atwrt.
+
+  DATA: lt_alloclist TYPE TABLE OF bapi1003_alloc_list,
+        lt_return    TYPE TABLE OF bapiret2.
+
+  DATA: objectkey     TYPE bapi1003_key-object,
+        valueschar    TYPE TABLE OF bapi1003_alloc_values_char,
+        intvalueschar TYPE       bapi1003_alloc_values_char.
+
+  objectkey       = matnr.
+  objectkey+18    = charg.
+
+*Считаем класс
+  CALL FUNCTION 'BAPI_OBJCL_GETCLASSES'
+    EXPORTING
+      objectkey_imp   = objectkey
+      objecttable_imp = 'MCH1'
+      classtype_imp   = '023'
+      read_valuations = 'X'
+    TABLES
+      alloclist       = lt_alloclist
+      allocvalueschar = valueschar
+      return          = lt_return.
+
+
+  READ TABLE valueschar INTO intvalueschar  WITH KEY charact = 'Z_CHARG_NUMB'. " для обычных деталей
+  IF sy-tabix NE 0.
+    e_value = intvalueschar-value_neutral.
+  ENDIF.
+
+  READ TABLE valueschar INTO intvalueschar  WITH KEY charact = 'BELAZ_SHASSIS_NUMBER'. " для  изделий группы А
+  IF sy-tabix NE 0.
+    e_value = intvalueschar-value_neutral.
+  ENDIF.
+
+ENDFORM.                    " GET_CHARG_CLASSIFICATION
+*&---------------------------------------------------------------------*
+*&      Form  GET_MAT_WEIGHT
+*&---------------------------------------------------------------------*
+*Расчет веса материала
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_mat_weight USING matnr    TYPE matnr
+                          charg    TYPE charg_d
+                          quantity TYPE menge_d
+                          meins    TYPE meins
+                     CHANGING e_weight TYPE meng15.
+
+  DATA: lv_basequantity TYPE menge_d,
+        lv_weight       TYPE meng15,
+        BEGIN OF ls_mara,
+          meins TYPE mara-meins,
+          brgew TYPE mara-brgew,
+          gewei TYPE mara-gewei,
+        END OF ls_mara.
+
+  SELECT SINGLE meins
+                brgew
+                gewei
+    FROM mara
+    INTO ls_mara
+    WHERE matnr = matnr.
+
+  "Конвертируем количество в базовую ЕИ
+  IF meins NE ls_mara-meins.
+    CALL FUNCTION 'MATERIAL_UNIT_CONVERSION'
+      EXPORTING
+        input    = quantity
+        kzmeinh  = 'X'
+        matnr    = matnr
+        meinh    = meins
+        type_umr = '3'
+      IMPORTING
+        output   = lv_basequantity
+      EXCEPTIONS
+        OTHERS   = 1.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+  ELSE.
+    lv_basequantity = quantity.
+  ENDIF.
+
+  ls_mara-brgew = ls_mara-brgew * lv_basequantity.
+
+  "Переведем вес в тонны, так как в накладной всегда тонны будут
+  CALL FUNCTION 'UNIT_CONVERSION_SIMPLE'
+    EXPORTING
+      input    = ls_mara-brgew
+      unit_in  = ls_mara-gewei
+      unit_out = 'TO'
+    IMPORTING
+      output   = lv_weight.
+
+  e_weight = lv_weight. "* lv_basequantity.
+
+
+ENDFORM.                    " GET_MAT_WEIGHT
+*&---------------------------------------------------------------------*
+*&      Form  GET_SPELL_MASSA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_spell_massa USING    VALUE(is_spell) TYPE spell
+                              iv_meins        TYPE meins
+                     CHANGING cv_spell_massa  TYPE string.
+
+  CONSTANTS:
+    lc_tonna             TYPE meins  VALUE 'TO',
+    lc_tonna_name_l      TYPE string VALUE 'тонн',
+
+    lc_kilogramm         TYPE meins  VALUE 'KG',
+    lc_kilogramm_name_s  TYPE string VALUE 'кг',
+    lc_kilogramm_name_l  TYPE string VALUE 'килограмм',
+
+    lc_gramm             TYPE meins VALUE 'G',
+    lc_gramm_name_s      TYPE string VALUE 'г',
+    lc_gramm_name_l      TYPE string VALUE 'грамм',
+
+    lc_milligramm_name_s TYPE string VALUE 'мг'.
+
+  DATA:
+    lv_name_unit TYPE string,
+    lv_pos       TYPE i,
+    lv_number    TYPE i.
+
+  CLEAR cv_spell_massa.
+
+  IF is_spell-word IS INITIAL OR
+     is_spell-decword IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  CASE iv_meins.
+    WHEN lc_tonna.
+      lv_name_unit = lc_tonna_name_l.
+      lv_number = is_spell-number+13.
+
+      IF NOT ( lv_number >= 11 AND lv_number <= 14 ).                          "{27.08.2015 VSasnouski rm#1411#note-334 Исправлено формирование масса с окончанием на 11, 12, 13, 14 и 2
+        IF is_spell-number+14 = 1.
+          CONCATENATE lv_name_unit 'а' INTO lv_name_unit.
+          lv_pos = strlen( is_spell-word ) - 2.
+          is_spell-word+lv_pos = 'на'.
+        ELSEIF is_spell-number+14 >= 2 AND is_spell-number+14 <= 4.
+          IF is_spell-number+14 = 2.
+            lv_pos = strlen( is_spell-word ) - 1.
+            is_spell-word+lv_pos = 'е'.
+          ENDIF.
+
+          CONCATENATE lv_name_unit 'ы' INTO lv_name_unit.
+        ENDIF.
+      ENDIF.                                                                   "}27.08.2015 VSasnouski rm#1411#note-334 Исправлено формирование масса с окончанием на 11, 12, 13, 14 и 2
+
+      CONCATENATE is_spell-word lv_name_unit
+                  is_spell-decword lc_kilogramm_name_s
+        INTO cv_spell_massa SEPARATED BY space.
+    WHEN lc_kilogramm.
+      CONCATENATE is_spell-word lc_kilogramm_name_l
+                  is_spell-decword lc_gramm_name_s
+        INTO cv_spell_massa SEPARATED BY space.
+    WHEN lc_gramm.
+      CONCATENATE is_spell-word lc_gramm_name_l
+                  is_spell-decword lc_milligramm_name_s
+        INTO cv_spell_massa SEPARATED BY space.
+  ENDCASE.
+ENDFORM. " Get_Spell_Massa
+
+*&---------------------------------------------------------------------*
+*&      Form  entry
+*&---------------------------------------------------------------------*
+*       Подпрограмма печати накладных для исходящих поставок
+*----------------------------------------------------------------------*
+FORM entry USING return_code us_screen.
+  IF us_screen = 'X'.
+    CALL FUNCTION 'ZBNMTO_ENTRY'
+      EXPORTING
+        nast_objky  = nast-objky
+        nast_vstat  = nast-vstat
+      IMPORTING
+        return_code = return_code
+      CHANGING
+        cs_nast     = nast.
+  ELSE.
+    MESSAGE w066(zfi).
+  ENDIF.
+ENDFORM.                    "entry
+
+*&---------------------------------------------------------------------*
+*&      Form  entry_wa01
+*&---------------------------------------------------------------------*
+*      Подпрограмма печати накладных для документов материалов
+*----------------------------------------------------------------------*
+*      -->ENT_RETCO  text
+*      -->ENT_SCREEN text
+*----------------------------------------------------------------------*
+FORM entry_wa01 USING ent_retco ent_screen.
+  IF ent_screen = 'X'.
+    CALL FUNCTION 'ZBNMTO_ENTRY_WA01'
+      EXPORTING
+        nast_objky = nast-objky
+        nast_vstat = nast-vstat
+      IMPORTING
+        ent_retco  = ent_retco
+      CHANGING
+        cs_nast    = nast.
+  ELSE.
+    MESSAGE w066(zfi).
+  ENDIF.
+ENDFORM.                    "entry_wa01
+*&---------------------------------------------------------------------*
+*&      Form  FILL_DRM
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM fill_drm USING it_pdrm TYPE gty_t_pdrm.
+  TYPES:                                                                       "{05.03.2014 VSasnouksi Переработан алгоритм добавления позиций по драг.металлам. Старый алгоритм имел проблемы с нумерацией позиций
+    BEGIN OF lty_s_a418,
+      kschl TYPE a418-kschl,
+      datbi TYPE a418-datbi,
+      datab TYPE a418-datab,
+      knumh TYPE a418-knumh,
+    END OF lty_s_a418,
+
+    BEGIN OF lty_s_konp,
+      knumh TYPE konp-knumh,
+      kbetr TYPE konp-kbetr,
+    END OF lty_s_konp,
+
+    lty_t_konp TYPE HASHED TABLE OF lty_s_konp WITH UNIQUE KEY knumh.
+
+  DATA:
+    ls_xpostable  TYPE pos_t,
+    lt_a418       TYPE TABLE OF lty_s_a418,
+    lt_konp       TYPE lty_t_konp,
+    lv_kschl      TYPE a418-kschl,
+    lt_kschl      TYPE RANGE OF kscha,
+    ls_kschl      LIKE LINE OF lt_kschl,
+    lv_cost       TYPE f,
+    lt_class      TYPE TABLE OF sclass,
+    lv_inc_buzei  TYPE char1,
+    lv_buzei_int  TYPE i,
+    lv_buzei_step TYPE zdeliv_note_p-buzei VALUE 10,
+    lv_buzei_max  TYPE zdeliv_note_p-buzei.
+
+  FIELD-SYMBOLS:
+    <ls_xpostab>   TYPE pos_t,
+    <ls_pdrm>      TYPE gty_s_pdrm,
+    <ls_objectdat> TYPE clobjdat,
+    <ls_a418>      TYPE lty_s_a418,
+    <ls_konp>      TYPE lty_s_konp.
+
+  IF it_pdrm IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  LOOP AT it_pdrm ASSIGNING <ls_pdrm> WHERE objectdata IS INITIAL
+                                        AND objek IS NOT INITIAL.
+    CALL FUNCTION 'CLAF_CLASSIFICATION_OF_OBJECTS'
+      EXPORTING
+        classtype       = '023'
+        object          = <ls_pdrm>-objek
+        objecttable     = 'MCH1'
+        initial_charact = ''
+      TABLES
+        t_class         = lt_class[]
+        t_objectdata    = <ls_pdrm>-objectdata[]
+      EXCEPTIONS
+        OTHERS          = 0.
+  ENDLOOP.
+
+  SORT it_pdrm BY buzei.
+
+  " Определение шага BUZEI по первым трем элементам
+  LOOP AT it_pdrm ASSIGNING <ls_pdrm> TO 3.
+    lv_buzei_int = <ls_pdrm>-buzei.
+    CHECK lv_buzei_int MOD 10 <> 0.
+    lv_buzei_step = 1.
+    EXIT.
+  ENDLOOP.
+
+  READ TABLE it_pdrm ASSIGNING <ls_pdrm> INDEX lines( it_pdrm ).
+  IF sy-subrc = 0.
+    lv_buzei_max = <ls_pdrm>-buzei.
+  ENDIF.
+
+  ls_kschl = 'IEQ'.
+  ls_kschl-low = 'ZKLX'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZKAL'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZKZH'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZKIZ'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZKRU'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZKSA'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMAU'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMIR'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMOS'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMPD'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMPT'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMRH'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMRU'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMAG'.
+  APPEND ls_kschl TO lt_kschl.
+  ls_kschl-low = 'ZMPG'.
+  APPEND ls_kschl TO lt_kschl.
+
+  SELECT kschl datbi datab knumh
+    INTO TABLE lt_a418
+    FROM a418
+    FOR ALL ENTRIES IN it_pdrm
+    WHERE kappl = 'V'
+      AND kschl IN lt_kschl
+      AND datab <= it_pdrm-dats
+      AND datbi >= it_pdrm-dats.
+
+  SORT lt_a418 BY knumh.
+
+  SELECT knumh kbetr
+    FROM konp
+    INTO TABLE lt_konp
+    FOR ALL ENTRIES IN lt_a418
+    WHERE knumh = lt_a418-knumh
+      AND kopos = '1'
+      AND loevm_ko = ''.
+
+  SORT lt_a418 BY kschl datbi datab knumh.
+
+  LOOP AT it_pdrm ASSIGNING <ls_pdrm>.
+    READ TABLE <ls_pdrm>-objectdata TRANSPORTING NO FIELDS
+      WITH KEY atnam = 'Z_COLVO_DRM'.
+    CHECK sy-subrc = 0.
+
+    READ TABLE xpostable ASSIGNING <ls_xpostab>
+      WITH KEY buzei = <ls_pdrm>-buzei.
+    CHECK sy-subrc = 0.
+
+    LOOP AT <ls_pdrm>-objectdata ASSIGNING <ls_objectdat>.
+      CASE <ls_objectdat>-atnam.
+        WHEN 'Z_ALEXANDRIT'.
+          lv_kschl = 'ZKLX'.
+        WHEN 'Z_ALMAZ'.
+          lv_kschl = 'ZKAL'.
+        WHEN 'Z_JEMCHUG'.
+          lv_kschl = 'ZKZH'.
+        WHEN 'Z_IZUMRUD'.
+          lv_kschl = 'ZKIZ'.
+        WHEN 'Z_RUBIN'.
+          lv_kschl = 'ZKRU'.
+        WHEN 'Z_SAPFIR'.
+          lv_kschl = 'ZKSA'.
+        WHEN 'Z_ZOLOTO'.
+          lv_kschl = 'ZMAU'.
+        WHEN 'Z_IRIDIY'.
+          lv_kschl = 'ZMIR'.
+        WHEN 'Z_OSMIY'.
+          lv_kschl = 'ZMOS'.
+        WHEN 'Z_PALADIY'.
+          lv_kschl = 'ZMPD'.
+        WHEN 'Z_PLATINA'.
+          lv_kschl = 'ZMPT'.
+        WHEN 'Z_RODIY'.
+          lv_kschl = 'ZMRH'.
+        WHEN 'Z_RUTENIY'.
+          lv_kschl = 'ZMRU'.
+        WHEN 'Z_SEREBRO'.
+          lv_kschl = 'ZMAG'.
+        WHEN 'Z_PLAT_GR'.
+          lv_kschl = 'ZMPG'.
+        WHEN OTHERS.
+          CONTINUE.
+      ENDCASE.
+
+      lv_buzei_max = lv_buzei_max + lv_buzei_step.
+
+      CLEAR ls_xpostable.
+      ls_xpostable-buzei = lv_buzei_max.
+      ls_xpostable-maktx = <ls_objectdat>-smbez.
+      ls_xpostable-zmenge_dm = <ls_objectdat>-atflv.
+
+      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT'
+        EXPORTING
+          input  = <ls_objectdat>-dime2
+        IMPORTING
+          output = ls_xpostable-meins
+        EXCEPTIONS
+          OTHERS = 1.
+      IF sy-subrc <> 0.
+        ls_xpostable-meins = 'G'.
+      ENDIF.
+
+      IF <ls_pdrm>-price = 'X'.
+        LOOP AT lt_a418 ASSIGNING <ls_a418> WHERE kschl = lv_kschl
+                                              AND datab <= <ls_pdrm>-dats
+                                              AND datbi >= <ls_pdrm>-dats.
+          EXIT.
+        ENDLOOP.
+
+        IF sy-subrc = 0.
+          READ TABLE lt_konp ASSIGNING <ls_konp>
+            WITH TABLE KEY knumh = <ls_a418>-knumh.
+          IF sy-subrc = 0.
+            ls_xpostable-price = <ls_konp>-kbetr.
+            lv_cost = ls_xpostable-price * ls_xpostable-zmenge_dm.
+            ls_xpostable-cost = lv_cost.
+            ls_xpostable-total = ls_xpostable-cost.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      ls_xpostable-drm = 'X'.
+      ls_xpostable-waers = <ls_xpostab>-waers.
+      APPEND ls_xpostable TO xpostable.
+
+      gv_drm_flg = 'X'.
+    ENDLOOP.
+  ENDLOOP.                                                                     "}05.03.2014 VSasnouksi Переработан алгоритм добавления позиций по драг.металлам. Старый алгоритм имел проблемы с нумерацией позиций
+ENDFORM.                    " FILL_DRM
+
+*&---------------------------------------------------------------------*
+*&      Form  calc_zprostoy
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->CS_HEADER  text
+*----------------------------------------------------------------------*
+FORM calc_zprostoy CHANGING cs_header TYPE zdeliv_note_h.
+  DATA:
+    lv_pribit_ts TYPE timestamp,
+    lv_ubitie_ts TYPE timestamp,
+    lv_diff_sec  TYPE tzntstmpl,
+    lv_sign      TYPE char1,
+    lv_sec       TYPE n LENGTH 2,
+    lv_diff_min  TYPE i,
+    lv_min       TYPE n LENGTH 2,
+    lv_hour      TYPE i.
+
+  IF cs_header-zdpribit = cs_header-zdubitie AND
+     cs_header-ztpribit = cs_header-ztubitie.
+    CLEAR cs_header-zprostoy.
+  ELSE.
+    lv_pribit_ts = |{ cs_header-zdpribit }{ cs_header-ztpribit }|.
+    lv_ubitie_ts = |{ cs_header-zdubitie }{ cs_header-ztubitie }|.
+
+    lv_diff_sec = cl_abap_tstmp=>subtract(
+      tstmp1 = lv_ubitie_ts
+      tstmp2 = lv_pribit_ts ).
+
+    IF lv_diff_sec < 0.
+      lv_sign = '-'.
+    ENDIF.
+
+    lv_sec = lv_diff_sec MOD 60.
+    lv_diff_min = ( lv_diff_sec - lv_sec ) / 60.
+
+    lv_min = lv_diff_min MOD 60.
+    lv_hour = ( lv_diff_min - lv_min ) / 60.
+
+    IF lv_sec IS INITIAL.
+      cs_header-zprostoy = |{ lv_sign }{ lv_hour }:{ lv_min }|.
+    ELSE.
+      cs_header-zprostoy = |{ lv_sign }{ lv_hour }:{ lv_min }:{ lv_sec }|.
+    ENDIF.
+  ENDIF.
+ENDFORM.                    "calc_zprostoy
+
+*&---------------------------------------------------------------------*
+*&      Form  set_ttn_form
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM set_ttn_form.
+  DATA:
+    lv_code TYPE sy-ucomm.
+
+  lv_code = ok_code.
+  CLEAR: ok_code, form.
+
+  SELECT SINGLE werks FROM mseg INTO gv_werks WHERE mblnr EQ xheader-mblnr AND mjahr EQ xheader-mjahr.
+  IF gs_nast-kschl = 'ZTNM'.
+    CASE 'X'.
+      WHEN gv_ttn1.
+        gv_ttn_type = gc_ttn_1.
+      WHEN gv_tn2.
+        gv_ttn_type = gc_tn_2.
+    ENDCASE.
+  ENDIF.
+
+  IF gv_ttn_type IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  IF gv_ttn_type = gc_ttn_1.
+    gs_nast-pfld1 = 'ТТН-1'.
+  ELSE.
+    gs_nast-pfld1 = 'ТН-2'.
+  ENDIF.
+
+  CLEAR print_header-znumpr.
+
+  CASE lv_code.
+    WHEN 'PORTRAIT'.
+      IF gv_ttn_type = gc_ttn_1.
+        IF gv_werks NE '0840' AND gv_werks NE '0830'.
+          form = 'Z_TTN_1_NEW'.
+        ELSE.
+          form = 'Z_TTN_1_NEW_0840'.
+        ENDIF.
+        xheader-znumpr = '1'.
+      ELSE.
+        form = 'Z_TN_2_NEW'.
+        xheader-znumpr = '5'.
+      ENDIF.
+    WHEN 'PORTRAIT_PR'.
+      IF gv_ttn_type = gc_ttn_1.
+        form = 'Z_TTN_1_NEW_PR'.
+        xheader-znumpr = '2'.
+      ELSE.
+        form = 'Z_TN_2_NEW_PR'.
+        xheader-znumpr = '6'.
+      ENDIF.
+
+      print_header-znumpr = '1'.
+    WHEN 'ALBUM'.
+      IF gv_werks NE '0840' AND gv_werks NE '0830'.
+        form = 'Z_TTN_1_ALBOM'.
+      ELSE.
+        form = 'Z_TTN_1_ALBOM_0840'.
+      ENDIF.
+
+      IF gv_ttn_type = gc_ttn_1.
+        xheader-znumpr = '3'.
+      ELSE.
+        form = 'Z_TN_2_ALBOM'.
+        xheader-znumpr = '7'.
+      ENDIF.
+    WHEN 'ALBUM_PR'.
+      print_header-znumpr = '1'.
+
+      IF gv_ttn_type = gc_ttn_1.
+        form = 'Z_TTN_1_ALBOM_PR'.
+        xheader-znumpr = '4'.
+      ELSE.
+        form = 'Z_TN_2_ALBOM_PR'.
+        xheader-znumpr = '8'.
+      ENDIF.
+  ENDCASE.
+ENDFORM.                    "set_ttn_form
+
+
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_SERNR_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM f_get_sernr_data USING is_header TYPE zdeliv_note_h
+                            it_pos    TYPE STANDARD TABLE
+                   CHANGING ct_sernr  TYPE gty_t_sernr.
+  TYPES: BEGIN OF lty_s_mara,
+           matnr TYPE mara-matnr,
+           mtart TYPE mara-mtart,
+         END OF lty_s_mara,
+         lty_t_mara TYPE STANDARD TABLE OF lty_s_mara,
+
+         BEGIN OF lty_s_storno,
+           sjahr TYPE mseg-sjahr,
+           smbln TYPE mseg-smbln,
+           smblp TYPE mseg-smblp,
+         END OF lty_s_storno,
+         lty_t_storno TYPE STANDARD TABLE OF lty_s_storno.
+
+  DATA: lt_pos    TYPE STANDARD TABLE OF pos_t,
+        lt_mara   TYPE lty_t_mara,
+        lt_sernr  TYPE gty_t_sernr,
+        lt_storno TYPE lty_t_storno.
+
+  FIELD-SYMBOLS: <ls_storno> TYPE lty_s_storno.
+  FIELD-SYMBOLS: <ls_sernr> TYPE gty_s_sernr.
+
+  lt_pos = it_pos.
+  SORT lt_pos BY matnr.
+
+  SELECT matnr mtart
+    FROM mara
+    INTO TABLE lt_mara
+    FOR ALL ENTRIES IN lt_pos
+    WHERE matnr = lt_pos-matnr
+      AND mtart = 'ZBSO'.
+
+  IF sy-subrc NE 0. RETURN. ENDIF.
+
+  SELECT mseg~mblnr
+         mseg~mjahr
+         mseg~zeile
+         mseg~matnr
+         mseg~charg
+         ser03~obknr
+         objk~sernr
+    FROM mseg
+      LEFT JOIN ser03
+        ON ser03~mblnr = mseg~mblnr AND
+           ser03~mjahr = mseg~mjahr AND
+           ser03~zeile = mseg~zeile
+      INNER JOIN objk
+        ON objk~obknr = ser03~obknr
+    INTO CORRESPONDING FIELDS OF TABLE ct_sernr
+    WHERE mseg~shkzg      = 'H'
+      AND mseg~bwart      = '301'
+      AND mseg~xblnr_mkpf = is_header-zdelivery.
+
+  SORT ct_sernr BY mblnr mjahr zeile.
+
+  SELECT sjahr
+         smbln
+         smblp
+    FROM mseg
+    INTO TABLE lt_storno
+    FOR ALL ENTRIES IN ct_sernr
+    WHERE sjahr = ct_sernr-mjahr
+      AND smbln = ct_sernr-mblnr
+      AND smblp = ct_sernr-zeile.
+
+  LOOP AT lt_storno ASSIGNING <ls_storno>.
+    DELETE ct_sernr WHERE mblnr = <ls_storno>-smbln
+                      AND mjahr = <ls_storno>-sjahr
+                      AND zeile = <ls_storno>-smblp.
+  ENDLOOP.
+
+  PERFORM f_split_sernr CHANGING ct_sernr.
+
+  SORT ct_sernr BY matnr charg sernr.
+
+ENDFORM.                    " F_GET_SERNR_DATA
+
+*&---------------------------------------------------------------------*
+*&      Form  f_split_sernr
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->CT_DOC     text
+*----------------------------------------------------------------------*
+FORM f_split_sernr CHANGING ct_sernr TYPE gty_t_sernr.
+
+  DATA: ls_res TYPE match_result.
+
+  FIELD-SYMBOLS: <ls_sernr> TYPE gty_s_sernr.
+
+  LOOP AT ct_sernr ASSIGNING <ls_sernr>.
+    FIND FIRST OCCURRENCE OF REGEX '[0123456789]' IN <ls_sernr>-sernr RESULTS ls_res.
+    IF sy-subrc  = 0 AND ls_res-offset NE 0.
+      <ls_sernr>-ser_part = <ls_sernr>-sernr+0(ls_res-offset).
+      <ls_sernr>-num_part = <ls_sernr>-sernr+ls_res-offset.
+
+    ELSEIF sy-subrc  = 0 AND ls_res-offset = 0.                 " Если серийный номер без серии
+      <ls_sernr>-ser_part = ''.
+      <ls_sernr>-num_part = <ls_sernr>-sernr+ls_res-offset.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.                    "f_split_sernr
+
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_SERNR_FOR_LINE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_LT_SERNR  text
+*      <--P_LS_PRINT_POS  text
+*----------------------------------------------------------------------*
+FORM f_get_sernr_for_line USING it_sernr TYPE gty_t_sernr                         "Ins Kolesnik V.A. 15.07.2014 (rm1411 #291)
+                       CHANGING cs_pos   TYPE zsd_delivery_pos.
+
+  DATA: lt_ser_part TYPE gty_t_sernr.
+
+  DATA: lv_num_prev TYPE gty_s_sernr-num_part,
+        lv_num_next TYPE gty_s_sernr-num_part,
+        lv_sernum   TYPE char7,
+        lv_num_s    TYPE gty_s_sernr-num_part,
+        lv_str      TYPE text200.
+
+  FIELD-SYMBOLS: <ls_sernr>    TYPE gty_s_sernr,
+                 <ls_ser_part> TYPE gty_s_sernr.
+
+  lt_ser_part = it_sernr.
+  SORT lt_ser_part BY matnr charg ser_part.
+  DELETE ADJACENT DUPLICATES FROM lt_ser_part COMPARING matnr charg ser_part.
+
+  LOOP AT lt_ser_part ASSIGNING <ls_ser_part> WHERE matnr = cs_pos-matnr
+                                                AND charg = cs_pos-charg.
+    CLEAR: lv_num_s,
+           lv_num_next.
+    LOOP AT it_sernr ASSIGNING <ls_sernr> WHERE matnr    = cs_pos-matnr
+                                            AND charg    = cs_pos-charg
+                                            AND ser_part = <ls_ser_part>-ser_part.
+      CONDENSE <ls_sernr>-num_part.
+      SHIFT <ls_sernr>-num_part LEFT DELETING LEADING '0'.
+      IF lv_num_s IS INITIAL.
+        lv_num_prev = lv_num_s = <ls_sernr>-num_part.
+        CONTINUE.
+      ELSE.
+        lv_num_next = lv_num_prev + 1.
+        CONDENSE lv_num_next.
+        IF lv_num_next = <ls_sernr>-num_part.
+          lv_num_prev = <ls_sernr>-num_part.
+        ELSE.
+          lv_str = 'Сер.&PART& с № &BEGIN& по № &END&'(rp1).
+
+          REPLACE FIRST OCCURRENCE OF: '&PART&'  IN lv_str WITH <ls_ser_part>-ser_part.
+          CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+            EXPORTING
+              input  = lv_num_s
+            IMPORTING
+              output = lv_sernum.
+          REPLACE FIRST OCCURRENCE OF '&BEGIN&' IN lv_str WITH lv_sernum.
+          CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+            EXPORTING
+              input  = lv_num_next
+            IMPORTING
+              output = lv_sernum.
+          REPLACE FIRST OCCURRENCE OF: '&END&'   IN lv_str WITH lv_sernum.
+          lv_num_prev = lv_num_s = <ls_sernr>-num_part.
+          SHIFT lv_str BY 6 PLACES RIGHT.
+          APPEND lv_str TO cs_pos-sernr.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+    lv_str = 'Сер.&PART& C № &BEGIN& По № &END&'(rp1).
+    REPLACE FIRST OCCURRENCE OF: '&PART&'  IN lv_str WITH <ls_ser_part>-ser_part.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_num_s
+      IMPORTING
+        output = lv_sernum.
+    REPLACE FIRST OCCURRENCE OF '&BEGIN&' IN lv_str WITH lv_sernum.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_num_next
+      IMPORTING
+        output = lv_sernum.
+    REPLACE FIRST OCCURRENCE OF: '&END&'   IN lv_str WITH lv_sernum.
+
+    SHIFT lv_str BY 6 PLACES RIGHT.
+    APPEND lv_str TO cs_pos-sernr.
+  ENDLOOP.
+ENDFORM.                    " F_GET_SERNR_FOR_LINE
+
+*&---------------------------------------------------------------------*
+*&      Form  F_GET_ZSOD_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_LS_PRINT_POS  text
+*----------------------------------------------------------------------*
+FORM f_get_zsod_data CHANGING ls_data TYPE zsd_delivery_pos.
+  DATA: lv_val     TYPE atwrt,
+        ls_objdata TYPE clobjdat.
+
+  DATA: lt_class   TYPE TABLE OF sclass,
+        lt_objdata TYPE TABLE OF clobjdat.
+
+  CALL FUNCTION 'CLAF_CLASSIFICATION_OF_OBJECTS'
+    EXPORTING
+      classtype          = '023'
+      object             = CONV ausp-objek( VALUE mch1_key( matnr = ls_data-matnr charg = ls_data-charg ) )
+      objecttable        = 'MCH1'
+      initial_charact    = ''
+    TABLES
+      t_class            = lt_class
+      t_objectdata       = lt_objdata
+    EXCEPTIONS
+      no_classification  = 1
+      no_classtypes      = 2
+      invalid_class_type = 3
+      OTHERS             = 4.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  READ TABLE lt_objdata
+    INTO ls_objdata
+    WITH KEY atnam = 'Z_ROST'.
+  IF sy-subrc = 0.
+    lv_val = ls_objdata-ausp1.
+    CONDENSE lv_val.
+    SHIFT lv_val LEFT DELETING LEADING '0'.
+    IF lv_val IS NOT INITIAL.
+      CONCATENATE ls_data-arktx '; рост'(tx8) INTO ls_data-arktx.
+      CONCATENATE ls_data-arktx lv_val INTO ls_data-arktx SEPARATED BY space.
+    ENDIF.
+  ENDIF.
+
+  READ TABLE lt_objdata
+    INTO ls_objdata
+    WITH KEY atnam = 'Z_RAZM'.
+  IF sy-subrc = 0.
+    lv_val = ls_objdata-ausp1.
+    CONDENSE lv_val.
+    SHIFT lv_val LEFT DELETING LEADING '0'.
+    IF lv_val IS NOT INITIAL.
+      CONCATENATE ls_data-arktx '; размер'(tx9) INTO ls_data-arktx.
+      CONCATENATE ls_data-arktx lv_val INTO ls_data-arktx SEPARATED BY space.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " F_GET_ZSOD_DATA
+
+FORM print_preparation_pmm CHANGING cs_pmm TYPE zmm_s_pmm.
+  TYPES:
+    BEGIN OF lty_s_mat,
+      matnr TYPE matnr,
+      charg TYPE charg_d,
+    END OF lty_s_mat,
+
+    BEGIN OF lty_s_matprice,
+      matnr     TYPE matnr,
+      charg     TYPE charg_d,
+      price     TYPE pos_t-price,
+      matnr_ref TYPE REF TO zmm_s_matnr_data,
+    END OF lty_s_matprice.
+
+  DATA:
+    lt_matnr    TYPE zmm_t_matnr_data,
+    lt_mat      TYPE SORTED TABLE OF lty_s_mat
+                       WITH UNIQUE KEY matnr charg,
+    ls_mat      TYPE lty_s_mat,
+    lt_mat_text TYPE ztb_mat_text,
+    lt_matprice TYPE HASHED TABLE OF lty_s_matprice
+                       WITH UNIQUE KEY matnr charg price,
+    ls_matprice TYPE lty_s_matprice.
+
+  FIELD-SYMBOLS:
+    <ls_matnr>     TYPE zmm_s_matnr_data,
+    <ls_xpostable> TYPE pos_t,
+    <ls_mat_text>  TYPE zst_mat_text,
+    <ls_matprice>  TYPE lty_s_matprice.
+
+  CLEAR cs_pmm.
+
+  IF xheader-ztype <> 'SO'.
+    LOOP AT xpostable ASSIGNING <ls_xpostable>
+                      WHERE matnr IS NOT INITIAL
+                        AND charg IS NOT INITIAL.
+      ls_mat-matnr = <ls_xpostable>-matnr.
+      ls_mat-charg = <ls_xpostable>-charg.
+      INSERT ls_mat INTO TABLE lt_mat.
+    ENDLOOP.
+
+    IF lt_mat IS NOT INITIAL.
+      lt_mat_text = zcl_text_for_material=>get_text_mat_v1(
+        iv_triger = p_triger
+        it_table  = lt_mat ).
+    ENDIF.
+  ENDIF.
+
+  LOOP AT xpostable ASSIGNING <ls_xpostable>.
+    IF gv_drm_flg IS INITIAL.
+      READ TABLE lt_matprice ASSIGNING <ls_matprice>
+        WITH TABLE KEY matnr = <ls_xpostable>-matnr
+                       charg = <ls_xpostable>-charg
+                       price = <ls_xpostable>-price.
+      IF sy-subrc <> 0.
+        CLEAR ls_matprice.
+        ls_matprice-matnr = <ls_xpostable>-matnr.
+        ls_matprice-charg = <ls_xpostable>-charg.
+        ls_matprice-price = <ls_xpostable>-price.
+        INSERT ls_matprice INTO TABLE lt_matprice ASSIGNING <ls_matprice>.
+      ENDIF.
+    ENDIF.
+
+    IF <ls_matprice> IS ASSIGNED AND <ls_matprice>-matnr_ref IS BOUND.
+      <ls_matprice>-matnr_ref->menge =
+        <ls_matprice>-matnr_ref->menge + <ls_xpostable>-menge.
+    ELSE.
+      APPEND INITIAL LINE TO lt_matnr ASSIGNING <ls_matnr>.
+      <ls_matnr>-matnr = <ls_xpostable>-matnr.
+      <ls_matnr>-charg = <ls_xpostable>-charg.
+      <ls_matnr>-menge = <ls_xpostable>-menge.
+      <ls_matnr>-meins = <ls_xpostable>-meins.
+
+      READ TABLE lt_mat_text ASSIGNING <ls_mat_text>
+        WITH TABLE KEY matnr = <ls_xpostable>-matnr
+                       charg = <ls_xpostable>-charg.
+      IF sy-subrc = 0 AND xheader-ztype <> 'SO'.
+        <ls_matnr>-matnr_name = <ls_mat_text>-text.
+      ELSE.
+        <ls_matnr>-matnr_name = <ls_xpostable>-maktx.
+      ENDIF.
+
+      IF <ls_matprice> IS ASSIGNED.
+        GET REFERENCE OF <ls_matnr> INTO <ls_matprice>-matnr_ref.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  FREE lt_matprice.
+
+  CALL FUNCTION 'ZMM_PRECIOUS_METAL_MATNR'
+    EXPORTING
+      it_matnr = lt_matnr
+    IMPORTING
+      es_pmm   = cs_pmm.
+ENDFORM.
+
+FORM set_bstkd USING uv_okcode.
+  DATA:
+    lt_return           TYPE TABLE OF bapiret2,
+    ls_order_header_in  TYPE bapisdh1,
+    ls_order_header_inx TYPE bapisdh1x.
+  DATA:
+    ls_vbakkom   TYPE  vbakkom,
+    ls_vbakkomx  TYPE  vbakkomx,
+    lt_fxvbpakom TYPE STANDARD TABLE OF vbpakom.
+
+  CASE uv_okcode.
+    WHEN 'OKAY'.
+      UPDATE vbkd SET bstkd = gv_bstkd
+       WHERE vbeln = gs_nast-objky(10)
+         AND posnr = '000000'.
+      COMMIT WORK AND WAIT.
+    WHEN 'CANC'.
+      SELECT SINGLE bstkd FROM vbkd INTO gv_bstkd WHERE vbeln = gs_nast-objky(10).
+  ENDCASE.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  READ_KUNNR_TXT
+*&---------------------------------------------------------------------*
+*    Адресные данные
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM read_kunnr_txt  USING    kunnr TYPE kna1-kunnr
+                 CHANGING text  TYPE string
+                          code1 TYPE stcd1
+                          code2 TYPE stcd3.
+
+  TABLES: vbak,                   " Торговый документ: данные заголовка
+          kna1.
+  DATA: lv_kunnr TYPE kunnr,postcode TYPE adrc-post_code1, " Почтовый индекс города
+        city     TYPE adrc-city1,      " Город
+        name1    TYPE adrc-name1,
+        name2    TYPE adrc-name2,
+        name3    TYPE adrc-name3,
+        name4    TYPE adrc-name4,
+        street   TYPE adrc-street,    " Улица
+        house    TYPE adrc-house_num1, " Номер дома
+        ktokd    TYPE kna1-ktokd.      " Группа счетов дебитора
+
+  CLEAR:         adrnr.
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING
+      input  = kunnr
+    IMPORTING
+      output = lv_kunnr.
+  SELECT SINGLE * FROM kna1 WHERE kunnr EQ lv_kunnr.
+  " Название, индекс, город, улица и номер дома
+  DATA: ls_name_bp TYPE zst_name_bp,
+        lv_lifnr   TYPE lifnr.
+
+  SELECT SINGLE post_code1 city1 street house_num1 name1 name2 name3 name4
+                FROM adrc
+                INTO (postcode,
+                      city,
+                      street,
+                      house,
+                      name1,
+                      name2,
+                      name3,
+                      name4)
+                WHERE addrnumber EQ kna1-adrnr.
+  CONCATENATE name1 name2 name3 name4
+      INTO text
+     SEPARATED BY ' '.
+
+  IF NOT house IS INITIAL.
+    CONCATENATE text postcode  city  street  house
+      INTO text
+     SEPARATED BY ', '.
+  ELSEIF NOT street IS INITIAL.
+    CONCATENATE  text  postcode  city  street INTO text
+      SEPARATED BY ', '.
+  ELSEIF NOT city IS INITIAL.
+    CONCATENATE  text  postcode  city INTO text
+      SEPARATED BY ', '.
+  ELSEIF NOT postcode IS INITIAL.
+    CONCATENATE  text  postcode INTO text
+      SEPARATED BY ', '.
+
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ORDER_DOC
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_order_doc .
+  TYPES:
+    BEGIN OF lty_s_tknum,
+      tknum TYPE tknum,
+    END OF lty_s_tknum.
+  CONSTANTS: lc_parvw TYPE char2 VALUE 'AG',
+             lc_posnr TYPE char6 VALUE '000000'..
+
+  DATA: lt_tknum      TYPE TABLE OF lty_s_tknum,
+        lt_ret        TYPE TABLE OF ddshretval,
+        lv_vodit      TYPE kunnr,
+        lv_avto       TYPE equnr,
+        lv_prizp      TYPE equnr,
+        lv_vodit_name TYPE kna1-name1,
+        lv_auto_name  TYPE eqkt-eqktx,
+        lv_objnr      TYPE j_objnr,
+        lv_number     TYPE fleet-license_num,
+        lv_tdname     TYPE thead-tdname,
+        lt_tlines     TYPE TABLE OF tline,
+        ls_tlines     TYPE tline,
+        l_spell_zkolm TYPE spell,
+        lv_repid      TYPE sy-repid,
+        lv_dynnr      TYPE sy-dynnr,
+        lv_vladelec   TYPE lfa1-lifnr,
+        ls_name_bp    TYPE zst_name_bp.
+  DATA:
+        lv_vsteltxt TYPE string.
+
+  FIELD-SYMBOLS <ls_ret> TYPE ddshretval.
+
+  zcl_sd_ztn_amdp=>get_order_data( EXPORTING iv_objky   = gs_nast-objky(10)
+                                             ic_parvw   = lc_parvw
+                                             ic_posnr   = lc_posnr
+                                   IMPORTING et_header  = DATA(lt_header)
+                                             et_items   = DATA(lt_items) ).
+  CLEAR xpostable[].
+
+  IF lt_header[] IS INITIAL.
+    MESSAGE e046(zfi) WITH xheader-zdelivery.
+  ENDIF.
+  IF lt_items[] IS INITIAL.
+    MESSAGE e044(zfi).
+  ENDIF.
+
+  READ TABLE lt_header ASSIGNING FIELD-SYMBOL(<ls_header>) INDEX 1.
+
+  "***************  Заполняем заголовок
+
+  xheader = VALUE #( BASE xheader
+                     ztype     = ztype
+                     zvkorg    = <ls_header>-vkorg
+                     bukrs     = <ls_header>-vkorg
+                     zdate     = <ls_header>-audat
+                     zvstel    = <ls_header>-vstel
+                     zvsteltxt = <ls_header>-vtext ).
+  IF xheader-zdelivery IS INITIAL.
+    xheader-zdelivery = <ls_header>-vbeln.
+  ENDIF.
+
+  "Сдал отправитель (отпуск произвел)
+  READ TABLE lt_items INDEX 1 ASSIGNING FIELD-SYMBOL(<ls_item>).
+  PERFORM read_fio USING    <ls_item>-lgort
+                            <ls_item>-werks
+                   CHANGING xheader-zsotp.
+
+  "Принял получатель (товар получил) + Пункт разгрузки
+  PERFORM get_zppol2  USING <ls_header>-vbeln
+                            <ls_header>-kunnr.
+
+  "Грузополучатель, из записи клиента
+  xheader-zkunag  = <ls_header>-kunnr.
+  xheader-zkunnr  = <ls_header>-vkorg.
+
+  CLEAR lv_tdname.
+  WRITE xheader-zdelivery TO lv_tdname(10) USING EDIT MASK '__________'.
+  CALL FUNCTION 'READ_TEXT'
+    EXPORTING
+      id       = 'ZRES'
+      language = sy-langu
+      name     = lv_tdname
+      object   = 'VBBK'
+    TABLES
+      lines    = lt_tlines
+    EXCEPTIONS
+      OTHERS   = 9.
+  IF sy-subrc = 0.
+    LOOP AT lt_tlines INTO ls_tlines.
+      CONCATENATE xheader-zosnot ls_tlines-tdline INTO xheader-zosnot.
+    ENDLOOP.
+  ENDIF.
+
+  "*********   Заполняем позиции
+  PERFORM get_pos_order USING lt_items
+                              <ls_header>.
+
+ENDFORM.                    " GET_ORDER_DOC
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_POS_ORDER
+*&---------------------------------------------------------------------*
+*       Позиции из документа исходящей поставки
+*----------------------------------------------------------------------*
+FORM get_pos_order USING it_pos  TYPE zcl_sd_ztn_amdp=>ty_t_order_pos
+                         is_head TYPE zcl_sd_ztn_amdp=>ty_s_order_hd.
+
+  DATA:
+    ls_xpostable TYPE pos_t,
+    lt_mat_text  TYPE ztb_mat_text,
+    ls_mat_text  TYPE zst_mat_text,
+    lt_pdrm      TYPE gty_t_pdrm.
+
+  SELECT SINGLE waers FROM t001 INTO @DATA(lv_waers) WHERE bukrs = @is_head-vkorg.
+
+  LOOP AT it_pos ASSIGNING FIELD-SYMBOL(<ls_pos>).
+    READ TABLE lt_mat_text TRANSPORTING NO FIELDS WITH TABLE KEY matnr = <ls_pos>-matnr
+                                                                 charg = <ls_pos>-charg.
+    IF sy-subrc <> 0.
+      "APPEND VALUE #( matnr = <ls_pos>-matnr charg = <ls_pos>-charg ) TO lt_mat_text.
+      INSERT VALUE #( matnr = <ls_pos>-matnr charg = <ls_pos>-charg ) INTO TABLE lt_mat_text.
+    ENDIF.
+  ENDLOOP.
+  zcl_text_for_material=>get_text_mat_v4( EXPORTING it_table = lt_mat_text CHANGING ct_table = lt_mat_text ).
+
+  LOOP AT it_pos ASSIGNING <ls_pos>.
+    CLEAR: ls_xpostable.
+
+    ls_xpostable = VALUE #(  matnr = <ls_pos>-matnr
+                             menge = <ls_pos>-kwmeng
+                             meins = <ls_pos>-vrkme
+                             waers = <ls_pos>-waerk
+                             buzei = <ls_pos>-posnr
+                             charg = <ls_pos>-charg
+                             price = <ls_pos>-netpr
+                             vrate = <ls_pos>-kbetr
+                             cost  = COND #( WHEN <ls_pos>-kzwi3 IS NOT INITIAL THEN <ls_pos>-kzwi3 ELSE <ls_pos>-kzwi2 )
+                             vatsm = <ls_pos>-kzwi5
+                             total = <ls_pos>-kzwi4 ).
+
+    " Вес брутто
+    IF <ls_pos>-brgew IS NOT INITIAL AND <ls_pos>-gewei IS NOT INITIAL .
+      CALL FUNCTION 'UNIT_CONVERSION_SIMPLE'
+        EXPORTING
+          input    = <ls_pos>-brgew
+          unit_in  = <ls_pos>-gewei
+          unit_out = 'TO'
+        IMPORTING
+          output   = ls_xpostable-brgew.
+    ELSE.
+      PERFORM get_mat_weight
+             USING ls_xpostable-matnr ls_xpostable-charg
+                   ls_xpostable-menge ls_xpostable-meins
+             CHANGING ls_xpostable-brgew.
+    ENDIF.
+
+    " наименование материала
+    READ TABLE lt_mat_text INTO ls_mat_text WITH TABLE KEY matnr = ls_xpostable-matnr
+                                                           charg = ls_xpostable-charg.
+    IF sy-subrc = 0.
+      ls_xpostable-maktx = ls_mat_text-text.
+    ENDIF.
+
+    "количество грузовых мест
+    IF ls_xpostable-menge < 256.
+      ls_xpostable-zkolm = ls_xpostable-menge.
+    ENDIF.
+
+    APPEND ls_xpostable TO xpostable.
+
+    APPEND INITIAL LINE TO lt_pdrm ASSIGNING FIELD-SYMBOL(<ls_pdrm>).
+    <ls_pdrm>-buzei    = ls_xpostable-buzei.
+    <ls_pdrm>-dats     = is_head-audat.
+    <ls_pdrm>-objek    = ls_xpostable-matnr.
+    <ls_pdrm>-objek+18 = ls_xpostable-charg.
+    IF ls_xpostable-price IS NOT INITIAL.
+      <ls_pdrm>-price = 'X'.
+    ENDIF.
+  ENDLOOP.
+
+  IF lt_pdrm IS NOT INITIAL.
+    PERFORM fill_drm USING lt_pdrm.
+  ENDIF.
+
+  PERFORM comb_data.
+
+ENDFORM.                                                    " GET_POS_ORDER
+
+FORM pbo_textedit.
+  TYPES: lty_stream TYPE c LENGTH 400.
+
+  DATA: lt_stream TYPE TABLE OF lty_stream,
+        ls_stream TYPE lty_stream.
+
+  IF gr_editor_handle IS INITIAL.
+    PERFORM create_text_edit_control CHANGING gr_editor_handle.
+  ENDIF.
+  ls_stream = xpostable[ cursorline ]-maktx.
+  "Убираем знаки ,, - табуляцию
+  REPLACE ALL OCCURRENCES OF ',,' IN ls_stream WITH cl_abap_char_utilities=>horizontal_tab.
+  REPLACE ALL OCCURRENCES OF '<(>,<)>' IN ls_stream WITH ','.
+
+
+  APPEND ls_stream TO lt_stream.
+
+  gr_editor_handle->set_text_as_stream(
+   EXPORTING
+     text = lt_stream ).
+
+  CALL FUNCTION 'CONTROL_FLUSH'
+    EXCEPTIONS
+      OTHERS = 0.
+
+  gr_editor_handle->set_readonly_mode(
+    EXPORTING
+      readonly_mode = 0 ).
+ENDFORM.                    "pbo_textedit
+
+*&---------------------------------------------------------------------*
+*& Form GET_READ_TEXT
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM get_read_text .
+
+  TYPES: lty_stream TYPE c LENGTH 400.
+
+  DATA: lt_stream TYPE TABLE OF lty_stream,
+        lt_lines  TYPE STANDARD TABLE OF tline,
+        lv_str    TYPE string.
+  " Считываем текст
+  gr_editor_handle->get_text_as_stream(
+    IMPORTING
+      text = lt_stream ).
+*
+  cl_gui_cfw=>flush( ).
+
+  CALL FUNCTION 'CONVERT_STREAM_TO_ITF_TEXT'
+    TABLES
+      text_stream = lt_stream
+      itf_text    = lt_lines.
+
+  lv_str = REDUCE #( INIT lv_text TYPE string
+                      FOR ls_lines IN lt_lines
+                     NEXT lv_text = COND #( WHEN lv_text IS INITIAL THEN ls_lines-tdline ELSE |{ lv_text } { ls_lines-tdline }| ) ).
+
+  REPLACE ALL OCCURRENCES OF ',,' IN lv_str WITH cl_abap_char_utilities=>horizontal_tab.
+  REPLACE ALL OCCURRENCES OF '<(>,<)>' IN lv_str WITH ','.
+
+  IF strlen( lv_str ) > 400 .
+    MESSAGE w001 WITH TEXT-034.
+    xpostable[ cursorline ]-maktx = lv_str(400).
+    xpostable[ cursorline ]-maktx2 = lv_str(200).
+  ELSE.
+    xpostable[ cursorline ]-maktx = lv_str.
+    xpostable[ cursorline ]-maktx2 = lv_str.
+  ENDIF.
+ENDFORM.
+
+FORM create_text_edit_control CHANGING cr_editor_handle TYPE REF TO cl_gui_textedit.
+  " Создание многострочного текстового поля
+  DATA(lr_container) = NEW cl_gui_custom_container( container_name = 'TEXT_CONTAINER').
+
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  cr_editor_handle = NEW cl_gui_textedit( parent = lr_container wordwrap_mode = 2 wordwrap_position = 100 ).
+
+  lr_container->link( EXPORTING container = 'EDITOR' ).
+
+ENDFORM.                    "create_text_edit_control

@@ -1,0 +1,42 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'Candidate Registration'
+@Metadata.ignorePropagatedAnnotations: true
+define root view entity ZHR_C_CANDIDATE_REGISTRATION as projection on ZHR_I_CANDIDATE_REGISTRATION
+{
+    key Uuid,
+    Pernr,
+    Nachn,
+    Name2,
+    Nach2,
+    Vorna,
+    Num01Email,
+    Subty,
+    Otype,
+    Objid,
+    Plvar,
+    Rsign,
+    Relat,
+    Istat,
+    Priox,
+    Begda,
+    Endda,
+    Varyf,
+    Seqnr,
+    Useralias,
+    Password,
+    ZhrUser,
+    ZsapUser,
+    SapOtype,
+    SapObjid,
+    SapPlvar,
+    CreatedUser,
+    CreatedData,
+    ChangedUser,
+    ChangedData,
+    CreatedTime,
+    ChangedTime,
+    HasErrors,
+    IsRunRegistration,
+    LastChangedAt,
+    ChangedBy
+}

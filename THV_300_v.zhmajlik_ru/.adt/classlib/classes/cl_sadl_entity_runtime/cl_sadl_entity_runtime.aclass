@@ -1,0 +1,1342 @@
+CLASS cl_sadl_entity_runtime DEFINITION PUBLIC INHERITING FROM cl_sadl_entity_transactional
+                             CREATE PRIVATE GLOBAL FRIENDS cl_sadl_entity_api .
+
+  PUBLIC SECTION.
+    INTERFACES if_sadl_capability_service .
+    INTERFACES if_sadl_query_fetch .
+    INTERFACES if_sadl_entity_runtime .
+    INTERFACES if_sadl_sql_cache_registry.
+    INTERFACES if_sadl_dbi_registry.
+    METHODS constructor IMPORTING io_mdp         TYPE REF TO if_sadl_metadata_provider
+                                  iv_name        TYPE        string
+                                  io_sadl_entity TYPE REF TO if_sadl_entity
+                        RAISING   cx_sadl_static cx_sadl_contract_violation .
+
+    " not mass enabled, because IF_SADL_ENTITY_TRANSACTIONAL->update supports only one set of changed attributes but GW supports many
+    METHODS map_update_request IMPORTING is_sadl_update TYPE if_sadl_batch=>ty_update
+                               EXPORTING et_bo_updates  TYPE if_sadl_batch=>tt_update
+                               RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS map_create_request IMPORTING is_sadl_create TYPE if_sadl_batch=>ty_create
+                               EXPORTING es_bo_create   TYPE if_sadl_batch=>ty_create
+                                         es_bo_action   TYPE if_sadl_batch=>ty_action
+                               RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS map_create_response IMPORTING is_bo_create   TYPE if_sadl_batch=>ty_create
+                                          is_sadl_create TYPE if_sadl_batch=>ty_create " key in component rs_entity_data is changed by implementation!
+                                RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS map_delete_request IMPORTING it_sadl_keys              TYPE STANDARD TABLE
+                               EXPORTING er_bo_keys                TYPE REF TO data " STANDARD TABLE
+                                         ev_alternative_key        TYPE string
+                                         ev_referenced_sadl_entity TYPE string
+                               RAISING   cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS map_action_request IMPORTING is_sadl_action TYPE if_sadl_batch=>ty_action
+                               EXPORTING es_bo_action   TYPE if_sadl_batch=>ty_action
+                               RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS map_action_response IMPORTING is_bo_action   TYPE if_sadl_batch=>ty_action
+                                          is_sadl_action TYPE if_sadl_batch=>ty_action " component r_returning_parameters is changed by implementation!
+                                RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS map_entity_to_sadl_data IMPORTING it_data             TYPE STANDARD TABLE
+                                              iv_structure        TYPE string OPTIONAL
+                                              iv_check_key_mapped TYPE abap_bool OPTIONAL
+                                    EXPORTING et_data             TYPE STANDARD TABLE
+                                    RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS map_entity_to_sadl_data_single IMPORTING it_data             TYPE STANDARD TABLE
+                                                     iv_check_key_mapped TYPE abap_bool OPTIONAL
+                                           EXPORTING es_data             TYPE data
+                                           RAISING   cx_sadl_static cx_sadl_contract_violation.
+  PROTECTED SECTION.
+    METHODS _create                      REDEFINITION.
+    METHODS _create_by_association       REDEFINITION .
+    METHODS _create_entity_structure_ref REDEFINITION .
+    METHODS _create_entity_table_ref     REDEFINITION .
+    METHODS _create_message_handler      REDEFINITION .
+    METHODS _delete                      REDEFINITION .
+    METHODS _execute                     REDEFINITION .
+    METHODS _get_properties_action       REDEFINITION .
+    METHODS _get_properties_association  REDEFINITION .
+    METHODS _get_properties_elements     REDEFINITION .
+    METHODS _get_properties_entity       REDEFINITION .
+    METHODS _read                        REDEFINITION .
+    METHODS _read_by_association         REDEFINITION .
+    METHODS _read_keys_by_association    REDEFINITION .
+    METHODS _update                      REDEFINITION .
+  PRIVATE SECTION.
+    DATA mo_fetch TYPE REF TO if_sadl_query_fetch.
+    DATA mv_fetch_supported TYPE abap_bool.
+    DATA mo_runtime TYPE REF TO if_sadl_entity_transactional.
+    DATA mo_mdp TYPE REF TO if_sadl_metadata_provider.
+    DATA mv_sadl_entity_id TYPE sadl_entity_id.
+    DATA mv_sadl_uuid TYPE if_sadl_types=>ty_uuid.
+    DATA mv_structure_name TYPE string.
+    DATA mr_metadata_node TYPE REF TO if_sadl_bsa_metadata=>ty_metadata_node.
+    DATA mv_primary_path TYPE string.
+    DATA mv_has_transient_fields TYPE abap_bool.
+    DATA mr_dyn_field_control_mapping TYPE REF TO if_sadl_load=>tt_field_control_mapping.
+    METHODS init_transactional RAISING cx_sadl_entity_srvice_not_supp cx_sadl_static cx_sadl_contract_violation.
+    METHODS init_fetch RAISING cx_sadl_static cx_sadl_contract_violation.
+
+    METHODS get_transactional_runtime IMPORTING iv_structure_name TYPE string
+                                      EXPORTING eo_runtime        TYPE REF TO if_sadl_entity_transactional
+                                                ev_entity_type    TYPE sadl_entity_type
+                                      RAISING   cx_sadl_entity_srvice_not_supp cx_sadl_static cx_sadl_contract_violation.
+    METHODS get_table_container IMPORTING iv_sadl_structure_name TYPE string
+                                RETURNING VALUE(rr_container)    TYPE REF TO data
+                                RAISING   cx_sadl_entity_srvice_not_supp cx_sadl_static.
+    METHODS get_target_structure IMPORTING iv_association_name             TYPE sadl_entity_association
+                                 RETURNING VALUE(rv_target_structure_name) TYPE string
+                                 RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS get_action_return_sadl_struc IMPORTING iv_action                TYPE sadl_entity_action
+                                         RETURNING VALUE(rv_sadl_structure) TYPE string
+                                         RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS get_alternative_key_name IMPORTING iv_structure_name              TYPE string
+                                     RETURNING VALUE(rv_alternative_key_name) TYPE string
+                                     RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS get_entity_id IMPORTING iv_structure_name   TYPE string
+                          RETURNING VALUE(rv_entity_id) TYPE sadl_entity_id
+                          RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS get_entity_type IMPORTING iv_structure_name     TYPE string
+                            RETURNING VALUE(rv_entity_type) TYPE sadl_entity_type
+                            RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS map_sadl_to_entity_data_single IMPORTING iv_structure TYPE string OPTIONAL
+                                                     is_data      TYPE data
+                                           EXPORTING es_data      TYPE data
+                                           RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS map_sadl_to_entity_data IMPORTING iv_structure TYPE string OPTIONAL
+                                              it_data      TYPE STANDARD TABLE
+                                    EXPORTING et_data      TYPE STANDARD TABLE
+                                    RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS map_sadl_to_entity_keys IMPORTING iv_structure TYPE string OPTIONAL
+                                              it_data      TYPE STANDARD TABLE
+                                    EXPORTING et_data      TYPE STANDARD TABLE
+                                    RAISING   cx_sadl_static cx_sadl_contract_violation.
+    TYPES: BEGIN OF ty_int_to_ext,
+             int TYPE string,
+             ext TYPE string,
+           END OF ty_int_to_ext,
+           tt_int_to_ext TYPE SORTED TABLE OF ty_int_to_ext WITH UNIQUE KEY int ext.
+    METHODS if_no_element_get_all IMPORTING iv_structure     TYPE string OPTIONAL
+                                  CHANGING  ct_sadl_elements TYPE if_sadl_entity_transactional=>tt_element_names.
+    METHODS map_sadl_to_entity_elements IMPORTING iv_structure    TYPE string OPTIONAL
+                                                  it_elements_ext TYPE if_sadl_entity_transactional=>tt_element_names
+                                        EXPORTING et_elements_int TYPE if_sadl_entity_transactional=>tt_element_names
+                                                  et_int_to_ext   TYPE tt_int_to_ext
+                                        RAISING   cx_sadl_static.
+    METHODS map_sadl_to_entity_assoc IMPORTING iv_structure_name            TYPE string
+                                               iv_sadl_association          TYPE string
+                                     RETURNING VALUE(rv_entity_association) TYPE string
+                                     RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS check_fetch_supported RAISING cx_sadl_contract_violation.
+    METHODS get_transaction_manager RETURNING VALUE(ro_trans_action_manager) TYPE REF TO cl_sadl_transaction_manager.
+    METHODS _add_messages IMPORTING iv_structure   TYPE string OPTIONAL
+                                    it_target_keys TYPE STANDARD TABLE OPTIONAL
+                          RAISING   cx_sadl_static cx_sadl_contract_violation.
+*    METHODS is_crud_supported IMPORTING iv_structure_name   TYPE string
+*                              RETURNING VALUE(rs_supported) TYPE if_sadl_entity_consump_info=>ty_allowed
+*                              RAISING   cx_sadl_static cx_sadl_contract_violation.
+    METHODS _clear_condition_providers ##RELAX.
+
+    METHODS _extract_transient_elements IMPORTING is_requested           TYPE if_sadl_query_engine_types=>ty_requested OPTIONAL
+                                                  is_text_search         TYPE if_sadl_query_engine_types=>ty_text_search OPTIONAL
+                                                  it_sort_elements       TYPE if_sadl_query_engine_types=>tt_sort_elements OPTIONAL
+                                                  is_aggregation         TYPE if_sadl_query_engine_types=>ty_aggregation OPTIONAL
+                                        EXPORTING es_requested           TYPE if_sadl_query_engine_types=>ty_requested
+                                                  es_text_search         TYPE if_sadl_query_engine_types=>ty_text_search
+                                                  et_sort_elements       TYPE if_sadl_query_engine_types=>tt_sort_elements
+                                                  es_aggregation         TYPE if_sadl_query_engine_types=>ty_aggregation
+                                                  et_transient_requested TYPE if_sadl_entity_transactional=>tt_element_names.
+
+    METHODS _extract_field_control_elems IMPORTING is_requested        TYPE if_sadl_query_engine_types=>ty_requested OPTIONAL
+                                                   is_text_search      TYPE if_sadl_query_engine_types=>ty_text_search OPTIONAL
+                                                   it_sort_elements    TYPE if_sadl_query_engine_types=>tt_sort_elements OPTIONAL
+                                                   is_aggregation      TYPE if_sadl_query_engine_types=>ty_aggregation OPTIONAL
+                                         EXPORTING es_requested        TYPE if_sadl_query_engine_types=>ty_requested
+                                                   et_fc_requested     TYPE if_sadl_entity_transactional=>tt_element_names
+                                                   ev_entity_ctrl_req  TYPE abap_bool
+                                                   et_action_requested TYPE string_sorted_table.
+
+    METHODS _copy_transient_fields IMPORTING it_transient_fields TYPE if_sadl_entity_transactional=>tt_element_names
+                                             it_transient_data   TYPE STANDARD TABLE
+                                             it_failed           TYPE INDEX TABLE
+                                   CHANGING  ct_data_rows        TYPE STANDARD TABLE.
+
+    METHODS _get_prim_path_and_mapping IMPORTING iv_structure    TYPE string OPTIONAL
+                                       EXPORTING er_mapping      TYPE REF TO if_sadl_bsa_metadata=>tt_attribute_mapping
+                                                 ev_primary_path TYPE string.
+
+    METHODS _check_complete_key_mapped IMPORTING is_data_source TYPE data
+                                                 ir_mapping     TYPE REF TO if_sadl_bsa_metadata=>tt_attribute_mapping
+                                       CHANGING  cs_target      TYPE data
+                                       RAISING   cx_sadl_contract_violation.
+    METHODS _get_uuid RETURNING VALUE(rv_uuid) TYPE sysuuid_x16
+                      RAISING   cx_sadl_static.
+    METHODS _is_create_over_draft RETURNING VALUE(rv_create_over_draft) TYPE sysuuid_x16
+                                  RAISING   cx_sadl_static.
+ENDCLASS.
+
+
+
+CLASS CL_SADL_ENTITY_RUNTIME IMPLEMENTATION.
+
+
+  METHOD check_fetch_supported.
+    IF mv_fetch_supported = abap_false.
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation EXPORTING textid = cx_sadl_contract_violation=>fetch_not_supported.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    super->constructor( iv_entity_id   = io_sadl_entity->get_id( )
+                        iv_entity_type = io_sadl_entity->get_type( ) ).
+    mv_sadl_uuid      = io_mdp->get_id( ). "cl_sadl_entity_mp_registry=>register_mp( io_mp ).
+    mo_mdp            = io_mdp.
+    mv_structure_name = iv_name.
+    mv_sadl_entity_id = mv_sadl_uuid && '~' && iv_name.
+    mo_sadl_entity    = io_sadl_entity.
+    init_fetch( ).
+  ENDMETHOD.
+
+
+  METHOD get_action_return_sadl_struc.
+    DATA(lr_entity_load) = mo_mdp->get_entity_load_by_id( mv_sadl_entity_id ).
+    DATA(ls_sadl_action) = lr_entity_load->sadl_entity-actions[ name = iv_action ].
+    IF ls_sadl_action-return_entity_type = cl_sadl_entity_factory=>co_type-sadl.
+      rv_sadl_structure = substring_after( val = ls_sadl_action-return_entity_id  sub = '~' ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_alternative_key_name.
+    DATA(lr_structure) = mo_mdp->get_node( iv_structure_name ).
+    rv_alternative_key_name = cl_sadl_entity_util=>get_alternative_key_name( lr_structure->* ).
+  ENDMETHOD.
+
+
+  METHOD get_entity_id.
+    DATA(lr_structure) = mo_mdp->get_node( iv_structure_name ).
+    rv_entity_id = lr_structure->ref_entity_id.
+  ENDMETHOD.
+
+
+  METHOD get_entity_type.
+    DATA(lr_structure) = mo_mdp->get_node( iv_structure_name ).
+    rv_entity_type = lr_structure->ref_entity_type.
+  ENDMETHOD.
+
+
+  METHOD get_table_container.
+    get_transactional_runtime( EXPORTING iv_structure_name = iv_sadl_structure_name
+                               IMPORTING eo_runtime        = DATA(lo_runtime) ).
+    rr_container = lo_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+  ENDMETHOD.
+
+
+  METHOD get_target_structure.
+    rv_target_structure_name = cl_sadl_entity_util=>get_entity_name( mo_sadl_entity->get_association( iv_association_name )-target_id ).
+  ENDMETHOD.
+
+
+  METHOD get_transactional_runtime.
+    CLEAR: eo_runtime, ev_entity_type.
+
+    DATA(lr_node) = mo_mdp->get_node( iv_structure_name ).
+    IF lr_node IS INITIAL.
+      RAISE EXCEPTION TYPE cx_sadl_entity_srvice_not_supp.
+    ENDIF.
+    IF lr_node->crud_supported <> abap_true.
+      RAISE EXCEPTION TYPE cx_sadl_entity_srvice_not_supp
+        EXPORTING
+          entity_id = lr_node->ref_entity_id.
+    ENDIF.
+
+    ev_entity_type = lr_node->ref_entity_type.
+    eo_runtime = cl_sadl_crud_runtime_util=>get_ta_runtime( iv_entity_id   = lr_node->ref_entity_id
+                                                            iv_entity_type = lr_node->ref_entity_type ).
+    IF eo_runtime IS NOT BOUND.
+      RAISE EXCEPTION TYPE cx_sadl_entity_srvice_not_supp
+        EXPORTING
+          entity_id = lr_node->ref_entity_id.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_transaction_manager.
+    ro_trans_action_manager = CAST cl_sadl_transaction_manager( cl_sadl_transact_manager_fctr=>get_transaction_manager( ) ).
+  ENDMETHOD.
+
+
+  METHOD if_no_element_get_all.
+    IF ct_sadl_elements IS INITIAL.
+      IF iv_structure IS NOT INITIAL.
+        DATA(lr_mapping) = cl_sadl_crud_runtime_util=>get_attribute_mapping( io_mdp            = mo_mdp
+                                                                             iv_structure_name = iv_structure ).
+      ELSE.
+        lr_mapping = REF #( mr_metadata_node->attribute_mapping ).
+      ENDIF.
+
+      LOOP AT lr_mapping->* INTO DATA(ls_mapping).
+        INSERT ls_mapping-attribute_name INTO TABLE ct_sadl_elements.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_capability_service~is_capability_supported.
+    check_fetch_supported( ).
+    rv_is_supported = mo_fetch->if_sadl_capability_service~is_capability_supported( iv_capability ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_capability_service~is_consumable.
+    check_fetch_supported( ).
+    rv_consumable = mo_fetch->if_sadl_capability_service~is_consumable( iv_artifact_name ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_capability_service~is_grouping_required.
+    check_fetch_supported( ).
+    rv_grouping_required = mo_fetch->if_sadl_capability_service~is_grouping_required( iv_artifact_name ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_dbi_registry~register.
+    IF mo_fetch IS NOT INITIAL.
+      TRY.
+          CAST if_sadl_dbi_registry( mo_fetch )->register( io_dbi ).
+        CATCH cx_sy_move_cast_error.
+      ENDTRY.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_query_fetch~fetch.
+    check_fetch_supported( ).
+
+    IF mr_dyn_field_control_mapping->* IS NOT INITIAL.
+      _extract_field_control_elems( EXPORTING is_requested        = is_requested
+                                              is_text_search      = is_text_search
+                                              it_sort_elements    = it_sort_elements
+                                              is_aggregation      = is_aggregation
+                                    IMPORTING es_requested        = DATA(ls_requested)
+                                              et_fc_requested     = DATA(lt_fc_requested)
+                                              ev_entity_ctrl_req  = DATA(lv_entity_ctrl_req)
+                                              et_action_requested = DATA(lt_action_requested) ).
+    ELSE.
+      ls_requested = is_requested.
+    ENDIF.
+
+    mo_fetch->fetch( EXPORTING is_requested        = ls_requested
+                               is_text_search      = is_text_search
+                               it_sort_elements    = it_sort_elements
+                               is_paging           = is_paging
+                               is_aggregation      = is_aggregation
+                               is_parameters       = is_parameters
+                               iv_disable_locale   = iv_disable_locale
+                               is_temporal_context = is_temporal_context
+                     IMPORTING et_data_rows        = et_data_rows
+                               ev_number_all_hits  = ev_number_all_hits ).
+
+    TRY.
+        init_transactional( ).
+
+        FIELD-SYMBOLS <t_keys> TYPE STANDARD TABLE.
+        DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+        ASSIGN lr_data->* TO <t_keys>.
+        map_sadl_to_entity_keys( EXPORTING it_data = et_data_rows
+                                 IMPORTING et_data = <t_keys> ).
+
+        IF lines( <t_keys> ) > 0 AND
+           ( lv_entity_ctrl_req = abap_true OR lt_fc_requested IS NOT INITIAL OR lt_action_requested IS NOT INITIAL ).
+          cl_sadl_runtime_properties=>read_and_map_properties(
+            EXPORTING
+              io_props                   = mo_runtime
+              it_keys                    = <t_keys>
+              iv_fill_entity_properties  = lv_entity_ctrl_req
+              it_req_elems               = lt_fc_requested
+              it_req_actions             = lt_action_requested
+              it_field_control_mapping   = mr_dyn_field_control_mapping->*
+            CHANGING
+              ct_data                    = et_data_rows ).
+        ENDIF.
+
+        IF lines( <t_keys> ) < 1000.
+          _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_keys> ).
+        ENDIF.
+      CATCH cx_sadl_entity_srvice_not_supp cx_sadl_static cx_sadl_contract_violation.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD if_sadl_query_fetch~register_condition_provider.
+    check_fetch_supported( ).
+    mo_fetch->register_condition_provider( io_provider ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_query_fetch~unregister_condition_provider.
+    check_fetch_supported( ).
+    mo_fetch->unregister_condition_provider( io_provider ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_query_itab~set_itab.
+    CAST if_sadl_query_itab( mo_fetch )->set_itab( ir_data ).
+  ENDMETHOD.
+
+
+  METHOD if_sadl_sql_cache_registry~register_cache_handler.
+    IF mo_fetch IS NOT INITIAL.
+      TRY.
+          CAST if_sadl_sql_cache_registry( mo_fetch )->register_cache_handler( io_cache ).
+        CATCH cx_sy_move_cast_error.
+      ENDTRY.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD init_fetch.
+    TRY.
+        mo_fetch = NEW cl_sadl_query_fetch_entity( ).
+        CAST cl_sadl_query_fetch_entity( mo_fetch )->if_sadl_init_mdp~init( iv_entity_id = mv_sadl_entity_id  io_mdp = mo_mdp ).
+        mv_fetch_supported = abap_true.
+        IF mr_metadata_node IS NOT BOUND OR mr_metadata_node->node_name <> mv_structure_name.
+          mr_metadata_node = mo_mdp->get_node( mv_structure_name ).
+        ENDIF.
+        DATA(lr_entity_load) = mo_mdp->get_entity_load( mv_structure_name  ).
+        mv_has_transient_fields = lr_entity_load->sadl_entity-has_transient_fields.
+        mr_dyn_field_control_mapping = REF #( lr_entity_load->dyn_field_control_mapping ).
+      CATCH cx_sadl_contract_violation.
+        mv_fetch_supported = abap_false.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD init_transactional.
+    IF mr_metadata_node IS NOT BOUND OR mr_metadata_node->node_name <> mv_structure_name.
+      mr_metadata_node = mo_mdp->get_node( mv_structure_name ).
+    ENDIF.
+    mv_primary_path = cl_sadl_crud_runtime_util=>get_primary_path( io_mdp            = mo_mdp
+                                                                   iv_structure_name = mv_structure_name  ).
+    get_transactional_runtime( EXPORTING iv_structure_name = mv_structure_name
+                               IMPORTING eo_runtime        = mo_runtime
+                                         ev_entity_type    = DATA(lv_entity_type) ).
+    DATA(lo_entity_type_trans_manager) = cl_sadl_entity_trans_factory=>get_transactional_provider( lv_entity_type
+                                         )->get_transaction_manager( lv_entity_type ).
+    get_transaction_manager( )->register_entity_transaction( io_entity_transaction = lo_entity_type_trans_manager
+                                                             iv_entity_type        = lv_entity_type
+                                                             io_mdp                = mo_mdp ).
+*  ENDMETHOD.
+*
+*
+*  METHOD is_crud_supported.
+*    IF mr_sadl_load IS NOT BOUND.
+*      mr_sadl_load = cl_sadl_entity_load_handler=>get_sadl_load( mo_mp ).
+*    ENDIF.
+*    READ TABLE mr_sadl_load->bsa_metadata_nodes WITH KEY node_name = iv_structure_name ASSIGNING FIELD-SYMBOL(<s_node>).
+*    IF sy-subrc = 0 and <s_node>-crud_supported = abap_true.
+*      rs_supported-allowed = abap_true.
+*    else. " error case -> we can afford calling the consumption service in order to get the exception text
+*      DATA(ls_consumption_info) = cl_sadl_entity_factory=>get_instance(
+*                      )->get_entity_consumption_info( iv_id   = <s_node>-ref_entity_id
+*                                                      iv_type = <s_node>-ref_entity_type )->get_consumption_information( ).
+*      rs_supported = ls_consumption_info-transactional.
+*    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD map_action_request.
+    init_transactional( ).
+    CLEAR: es_bo_action.
+
+    FIELD-SYMBOLS <t_bo_keys> TYPE INDEX TABLE.
+    FIELD-SYMBOLS <t_sadl_keys> TYPE INDEX TABLE.
+    es_bo_action-rt_key_values = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ).
+
+    IF is_sadl_action-rt_key_values IS BOUND.
+      ASSIGN is_sadl_action-rt_key_values->* TO <t_sadl_keys>.
+      IF lines( <t_sadl_keys> ) > 0.
+        ASSIGN es_bo_action-rt_key_values->* TO <t_bo_keys>.
+        map_sadl_to_entity_data( EXPORTING it_data = <t_sadl_keys>
+                                 IMPORTING et_data = <t_bo_keys> ).
+      ENDIF.
+    ENDIF.
+
+    es_bo_action-alternative_key_name = get_alternative_key_name( mv_structure_name ).
+    es_bo_action-entity_id = mr_metadata_node->ref_entity_id.
+    es_bo_action-name = mr_metadata_node->action_mapping[ action_name = is_sadl_action-name ]-referenced_action_name.
+    es_bo_action-rs_importing_parameters = is_sadl_action-rs_importing_parameters.
+    DATA(lv_return_sadl_struc) = get_action_return_sadl_struc( is_sadl_action-name ).
+    IF lv_return_sadl_struc IS NOT INITIAL.
+      get_transactional_runtime( EXPORTING iv_structure_name = lv_return_sadl_struc
+                                 IMPORTING eo_runtime        = DATA(lo_target_runtime) ).
+      es_bo_action-r_returning_parameters = lo_target_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+    ELSE.
+      es_bo_action-r_returning_parameters = is_sadl_action-r_returning_parameters.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD map_action_response.
+    init_transactional( ).
+    DATA(lv_return_struc) = get_action_return_sadl_struc( is_sadl_action-name ).
+
+    IF lv_return_struc IS NOT INITIAL.
+      ASSIGN is_bo_action-r_returning_parameters->* TO FIELD-SYMBOL(<t_bo_data>).
+      ASSIGN is_sadl_action-r_returning_parameters->* TO FIELD-SYMBOL(<t_sadl_data>).
+
+      map_entity_to_sadl_data( EXPORTING iv_structure = lv_return_struc
+                                         it_data      = <t_bo_data>
+                               IMPORTING et_data      = <t_sadl_data> ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD map_create_request.
+    CLEAR es_bo_create.
+    CLEAR es_bo_action.
+
+    init_transactional( ).
+
+    DATA(lr_bo_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_structure_ref( ).
+    IF is_sadl_create-source-association_name IS INITIAL.
+      ASSIGN lr_bo_data->* TO FIELD-SYMBOL(<s_bo_data>).
+
+      ASSIGN is_sadl_create-rs_entity_data->* TO FIELD-SYMBOL(<s_sadl_data>).
+
+      map_sadl_to_entity_data_single( EXPORTING is_data = <s_sadl_data>
+                                      IMPORTING es_data = <s_bo_data> ).
+
+      es_bo_create = VALUE #( entity_id = mr_metadata_node->ref_entity_id  rs_entity_data = lr_bo_data
+                              requested_alternative_key = get_alternative_key_name( mv_structure_name ) ).
+    ELSE.
+      IF is_sadl_create-source-tabix IS INITIAL.
+        ASSIGN lr_bo_data->* TO FIELD-SYMBOL(<s_source_key_values>).
+        ASSIGN is_sadl_create-source-rs_key_values->* TO FIELD-SYMBOL(<s_sadl_source_key>).
+        map_sadl_to_entity_data_single( EXPORTING is_data = <s_sadl_source_key>
+                                        IMPORTING es_data = <s_source_key_values> ).
+      ENDIF.
+
+      DATA(lv_target_structure) = get_target_structure( is_sadl_create-source-association_name ).
+      get_transactional_runtime( EXPORTING iv_structure_name = lv_target_structure
+                                 IMPORTING eo_runtime        = DATA(lo_target_runtime) ).
+      DATA(lr_target_data) = lo_target_runtime->if_sadl_entity_container_fctry~create_entity_structure_ref( ).
+      ASSIGN lr_target_data->* TO FIELD-SYMBOL(<s_bo_target_data>).
+
+      ASSIGN is_sadl_create-rs_entity_data->* TO <s_sadl_data>.
+      map_sadl_to_entity_data_single( EXPORTING iv_structure = lv_target_structure
+                                                is_data      = <s_sadl_data>
+                                      IMPORTING es_data      = <s_bo_target_data> ).
+      DATA(lr_node) = mo_mdp->get_node( lv_target_structure ).
+      ASSERT lr_node IS BOUND.
+      es_bo_create = VALUE #( entity_id                   = lr_node->ref_entity_id
+                              rs_entity_data              = lr_target_data
+                              requested_alternative_key   = get_alternative_key_name( lv_target_structure )
+                              source-alternative_key_name = get_alternative_key_name( mv_structure_name )
+                              source-association_name     = map_sadl_to_entity_assoc( iv_structure_name   = mv_structure_name
+                                                                                      iv_sadl_association = is_sadl_create-source-association_name )
+                              source-entity_id            = mr_metadata_node->ref_entity_id
+                              source-rs_key_values        = lr_bo_data
+                              source-tabix                = is_sadl_create-source-tabix ).
+    ENDIF.
+*    IF _is_create_over_draft( ) = abap_true.
+*      ASSIGN es_bo_create-rs_entity_data->* TO FIELD-SYMBOL(<s_data>).
+*      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE <s_data> TO FIELD-SYMBOL(<v_data_target>).
+*      IF sy-subrc = 0.
+*        es_bo_action = VALUE #( entity_id = es_bo_create-entity_id  name = 'ACTIVATION' ).
+*        es_bo_action-rt_key_values = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ).
+*        FIELD-SYMBOLS <t_keys> TYPE table.
+*        ASSIGN es_bo_action-rt_key_values->* TO <t_keys>.
+*        INSERT <s_data> INTO TABLE <t_keys>.
+*      ENDIF.
+*    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD map_create_response.
+    init_transactional( ).
+    ASSIGN is_bo_create-rs_entity_data->* TO FIELD-SYMBOL(<s_bo_key>).
+    ASSIGN is_sadl_create-rs_entity_data->* TO FIELD-SYMBOL(<s_sadl_key>).
+    CLEAR <s_sadl_key>.
+    cl_sadl_crud_runtime_util=>map_entity_to_sadl_data_single( EXPORTING ir_mapping = REF #( mr_metadata_node->attribute_mapping )
+                                                                         iv_path_id = mv_primary_path
+                                                                         is_source  = <s_bo_key>
+                                                               CHANGING  cs_target  = <s_sadl_key> ).
+  ENDMETHOD.
+
+
+  METHOD map_delete_request.
+    CLEAR: ev_alternative_key, ev_referenced_sadl_entity, er_bo_keys.
+    init_transactional( ).
+
+    ev_alternative_key = get_alternative_key_name( mv_structure_name ).
+    er_bo_keys = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ev_alternative_key ).
+    FIELD-SYMBOLS <t_bo_keys> TYPE STANDARD TABLE.
+    ASSIGN er_bo_keys->* TO <t_bo_keys>.
+
+    map_sadl_to_entity_data( EXPORTING it_data = it_sadl_keys
+                             IMPORTING et_data = <t_bo_keys> ).
+
+    ev_referenced_sadl_entity = mr_metadata_node->ref_entity_id.
+  ENDMETHOD.
+
+
+  METHOD map_entity_to_sadl_data.
+    CLEAR et_data.
+    _get_prim_path_and_mapping( EXPORTING iv_structure    = iv_structure
+                                IMPORTING er_mapping      = DATA(lr_mapping)
+                                          ev_primary_path = DATA(lv_primary_path) ).
+    LOOP AT it_data ASSIGNING FIELD-SYMBOL(<s_data_source>).
+      APPEND INITIAL LINE TO et_data ASSIGNING FIELD-SYMBOL(<s_data_target>).
+      cl_sadl_crud_runtime_util=>map_entity_to_sadl_data_single( EXPORTING ir_mapping = lr_mapping
+                                                                           iv_path_id = lv_primary_path
+                                                                           is_source  = <s_data_source>
+                                                                 CHANGING  cs_target  = <s_data_target> ).
+      IF iv_check_key_mapped = abap_true.
+        _check_complete_key_mapped( EXPORTING is_data_source = <s_data_source>
+                                              ir_mapping     = lr_mapping
+                                    CHANGING  cs_target      = <s_data_target> ).
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD map_entity_to_sadl_data_single.
+    CLEAR es_data.
+    LOOP AT it_data ASSIGNING FIELD-SYMBOL(<s_data_source>).
+      _get_prim_path_and_mapping( IMPORTING er_mapping      = DATA(lr_mapping)
+                                            ev_primary_path = DATA(lv_primary_path) ).
+      cl_sadl_crud_runtime_util=>map_entity_to_sadl_data_single( EXPORTING ir_mapping = lr_mapping
+                                                                           iv_path_id = lv_primary_path
+                                                                           is_source  = <s_data_source>
+                                                                 CHANGING  cs_target  = es_data ).
+      IF iv_check_key_mapped = abap_true.
+        _check_complete_key_mapped( EXPORTING is_data_source = <s_data_source>
+                                              ir_mapping     = lr_mapping
+                                    CHANGING  cs_target      = es_data ).
+      ENDIF.
+      EXIT.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD map_sadl_to_entity_assoc.
+    DATA(lr_node) = mo_mdp->get_node( iv_structure_name ).
+    ASSERT lr_node IS BOUND.
+    READ TABLE lr_node->association_mappping WITH KEY association_name = iv_sadl_association ASSIGNING FIELD-SYMBOL(<s_assoc_mapping>).
+    IF sy-subrc <> 0.
+      DATA(lr_entity_load) = mo_mdp->get_entity_load( iv_structure_name ).
+      IF lr_entity_load IS BOUND.
+        IF line_exists( lr_entity_load->sadl_entity-associations[ name = iv_sadl_association ] ).
+          RAISE EXCEPTION TYPE cx_sadl_contract_violation
+            EXPORTING
+              textid = cx_sadl_contract_violation=>navigation_read_only
+              name   = iv_sadl_association.
+        ELSE.
+          RAISE EXCEPTION TYPE cx_sadl_contract_violation
+            EXPORTING
+              textid = cx_sadl_contract_violation=>association_not_found
+              name   = iv_sadl_association.
+        ENDIF.
+      ELSE.
+        RAISE EXCEPTION TYPE cx_sadl_contract_violation
+          EXPORTING
+            textid = cx_sadl_contract_violation=>entity_not_found
+            name   = iv_structure_name.
+      ENDIF.
+    ENDIF.
+    rv_entity_association = <s_assoc_mapping>-referenced_association_name.
+  ENDMETHOD.
+
+
+  METHOD map_sadl_to_entity_data.
+    CLEAR et_data.
+    IF iv_structure IS NOT INITIAL.
+      DATA(lr_mapping) = cl_sadl_crud_runtime_util=>get_attribute_mapping( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+      DATA(lv_primary_path) = cl_sadl_crud_runtime_util=>get_primary_path( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+    ELSE.
+      lr_mapping = REF #( mr_metadata_node->attribute_mapping ).
+      lv_primary_path = mv_primary_path.
+    ENDIF.
+
+
+    LOOP AT it_data ASSIGNING FIELD-SYMBOL(<s_data_source>).
+      APPEND INITIAL LINE TO et_data ASSIGNING FIELD-SYMBOL(<s_data_target>).
+      LOOP AT lr_mapping->* INTO DATA(ls_mapping) USING KEY path_id WHERE path_id = lv_primary_path.
+        ASSIGN COMPONENT ls_mapping-attribute_name OF STRUCTURE <s_data_source> TO FIELD-SYMBOL(<v_data_source>).
+        IF <v_data_source> IS ASSIGNED.
+          ASSIGN COMPONENT ls_mapping-referenced_attribute_name OF STRUCTURE <s_data_target> TO FIELD-SYMBOL(<v_data_target>).
+          IF <v_data_target> IS ASSIGNED.
+            <v_data_target> = <v_data_source>.
+            UNASSIGN <v_data_target>.
+          ENDIF.
+          UNASSIGN <v_data_source>.
+        ENDIF.
+      ENDLOOP.
+      IF mr_metadata_node->is_draft_enabled = abap_false.
+        ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE <s_data_target> TO <v_data_target>.
+        IF sy-subrc = 0.
+          <v_data_target> = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD map_sadl_to_entity_data_single.
+    CLEAR es_data.
+    IF iv_structure IS NOT INITIAL.
+      DATA(lr_mapping) = cl_sadl_crud_runtime_util=>get_attribute_mapping( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+      DATA(lv_primary_path) = cl_sadl_crud_runtime_util=>get_primary_path( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+    ELSE.
+      lr_mapping = REF #( mr_metadata_node->attribute_mapping ).
+      lv_primary_path = mv_primary_path.
+    ENDIF.
+
+    LOOP AT lr_mapping->* USING KEY path_id ASSIGNING FIELD-SYMBOL(<ls_mapping>) WHERE path_id = lv_primary_path.
+      ASSIGN COMPONENT <ls_mapping>-attribute_name OF STRUCTURE is_data TO FIELD-SYMBOL(<v_data_source>).
+      IF <v_data_source> IS ASSIGNED.
+        ASSIGN COMPONENT <ls_mapping>-referenced_attribute_name OF STRUCTURE es_data TO FIELD-SYMBOL(<v_data_target>).
+        IF <v_data_target> IS ASSIGNED.
+          <v_data_target> = <v_data_source>.
+          UNASSIGN <v_data_target>.
+        ENDIF.
+        UNASSIGN <v_data_source>.
+      ENDIF.
+    ENDLOOP.
+
+    IF mr_metadata_node->is_draft_enabled = abap_false.
+      ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-is_active_entity OF STRUCTURE es_data TO <v_data_target>.
+      IF sy-subrc = 0.
+        <v_data_target> = abap_true.
+*        IF _is_create_over_draft( ) = abap_true.
+*          CLEAR <v_data_target>.
+*          ASSIGN COMPONENT if_draft_constants=>co_db_fieldname-draft_uuid OF STRUCTURE es_data TO <v_data_target>.
+*          IF sy-subrc = 0.
+*            <v_data_target> = _get_uuid( ).
+*          ELSE.
+*            READ TABLE lr_mapping->* WITH KEY is_primary_key_field = abap_true ASSIGNING <ls_mapping>.
+*            IF sy-subrc = 0.
+*              ASSIGN COMPONENT <ls_mapping>-referenced_attribute_name OF STRUCTURE es_data TO <v_data_target>.
+*              <v_data_target> = _get_uuid( ).
+*            ENDIF.
+*          ENDIF.
+*        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD map_sadl_to_entity_elements.
+    CLEAR: et_elements_int, et_int_to_ext.
+    IF iv_structure IS NOT INITIAL.
+      DATA(lr_mapping) = cl_sadl_crud_runtime_util=>get_attribute_mapping( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+      DATA(lv_path_id) = cl_sadl_crud_runtime_util=>get_primary_path( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+    ELSE.
+      lr_mapping = REF #( mr_metadata_node->attribute_mapping ).
+      lv_path_id = mv_primary_path.
+    ENDIF.
+
+    IF it_elements_ext IS INITIAL.
+      LOOP AT lr_mapping->* INTO DATA(ls_mapping) USING KEY path_id WHERE path_id = lv_path_id.
+        INSERT ls_mapping-referenced_attribute_name INTO TABLE et_elements_int.
+        INSERT VALUE #( int = ls_mapping-referenced_attribute_name ext = ls_mapping-attribute_name ) INTO TABLE et_int_to_ext.
+      ENDLOOP.
+    ELSE.
+      LOOP AT it_elements_ext ASSIGNING FIELD-SYMBOL(<v_element_name>).
+        READ TABLE lr_mapping->* INTO ls_mapping WITH KEY path_id COMPONENTS path_id = lv_path_id
+                                                                             attribute_name = <v_element_name>.
+        IF sy-subrc = 0.
+          INSERT ls_mapping-referenced_attribute_name INTO TABLE et_elements_int.
+          INSERT VALUE #( int = ls_mapping-referenced_attribute_name ext = ls_mapping-attribute_name ) INTO TABLE et_int_to_ext.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD map_sadl_to_entity_keys.
+    CLEAR et_data.
+    IF it_data IS NOT INITIAL.
+      IF iv_structure IS NOT INITIAL.
+        DATA(lr_mapping) = cl_sadl_crud_runtime_util=>get_attribute_mapping( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+        DATA(lv_primary_path) = cl_sadl_crud_runtime_util=>get_primary_path( io_mdp = mo_mdp  iv_structure_name = iv_structure ).
+      ELSE.
+        lr_mapping = REF #( mr_metadata_node->attribute_mapping ).
+        lv_primary_path = mv_primary_path.
+      ENDIF.
+
+*      IF sy-uname = 'NOVAKP'.
+*        DATA lt_mapping TYPE cl_abap_corresponding=>mapping_table.
+*        ASSIGN it_data[ 1 ] TO FIELD-SYMBOL(<s_sadl_data>).
+*        APPEND INITIAL LINE TO et_data ASSIGNING FIELD-SYMBOL(<s_entity_data>).
+*        LOOP AT lr_mapping->* INTO DATA(ls_map) USING KEY path_id WHERE path_id = lv_primary_path AND is_primary_key_field = abap_true.
+*          ASSIGN COMPONENT ls_map-attribute_name OF STRUCTURE <s_sadl_data> TO FIELD-SYMBOL(<attr>).
+*          IF sy-subrc <> 0.
+*            CONTINUE.
+*          ENDIF.
+*          ASSIGN COMPONENT ls_map-referenced_attribute_name OF STRUCTURE <s_entity_data> TO <attr>.
+*          IF sy-subrc <> 0.
+*            CONTINUE.
+*          ENDIF.
+*          APPEND VALUE #( kind = cl_abap_corresponding=>mapping_component
+*                          srcname = ls_map-attribute_name
+*                          dstname = ls_map-referenced_attribute_name ) TO lt_mapping.
+*        ENDLOOP.
+*        DATA(lo_mapper) = cl_abap_corresponding=>create( source      = it_data
+*                                                         destination = et_data
+*                                                         mapping     = lt_mapping ).
+*        lo_mapper->execute( EXPORTING source = it_data CHANGING destination = et_data ).
+*      ELSE.
+      LOOP AT it_data ASSIGNING FIELD-SYMBOL(<s_data_source>).
+        APPEND INITIAL LINE TO et_data ASSIGNING FIELD-SYMBOL(<s_data_target>).
+        LOOP AT lr_mapping->* INTO DATA(ls_mapping) USING KEY path_id WHERE path_id = lv_primary_path AND is_primary_key_field = abap_true.
+          ASSIGN COMPONENT ls_mapping-attribute_name OF STRUCTURE <s_data_source> TO FIELD-SYMBOL(<v_data_source>).
+          IF <v_data_source> IS ASSIGNED.
+            ASSIGN COMPONENT ls_mapping-referenced_attribute_name OF STRUCTURE <s_data_target> TO FIELD-SYMBOL(<v_data_target>).
+            IF <v_data_target> IS ASSIGNED.
+              <v_data_target> = <v_data_source>.
+              UNASSIGN <v_data_target>.
+            ENDIF.
+            UNASSIGN <v_data_source>.
+          ENDIF.
+        ENDLOOP.
+      ENDLOOP.
+*      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD map_update_request.
+    CLEAR et_bo_updates.
+    init_transactional( ).
+
+    DATA(lr_bo_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_structure_ref( ).
+    ASSIGN lr_bo_data->* TO FIELD-SYMBOL(<s_bo_data>).
+
+    ASSIGN is_sadl_update-rs_entity_data->* TO FIELD-SYMBOL(<s_sadl_data>).
+
+    map_sadl_to_entity_data_single( EXPORTING is_data = <s_sadl_data>
+                                    IMPORTING es_data = <s_bo_data> ).
+
+    map_sadl_to_entity_elements( EXPORTING it_elements_ext = is_sadl_update-updated_elements
+                                 IMPORTING et_elements_int = DATA(lt_updated_elements) ).
+
+    et_bo_updates = VALUE #( ( entity_id = mr_metadata_node->ref_entity_id  rs_entity_data = lr_bo_data  updated_elements = lt_updated_elements
+                               alternative_key_name = get_alternative_key_name( mv_structure_name ) ) ).
+  ENDMETHOD.
+
+
+  METHOD _add_messages.
+    FIELD-SYMBOLS <t_keys> TYPE table.
+    DATA lr_keys TYPE REF TO data.
+    DATA(lv_entity_id) = get_entity_id( iv_structure ).
+    DATA(lv_entity_type) = get_entity_type( iv_structure ).
+*    DATA(lr_keys) = cl_sadl_crud_runtime_util=>get_ta_runtime( iv_entity_id = lv_entity_id  iv_entity_type = lv_entity_type
+*                    )->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+    CREATE DATA lr_keys LIKE it_target_keys.
+    ASSIGN lr_keys->* TO <t_keys>.
+    IF lines( it_target_keys ) > 0.
+      MOVE-CORRESPONDING it_target_keys TO <t_keys>.
+      cl_sadl_crud_runtime_util=>read_primary_keys( EXPORTING ir_node = mo_mdp->get_node( iv_structure )
+                                                    CHANGING ct_keys = <t_keys> ).
+    ENDIF.
+    DATA(lo_entity_message_handler) = mo_runtime->get_message_handler( ).
+    lo_entity_message_handler->get_messages( EXPORTING iv_target_entity_id = lv_entity_id  iv_target_entity_type = lv_entity_type  it_target_keys = <t_keys>
+                                             IMPORTING et_messages = DATA(lt_messages) ).
+    cl_sadl_crud_runtime_util=>map_messages( EXPORTING io_mdp       = mo_mdp
+                                             CHANGING  ct_messages  = lt_messages ).
+    _get_message_handler( )->add_messages( lt_messages ).
+    lo_entity_message_handler->clear( ).
+  ENDMETHOD.
+
+
+  METHOD _check_complete_key_mapped.
+    DATA(lr_entity_load) = mo_mdp->get_entity_load_by_id( mv_sadl_entity_id ).
+    IF lr_entity_load IS NOT INITIAL.
+      LOOP AT lr_entity_load->sadl_entity-primary_key INTO DATA(lv_key_field).
+        READ TABLE ir_mapping->* TRANSPORTING NO FIELDS WITH KEY attribute_name = lv_key_field.
+        IF sy-subrc <> 0.
+          ASSIGN COMPONENT lv_key_field OF STRUCTURE cs_target TO FIELD-SYMBOL(<v_target_field>).
+          IF sy-subrc = 0.
+            ASSIGN COMPONENT lv_key_field OF STRUCTURE is_data_source TO FIELD-SYMBOL(<v_source_field>).
+            IF sy-subrc = 0.
+              <v_target_field> = <v_source_field>.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _clear_condition_providers.
+    IF mo_fetch IS BOUND.
+      CAST cl_sadl_query_fetch_entity( mo_fetch )->_clear_condition_providers( ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _copy_transient_fields.
+    DATA(lv_rowix) = 1.
+    LOOP AT ct_data_rows ASSIGNING FIELD-SYMBOL(<s_data_row>).
+      DATA(lv_tabix) = sy-tabix.
+      IF NOT line_exists( it_failed[ table_line = lv_tabix ] ).
+        ASSIGN it_transient_data[ lv_rowix ] TO FIELD-SYMBOL(<s_transient_data>).
+        LOOP AT it_transient_fields ASSIGNING FIELD-SYMBOL(<requested>).
+          ASSIGN COMPONENT <requested> OF STRUCTURE <s_transient_data> TO FIELD-SYMBOL(<requested_value>).
+          ASSIGN COMPONENT <requested> OF STRUCTURE <s_data_row> TO FIELD-SYMBOL(<data_element>).
+          <data_element> = <requested_value>.
+        ENDLOOP.
+        ADD 1 TO lv_rowix.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _create.
+    CLEAR et_failed.
+    init_transactional( ).
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+    ASSIGN lr_data->* TO <t_data>.
+
+    map_sadl_to_entity_data( EXPORTING it_data = ct_entity_data
+                             IMPORTING et_data = <t_data> ).
+    mo_runtime->create( EXPORTING iv_requested_alternative_key = get_alternative_key_name( mv_structure_name )
+                        IMPORTING et_failed                    = et_failed
+                        CHANGING  ct_entity_data               = <t_data> ).
+    map_entity_to_sadl_data( EXPORTING it_data = <t_data>
+                             IMPORTING et_data = ct_entity_data ).
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+
+
+  METHOD _create_by_association.
+    CLEAR: ev_source_failed, et_target_failed.
+
+    init_transactional( ).
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_structure_ref( ).
+    ASSIGN lr_data->* TO FIELD-SYMBOL(<s_source_key_values>).
+    map_sadl_to_entity_data_single( EXPORTING is_data = is_source_key_values
+                                    IMPORTING es_data = <s_source_key_values> ).
+
+    DATA(lv_target_structure) = get_target_structure( iv_association_name ).
+    lr_data = get_table_container( lv_target_structure ).
+    FIELD-SYMBOLS <t_target_data> TYPE STANDARD TABLE.
+    ASSIGN lr_data->* TO <t_target_data>.
+    map_sadl_to_entity_data( EXPORTING iv_structure = lv_target_structure
+                                       it_data      = ct_target_entity_data
+                             IMPORTING et_data      = <t_target_data> ).
+    mo_runtime->create_by_association( EXPORTING iv_association_name = map_sadl_to_entity_assoc( iv_structure_name   = mv_structure_name
+                                                                                                 iv_sadl_association = iv_association_name )
+                                                 iv_source_alternative_key_name = get_alternative_key_name( mv_structure_name )
+                                                 is_source_key_values           = <s_source_key_values>
+                                                 iv_requested_target_alt_key    = get_alternative_key_name( lv_target_structure )
+                                       IMPORTING ev_source_failed               = ev_source_failed
+                                                 et_target_failed               = et_target_failed
+                                       CHANGING  ct_target_entity_data          = <t_target_data> ).
+    map_entity_to_sadl_data( EXPORTING iv_structure = lv_target_structure
+                                       it_data      = <t_target_data>
+                             IMPORTING et_data      = ct_target_entity_data ).
+    _add_messages( iv_structure = lv_target_structure  it_target_keys = <t_target_data> ).
+  ENDMETHOD.
+
+
+  METHOD _create_entity_structure_ref.
+    DATA(lr_entity_load) = mo_mdp->get_entity_load_by_id( mv_sadl_entity_id ).
+    rr_structure_ref = cl_sadl_entity_util=>get_data_line_container( io_sadl_entity           = mo_sadl_entity
+                                                                     it_field_control_mapping = lr_entity_load->dyn_field_control_mapping ).
+  ENDMETHOD.
+
+
+  METHOD _create_entity_table_ref.
+    DATA(lr_entity_load) = mo_mdp->get_entity_load_by_id( mv_sadl_entity_id ).
+    rr_table_ref = cl_sadl_entity_util=>get_data_table_container( io_sadl_entity           = mo_sadl_entity
+                                                                  it_field_control_mapping = lr_entity_load->dyn_field_control_mapping ).
+  ENDMETHOD.
+
+
+  METHOD _create_message_handler.
+    DATA lo_msg_handler TYPE REF TO if_sadl_message_handler.
+    lo_msg_handler = cl_sadl_transact_manager_fctr=>get_transaction_manager( )->get_message_handler( ).
+    ro_message_handler = CAST cl_sadl_frwk_message_handler( lo_msg_handler ).
+  ENDMETHOD.
+
+
+  METHOD _delete.
+    CLEAR et_failed.
+    map_delete_request( EXPORTING it_sadl_keys       = it_key_values
+                        IMPORTING er_bo_keys         = DATA(lr_data)
+                                  ev_alternative_key = DATA(lv_alt_key) ).
+
+    FIELD-SYMBOLS <t_key_values> TYPE STANDARD TABLE.
+    ASSIGN lr_data->* TO <t_key_values>.
+
+    mo_runtime->delete( EXPORTING iv_alternative_key_name = lv_alt_key
+                                  it_key_values           = <t_key_values>
+                        IMPORTING et_failed               = et_failed ).
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_key_values> ).
+  ENDMETHOD.
+
+
+  METHOD _execute.
+    CLEAR: ev_static_action_failed, et_failed.
+    FIELD-SYMBOLS <t_bo_data> TYPE ANY TABLE.
+
+    map_action_request( EXPORTING is_sadl_action = VALUE #( name                   = iv_action_name
+                                                            rt_key_values          = REF #( it_key_values )
+                                                            r_returning_parameters = REF #( et_data ) )
+                        IMPORTING es_bo_action   = DATA(ls_bo_action) ).
+
+    FIELD-SYMBOLS <t_data> TYPE INDEX TABLE.
+    ASSIGN ls_bo_action-rt_key_values->* TO <t_data>.
+    map_sadl_to_entity_data( EXPORTING it_data = it_key_values
+                             IMPORTING et_data = <t_data> ).
+    ASSIGN ls_bo_action-r_returning_parameters->* TO <t_bo_data>.
+
+    mo_runtime->execute( EXPORTING iv_action_name          = ls_bo_action-name
+                                   iv_alternative_key_name = ls_bo_action-alternative_key_name
+                                   i_action_parameters     = i_action_parameters
+                                   it_key_values           = <t_data>
+                         IMPORTING et_failed               = et_failed
+                                   ev_static_action_failed = ev_static_action_failed
+                                   et_data                 = <t_bo_data> ).
+    DATA(lv_return_struc) = get_action_return_sadl_struc( iv_action_name ).
+    IF lv_return_struc IS NOT INITIAL.
+      map_entity_to_sadl_data( EXPORTING iv_structure = lv_return_struc
+                                         it_data      = <t_bo_data>
+                               IMPORTING et_data      = et_data ).
+    ENDIF.
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+
+
+  METHOD _extract_field_control_elems.
+    CLEAR: et_fc_requested, ev_entity_ctrl_req, et_action_requested, es_requested.
+
+    IF mr_dyn_field_control_mapping->* IS INITIAL.
+      es_requested = is_requested.
+    ELSE.
+      es_requested-fill_data = is_requested-fill_data.
+      es_requested-fill_number_all_hits = is_requested-fill_number_all_hits.
+      LOOP AT is_requested-elements INTO DATA(lv_element).
+        READ TABLE  mr_dyn_field_control_mapping->* WITH TABLE KEY field_control_element = lv_element
+                                                    ASSIGNING FIELD-SYMBOL(<s_mapping>).
+        IF sy-subrc = 0.
+          IF <s_mapping>-referenced_element IS NOT INITIAL.
+            INSERT <s_mapping>-referenced_element INTO TABLE et_fc_requested.
+          ELSEIF <s_mapping>-entity_updatable = abap_true OR <s_mapping>-entity_deletable = abap_true.
+            ev_entity_ctrl_req = abap_true.
+          ELSEIF <s_mapping>-action IS NOT INITIAL.
+            INSERT <s_mapping>-referenced_action INTO TABLE et_action_requested.
+          ENDIF.
+        ELSE.
+          INSERT lv_element INTO TABLE es_requested-elements.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    LOOP AT is_text_search-search_scope INTO lv_element.
+      ASSERT NOT line_exists( mr_dyn_field_control_mapping->*[ field_control_element = lv_element ] ).
+    ENDLOOP.
+    LOOP AT is_text_search-search_scope_details INTO DATA(ls_search_scope_detail).
+      ASSERT NOT line_exists( mr_dyn_field_control_mapping->*[ field_control_element = ls_search_scope_detail-alias ] ).
+    ENDLOOP.
+    LOOP AT it_sort_elements INTO DATA(ls_sort).
+      ASSERT NOT line_exists( mr_dyn_field_control_mapping->*[ field_control_element = ls_sort-element_name ] ).
+    ENDLOOP.
+    LOOP AT is_aggregation-elements INTO DATA(ls_aggr).
+      ASSERT NOT line_exists( mr_dyn_field_control_mapping->*[ field_control_element = ls_aggr-element ] ).
+    ENDLOOP.
+
+
+    IF is_aggregation IS NOT INITIAL. "do not add key if grouping should be done, no dynamic properties can be filled
+      CLEAR: et_fc_requested, ev_entity_ctrl_req, et_action_requested.
+    ELSEIF et_fc_requested IS NOT INITIAL OR ev_entity_ctrl_req IS NOT INITIAL OR et_action_requested IS NOT INITIAL.
+      " entity key is needed to get FC properties from instance
+      mo_sadl_entity->get_primary_key_elements( IMPORTING et_primary_key_elements = DATA(lt_pk_elements) ).
+      LOOP AT lt_pk_elements INTO DATA(lv_pk_el).
+        READ TABLE es_requested-elements TRANSPORTING NO FIELDS WITH KEY table_line = lv_pk_el.
+        IF sy-subrc <> 0.
+          APPEND lv_pk_el TO es_requested-elements.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _extract_transient_elements.
+    " we assert that no search, sorting and aggregation has been requested for transient fields - to be prevented by metadata checks
+    " open: check the usage of transient fields in condition providers - leads to element unknown exception
+    es_requested = is_requested.
+    es_text_search = is_text_search.
+    et_sort_elements = it_sort_elements.
+    es_aggregation = is_aggregation.
+    CLEAR et_transient_requested.
+    LOOP AT mr_metadata_node->attribute_mapping ASSIGNING FIELD-SYMBOL(<s_attribute>) WHERE is_transient = abap_true.
+      DELETE es_requested-elements WHERE table_line = <s_attribute>-attribute_name.
+      IF sy-subrc = 0.
+        INSERT <s_attribute>-attribute_name INTO TABLE et_transient_requested.
+      ENDIF.
+      ASSERT NOT line_exists( es_text_search-search_scope[ table_line = <s_attribute>-attribute_name ] ).
+      ASSERT NOT line_exists( es_text_search-search_scope_details[ alias = <s_attribute>-attribute_name ] ).
+      ASSERT NOT line_exists( et_sort_elements[ element_name = <s_attribute>-attribute_name ] ).
+      ASSERT NOT line_exists( es_aggregation-elements[ element = <s_attribute>-attribute_name ] ).
+*      DELETE es_text_search-search_scope WHERE table_line = <s_attribute>-attribute_name.
+*      DELETE es_text_search-search_scope_details WHERE alias = <s_attribute>-attribute_name.
+*      DELETE et_sort_elements WHERE element_name = <s_attribute>-attribute_name.
+*      DELETE es_aggregation-elements WHERE element = <s_attribute>-attribute_name.
+    ENDLOOP.
+
+    IF es_requested-elements IS INITIAL. " if only transient fields were requested
+      mo_sadl_entity->get_primary_key_elements( IMPORTING et_primary_key_elements = es_requested-elements ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_prim_path_and_mapping.
+    CLEAR: er_mapping, ev_primary_path.
+    IF iv_structure IS NOT INITIAL.
+      er_mapping  = cl_sadl_crud_runtime_util=>get_attribute_mapping( io_mdp            = mo_mdp
+                                                                      iv_structure_name = iv_structure ).
+      ev_primary_path  = cl_sadl_crud_runtime_util=>get_primary_path( io_mdp            = mo_mdp
+                                                                      iv_structure_name = iv_structure ).
+    ELSE.
+      er_mapping = REF #( mr_metadata_node->attribute_mapping ).
+      IF mv_primary_path IS INITIAL.
+        mv_primary_path = cl_sadl_crud_runtime_util=>get_primary_path( io_mdp            = mo_mdp
+                                                                       iv_structure_name = mv_structure_name ).
+      ENDIF.
+      ev_primary_path = mv_primary_path.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _get_properties_action.
+    init_transactional( ).
+
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ).
+    ASSIGN lr_data->* TO <t_data>.
+
+    map_sadl_to_entity_data( EXPORTING it_data = it_key_values
+                             IMPORTING et_data = <t_data> ).
+
+    mo_runtime->get_properties_action( EXPORTING iv_action_name          = mr_metadata_node->action_mapping[ action_name = iv_action_name ]-referenced_action_name
+                                                 iv_alternative_key_name = get_alternative_key_name( mv_structure_name )
+                                                 it_key_values           = <t_data>
+                                       IMPORTING et_properties  = et_properties
+                                                 et_failed      = et_failed ).
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+
+
+  METHOD _get_properties_association.
+    init_transactional( ).
+
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ).
+    ASSIGN lr_data->* TO <t_data>.
+
+    map_sadl_to_entity_data( EXPORTING it_data = it_key_values
+                             IMPORTING et_data = <t_data> ).
+    mo_runtime->get_properties_association( EXPORTING iv_association_name     = mr_metadata_node->association_mappping[ association_name = iv_association_name ]-referenced_association_name
+                                                      iv_alternative_key_name = get_alternative_key_name( mv_structure_name )
+                                                      it_key_values           = <t_data>
+                                            IMPORTING et_failed               = et_failed
+                                                      et_properties           = et_properties ).
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+
+
+  METHOD _get_properties_elements.
+    CLEAR et_props_by_tabix_and_elems.
+
+    init_transactional( ).
+
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ).
+    ASSIGN lr_data->* TO <t_data>.
+
+    map_sadl_to_entity_data( EXPORTING it_data = it_key_values
+                             IMPORTING et_data = <t_data> ).
+    map_sadl_to_entity_elements( EXPORTING it_elements_ext = it_requested_elements
+                                 IMPORTING et_elements_int = DATA(lt_requested_elements)
+                                           et_int_to_ext   = DATA(lt_element_names_int_to_ext) ).
+    mo_runtime->get_properties_elements( EXPORTING it_requested_elements       = lt_requested_elements
+                                                   iv_alternative_key_name     = get_alternative_key_name( mv_structure_name ) "iv_alternative_key_name
+                                                   it_key_values               = <t_data>
+                                         IMPORTING et_props_by_tabix_and_elems = DATA(lt_props_by_tabix_and_elems)
+                                                   et_failed                   = et_failed ).
+
+    " Map internal name to external name in output
+    LOOP AT lt_props_by_tabix_and_elems INTO DATA(ls_property).
+      " It might happen that one element is mapped multiple times
+      LOOP AT lt_element_names_int_to_ext INTO DATA(ls_element_name_int_to_ext) WHERE int = ls_property-element_name.
+        ls_property-element_name = ls_element_name_int_to_ext-ext.
+        INSERT ls_property INTO TABLE et_props_by_tabix_and_elems.
+      ENDLOOP.
+    ENDLOOP.
+
+    NEW cl_sadl_crud_runtime_util( mr_metadata_node )->set_max_read_only_property( EXPORTING iv_no_of_lines              = lines( <t_data> )
+                                                                                             it_failed                   = et_failed
+                                                                                             it_requested_elements       = it_requested_elements
+                                                                                   CHANGING  ct_props_by_tabix_and_elems = et_props_by_tabix_and_elems ).
+
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+
+
+  METHOD _get_properties_entity.
+    init_transactional( ).
+
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ).
+    ASSIGN lr_data->* TO <t_data>.
+
+    " Map external name to internal name in input
+    map_sadl_to_entity_data( EXPORTING it_data = it_key_values
+                             IMPORTING et_data = <t_data> ).
+    " Execute
+    mo_runtime->get_properties_entity( EXPORTING iv_alternative_key_name = get_alternative_key_name( mv_structure_name ) "iv_alternative_key_name
+                                                 it_key_values           = <t_data>
+                                       IMPORTING et_failed               = et_failed
+                                                 et_properties           = et_properties ).
+    " Map internal name to external name in output: Not required
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+
+
+  METHOD _get_uuid.
+    TRY.
+        rv_uuid = cl_system_uuid=>create_uuid_x16_static( ).
+      CATCH cx_uuid_error INTO DATA(lx).
+        RAISE EXCEPTION TYPE cx_sadl_static EXPORTING previous = lx.
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD _is_create_over_draft.
+    IF cl_sadl_todo_marker=>prototype_active_over_draft( ) AND mr_metadata_node->is_draft_enabled = abap_false.
+      mo_sadl_entity->get_annotations( IMPORTING et_entity_annotations = DATA(lt_entity_annotations) ).
+      rv_create_over_draft = xsdbool( NOT line_exists( lt_entity_annotations[ name = if_sadl_cds_annotations=>objectmodel_writedraftpersist ] ) ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD _read.
+    CLEAR: et_entity_data, et_failed.
+    init_transactional( ).
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_key_table_ref( ).
+    FIELD-SYMBOLS <t_key_values> TYPE STANDARD TABLE.
+    ASSIGN lr_data->* TO <t_key_values>.
+
+    lr_data = mo_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    ASSIGN lr_data->* TO <t_data>.
+
+    map_sadl_to_entity_data( EXPORTING it_data = it_key_values
+                             IMPORTING et_data = <t_key_values> ).
+    map_sadl_to_entity_elements( EXPORTING it_elements_ext = it_requested_elements
+                                 IMPORTING et_elements_int = DATA(lt_requested_elements) ).
+
+    mo_runtime->read( EXPORTING iv_alternative_key_name = get_alternative_key_name( mv_structure_name )
+                                it_key_values           = <t_key_values>
+                                it_requested_elements   = lt_requested_elements
+                                iv_edit_mode            = iv_edit_mode
+                      IMPORTING et_entity_data          = <t_data>
+                                et_failed               = et_failed ).
+    map_entity_to_sadl_data( EXPORTING it_data = <t_data>
+                             IMPORTING et_data = et_entity_data ).
+    NEW cl_sadl_crud_runtime_util( ir_metadata_node = mr_metadata_node
+                                 )->read_secondaries( EXPORTING it_entity_data        = <t_data>
+                                                                it_requested_elements = it_requested_elements
+                                                      CHANGING  ct_sadl_data          = et_entity_data ).
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+
+
+  METHOD _read_by_association.
+    CLEAR: et_links, et_target_entity_data, et_source_failed.
+    init_transactional( ).
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+    FIELD-SYMBOLS <t_source_key_values> TYPE STANDARD TABLE.
+    ASSIGN lr_data->* TO <t_source_key_values>.
+    map_sadl_to_entity_data( EXPORTING it_data = it_source_key_values
+                             IMPORTING et_data = <t_source_key_values> ).
+
+    DATA(lv_target_structure) = get_target_structure( iv_association_name ).
+    lr_data = get_table_container( lv_target_structure ).
+    FIELD-SYMBOLS <t_target_data> TYPE STANDARD TABLE.
+    ASSIGN lr_data->* TO <t_target_data>.
+
+    map_sadl_to_entity_elements( EXPORTING iv_structure    = lv_target_structure
+                                           it_elements_ext = it_requested_elements
+                                 IMPORTING et_elements_int = DATA(lt_requested_elements) ).
+
+    mo_runtime->read_by_association( EXPORTING iv_association_name            = map_sadl_to_entity_assoc( iv_structure_name   = mv_structure_name
+                                                                                                          iv_sadl_association = iv_association_name )
+                                               iv_source_alternative_key_name = get_alternative_key_name( mv_structure_name )
+                                               it_source_key_values           = <t_source_key_values>
+                                               it_requested_elements          = lt_requested_elements
+                                               iv_target_alternative_key_name = get_alternative_key_name( lv_target_structure )
+                                               iv_target_edit_mode            = iv_target_edit_mode
+                                     IMPORTING et_source_failed               = et_source_failed
+                                               et_target_entity_data          = <t_target_data>
+                                               et_links                       = et_links ).
+
+    map_entity_to_sadl_data( EXPORTING iv_structure = lv_target_structure
+                                       it_data      = <t_target_data>
+                             IMPORTING et_data      = et_target_entity_data ).
+    DATA(lr_target_node_metadata) =  mo_mdp->get_node( lv_target_structure ).
+    NEW cl_sadl_crud_runtime_util( ir_metadata_node = lr_target_node_metadata
+                                 )->read_secondaries( EXPORTING it_entity_data        = <t_target_data>
+                                                                it_requested_elements = it_requested_elements
+                                                      CHANGING  ct_sadl_data          = et_target_entity_data ).
+
+*    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+    _add_messages( iv_structure = lv_target_structure  it_target_keys = <t_target_data> ).
+  ENDMETHOD.
+
+
+  METHOD _read_keys_by_association.
+    if_sadl_entity_transactional~read_by_association( EXPORTING iv_association_name            = iv_association_name
+                                                                iv_source_alternative_key_name = iv_source_alternative_key_name
+                                                                it_source_key_values           = it_source_key_values
+                                                                iv_target_alternative_key_name = iv_target_alternative_key_name
+                                                                iv_target_edit_mode            = iv_target_edit_mode
+                                                      IMPORTING et_target_entity_data          = et_target_key_values
+                                                                et_links                       = et_links
+                                                                et_source_failed               = et_source_failed ).
+  ENDMETHOD.
+
+
+  METHOD _update.
+    DATA lt_updated_elements_per_tabix TYPE if_sadl_entity_transactional=>tt_elements_per_tabix.
+    CLEAR et_failed.
+
+    init_transactional( ).
+    FIELD-SYMBOLS <t_data> TYPE STANDARD TABLE.
+    DATA(lr_data) = mo_runtime->if_sadl_entity_container_fctry~create_entity_table_ref( ).
+    ASSIGN lr_data->* TO <t_data>.
+
+    map_sadl_to_entity_data( EXPORTING it_data = it_entity_data
+                             IMPORTING et_data = <t_data> ).
+    LOOP AT it_updated_elements_per_tabix ASSIGNING FIELD-SYMBOL(<s_updated_elements>).
+      map_sadl_to_entity_elements( EXPORTING it_elements_ext = <s_updated_elements>-elements
+                                   IMPORTING et_elements_int = DATA(lt_updated_elements) ).
+      INSERT VALUE #( tabix = <s_updated_elements>-tabix  elements = lt_updated_elements ) INTO TABLE lt_updated_elements_per_tabix.
+    ENDLOOP.
+
+    IF lt_updated_elements_per_tabix IS NOT INITIAL.
+      mo_runtime->update( EXPORTING iv_alternative_key_name       = get_alternative_key_name( mv_structure_name )
+                                    it_updated_elements_per_tabix = lt_updated_elements_per_tabix
+                                    it_entity_data                = <t_data>
+                          IMPORTING et_failed                     = et_failed ).
+    ENDIF.
+    _add_messages( iv_structure = mv_structure_name  it_target_keys = <t_data> ).
+  ENDMETHOD.
+ENDCLASS.

@@ -20,7 +20,8 @@
     deleteEnabled: true,
     draftEnabled: true,
     writeDraftPersistence: 'ZHR_PB0002D'
-   //lifecycle.enqueue.expiryBehavior: #RELATIVE_TO_ENQUEUE_START
+   //lifecycle.enqueue.expiryBehavior: #RELATIVE_TO_ENQUEUE_START,
+   //lifecycle.enqueue.expiryInterval: 'PT60M'
 }
 
 define view zhr_i_candidateheader

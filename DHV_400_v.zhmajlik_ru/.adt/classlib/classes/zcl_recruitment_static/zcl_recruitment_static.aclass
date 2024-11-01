@@ -5,6 +5,8 @@ CLASS zcl_recruitment_static DEFINITION
   PUBLIC SECTION.
     TYPES ty_lt_bapiret2 TYPE STANDARD TABLE OF bapiret2 WITH DEFAULT KEY.
 
+    CLASS-DATA mv_destination TYPE z_destination_id.
+
     CLASS-METHODS get_hr_master_data.
 
     CLASS-METHODS copy_roles_from_user_to_user
@@ -28,6 +30,15 @@ CLASS zcl_recruitment_static DEFINITION
       CHANGING  cs_candidate     TYPE zhr_s_sync_btw_erp_and_hr
       RETURNING VALUE(et_return) TYPE bapirettab.
 
+    CLASS-METHODS change_password_for_e_mail IMPORTING iv_e_mail          TYPE zhr_s_sync_btw_erp_and_hr-candidate_header-num01_email
+                                             RETURNING VALUE(rv_password) TYPE char08.
+
+    CLASS-METHODS class_constructor.
+
+  PRIVATE SECTION.
+    CONSTANTS gc_mailsubject TYPE char50 VALUE 'Регистрационные данные кандидата - beloil.by'.
+    CONSTANTS gc_sap_mail    TYPE uname  VALUE 'SAP_MAIL'.
+
     CLASS-METHODS modify_user_password IMPORTING iv_username      TYPE uname
                                                  iv_user_password TYPE  char08.
 
@@ -35,13 +46,6 @@ CLASS zcl_recruitment_static DEFINITION
                                          RETURNING VALUE(rv_user) TYPE uname.
 
     CLASS-METHODS generate_password RETURNING VALUE(rv_password) TYPE char08.
-
-    CLASS-METHODS change_password_for_e_mail IMPORTING iv_e_mail          TYPE zhr_s_sync_btw_erp_and_hr-candidate_header-num01_email
-                                             RETURNING VALUE(rv_password) TYPE abap_bool.
-
-  PRIVATE SECTION.
-    CONSTANTS gc_mailsubject TYPE char50 VALUE 'Регистрационные данные кандидата - beloil.by'.
-    CONSTANTS gc_sap_mail    TYPE uname  VALUE 'SAP_MAIL'.
 
 ENDCLASS.
 
@@ -51,8 +55,15 @@ CLASS zcl_recruitment_static IMPLEMENTATION.
     DATA(lv_username) = get_username_by_e_mail( iv_e_mail ).
     DATA(lv_password) = generate_password( ).
 
+    rv_password = lv_password.
+
     modify_user_password( iv_username      = lv_username
                           iv_user_password = lv_password ).
+
+    CALL FUNCTION 'ZHR_FM_CAND_CHANGE_PASSWORD'
+      DESTINATION mv_destination
+      EXPORTING iv_e_mail   = iv_e_mail
+                iv_password = lv_password.
   ENDMETHOD.
 
   METHOD change_user_alias.
@@ -136,11 +147,8 @@ CLASS zcl_recruitment_static IMPLEMENTATION.
     DATA lt_vacans_vh      TYPE TABLE OF zhr_vacans_vh.
     DATA lt_hrp1000_z      TYPE TABLE OF zhrp1000.
 
-    DATA(destination) = COND z_destination_id( WHEN sy-host CP '*dhv' OR sy-host CP '*qhv'
-                                               THEN 'HRDCLNT300'
-                                               ELSE 'HRPCLNT300HR' ).
     CALL FUNCTION 'ZHR_FM_GET_HR_MASTER_DATA'
-      DESTINATION destination
+      DESTINATION mv_destination
       IMPORTING et_hrp1001        = lt_hrp1001
                 et_hrp1000        = lt_hrp1000
                 et_t591s          = lt_t591s
@@ -149,27 +157,45 @@ CLASS zcl_recruitment_static IMPLEMENTATION.
                 et_t535n          = lt_t535n
                 et_vacancy        = lt_vacans_vh.
 
-    DELETE FROM zhrp1000.                               "#EC CI_NOWHERE
-    DELETE FROM zhrp1001.                               "#EC CI_NOWHERE
-    DELETE FROM zt591s.                                 "#EC CI_NOWHERE
-    DELETE FROM zt77rcf_contty.                         "#EC CI_NOWHERE
-    DELETE FROM zhr_c_org_recr.                         "#EC CI_NOWHERE
-    DELETE FROM t535n WHERE art = 'T'.
+    IF lt_hrp1000 IS NOT INITIAL.
+      lt_hrp1000_z = CORRESPONDING #( lt_hrp1000 ).
+      DELETE FROM zhrp1000.                             "#EC CI_NOWHERE
+      INSERT zhrp1000 FROM TABLE lt_hrp1000_z.
+    ENDIF.
 
-    DELETE FROM zhr_vacans_vh.                          "#EC CI_NOWHERE
-    DELETE lt_vacans_vh WHERE NOT (     start_date <= sy-datum
-                                    AND end_date   >= sy-datum ).
+    IF lt_hrp1001 IS NOT INITIAL.
+      DELETE FROM zhrp1001.                             "#EC CI_NOWHERE
+      INSERT zhrp1001 FROM TABLE lt_hrp1001.
+    ENDIF.
 
-    SORT lt_vacans_vh BY objid.
-    DELETE ADJACENT DUPLICATES FROM lt_vacans_vh COMPARING objid.
-    INSERT zhr_vacans_vh FROM TABLE lt_vacans_vh.
-    lt_hrp1000_z = CORRESPONDING #( lt_hrp1000 ).
-    INSERT zhrp1000 FROM TABLE lt_hrp1000_z.
-    INSERT zhrp1001 FROM TABLE lt_hrp1001.
-    INSERT zt591s FROM TABLE lt_t591s.
-    INSERT zt77rcf_contty FROM TABLE lt_t77rcf_contty.
-    INSERT zhr_c_org_recr FROM TABLE lt_zhr_c_org_recr.
-    INSERT t535n FROM TABLE lt_t535n.
+    IF lt_t591s IS NOT INITIAL.
+      DELETE FROM zt591s.                               "#EC CI_NOWHERE
+      INSERT zt591s FROM TABLE lt_t591s.
+    ENDIF.
+
+    IF lt_t77rcf_contty IS NOT INITIAL.
+      DELETE FROM zt77rcf_contty.                       "#EC CI_NOWHERE
+      INSERT zt77rcf_contty FROM TABLE lt_t77rcf_contty.
+    ENDIF.
+
+    IF lt_zhr_c_org_recr IS NOT INITIAL.
+      DELETE FROM zhr_c_org_recr.                       "#EC CI_NOWHERE
+      INSERT zhr_c_org_recr FROM TABLE lt_zhr_c_org_recr.
+    ENDIF.
+
+    IF lt_t535n IS NOT INITIAL.
+      DELETE FROM t535n WHERE art = 'T'.
+      INSERT t535n FROM TABLE lt_t535n.
+    ENDIF.
+
+    IF lt_vacans_vh IS NOT INITIAL.
+      DELETE FROM zhr_vacans_vh.                        "#EC CI_NOWHERE
+      DELETE lt_vacans_vh WHERE NOT (     start_date <= sy-datum
+                                      AND end_date   >= sy-datum ).
+      SORT lt_vacans_vh BY objid.
+      DELETE ADJACENT DUPLICATES FROM lt_vacans_vh COMPARING objid.
+      INSERT zhr_vacans_vh FROM TABLE lt_vacans_vh.
+    ENDIF.
   ENDMETHOD.
 
   METHOD get_username_by_e_mail.
@@ -301,5 +327,11 @@ CLASS zcl_recruitment_static IMPLEMENTATION.
         cl_cam_address_bcs=>create_internet_address( CONV #( cs_candidate-candidate_header-num01_email ) ) ).
     lo_send_request->set_send_immediately( 'X' ).
     lo_send_request->send( ).
+  ENDMETHOD.
+
+  METHOD class_constructor.
+    mv_destination = COND #( WHEN sy-host CP '*dhv' OR sy-host CP '*qhv'
+                             THEN 'HRDCLNT300'
+                             ELSE 'HRPCLNT300HR' ).
   ENDMETHOD.
 ENDCLASS.

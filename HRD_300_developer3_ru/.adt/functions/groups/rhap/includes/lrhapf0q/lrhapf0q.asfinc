@@ -1,0 +1,144 @@
+*----------------------------------------------------------------------*
+*   INCLUDE LRHAPF15                                                   *
+*----------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+*       FORM INSERT                                                   *
+*---------------------------------------------------------------------*
+*       Einfuegen von Saetzen;aktueller Satz in PPLOG                 *
+*---------------------------------------------------------------------*
+* <--   INSERT_SUBRC                                                  *
+*       Returncodes 0  = Ok                                           *
+*                   1  = Ok ueberlagerte Saetze geloescht             *
+*                   2  = Ok Vorgaenger am Ende begrenzt               *
+*                   3  = Ok 1 + 2                                     *
+*                   4  = Ok umfassenden Satz aufgespalten             *
+*                   8  = Ok Nachfolger am Ende begrenzt               *
+*                   9  = Ok 1 + 8                                     *
+*                   10 = Ok 2 + 8                                     *
+*                   11 = Ok 1 + 2 + 8                                 *
+*                   99 = Zeitbindung nicht gefunden                   *
+*                sonst = Fehler                                       *
+*---------------------------------------------------------------------*
+FORM INSERT USING INSERT_SUBRC LIKE SY-SUBRC.
+  DATA: I_EXIST_SUBRC LIKE SY-SUBRC.
+  DATA: l_p1000 type p1000,                                "ANDPLVO
+        l_orig_p1000 type p1000.                           "ANDPLVO
+
+
+  CLEAR INSERT_SUBRC.
+* Bei sprachabhaengigen Infotypen werden alle anderen Sprachen
+* automatisch mitgepflegt
+* und zwar bei beantragen,genehmigen,aktivieren, ablehnen
+* und neuerdings auch bei planvorschlagen;
+* als ein log. Satz werden dabei alle Satze mit gleichem KEY,
+* die sich nur durch den Sprachschluessel im VARYF unterscheiden
+* Bei Hinzufuegen wird nur die Anmeldesprache hinzugefuegt
+  CLEAR : SATZ,ORIG_SATZ.
+  ORIG_SATZ = PPLOG.
+  SATZ = ORIG_SATZ.
+  IF PPPAR-LANGU EQ ON.
+    ORIG_LANGU = PPLOG-VARYF(1).
+    IF PPPAR-VTASK EQ 'B' AND                              "VWMACTLANGU
+*   IF PPPAR-FCODE EQ AKTI OR PPPAR-FCODE EQ BEAN          "VWMACTLANGU
+     ( PPPAR-FCODE EQ AKTI OR PPPAR-FCODE EQ BEAN          "VWMACTLANGU
+    OR PPPAR-FCODE EQ PLVO OR PPPAR-FCODE EQ ABLN
+*   OR PPPAR-FCODE EQ GENE.                                "VWMACTLANGU
+    OR PPPAR-FCODE EQ GENE ) .                             "VWMACTLANGU
+*   Diese Prüfung nur noch für VTASK = 'B', d.h.
+*   Direktverbuchung pro Satz wird bei sprachabhängigen
+*   Sätzen nicht mehr unterstützt
+*   Bei Statusänderungen überprüfen, ob der Satz in der
+*   gewünschten Sprache nicht bereits im neuen Status
+*   hinzugefügt worden ist (bei einer vorhergehenden
+*   Sprache) => kein gesonderter Insert mehr erforderlich
+      CLEAR PPKEY.
+      PPKEY = PPLOG.
+*     Prüfung, daß Satz im neuen Status schon ex.
+      IF PPPAR-FCODE EQ 'PLVO'.
+*       Beim Planvorschlagen kann nur auf Key-Gleichheit geprüft werden
+        PERFORM EXIST_SET_FULL USING I_EXIST_SUBRC.
+      ELSE.
+*       Bei allen anderen Operation wird auch Gleichheit des Datenteils
+*       verlangt
+        PERFORM IDENT_LANGU_SET_ALREADY_EXISTS USING I_EXIST_SUBRC.
+      ENDIF.
+      IF I_EXIST_SUBRC = 0.
+*     Satz wurde schon bearbeitet
+*       IF PPPAR-VTASK NE 'B'                              "VWMACTLANGU
+*       OR PPPAR-FCODE EQ PLVO.                            "VWMACTLANGU
+        IF PPPAR-FCODE EQ PLVO.                            "VWMACTLANGU
+*         EXIT.                                            "VWMACTLANGU
+*       Bei PLVO muß auf bereits erfolgten Insert im       "VWMACTLANGU
+*       neuen Status geprüft werden, da Löschung des       "VWMACTLANGU
+*       Vorgängerstatus entfällt                           "VWMACTLANGU
+          PERFORM LANGU_SET_ALREADY_INSERTED USING         "VWMACTLANGU
+                                            I_EXIST_SUBRC. "VWMACTLANGU
+        ELSE.
+*       Bei Verbuchung im Puffer noch prüfen, daß Satz
+*       im alten Status schon in der gewünschten und
+*       noch einer anderen Sprache gelöscht wurde
+          PPKEY-ISTAT = ORIGINAL_ISTAT.
+          PERFORM LANGU_SET_ALREADY_DELETED USING
+                                            I_EXIST_SUBRC.
+          IF I_EXIST_SUBRC = 0.
+            EXIT.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+    PERFORM INSERT1 USING INSERT_SUBRC.
+    IF PPPAR-FCODE NE INSERT AND PPPAR-FCODE NE QUICK.
+      REFRESH PPLOG_LANGU_TAB.
+*     Sammeln aller sprachabhängigen Sätze in PPLOG_LANGU_TAB
+      LOOP AT  BUFFER WHERE   PLVAR    EQ SATZ-PLVAR
+                        AND   OTYPE    EQ SATZ-OTYPE
+                        AND   OBJID    EQ SATZ-OBJID
+                        AND   INFTY    EQ SATZ-INFTY
+                        AND   SUBTY    EQ SATZ-SUBTY
+                        AND   ISTAT    EQ ORIGINAL_ISTAT
+                        AND   PRIOX    EQ SATZ-PRIOX
+                        AND   BEGDA    EQ SATZ-BEGDA
+                        AND   ENDDA    EQ SATZ-ENDDA
+                        AND   VARYF(1) NE ORIG_LANGU
+                        AND   SEQNR    EQ SATZ-SEQNR.
+        IF satz-infty = id_infty and                     "ANDPLVO
+           PPPAR-FCODE EQ PLVO.                          "ANDPLVO
+*         Beim Planvorschlagen den Infotyps 1000 muss der Wert
+*         in GDATE auch in alle Übersetzungen kopiert werden,
+*         damit beim Aktivieren unabhänig davon welche
+*         Übersetzung aktiviert wird, das selbe Ergebnis erzielt
+*         wird.
+          l_p1000 = buffer.                              "ANDPLVO
+          l_orig_p1000 = orig_satz.                      "ANDPLVO
+          l_p1000-gdate = l_orig_p1000-gdate.            "ANDPLVO
+          l_p1000-istat = l_orig_p1000-istat.            "ANDPLVO
+          pplog_langu_tab = l_p1000.                     "ANDPLVO
+        ELSE.                                            "ANDPLVO
+          SATZ-VARYF(1) = BUFFER-VARYF(1).
+          SATZ-VDATA = BUFFER-VDATA.
+          CLEAR PPLOG_LANGU_TAB.
+          PPLOG_LANGU_TAB = SATZ.
+        ENDIF.                                           "ANDPLVO
+        APPEND PPLOG_LANGU_TAB.
+      ENDLOOP.
+*     Verarbeiten aller sprachbahängigen Sätze
+*     sprachabhängige Sätze sind nicht workflow-relevant   "VWMWF
+      SAVE_RHAP_WORKF_ACTV = RHAP_WORKF_ACTV.              "VWMWF
+      CLEAR RHAP_WORKF_ACTV.                               "VWMWF
+      LOOP AT PPLOG_LANGU_TAB.
+        PPLOG = PPLOG_LANGU_TAB.
+*       Beim Planvorschlagen sprachabh. Tabelleninfotypen muß
+*       Tabellenteil in TB_BUFFER kopiert werden
+        IF PPPAR-FCODE = 'PLVO'.
+          PERFORM COPY_TDATA USING PPLOG.
+        ENDIF.
+        PERFORM INSERT1 USING INSERT_SUBRC.
+      ENDLOOP.
+      RHAP_WORKF_ACTV = SAVE_RHAP_WORKF_ACTV.              "VWMWF
+    ENDIF.
+    PPLOG = ORIG_SATZ.
+  ELSE.
+* nicht Sprachabhaengige Infotypen
+    PERFORM INSERT1 USING INSERT_SUBRC.
+  ENDIF.
+ENDFORM.

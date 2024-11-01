@@ -1,0 +1,325 @@
+CLASS zcl_aa_ee_customer_hdb DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+  PUBLIC SECTION.
+    INTERFACES if_amdp_marker_hdb.
+
+    CLASS-METHODS:
+      zumo_get_amount
+        IMPORTING
+                  iv_bukrs         TYPE anla-bukrs
+                  iv_anln1         TYPE anla-anln1
+                  iv_anln2         TYPE anla-anln2
+                  iv_afabe         TYPE anlb-afabe
+                  iv_gjahr         TYPE anlc-gjahr
+                  iv_monat         TYPE anek-monat
+                  iv_rest          TYPE faa_ee_netvalue
+                  iv_sdate         TYPE d      "дата начала амортизации
+        RETURNING VALUE(rv_amount) TYPE anep-anbtr.
+  PRIVATE SECTION.
+
+    TYPES :
+      BEGIN OF gty_s_usep,
+        afabe TYPE anlb-afabe,
+        adatu TYPE d,              "дата c
+        bdatu TYPE d,              "дата по
+        usep  TYPE i,              "Остаточный СПИ мес
+        spip  TYPE i,              "Актуальный СПИ мес
+      END OF gty_s_usep,
+      BEGIN OF gty_s_kumo,
+        adatu TYPE d,              "дата действия
+        k_umo TYPE zaa_kumo-k_umo, "коэффициент ускорения амортизации
+      END OF gty_s_kumo,
+      gty_t_kumo TYPE STANDARD TABLE OF gty_s_kumo WITH DEFAULT KEY,
+      BEGIN OF gty_s_rest,
+        afabe TYPE anlb-afabe,
+        adatu TYPE d,            "дата
+        rest  TYPE anep-anbtr,   "остаточная стоимость
+      END OF gty_s_rest,
+      gty_t_rest TYPE STANDARD TABLE OF gty_s_rest WITH DEFAULT KEY,
+      gty_t_usep TYPE STANDARD TABLE OF gty_s_usep WITH DEFAULT KEY,
+      BEGIN OF gty_s_zumo,
+        bukrs  TYPE anla-bukrs,
+        anln1  TYPE anla-anln1,
+        anln2  TYPE anla-anln2,
+        t_kumo TYPE gty_t_kumo,
+        t_rest TYPE gty_t_rest,
+        t_usep TYPE gty_t_usep, "список остаточных СПИ
+      END OF gty_s_zumo.
+    CLASS-METHODS:
+      insert_asset_data
+        IMPORTING
+          VALUE(iv_bukrs) TYPE anla-bukrs
+          VALUE(iv_anln1) TYPE anla-anln1
+          VALUE(iv_anln2) TYPE anla-anln2
+          VALUE(iv_gjahr) TYPE anlc-gjahr
+        EXPORTING
+          VALUE(et_kumo)  TYPE gty_t_kumo
+          VALUE(et_usep)  TYPE gty_t_usep
+          VALUE(et_rest)  TYPE gty_t_rest.
+    CLASS-DATA:
+      gt_zumo_par TYPE SORTED TABLE OF  gty_s_zumo
+        WITH UNIQUE KEY bukrs anln1 anln2.
+ENDCLASS.
+
+
+
+CLASS ZCL_AA_EE_CUSTOMER_HDB IMPLEMENTATION.
+
+
+  METHOD insert_asset_data BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT
+                           USING faav_anek faav_anep anla faav_anlc setleaf zaa_kumo anlb anlbza
+                           ZAA_UTILS_HDB=>GET_ASSET_SPI_ONDATE
+                           zaa_utils_hdb=>get_asset_val_ng .
+    DECLARE LV_MANDT STRING := SESSION_CONTEXT( 'CLIENT');
+    DECLARE LV_GJAHR_D STRING := :IV_GJAHR  || '0000';
+    DECLARE LV_INVNR STRING;
+    DECLARE LV_ADATU STRING;
+    /* ВЫБОРКА СПИ мес */
+    /* формирование списка начала действия метода амортизации по временным интервалам */
+    LT_SPI_IN =
+      SELECT DISTINCT
+           ADATU AS BUDAT,
+           BUKRS,
+           ANLN1,
+           ANLN2,
+           AFABE,
+           '00000000' AS AFABG,
+           AFASL,
+           NDPER,
+           NDJAR,
+           '000' AS USEP,
+           '00'  AS USEJ,
+           '000' AS RESTP,
+           '00'  AS RESTJ
+       FROM  ANLBZA AS ZA
+                WHERE ZA.BUKRS = :IV_BUKRS
+                  AND ZA.ANLN1 = :IV_ANLN1
+                  AND ZA.ANLN2 = :IV_ANLN2
+                  AND ZA.MANDT = :LV_MANDT;
+   CALL "ZAA_UTILS_HDB=>GET_ASSET_SPI_ONDATE"( IT_DATA => :LT_SPI_IN, ET_DATA => :LT_SPI_OUT, IV_EX_CURPER => 'X' );
+   /* если на начало диапазона остаточный СПИ равен 0 то берется полный СПИ иначе полный СПИ */
+   LT_USEP = SELECT ZA.AFABE,ZA.ADATU, ZA.BDATU,
+                     CASE WHEN ( REST.RESTJ + REST.RESTP ) > 0
+                          THEN REST.RESTJ * 12 + REST.RESTP
+                          ELSE ZA.NDJAR * 12 + ZA.NDPER
+                     END  AS USEP,
+                     ZA.NDJAR * 12 + ZA.NDPER AS SPIP
+                FROM ANLBZA AS ZA
+                JOIN :LT_SPI_OUT  AS REST ON REST.BUKRS = ZA.BUKRS
+                                          AND REST.ANLN1 = ZA.ANLN1
+                                          AND REST.ANLN2 = ZA.ANLN2
+                                          AND REST.AFABE = ZA.AFABE
+                                          AND REST.BUDAT BETWEEN ZA.ADATU AND ZA.BDATU
+                WHERE ZA.BUKRS = :IV_BUKRS
+                  AND ZA.ANLN1 = :IV_ANLN1
+                  AND ZA.ANLN2 = :IV_ANLN2
+                  AND ZA.MANDT = :LV_MANDT;
+    ET_USEP =
+      SELECT * FROM :LT_USEP
+      UNION ALL
+      SELECT AFABE, ADATU, BDATU, ( NDJAR * 12 + NDPER ) AS USEP, ( NDJAR * 12 + NDPER ) AS SPIP
+        FROM ANLB AS AB
+        WHERE AB.BUKRS = :IV_BUKRS
+          AND AB.ANLN1 = :IV_ANLN1
+          AND AB.ANLN2 = :IV_ANLN2
+          AND AB.MANDT = :LV_MANDT
+          AND NOT EXISTS (  SELECT AFABE FROM :LT_USEP AS UP WHERE UP.AFABE = AB.AFABE );
+
+       /* ВЫБОРКА КОЭФФ УСКОРЕНИЯ */
+    ET_KUMO = SELECT ADATU, K_UMO
+                FROM ZAA_KUMO AS Z
+                  JOIN ANLA AS A ON A.INVNR = Z.INVNR
+                                 AND A.MANDT = Z.MANDT
+                WHERE A.BUKRS = :IV_BUKRS
+                  AND A.ANLN1 = :IV_ANLN1
+                  AND A.ANLN2 = :IV_ANLN2
+                  AND A.MANDT = :LV_MANDT
+                  ORDER BY ADATU DESC
+            WITH HINT (NO_INLINE);
+
+    /*  ВЫБОРКА ИНВ. НОМЕРА */
+    SELECT INVNR
+      INTO LV_INVNR
+      FROM ANLA AS A
+      WHERE A.BUKRS = :IV_BUKRS
+        AND A.ANLN1 = :IV_ANLN1
+        AND A.ANLN2 = :IV_ANLN2
+        AND A.MANDT = :LV_MANDT
+    WITH HINT (NO_INLINE);
+
+
+    /* определение остаточной стоимости на начало года */
+    ET_REST =
+      SELECT  AFABE,  :LV_GJAHR_D AS ADATU,
+              SUM( A.KANSW + A.KAUFW + A.KNAFA + A.KAAFA + A.KAUFN ) AS REST
+          FROM FAAV_ANLC AS A
+            JOIN ANLA AS L ON  L.BUKRS = A.BUKRS
+                           AND L.MANDT = A.MANDT
+                           AND L.ANLN1 = A.ANLN1
+                           AND L.ANLN2 = A.ANLN2
+          WHERE L.INVNR = :LV_INVNR
+            AND A.MANDT = :LV_MANDT
+            AND A.GJAHR = :IV_GJAHR
+          GROUP BY A.AFABE
+          ORDER BY A.AFABE WITH HINT (NO_INLINE);
+
+    /*  выборка периодов  в которых были несторнированные движения меняющего аморт стоимость */
+      LT_MONAT =
+      -- AK_BUTVILOVS #8000001264, АмортМетодУменьшаемогоОстатка
+      --  SELECT DISTINCT A.BUKRS, A.ANLN1, A.ANLN2,P.AFABE, TO_DATS( LAST_DAY( :IV_GJAHR || K.MONAT || '01' )) AS ADATU,
+        SELECT DISTINCT A.BUKRS, A.ANLN1, A.ANLN2,P.AFABE, TO_DATS( LAST_DAY( K.GJAHR || K.MONAT || '01' )) AS ADATU,
+            CAST(0.0 AS REAL) AS REST
+            FROM FAAV_ANEP AS P
+              INNER JOIN ANLA AS A ON A.BUKRS = P.BUKRS
+                                  AND A.MANDT = P.MANDT
+                                  AND A.ANLN1 = P.ANLN1
+                                  AND A.ANLN2 = P.ANLN2
+              INNER JOIN SETLEAF AS S ON  S.SETCLASS = '0000'
+                                      AND S.SUBCLASS = ''
+                                      AND S.SETNAME  = 'Z_TTYPE_AMORT'
+                                      AND S.VALFROM = P.BWASL
+              INNER JOIN FAAV_ANEK AS K ON K.BUKRS = P.BUKRS
+                                  AND K.MANDT = P.MANDT
+                                  AND K.ANLN1 = P.ANLN1
+                                  AND K.ANLN2 = P.ANLN2
+                                  AND K.GJAHR = P.GJAHR
+                                  AND K.LNRAN = P.LNRAN
+              LEFT JOIN FAAV_ANEP AS REV ON REV.BUKRS = P.BUKRS             /*ВЫБОРКА СТОРНО ОДНОГО МЕСЯЦА*/
+                                  AND REV.MANDT = P.MANDT
+                                  AND REV.ANLN1 = P.ANLN1
+                                  AND REV.ANLN2 = P.ANLN2
+                                  AND REV.GJAHR = P.GJAHR
+                                  AND REV.AFABE = P.AFABE
+                                  AND REV.LNRAN = P.LNSAN
+              LEFT JOIN FAAV_ANEK AS KREV ON KREV.BUKRS = REV.BUKRS
+                                  AND KREV.MANDT = REV.MANDT
+                                  AND KREV.ANLN1 = REV.ANLN1
+                                  AND KREV.ANLN2 = REV.ANLN2
+                                  AND KREV.GJAHR = REV.GJAHR
+                                  AND KREV.LNRAN = REV.LNRAN
+                                  AND KREV.MONAT = K.MONAT
+            WHERE A.INVNR = :LV_INVNR
+              AND A.MANDT = :LV_MANDT
+              AND ( A.DEAKT < '19000101' OR A.DEAKT >  :LV_GJAHR_D )
+              AND LEFT( A.AKTIV,4 ) <= :IV_GJAHR
+              AND KREV.BUKRS IS NULL
+
+      UNION
+        SELECT DISTINCT L.BUKRS, L.ANLN1, L.ANLN2,L.AFABE, TO_DATS( LAST_DAY( ADD_DAYS(LEFT(L.BUDAT,6) || '01',-1))) AS ADATU,
+                        CAST(0.0 AS REAL) AS REST
+          FROM :LT_SPI_IN as L
+      WITH HINT (NO_INLINE);
+
+      LT_MONAT =
+        SELECT DISTINCT * FROM :LT_MONAT;
+
+      ET_REST =
+       SELECT * FROM :ET_REST
+       UNION
+         SELECT  MN.AFABE,  MN.ADATU, SUM( MOVS.NETVL ) AS REST
+           FROM "ZAA_UTILS_HDB=>GET_ASSET_VAL_NG"( :LV_MANDT ) AS MOVS
+           INNER JOIN :LT_MONAT AS MN     ON MOVS.BUKRS = MN.BUKRS
+                                         AND MOVS.ANLN1 = MN.ANLN1
+                                         AND MOVS.ANLN2 = MN.ANLN2
+                                         AND MOVS.AFABE = MN.AFABE
+                                         AND MOVS.BUDAT >= :LV_GJAHR_D
+                                         AND MOVS.BUDAT <= MN.ADATU
+           GROUP BY MN.AFABE,  MN.ADATU
+      WITH HINT (NO_INLINE)
+      ;
+
+     ET_REST =
+       SELECT  AFABE, ADATU, IFNULL( REST,0.00) AS REST
+         FROM :ET_REST ORDER BY AFABE, ADATU DESC;
+
+  ENDMETHOD.
+
+
+  METHOD zumo_get_amount.
+    DATA:
+      lv_edate TYPE d.
+    ASSIGN gt_zumo_par[ bukrs = iv_bukrs
+                        anln1 = iv_anln1
+                        anln2 = iv_anln2 ]
+      TO FIELD-SYMBOL(<ls_par>).
+    IF sy-subrc <> 0.
+      INSERT VALUE #( bukrs = iv_bukrs
+                      anln1 = iv_anln1
+                      anln2 = iv_anln2 )
+      INTO TABLE gt_zumo_par ASSIGNING <ls_par> .
+
+      insert_asset_data( EXPORTING
+                           iv_bukrs = iv_bukrs
+                           iv_anln1 = iv_anln1
+                           iv_anln2 = iv_anln2
+                           iv_gjahr = iv_gjahr
+                         IMPORTING
+                           et_kumo = <ls_par>-t_kumo
+                           et_usep = <ls_par>-t_usep
+                           et_rest = <ls_par>-t_rest ).
+      ASSIGN gt_zumo_par[ bukrs = iv_bukrs
+                          anln1 = iv_anln1
+                          anln2 = iv_anln2 ]
+        TO <ls_par>.
+    ENDIF.
+    "если выполняется расчет за 01 период будущих лет, то его остаточная берется как база для расчета
+    IF iv_monat = '01'.
+      IF NOT line_exists( <ls_par>-t_rest[ afabe = iv_afabe adatu = iv_gjahr && '0000' ] ).
+        APPEND VALUE #( afabe = iv_afabe adatu = iv_gjahr && '0000' rest = iv_rest )
+           TO <ls_par>-t_rest.
+        SORT <ls_par>-t_rest BY afabe adatu DESCENDING.
+      ENDIF.
+    ELSE. "заполнение остаточной стоимости для движ меняющего аморт стоимость
+      DATA(lv_monat_prev) = CONV anek-monat( iv_monat - 1 ).
+      LOOP AT <ls_par>-t_rest ASSIGNING FIELD-SYMBOL(<ls_rest>)
+        WHERE afabe = iv_afabe AND adatu(6) = iv_gjahr && lv_monat_prev.
+        <ls_rest>-rest = iv_rest.
+        EXIT.
+      ENDLOOP.
+    ENDIF.
+    lv_edate = zcl_im_faa_ee_customer=>get_last_month_day( iv_gjahr && iv_monat && '01' ).
+    LOOP AT <ls_par>-t_kumo ASSIGNING FIELD-SYMBOL(<ls_kumo>)
+      WHERE adatu <= lv_edate.
+      EXIT.
+    ENDLOOP.
+    IF sy-subrc <> 0. "если нет коэффициента то О
+      rv_amount = 0.
+      RETURN.
+    ENDIF.
+
+    "определение СПИ
+    LOOP AT <ls_par>-t_usep ASSIGNING FIELD-SYMBOL(<ls_usep>) WHERE afabe = iv_afabe
+                                                              AND adatu <= lv_edate
+                                                              AND bdatu >= lv_edate.
+      EXIT.
+    ENDLOOP.
+    IF sy-subrc <> 0.
+      rv_amount = 0.
+      RETURN.
+    ENDIF .
+    "определение последнего периода амортизации
+    IF ( ( iv_gjahr - iv_sdate(4) ) * 12 - iv_sdate+4(2) + iv_monat + 1  ) = <ls_usep>-spip.
+      rv_amount = iv_rest.
+      RETURN.
+    ENDIF.
+    "определение остаточной стоимости на день проводки аморт стоимости
+    READ TABLE <ls_par>-t_rest TRANSPORTING NO FIELDS
+      WITH KEY afabe = iv_afabe BINARY SEARCH.
+    IF sy-subrc <> 0.
+      rv_amount = 0.
+      RETURN.
+    ENDIF .
+
+    LOOP AT <ls_par>-t_rest ASSIGNING <ls_rest> FROM sy-tabix
+      WHERE afabe = iv_afabe AND adatu < lv_edate.
+      EXIT.
+    ENDLOOP.
+    IF sy-subrc <> 0. "если нет стоимости то амортизация = О
+      rv_amount = 0.
+      RETURN.
+    ENDIF.
+    rv_amount = <ls_rest>-rest / <ls_usep>-usep * <ls_kumo>-k_umo .
+  ENDMETHOD.
+ENDCLASS.

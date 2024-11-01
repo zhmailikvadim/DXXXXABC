@@ -1,0 +1,833 @@
+CLASS zfi_cl_proptax_reestr DEFINITION
+  PUBLIC
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    TYPES:
+      BEGIN OF gty_s_sscr,
+        type     TYPE char1,
+        bukrs    TYPE anla-bukrs,
+        period   TYPE hcp_s_begda_endda,
+        okato1   TYPE zanlz_tax-glo_rus_prt_okt1,
+        okato2   TYPE zanlz_tax-glo_rus_prt_okt2,
+        it_bukrs TYPE RANGE OF anla-bukrs,
+        it_anlkl TYPE RANGE OF anla-anlkl,
+        it_anln1 TYPE RANGE OF anla-anln1,
+        it_invnr TYPE RANGE OF anla-invnr,
+        it_bwasl TYPE RANGE OF tabw-bwasl,
+        it_group TYPE RANGE OF j_3rfdeprgroup-amortgr,
+        it_afabe TYPE RANGE OF anlc-afabe,
+        variant  TYPE disvariant,
+      END OF gty_s_sscr .
+    TYPES:
+      BEGIN OF gty_s_out,
+        type        TYPE flag,
+        bukrs       TYPE t001-bukrs,
+        butxt       TYPE char200,
+        period      TYPE hcp_s_begda_endda,
+        period_txt  TYPE string,
+        variant     TYPE disvariant,
+        afabe       TYPE string,
+        executer    TYPE string,
+        exec_pos    TYPE string,
+        data        TYPE zfi_cl_proptax_reestr_hdb=>gty_t_data,
+        initialized TYPE abap_bool,
+      END OF gty_s_out .
+
+    CLASS-DATA gs_out TYPE gty_s_out .
+    CLASS-DATA title TYPE string .
+
+    METHODS constructor
+      IMPORTING
+        VALUE(is_sscr) TYPE gty_s_sscr .
+    CLASS-METHODS read_bwasl_defaults
+      IMPORTING
+        VALUE(iv_type)  TYPE char1
+      RETURNING
+        VALUE(rt_bwasl) TYPE zfi_cl_proptax_reestr_hdb=>gty_t_bwasl .
+    CLASS-METHODS check_sscr_values
+      IMPORTING
+        VALUE(it_bukrs)  TYPE bukrs_ran_itab
+      RETURNING
+        VALUE(rv_result) TYPE abap_bool .
+    METHODS end_of_selection
+      RETURNING
+        VALUE(rv_ok) TYPE abap_bool .
+    METHODS show_alv .
+    METHODS free .
+    CLASS-METHODS set_title
+      IMPORTING
+        !im_type        TYPE flag
+      RETURNING
+        VALUE(rv_title) TYPE string .
+    CLASS-METHODS load_default_sscr .
+  PROTECTED SECTION.
+
+    DATA gt_moves TYPE zfi_cl_proptax_reestr_hdb=>gty_t_moves .
+    DATA gt_costs TYPE zfi_cl_proptax_reestr_hdb=>gty_t_costs .
+    DATA gr_grid TYPE REF TO cl_gui_alv_grid .
+
+    METHODS reptype_modify_fcat
+      CHANGING
+        VALUE(cs_fcat) TYPE lvc_s_fcat .
+    METHODS fill_fieldcat
+      IMPORTING
+        VALUE(iv_type) TYPE gty_s_sscr-type
+      RETURNING
+        VALUE(rt_fcat) TYPE lvc_t_fcat .
+    METHODS select_data
+      IMPORTING
+        VALUE(is_sscr) TYPE gty_s_sscr .
+    METHODS on_hotspot_event
+          FOR EVENT hotspot_click OF cl_gui_alv_grid
+      IMPORTING
+          !e_row_id
+          !e_column_id .
+    METHODS on_toolbar_event
+          FOR EVENT toolbar OF cl_gui_alv_grid
+      IMPORTING
+          !e_object
+          !e_interactive .
+    METHODS on_ucomm_event
+          FOR EVENT user_command OF cl_gui_alv_grid
+      IMPORTING
+          !e_ucomm .
+    METHODS on_menu_dropdown
+          FOR EVENT menu_button OF cl_gui_alv_grid
+      IMPORTING
+          !e_object
+          !e_ucomm .
+  PRIVATE SECTION.
+
+    METHODS get_afabe_texts
+      IMPORTING
+        VALUE(it_bukrs) TYPE bukrs_ran_itab
+        VALUE(it_afabe) TYPE gty_s_sscr-it_afabe
+      RETURNING
+        VALUE(rv_text)  TYPE string .
+    METHODS set_page_header
+      IMPORTING
+        VALUE(ir_container) TYPE REF TO cl_gui_container .
+    CLASS-METHODS show_warning
+      IMPORTING
+        VALUE(iv_type)   TYPE sy-msgty DEFAULT 'I'
+        VALUE(iv_text)   TYPE c
+        VALUE(iv_var1)   TYPE c OPTIONAL
+        VALUE(iv_var2)   TYPE c OPTIONAL
+        VALUE(iv_var3)   TYPE c OPTIONAL
+        VALUE(iv_var4)   TYPE c OPTIONAL
+        VALUE(iv_astype) TYPE sy-msgty OPTIONAL .
+ENDCLASS.
+
+
+
+CLASS ZFI_CL_PROPTAX_REESTR IMPLEMENTATION.
+
+
+  METHOD check_sscr_values.
+    rv_result = abap_true.
+
+    SELECT bukrs
+      INTO TABLE @DATA(lt_bukrs)
+      FROM t001
+     WHERE bukrs IN @it_bukrs[].
+
+    LOOP AT lt_bukrs[] ASSIGNING FIELD-SYMBOL(<ls_bukrs>).
+      AUTHORITY-CHECK OBJECT 'F_BKPF_BUK'
+         ID 'ACTVT' FIELD '03'
+         ID 'BUKRS' FIELD <ls_bukrs>-bukrs.
+      IF sy-subrc <> 0.
+        MESSAGE e460(f5) WITH <ls_bukrs>-bukrs.                       "'Нет полномочий для БЕ'
+        rv_result = abap_false.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+
+    IF lines( lt_bukrs[] ) = 1.
+      gs_out-bukrs = lt_bukrs[ 1 ]-bukrs.
+      SELECT SINGLE
+          name1 && ' ' && name2 && ' ' && name3 && ' ' && name4
+        FROM zcds_be_names_v
+        INTO @gs_out-butxt
+        WHERE bukrs = @gs_out-bukrs.
+    ENDIF.
+
+    gs_out-butxt = replace( val = gs_out-butxt sub = `  ` with = ` ` ).
+
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    gs_out = VALUE #( BASE gs_out
+      period          = is_sscr-period
+      period_txt      = replace(
+                          sub = '&'
+                          with = |{ is_sscr-period-endda+6(2) }.{ is_sscr-period-endda+4(2) }.{ is_sscr-period-endda(4) }|
+                          occ = 1
+                          val = replace(
+                            val = TEXT-001
+                            sub = '&'
+                            with = |{ is_sscr-period-begda+6(2) }.{ is_sscr-period-begda+4(2) }.{ is_sscr-period-begda(4) }|
+                            occ = 1 ) )
+      type            = is_sscr-type
+      variant-variant = is_sscr-variant
+      variant-report  = sy-cprog
+      afabe           = me->get_afabe_texts( it_bukrs = is_sscr-it_bukrs[] it_afabe = is_sscr-it_afabe ) ).
+
+    me->title = SWITCH #( gs_out-type
+      WHEN 'A' THEN TEXT-rta
+      WHEN 'E' THEN TEXT-rte
+      WHEN 'R' THEN TEXT-rtr ).
+
+    " ФИО исполнителя
+    zcl_names=>get_fio_dolz( EXPORTING
+                               iv_uname = sy-uname
+                             IMPORTING
+                               et_fio   = DATA(lt_fio) ).
+
+    gs_out-executer = lt_fio[ 1 ]-fio.
+    me->select_data( is_sscr ).
+  ENDMETHOD.
+
+
+  METHOD end_of_selection.
+    IF gs_out-data[] IS NOT INITIAL.
+      rv_ok = abap_true.
+    ELSE.
+      show_warning( iv_text = TEXT-e02 iv_astype = 'E' ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD fill_fieldcat.
+    rt_fcat[] = CORRESPONDING #(
+      cl_salv_data_descr=>read_structdescr(
+        CAST cl_abap_structdescr(
+          CAST cl_abap_tabledescr( cl_abap_tabledescr=>describe_by_data( gs_out-data[] ) )->get_table_line_type( ) ) ) ).
+
+    LOOP AT rt_fcat[] ASSIGNING FIELD-SYMBOL(<ls_fcat>).
+
+      <ls_fcat> = VALUE #( BASE <ls_fcat>
+        no_out = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'MANDT' OR 'ANLN1' OR 'ANLN2' OR 'AKTIV' OR 'UTVDATE' OR 'AKTNUM' OR 'OKT1' OR 'OKT2' THEN abap_true
+          WHEN 'ADATU' OR 'BDATU' OR 'LIFNR' OR 'SHIPPER' OR 'SHIP_BUKRS' OR 'SHIP_BUTXT' OR 'END_PRIV' THEN abap_true
+          WHEN 'BEGDA' OR 'ENDDA' OR 'BUKRS' OR 'ANLN' OR 'DEAKT' OR 'OFPRIV' OR 'BWASL' OR 'RECEIVER' THEN abap_true
+          WHEN 'ANLKL' OR 'DEPGR' OR 'RECEIVER_TEXT' THEN abap_true
+          ELSE <ls_fcat>-no_out )
+        hotspot = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'ANLN' OR 'INVNR' THEN abap_true
+          ELSE  <ls_fcat>-hotspot )
+        col_opt = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'OBJNAME' OR 'REGION' OR 'SHIPPER_TEXT' THEN abap_false
+          WHEN 'GROUP_DESCR' OR 'INVNR' OR 'BUKRS' OR 'ANLN' OR 'ZUGDT' OR 'DEAKT' OR 'OFPRIV' THEN abap_true
+          WHEN 'BEGDA' OR 'ENDDA' OR 'AKTIV' OR 'UTVDATE' OR 'AKTNUM' THEN abap_true
+          WHEN 'START_COST' OR 'START_AMORT' OR 'START_NETVL' THEN abap_true
+          WHEN 'END_COST' OR 'END_AMORT' OR 'END_NETVL' THEN abap_true
+          WHEN 'PRIV_COST' OR 'PRIV_AMORT' OR 'PRIV_NETVL' THEN abap_true
+          WHEN 'BWASL' OR 'BWATXT' THEN abap_true )
+        outputlen = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'AKTIV_0818' THEN 10
+          WHEN 'OBJNAME' THEN 50
+          WHEN 'REGION' THEN 35
+          WHEN 'SHIPPER' THEN 30
+          WHEN 'SHIPPER_TEXT' THEN 20
+          WHEN 'NOTES' THEN 50 )
+        key = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'BUKRS' OR 'ANLN' OR 'INVNR' THEN abap_true
+          ELSE <ls_fcat>-key )
+        edit = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'NOTES' THEN abap_true
+          ELSE <ls_fcat>-edit )
+        ref_table = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'DEAKT' THEN 'ANLA'
+          ELSE <ls_fcat>-ref_table )
+        ref_field = SWITCH #( <ls_fcat>-fieldname
+          WHEN 'DEAKT' THEN 'DEAKT'
+          ELSE <ls_fcat>-ref_field )
+      ).
+
+      CASE <ls_fcat>-fieldname.
+        WHEN 'ANLN'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-00l.
+          <ls_fcat>-scrtext_m = TEXT-00m.
+          <ls_fcat>-scrtext_s = TEXT-00s.
+        WHEN 'OBJNAME'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-01l.
+          <ls_fcat>-scrtext_m = TEXT-01m.
+          <ls_fcat>-scrtext_s = TEXT-01s.
+        WHEN 'REGION'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-02l.
+          <ls_fcat>-scrtext_m = TEXT-02m.
+          <ls_fcat>-scrtext_s = TEXT-02s.
+        WHEN 'GROUP_DESCR'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-03l.
+          <ls_fcat>-scrtext_m = TEXT-03m.
+          <ls_fcat>-scrtext_s = TEXT-03s.
+        WHEN 'AKTIV_0818'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-04l.
+          <ls_fcat>-scrtext_m = TEXT-04m.
+          <ls_fcat>-scrtext_s = TEXT-04s.
+        WHEN 'AKTIV_01'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-05l.
+          <ls_fcat>-scrtext_m = TEXT-05m.
+          <ls_fcat>-scrtext_s = TEXT-05s.
+        WHEN 'START_COST'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-06l.
+          <ls_fcat>-scrtext_m = TEXT-06m.
+          <ls_fcat>-scrtext_s = TEXT-06s.
+        WHEN 'START_AMORT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-07l.
+          <ls_fcat>-scrtext_m = TEXT-07m.
+          <ls_fcat>-scrtext_s = TEXT-07s.
+        WHEN 'START_NETVL'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-08l.
+          <ls_fcat>-scrtext_m = TEXT-08m.
+          <ls_fcat>-scrtext_s = TEXT-08s.
+        WHEN 'END_COST'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-09l.
+          <ls_fcat>-scrtext_m = TEXT-09m.
+          <ls_fcat>-scrtext_s = TEXT-09s.
+        WHEN 'END_AMORT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-10l.
+          <ls_fcat>-scrtext_m = TEXT-10m.
+          <ls_fcat>-scrtext_s = TEXT-10s.
+        WHEN 'END_NETVL'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-11l.
+          <ls_fcat>-scrtext_m = TEXT-11m.
+          <ls_fcat>-scrtext_s = TEXT-11s.
+        WHEN 'PRIV_COST'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-12l.
+          <ls_fcat>-scrtext_m = TEXT-12m.
+          <ls_fcat>-scrtext_s = TEXT-12s.
+        WHEN 'PRIV_AMORT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-13l.
+          <ls_fcat>-scrtext_m = TEXT-13m.
+          <ls_fcat>-scrtext_s = TEXT-13s.
+        WHEN 'PRIV_NETVL'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-14l.
+          <ls_fcat>-scrtext_m = TEXT-14m.
+          <ls_fcat>-scrtext_s = TEXT-14s.
+        WHEN 'SHIPPER_TEXT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-15l.
+          <ls_fcat>-scrtext_m = TEXT-15m.
+          <ls_fcat>-scrtext_s = TEXT-15s.
+        WHEN 'NOTES'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-16l.
+          <ls_fcat>-scrtext_m = TEXT-16m.
+          <ls_fcat>-scrtext_s = TEXT-16s.
+        WHEN 'SHIPPER'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-17l.
+          <ls_fcat>-scrtext_m = TEXT-17m.
+          <ls_fcat>-scrtext_s = TEXT-17s.
+        WHEN 'ZUGDT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-22l.
+          <ls_fcat>-scrtext_m = TEXT-22m.
+          <ls_fcat>-scrtext_s = TEXT-22s.
+        WHEN 'AKTIV'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-23l.
+          <ls_fcat>-scrtext_m = TEXT-23m.
+          <ls_fcat>-scrtext_s = TEXT-23s.
+        WHEN 'UTVDATE'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-24l.
+          <ls_fcat>-scrtext_m = TEXT-24m.
+          <ls_fcat>-scrtext_s = TEXT-24s.
+        WHEN 'DEAKT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-25l.
+          <ls_fcat>-scrtext_m = TEXT-25m.
+          <ls_fcat>-scrtext_s = TEXT-25s.
+        WHEN 'BWASL'.
+          <ls_fcat>-ref_table = 'TABW'.
+          <ls_fcat>-ref_field = 'BWASL'.
+        WHEN 'BWATXT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-26l.
+          <ls_fcat>-scrtext_m = TEXT-26m.
+          <ls_fcat>-scrtext_s = TEXT-26s.
+        WHEN 'RECEIVER_TEXT'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext = TEXT-30l.
+          <ls_fcat>-scrtext_m = TEXT-30m.
+          <ls_fcat>-scrtext_s = TEXT-30s.
+          <ls_fcat>-col_opt = abap_true.
+        WHEN 'TYPE'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext =
+          <ls_fcat>-scrtext_m = <ls_fcat>-scrtext_s = TEXT-002.
+        WHEN 'AKTIV_MOVE'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext =
+          <ls_fcat>-scrtext_m = <ls_fcat>-scrtext_s = TEXT-003.
+        WHEN 'BUKRS_MOVE'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext =
+          <ls_fcat>-scrtext_m = <ls_fcat>-scrtext_s = TEXT-004.
+        WHEN 'ANLN1_MOVE'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext =
+          <ls_fcat>-scrtext_m = <ls_fcat>-scrtext_s = TEXT-005.
+        WHEN 'ANLN2_MOVE'.
+          <ls_fcat>-scrtext_l = <ls_fcat>-reptext =
+          <ls_fcat>-scrtext_m = <ls_fcat>-scrtext_s = TEXT-006.
+      ENDCASE.
+
+      me->reptype_modify_fcat( CHANGING cs_fcat = <ls_fcat> ).
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD free.
+    IF gr_grid IS BOUND.
+      DATA(lr_container) = gr_grid->parent->parent.
+      gr_grid->free( ).
+      FREE gr_grid.
+      IF lr_container IS BOUND.
+        lr_container->free( ).
+        FREE lr_container.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_afabe_texts.
+    TYPES:
+      BEGIN OF lty_s_afabe,
+        afabe  TYPE t093t-afaber,
+        afbtxt TYPE t093t-afbtxt,
+      END OF lty_s_afabe.
+    DATA: lt_afabe TYPE STANDARD TABLE OF lty_s_afabe.
+
+    SELECT a2~afaber, a2~afbtxt
+      INTO TABLE @lt_afabe[]
+      FROM t093t AS a2
+        LEFT JOIN t001 AS a1 ON a1~ktopl = a2~afapl
+      WHERE a2~spras = @sy-langu
+        AND a2~afaber IN @it_afabe[]
+        AND a1~bukrs IN @it_bukrs[].
+
+    rv_text = REDUCE #(
+      INIT lv_text TYPE string
+           lv_idx  = 0
+      FOR <ls_afatxt> IN lt_afabe[]
+      NEXT
+        lv_text = SWITCH #( lv_idx
+          WHEN 0 THEN |{ <ls_afatxt>-afabe } ({ <ls_afatxt>-afbtxt })|
+          ELSE lv_text && `, ` && |{ <ls_afatxt>-afabe } ({ <ls_afatxt>-afbtxt })| )
+        lv_idx = lv_idx + 1 ).
+
+  ENDMETHOD.
+
+
+  METHOD load_default_sscr.
+    IF gs_out-initialized = abap_false.
+      CALL FUNCTION 'RS_SUPPORT_SELECTIONS'
+        EXPORTING
+          report               = sy-cprog
+          variant              = CONV rsvar-variant( |@{ sy-uname }| )
+        EXCEPTIONS
+          variant_not_existent = 1
+          variant_obsolete     = 2
+          OTHERS               = 3.
+      "Do not care about exceptions
+
+      gs_out-initialized = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD on_hotspot_event.
+    ASSIGN gs_out-data[ e_row_id-index ] TO FIELD-SYMBOL(<ls_data>).
+
+    CASE e_column_id-fieldname.
+      WHEN 'ANLN' OR 'INVNR'.
+        SET PARAMETER ID 'BUK' FIELD <ls_data>-bukrs.
+        SET PARAMETER ID 'AN1' FIELD <ls_data>-anln1.
+        SET PARAMETER ID 'AN2' FIELD <ls_data>-anln2.
+        CALL TRANSACTION 'AS03' AND SKIP FIRST SCREEN.
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD on_menu_dropdown.
+    e_object->add_separator( ).
+
+    e_object->add_function(
+        fcode       = 'DEFAULT_EXPORT'
+        text        = CONV #( TEXT-t04 ) ).
+  ENDMETHOD.
+
+
+  METHOD on_toolbar_event.
+    APPEND LINES OF VALUE ttb_button(
+      ( butn_type = cntb_btype_sep )
+      ( butn_type = cntb_btype_dropdown function = 'EXPORT' icon = icon_xls text = TEXT-t00 quickinfo = TEXT-q00 ) ) TO e_object->mt_toolbar[].
+  ENDMETHOD.
+
+
+  METHOD on_ucomm_event.
+    CASE e_ucomm.
+      WHEN 'EXPORT'.
+        DATA(lr_simple) = NEW zcl_excel_simple( ).
+        gr_grid->check_changed_data( ).
+        lr_simple->create_from_alv( EXPORTING ir_grid = gr_grid
+                                              ir_data = REF #( gs_out-data[] )
+                                              iv_formname =  sy-cprog &&
+                                                SWITCH #( gs_out-type
+                                                  WHEN 'A' THEN '_ACQ_DEF'
+                                                  WHEN 'E' THEN '_END_DEF'
+                                                  WHEN 'R' THEN '_RET_DEF') && '.xlsx'
+                                              it_params = VALUE #( param_type = zcl_excel_inject=>c_param_type-placeholder
+                                               ( param_name = 'date'   value      = |{ sy-datum DATE = ENVIRONMENT }| )
+                                               ( param_name = 'BUTXT'  value      = gs_out-butxt )
+                                               ( param_name = 'PERIOD_TXT'  value      = gs_out-period_txt )
+                                               ( param_name = 'EXECUTER'    value      = gs_out-executer )
+                                               ( param_name = 'EXEC_POS'    value      = gs_out-exec_pos ) )
+                                    IMPORTING  et_msg  = DATA(lt_msg) ).
+        FREE lr_simple.
+      WHEN 'DEFAULT_EXPORT'.
+        DATA(lr_excel) = NEW lcl_exporter( iv_class = 'ZIBA_DOCS' iv_keyid = 'AA' iv_docname = TEXT-t01 iv_form = sy-cprog &&
+          SWITCH #( gs_out-type
+            WHEN 'A' THEN '_ACQ'
+            WHEN 'E' THEN '_END'
+            WHEN 'R' THEN '_RET') && '.xls'  ).
+        lr_excel->set_xml_source( iv_map = 'abap_map' iv_xml = lr_excel->transform_data( iv_show = '' is_source = gs_out ) ).
+        FREE lr_excel.
+
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD read_bwasl_defaults.
+    DATA: lt_bwasl TYPE RANGE OF bwasl.
+
+    "Оставляем поведение из ТЗ на случай возврата, обходим вышестоящим return.
+    DATA(lt_set) = SWITCH #( iv_type
+      WHEN 'A' THEN VALUE log_t_range_stat(
+        ( sign = 'I' option = 'EQ' low = '1' )
+        ( sign = 'I' option = 'EQ' low = '3' )
+        ( sign = 'I' option = 'EQ' low = '5' ) )
+      WHEN 'R' THEN VALUE log_t_range_stat(
+        ( sign = 'I' option = 'EQ' low = '2' )
+        ( sign = 'I' option = 'EQ' low = '4' ) ) ).
+
+    TRY.
+        zfi_cl_proptax_reestr_hdb=>read_bwasl_defaults(
+          EXPORTING
+            iv_gitcol = cl_shdb_seltab=>combine_seltabs(
+                          it_named_seltabs = VALUE #(
+                            ( name = 'GITCOL' dref = REF #( lt_set[] ) ) ) )
+            iv_type   = iv_type
+          IMPORTING
+            et_bwasl  = rt_bwasl[] ).
+      CATCH cx_root.
+        show_warning( iv_text = TEXT-e00 iv_astype = 'E' ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD reptype_modify_fcat.
+    cs_fcat = SWITCH #( gs_out-type
+      WHEN 'E' THEN VALUE #( BASE cs_fcat
+        no_out = SWITCH #( cs_fcat-fieldname
+          WHEN 'AKTIV_0818' OR 'AKTIV_01' OR 'DEAKT' OR 'OFPRIV' OR 'ZUGDT' THEN abap_true
+          WHEN 'AKTIV' OR 'UTVDATE' OR 'AKTNUM' OR 'BDATU' THEN abap_false
+          WHEN 'PRIV_COST' OR 'PRIV_AMORT' OR 'PRIV_NETVL' THEN abap_true
+          WHEN 'SHIPPER_TEXT' OR 'BWASL' OR 'BWATXT' THEN abap_true
+          ELSE cs_fcat-no_out )
+        scrtext_l = SWITCH #( cs_fcat-fieldname
+          WHEN 'BDATU' THEN TEXT-18l
+          WHEN 'START_COST' THEN TEXT-27l
+          WHEN 'START_AMORT' THEN TEXT-28l
+          WHEN 'START_NETVL' THEN TEXT-29l
+          WHEN 'END_COST' THEN TEXT-19l
+          WHEN 'END_AMORT' THEN TEXT-20l
+          WHEN 'END_NETVL' THEN TEXT-21l
+          ELSE cs_fcat-scrtext_l )
+        reptext = SWITCH #( cs_fcat-fieldname
+          WHEN 'BDATU' THEN TEXT-18l
+          WHEN 'START_COST' THEN TEXT-27l
+          WHEN 'START_AMORT' THEN TEXT-28l
+          WHEN 'START_NETVL' THEN TEXT-29l
+          WHEN 'END_COST' THEN TEXT-19l
+          WHEN 'END_AMORT' THEN TEXT-20l
+          WHEN 'END_NETVL' THEN TEXT-21l
+          ELSE cs_fcat-reptext )
+        scrtext_m = SWITCH #( cs_fcat-fieldname
+          WHEN 'BDATU' THEN TEXT-18m
+          WHEN 'START_COST' THEN TEXT-27m
+          WHEN 'START_AMORT' THEN TEXT-28m
+          WHEN 'START_NETVL' THEN TEXT-29m
+          WHEN 'END_COST' THEN TEXT-19m
+          WHEN 'END_AMORT' THEN TEXT-20m
+          WHEN 'END_NETVL' THEN TEXT-21m
+          ELSE cs_fcat-scrtext_m )
+        scrtext_s = SWITCH #( cs_fcat-fieldname
+          WHEN 'BDATU' THEN TEXT-18s
+          WHEN 'START_COST' THEN TEXT-27s
+          WHEN 'START_AMORT' THEN TEXT-28s
+          WHEN 'START_NETVL' THEN TEXT-29s
+          WHEN 'END_COST' THEN TEXT-19s
+          WHEN 'END_AMORT' THEN TEXT-20s
+          WHEN 'END_NETVL' THEN TEXT-21s
+          ELSE cs_fcat-scrtext_s )
+      )
+      WHEN 'R' THEN VALUE #( BASE cs_fcat
+        no_out = SWITCH #( cs_fcat-fieldname
+          WHEN 'AKTIV_0818' OR 'AKTIV' OR 'OFPRIV' OR 'ZUGDT' OR 'SHIPPER_TEXT' THEN abap_true
+          WHEN 'AKTIV_01' OR 'DEAKT' OR 'RECEIVER_TEXT' THEN abap_false
+          ELSE cs_fcat-no_out )
+        scrtext_l = SWITCH #( cs_fcat-fieldname
+          WHEN 'ADATU' THEN TEXT-18l
+          WHEN 'START_COST' THEN TEXT-27l
+          WHEN 'START_AMORT' THEN TEXT-28l
+          WHEN 'START_NETVL' THEN TEXT-29l
+          WHEN 'END_COST' THEN TEXT-31l
+          WHEN 'END_AMORT' THEN TEXT-32l
+          WHEN 'END_NETVL' THEN TEXT-33l
+          WHEN 'PRIV_COST' THEN TEXT-34l
+          WHEN 'PRIV_AMORT' THEN TEXT-35l
+          WHEN 'PRIV_NETVL' THEN TEXT-36l
+          ELSE cs_fcat-scrtext_l )
+        reptext = SWITCH #( cs_fcat-fieldname
+          WHEN 'ADATU' THEN TEXT-18l
+          WHEN 'START_COST' THEN TEXT-27l
+          WHEN 'START_AMORT' THEN TEXT-28l
+          WHEN 'START_NETVL' THEN TEXT-29l
+          WHEN 'END_COST' THEN TEXT-31l
+          WHEN 'END_AMORT' THEN TEXT-32l
+          WHEN 'END_NETVL' THEN TEXT-33l
+          WHEN 'PRIV_COST' THEN TEXT-34l
+          WHEN 'PRIV_AMORT' THEN TEXT-35l
+          WHEN 'PRIV_NETVL' THEN TEXT-36l
+          ELSE cs_fcat-reptext )
+        scrtext_m = SWITCH #( cs_fcat-fieldname
+          WHEN 'ADATU' THEN TEXT-18m
+          WHEN 'START_COST' THEN TEXT-27m
+          WHEN 'START_AMORT' THEN TEXT-28m
+          WHEN 'START_NETVL' THEN TEXT-29m
+          WHEN 'END_COST' THEN TEXT-31m
+          WHEN 'END_AMORT' THEN TEXT-32m
+          WHEN 'END_NETVL' THEN TEXT-33m
+          WHEN 'PRIV_COST' THEN TEXT-34m
+          WHEN 'PRIV_AMORT' THEN TEXT-35m
+          WHEN 'PRIV_NETVL' THEN TEXT-36m
+          ELSE cs_fcat-scrtext_m )
+        scrtext_s = SWITCH #( cs_fcat-fieldname
+          WHEN 'ADATU' THEN TEXT-18s
+          WHEN 'START_COST' THEN TEXT-27s
+          WHEN 'START_AMORT' THEN TEXT-28s
+          WHEN 'START_NETVL' THEN TEXT-29s
+          WHEN 'END_COST' THEN TEXT-31s
+          WHEN 'END_AMORT' THEN TEXT-32s
+          WHEN 'END_NETVL' THEN TEXT-33s
+          WHEN 'PRIV_COST' THEN TEXT-34s
+          WHEN 'PRIV_AMORT' THEN TEXT-35s
+          WHEN 'PRIV_NETVL' THEN TEXT-36s
+          ELSE cs_fcat-scrtext_s )
+      )      ELSE cs_fcat
+    ).
+
+  ENDMETHOD.
+
+
+  METHOD select_data.
+    DATA:
+      lt_okato1 TYPE RANGE OF gty_s_sscr-okato1,
+      lt_okato2 TYPE RANGE OF gty_s_sscr-okato2,
+      ls_vals   TYPE zaa_v2_stock.
+
+    IF is_sscr-okato1 IS NOT INITIAL.
+      lt_okato1 = VALUE #( ( 'IEQ' && is_sscr-okato1 ) ).
+    ENDIF.
+    IF is_sscr-okato2 IS NOT INITIAL.
+      lt_okato2 = VALUE #( ( 'IEQ' && is_sscr-okato2 ) ).
+    ENDIF.
+
+    TRY.
+        IF is_sscr-type = 'A'.
+          zfi_cl_proptax_reestr_hdb=>get_data_a(
+            EXPORTING
+              iv_begda      = is_sscr-period-begda
+              iv_endda      = is_sscr-period-endda
+              iv_anln_flt   = cl_shdb_seltab=>combine_seltabs(
+                                it_named_seltabs = VALUE #(
+                                  ( name = 'BUKRS' dref = REF #( is_sscr-it_bukrs[] ) )
+                                  ( name = 'ANLN1' dref = REF #( is_sscr-it_anln1[] ) ) ) )
+              iv_final_flt   = cl_shdb_seltab=>combine_seltabs(
+                                it_named_seltabs = VALUE #(
+                                  ( name = 'OKT1'  dref = REF #( lt_okato1[] ) )
+                                  ( name = 'OKT2'  dref = REF #( lt_okato2[] ) )
+                                  ( name = 'ANLKL' dref = REF #( is_sscr-it_anlkl[] ) )
+                                  ( name = 'INVNR' dref = REF #( is_sscr-it_invnr[] ) )
+                                  ( name = 'DEPGR' dref = REF #( is_sscr-it_group[] ) ) ) )
+              iv_move_flt   = cl_shdb_seltab=>combine_seltabs(
+                                it_named_seltabs = VALUE #(
+                                  ( name = 'BWASL' dref = REF #( is_sscr-it_bwasl[] ) ) ) )
+            IMPORTING
+              et_data  = gs_out-data[] ).
+        ELSE.
+          zfi_cl_proptax_reestr_hdb=>get_data(
+            EXPORTING
+              iv_type       = is_sscr-type
+              iv_begda      = is_sscr-period-begda
+              iv_endda      = is_sscr-period-endda
+              iv_anln_flt   = cl_shdb_seltab=>combine_seltabs(
+                                it_named_seltabs = VALUE #(
+                                  ( name = 'BUKRS' dref = REF #( is_sscr-it_bukrs[] ) )
+                                  ( name = 'ANLN1' dref = REF #( is_sscr-it_anln1[] ) ) ) )
+              iv_final_flt   = cl_shdb_seltab=>combine_seltabs(
+                                it_named_seltabs = VALUE #(
+                                  ( name = 'OKT1'  dref = REF #( lt_okato1[] ) )
+                                  ( name = 'OKT2'  dref = REF #( lt_okato2[] ) )
+                                  ( name = 'ANLKL' dref = REF #( is_sscr-it_anlkl[] ) )
+                                  ( name = 'INVNR' dref = REF #( is_sscr-it_invnr[] ) )
+                                  ( name = 'DEPGR' dref = REF #( is_sscr-it_group[] ) ) ) )
+              iv_move_flt   = cl_shdb_seltab=>combine_seltabs(
+                                it_named_seltabs = VALUE #(
+                                  ( name = 'BWASL' dref = REF #( is_sscr-it_bwasl[] ) ) ) )
+            IMPORTING
+              et_data  = gs_out-data[] ).
+        ENDIF.
+      CATCH cx_root.
+        show_warning( iv_text = TEXT-e01 iv_astype = 'E' ).
+        RETURN.
+    ENDTRY.
+
+    IF gs_out-data IS NOT INITIAL.
+      IF is_sscr-type = 'A'.
+        LOOP AT gs_out-data ASSIGNING FIELD-SYMBOL(<ls_data>) WHERE type = 3.
+          CALL FUNCTION 'ZAA_GET_STOCK'
+            EXPORTING
+              iv_bukrs = <ls_data>-bukrs_move
+              iv_anln1 = <ls_data>-anln1_move
+              iv_anln2 = <ls_data>-anln2_move
+              iv_date  = <ls_data>-aktiv_move
+              iv_afabe = '01'
+            IMPORTING
+              es_vals  = ls_vals.
+          <ls_data>-start_cost  = ls_vals-kansw.
+          <ls_data>-start_amort = ls_vals-knafa * -1.
+          <ls_data>-start_netvl = ls_vals-netvl.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+    TRY.
+        zcl_names=>get_fio_formatted(
+          EXPORTING
+            iv_uname = sy-uname
+            iv_date  = is_sscr-period-endda
+          IMPORTING
+            et_pernr = DATA(lt_fio) ).
+      CATCH cx_root.
+        show_warning( iv_text = TEXT-e03 iv_astype = 'E' ).
+        RETURN.
+    ENDTRY.
+
+    TRY.
+        gs_out-executer = lt_fio[ 1 ]-ename.
+        gs_out-exec_pos = lt_fio[ 1 ]-plong.
+      CATCH cx_sy_itab_line_not_found.
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD set_page_header.
+    IF cl_gui_alv_grid=>offline( ) IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lr_html) = NEW cl_dd_document( style = 'ALV_GRID' background_color = 35 ).
+
+    IF gs_out-bukrs IS NOT INITIAL.
+      lr_html->add_text( text = TEXT-t01 sap_emphasis = cl_dd_document=>strong ).
+      lr_html->add_gap( width = 2 ).
+      lr_html->add_text( text = gs_out-bukrs && ` (` && gs_out-butxt && `)` ).
+
+      lr_html->new_line( ).
+    ENDIF.
+
+    lr_html->add_text( text = TEXT-t02 sap_emphasis = cl_dd_document=>strong ).
+    lr_html->add_gap( width = 25 ).
+    lr_html->add_text( text = |{ gs_out-period-begda+6(2) }.{ gs_out-period-begda+4(2) }.{ gs_out-period-begda(4) } - | &&
+      |{ gs_out-period-endda+6(2) }.{ gs_out-period-endda+4(2) }.{ gs_out-period-endda(4) }| ).
+
+    lr_html->new_line( ).
+    lr_html->add_text( text = TEXT-t03 sap_emphasis = cl_dd_document=>strong ).
+    lr_html->add_gap( width = 11 ).
+    lr_html->add_text( text = CONV #( gs_out-afabe ) ).
+
+    lr_html->display_document( parent = ir_container ).
+  ENDMETHOD.
+
+
+  METHOD set_title.
+    rv_title = title = SWITCH #( im_type
+                          WHEN 'A' THEN TEXT-rta
+                          WHEN 'E' THEN TEXT-rte
+                          WHEN 'R' THEN TEXT-rtr ).
+  ENDMETHOD.
+
+
+  METHOD show_alv.
+    IF gr_grid IS BOUND.
+      gr_grid->refresh_table_display( EXPORTING is_stable = VALUE lvc_s_stbl( row = abap_true col = abap_true )
+                                      EXCEPTIONS OTHERS = 0
+                                     ).
+      RETURN.
+    ENDIF.
+
+    DATA(lt_fcat)     = me->fill_fieldcat( gs_out-type ).
+    DATA(ls_variant)  = VALUE disvariant( report = sy-cprog variant = gs_out-variant-variant ).
+    DATA(ls_layout)   = VALUE lvc_s_layo( zebra = abap_true col_opt = abap_true ).
+    DATA(lt_sort)     = VALUE lvc_t_sort(
+      ( spos = 1 fieldname = 'BUKRS'   up = abap_true )
+      ( spos = 2 fieldname = 'ANLN'    up = abap_true )
+    ).
+
+    DATA(lr_splitter) = NEW cl_gui_splitter_container(
+      parent = NEW cl_gui_custom_container( container_name = 'ALV_CONTAINER' )
+      rows = 2
+      columns = 1 ).
+    lr_splitter->set_row_height( id = 1 height = 8 ).
+    me->set_page_header( lr_splitter->get_container( row = 1 column = 1 ) ).
+
+
+*    gr_grid = NEW #( i_parent =  lr_splitter->get_container( row = 2 column = 1 ) i_appl_events = abap_true ).
+    gr_grid = NEW #( i_parent =  lr_splitter->get_container( row = 2 column = 1 )  ).
+    gr_grid->register_edit_event( i_event_id = cl_gui_alv_grid=>mc_evt_modified ).
+
+    SET HANDLER
+      me->on_hotspot_event
+      me->on_ucomm_event
+      me->on_toolbar_event
+      me->on_menu_dropdown
+      FOR gr_grid.
+
+    gr_grid->set_table_for_first_display(
+      EXPORTING is_layout             = ls_layout
+                i_save                = 'A'
+                i_default             = abap_true
+                is_variant            = ls_variant
+      CHANGING  it_outtab             = gs_out-data[]
+                it_fieldcatalog       = lt_fcat[]
+                it_sort               = lt_sort ).
+  ENDMETHOD.
+
+
+  METHOD show_warning.
+    DATA: lv_message TYPE string.
+
+    lv_message = iv_text.
+
+    lv_message = replace( val =
+      replace( val =
+        replace( val =
+          replace( val = lv_message sub = '&' with = iv_var1 occ = 1 )
+        sub = '&' with = iv_var2 occ = 1 )
+      sub = '&' with = iv_var3 occ = 1 )
+    sub = '&' with = iv_var4 occ = 1 ).
+
+    IF iv_astype IS SUPPLIED.
+      MESSAGE lv_message TYPE iv_type DISPLAY LIKE iv_astype.
+    ELSE.
+      MESSAGE lv_message TYPE iv_type.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

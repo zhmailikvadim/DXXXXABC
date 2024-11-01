@@ -1,0 +1,298 @@
+CLASS zfi_amort_assets_f1_hdb DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+    INTERFACES IF_AMDP_MARKER_HDB.
+
+    TYPES:
+      BEGIN OF GTY_S_AMORT,
+        BUKRS TYPE ANLA-BUKRS,          " БЕ
+        ANLN1 TYPE ANLA-ANLN1,          " СИСТЕМНЫЙ НОМЕР ОСА
+        ANLN2 TYPE ANLA-ANLN2,          " СУБНОМЕР ОС
+        kansw01          TYPE kansw,
+        depr01           TYPE kansw,
+*        value_beg  TYPE acdoca-hsl,      "Первоначальная (переоцен) стоим. на нач.пер.
+*        am_beg     TYPE acdoca-hsl,      "Накопленная амортизация на нач. периода
+        typeuse    TYPE ztypeuse,
+      END OF GTY_S_AMORT,
+    GTY_T_AMORT TYPE STANDARD TABLE OF GTY_S_AMORT WITH EMPTY KEY.
+
+    CLASS-METHODS:
+    GET_DATA                             "ВЫБОРКА ДАННЫХ
+      IMPORTING
+        VALUE(IV_GJAHR)  TYPE GJAHR       "ГОД ОТЧЕТА
+        VALUE(IV_MFROM)  TYPE BKPF-MONAT  "МЕСЯЦ С
+        VALUE(IV_MTO)    TYPE BKPF-MONAT  "МЕСЯЦ ПО
+        VALUE(IV_FLT)    TYPE STRING      "ФИЛЬТР ПО ПРОЧИМ ПОЛЯМ
+      EXPORTING
+        VALUE(ET_DATA)   TYPE GTY_T_AMORT.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZFI_AMORT_ASSETS_F1_HDB IMPLEMENTATION.
+
+
+METHOD  GET_DATA BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT
+                   USING ZAA_UTILS_HDB=>GET_ASSET_VAL_NG ZFI_AMORT_AFABE_HDB=>GET_ASSET_SPI  "ZAA_UTILS_HDB=>GET_ASSET_SPI
+                         T001L ZAA_VIDUSE_TEXT ANLA ANKT ZANLZ ANLZ PRPS ANLB T499S T001W T093C T090NAT ANLU T095 T095B
+                         ZANLU GLOFAAASSETDATA GLOFAATMDPNDNT J_3RFDEPRGROUPT CSKT T001 TKA02 AUFK FAAV_ANLP TABW TABWG.
+
+    DECLARE LV_SDATE CHAR(8) := :IV_GJAHR || :IV_MFROM || '01';                     -- ДАТА НАЧАЛО ОТЧЕТА
+    DECLARE LV_EDATE CHAR(8) := TO_DATS(LAST_DAY( :IV_GJAHR || :IV_MTO || '01' ) ); -- ДАТА ОКОНЧАНИЯ ОТЧЕТА
+    DECLARE LV_GDATE CHAR(8) := :IV_GJAHR || '0000';                                -- ДАТА НАЧАЛО ГОДА
+    DECLARE LV_MANDT CHAR(3) := SESSION_CONTEXT('CLIENT');
+    DECLARE LV_SPRAS CHAR(1) := SESSION_CONTEXT('LOCALE_SAP');
+
+    DECLARE LV_SPER  CHAR(7) := ( :IV_GJAHR - 1) || '012';                          -- ЗАТРАТЫ НА НАЧАЛО ПЕРИОДА
+    DECLARE LV_EPER  CHAR(7) := :IV_GJAHR || '0' || :IV_MTO;
+
+    -- ВЫБОРКА ОСНОВНЫХ ДАННЫХ ОС
+    LT_DATA =
+    SELECT  ANLB.AFABE,
+            ANLA.BUKRS,
+            ANLA.ANLN1,
+            ANLA.INVNR,
+            ANLA.TXT50,
+            ANLA.AKTIV,
+            ANLU.ZZBUDATE AS ZUGDT,
+            ANLB.AFABG,
+            ANLB.AFASL AS AFASL,
+            ANLB.AFASL || CHAR(32) ||  COALESCE(T090T.AFATXT,'') AS AFASL_NM,
+            COALESCE(ANLBZA_BEG.NDJAR, ANLB.NDJAR) AS NDJAR_BEG,                -- СПИ, ЛЕТ
+            COALESCE(ANLBZA_BEG.NDPER, ANLB.NDPER) AS NDPER_BEG,                -- СПИ, МЕСЯЦЕВ
+            COALESCE(ANLBZA_END.NDJAR, ANLB.NDJAR) AS NDJAR_END,                -- СПИ, ЛЕТ
+            COALESCE(ANLBZA_END.NDPER, ANLB.NDPER) AS NDPER_END,                -- СПИ, МЕСЯЦЕВ
+            ZANLU.COSTRE_AC,                                                    -- ПЕРВОНАЧАЛЬНАЯ СТОИМОСТЬ
+            ZANLU.GRMSFO AS GRMSFO,                                             -- ГРУППА ОС/НМА ПО МСФО
+            ZANLU.EXPDATE AS EXPDATE,                                           -- ДАТА НАЧАЛА ЭКСПЛУАТАЦИИ ПО МСФО
+            ZANLU.MSFOACC AS MSFOACC,                                           -- СЧЕТ ЗАТРАТ ПО МСФО
+            ( SELECT SUM( NAFAZ + SAFAZ + AUFNG )
+                FROM FAAV_ANLP
+                WHERE MANDT = ANLA.MANDT
+                  AND ANLN1 = ANLA.ANLN1
+                  AND ANLN2 = ANLA.ANLN2
+                  AND AFABER = ANLB.AFABE
+                  AND GJAHR = :IV_GJAHR
+                  AND RIGHT(PERAF,2) BETWEEN :IV_MFROM AND :IV_MTO ) AS AM_PER, -- АМОРТИЗАЦИЯ ЗА ПЕРИОД БЕЗ ВНЕПЛАНОВОЙ
+            ( SELECT SUM( AAFAZ )
+                FROM FAAV_ANLP
+                WHERE MANDT = ANLA.MANDT
+                  AND ANLN1 = ANLA.ANLN1
+                  AND ANLN2 = ANLA.ANLN2
+                  AND AFABER = ANLB.AFABE
+                  AND GJAHR = :IV_GJAHR
+                  AND RIGHT(PERAF,2) BETWEEN :IV_MFROM AND :IV_MTO ) AS AM_PER_VN, -- ВНЕПЛАНОВАЯ АМОРТИЗАЦИЯ ЗА ПЕРИОД
+            ZANLZ.VIDUSE || CHAR(32) || ZAA_VIDUSE_TEXT.VIDUSE_NAME AS VIDUSE,  --16   ВИД ИСПОЛЬЗОВАНИЯ ZANLZ- VIDUSE, ФОРМАТ: «КОД НАИМЕНОВАНИЕ»
+            T095.KTANSW,                                                        -- СЧЕТ ЗАПАСА
+            T095B.KTNAFG,                                                       -- СЧЕТ ЗАТРАТ
+            T095B.KTNAFB,                                                       -- СЧЕТ АМОРТИЗАЦИИ
+            T095_50.KTANSW AS KTANSW_50,                                        -- СЧЕТ НАЛИЧИЯ ПО МСФО
+            ZANLZ.MSFOACCEPT AS MSFOACCEPT,                                     -- КРИТЕРИЙ ПРИЗНАНИЯ ПО МСФО
+            ZANLZ.TYPEUSE    AS TYPEUSE,
+            ANLA.ANLN2,
+            ANLA.DEAKT,
+            G.GLO_RUS_OKOF,                                                     -- ШИФР НОРМАТИВНОГО СРОКА СЛУЖБЫ
+            ANLA.ANLKL,
+            ANLA.ANLKL || CHAR(32) || ANKT.TXK20 AS TXK20,
+            COALESCE(ANLZ.KOSTL,'') AS KOSTL,
+            COALESCE(G.GLO_RUS_DEPGR,'') AS DEPGR,
+            COALESCE(G.GLO_RUS_DEPGR,'') || CHAR(32) || COALESCE(JT.DESCRIPT,'') AS DEPGR_NM,
+            CSKT.KOSTL || CHAR(32) || CSKT.KTEXT  AS NAME_KOSTL,                -- НАИМЕНОВАНИЕ МВЗ
+            COALESCE(ANLZ.WERKS,'') AS WERKS,
+            T001W.WERKS || CHAR(32) || T001W.NAME1 || T001W.NAME2 AS NAME_WERKS,
+            COALESCE(ANLZ.CAUFN,'') AS CAUFN,
+            ANLZ.CAUFN || CHAR(32) || AUFK.KTEXT AS NAME_CAUFN,
+            COALESCE(ANLZ.PS_PSP_PNR2,'') AS PS_PSP_PNR2,
+            PRPS.POSID || CHAR(32) || PRPS.POST1 AS POST1,
+            COALESCE(ANLZ.RAUMN,'') AS RAUMN,
+            COALESCE(ANLZ.LGORT,'') AS LGORT,
+            T001.WAERS,
+            T001L.LGORT || CHAR(32) || T001L.LGOBE AS NAME_LGORT,
+            CASE WHEN  ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP ) = 0
+                 THEN 0
+                 ELSE FLOOR( ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP -1 )/12 ) END AS FCJAR,                           --ФCC, ЛЕТ
+            CASE WHEN ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP ) = 0
+                 THEN 0
+                 ELSE MOD( ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP - 1 ),12 ) END  AS FCPER,                           --ФCC, МЕС
+            CASE WHEN  ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP  = 0
+                 THEN ANLBZA_BEG.NDJAR
+                 WHEN ( ANLBZA_BEG.NDJAR * 12 + ANLBZA_BEG.NDPER ) < ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP - 1 )
+                 THEN 0
+                 ELSE FLOOR( (( ANLBZA_BEG.NDJAR * 12 + ANLBZA_BEG.NDPER ) - ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP - 1 ))/12 ) END AS RSJAR,                         --ОCC, ЛЕТ
+            CASE WHEN  ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP  = 0
+                 THEN ANLBZA_BEG.NDPER
+                 WHEN ( ANLBZA_BEG.NDJAR * 12 + ANLBZA_BEG.NDPER ) < ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP - 1 )
+                 THEN 0
+                 ELSE MOD( (( ANLBZA_BEG.NDJAR * 12 + ANLBZA_BEG.NDPER ) - ( ANLBZA_BEG.USEJ * 12 + ANLBZA_BEG.USEP - 1 )),12 ) END   AS RSPER,                         --ОCC, МЕС
+            ANLBZA_END.USEJ  AS FCJAR_END,                                               --ФCC, ЛЕТ
+            ANLBZA_END.USEP  AS FCPER_END,                                               --ФCC, МЕС
+            ANLBZA_END.RESTJ AS RSJAR_END,                                               --ОCC, ЛЕТ
+            ANLBZA_END.RESTP AS RSPER_END                                                --ОCC, МЕС
+       FROM ANLA AS ANLA
+         INNER JOIN ANLB AS ANLB ON  ANLB.MANDT = ANLA.MANDT                  -- ДАННЫЕ ПО ОЦЕНКЕ ОС НА ТЕК МОМЕНТ
+                                 AND ANLB.BUKRS = ANLA.BUKRS
+                                 AND ANLB.ANLN1 = ANLA.ANLN1
+                                 AND ANLB.ANLN2 = ANLA.ANLN2
+*                                AND ANLB.AFABE =  AFABE
+         INNER JOIN T001 AS T001 ON  T001.BUKRS = ANLA.BUKRS                  --ДАННЫЕ БЕ
+                                 AND T001.MANDT = ANLA.MANDT
+         INNER JOIN TKA02 AS TKA02 ON  TKA02.MANDT = ANLA.MANDT               --ПРИСВОЕНИЕ КЕ
+                                   AND TKA02.BUKRS = ANLA.BUKRS
+         LEFT OUTER JOIN ANKT AS ANKT ON  ANKT.MANDT = ANLA.MANDT
+                                      AND ANKT.SPRAS = :LV_SPRAS
+                                      AND ANKT.ANLKL = ANLA.ANLKL
+         LEFT OUTER JOIN ZANLZ AS ZANLZ ON  ZANLZ.MANDT = ANLA.MANDT          -- ВРЕМЕННО ЗАВИСИМЫЕ ДОПДАННЫЕ ОС
+                                        AND ZANLZ.INVNR = ANLA.INVNR
+                                        AND ZANLZ.ADATU < :LV_SDATE
+                                        AND ZANLZ.BDATU >= :LV_SDATE
+                                        AND ANLA.INVNR <> ''
+         LEFT OUTER JOIN ANLZ AS ANLZ ON  ANLZ.MANDT = ANLA.MANDT             -- ОС ВРЕМЕННО ЗАВИМ ДАННЫЕ
+                                      AND ANLZ.BUKRS = ANLA.BUKRS
+                                      AND ANLZ.ANLN1 = ANLA.ANLN1
+                                      AND ANLZ.ANLN2 = ANLA.ANLN2
+                                      AND ANLZ.ADATU <= :LV_SDATE
+                                      AND ANLZ.BDATU >= :LV_SDATE
+         LEFT OUTER JOIN ANLU AS ANLU ON  ANLU.MANDT = ANLA.MANDT             -- ОС ВРЕМЕННО ЗАВИМ ДАННЫЕ
+                                      AND ANLU.BUKRS = ANLA.BUKRS
+                                      AND ANLU.ANLN1 = ANLA.ANLN1
+                                      AND ANLU.ANLN2 = ANLA.ANLN2
+         LEFT OUTER JOIN T001L AS T001L ON  T001L.MANDT = ANLZ.MANDT
+                                        AND T001L.WERKS = ANLZ.WERKS
+                                        AND T001L.LGORT = ANLZ.LGORT
+         LEFT OUTER JOIN T001W AS T001W ON  T001W.MANDT = ANLA.MANDT          -- ЗАВОД
+                                        AND T001W.WERKS = ANLZ.WERKS
+         LEFT OUTER JOIN PRPS AS PRPS ON  PRPS.MANDT = ANLZ.MANDT             -- СПП
+                                      AND PRPS.PSPNR = ANLZ.PS_PSP_PNR2
+         LEFT OUTER JOIN T499S AS T499S ON  T499S.MANDT = ANLA.MANDT          -- МЕСТОПОЛОЖ
+                                        AND T499S.WERKS = ANLZ.WERKS
+                                        AND T499S.STAND = ANLZ.STORT
+         LEFT OUTER JOIN ZAA_VIDUSE_TEXT AS ZAA_VIDUSE_TEXT ON  ZAA_VIDUSE_TEXT.MANDT  = ZANLZ.MANDT
+                                                            AND ZAA_VIDUSE_TEXT.SPRAS  = :LV_SPRAS
+                                                            AND ZAA_VIDUSE_TEXT.VIDUSE = ZANLZ.VIDUSE
+         LEFT OUTER JOIN "ZFI_AMORT_AFABE_HDB=>GET_ASSET_SPI"( SESSION_CONTEXT('CLIENT'), :LV_SDATE ) AS ANLBZA_BEG
+                                         ON ANLBZA_BEG.BUKRS = ANLA.BUKRS     -- ДАННЫЕ ПО ОЦЕНКЕ НА НАЧ ОТЧЕТА
+                                        AND ANLBZA_BEG.ANLN1 = ANLA.ANLN1
+                                        AND ANLBZA_BEG.ANLN2 = ANLA.ANLN2
+                                        AND ANLBZA_BEG.AFABE = ANLB.AFABE
+         LEFT OUTER JOIN "ZFI_AMORT_AFABE_HDB=>GET_ASSET_SPI"( SESSION_CONTEXT('CLIENT'), :LV_EDATE ) AS ANLBZA_END
+                                         ON ANLBZA_END.BUKRS = ANLA.BUKRS     -- ДАННЫЕ ПО ОЦЕНКЕ НА НАЧ ОТЧЕТА
+                                        AND ANLBZA_END.ANLN1 = ANLA.ANLN1
+                                        AND ANLBZA_END.ANLN2 = ANLA.ANLN2
+                                        AND ANLBZA_END.AFABE = ANLB.AFABE
+         LEFT OUTER JOIN GLOFAAASSETDATA AS G ON  ANLA.MANDT = G.MANDT        -- ОС СПЕЦИФИКА СТРАНЫ
+                                              AND ANLA.BUKRS = G.BUKRS
+                                              AND ANLA.ANLN1 = G.ANLN1
+                                              AND ANLA.ANLN2 = G.ANLN2
+         LEFT OUTER JOIN J_3RFDEPRGROUPT AS JT ON  JT.MANDT = G.MANDT
+                                               AND JT.SPRSL = :LV_SPRAS
+                                               AND JT.AMORTGR = G.GLO_RUS_DEPGR
+         INNER JOIN T093C AS T093C ON  T093C.MANDT = T001.MANDT               -- ПЛАН ОЦЕНКИ
+                                   AND T093C.BUKRS = T001.BUKRS
+         LEFT JOIN T090NAT AS T090T ON  T090T.MANDT = ANLB.MANDT
+                                    AND T090T.AFAPL = T093C.AFAPL
+                                    AND T090T.SPRAS = :LV_SPRAS
+                                    AND T090T.AFASL = ANLB.AFASL
+         INNER JOIN T095 AS T095 ON  T095.MANDT = ANLA.MANDT                  -- СЧЕТА ЗАПАСА КЛАССА ОС
+                                 AND T095.KTOPL = T001.KTOPL
+                                 AND T095.KTOGR = ANLA.KTOGR
+                                 AND T095.AFABE = '01'
+         LEFT OUTER JOIN T095B AS T095B ON  T095B.MANDT = ANLA.MANDT          -- ЗАТРАТНЫЕ СЧЕТА КЛАССА ОС
+                                        AND T095B.KTOPL = T001.KTOPL
+                                        AND T095B.KTOGR = ANLA.KTOGR
+                                        AND T095B.AFABE = '01'
+         LEFT OUTER JOIN T095 AS T095_50 ON  T095_50.MANDT = ANLA.MANDT       -- СЧЕТ НАЛИЧИЯ ПО МСФО
+                                         AND T095_50.KTOPL = T001.KTOPL
+                                         AND T095_50.KTOGR = ANLA.KTOGR
+                                         AND T095_50.AFABE = '50'
+         LEFT OUTER JOIN ZANLU AS ZANLU ON  ZANLU.MANDT = ANLA.MANDT          -- ДОП ДАННЫЕ ОС
+                                        AND ZANLU.INVNR = ANLA.INVNR
+         LEFT OUTER JOIN GLOFAATMDPNDNT AS GT ON  GT.MANDT = ANLA.MANDT       -- ОС СПЕЦИФИКА СТРАНЫ - ВРЕМЕННО ЗАВИСИМ
+                                              AND GT.BUKRS = ANLA.BUKRS
+                                              AND GT.ANLN1 = ANLA.ANLN1
+                                              AND GT.ANLN2 = ANLA.ANLN2
+                                              AND GT.ADATU <= :LV_SDATE
+                                              AND GT.BDATU >= :LV_SDATE
+         LEFT OUTER JOIN AUFK AS AUFK ON  AUFK.MANDT = ANLZ.MANDT             -- ЗАКАЗЫ
+                                      AND AUFK.AUFNR = ANLZ.CAUFN
+         LEFT OUTER JOIN CSKT AS CSKT ON  CSKT.MANDT = ANLA.MANDT             -- АКТУАЛЬНОЕ НАЗВАНИЕ МВЗ
+                                      AND CSKT.SPRAS = :LV_SPRAS
+                                      AND CSKT.KOKRS = TKA02.KOKRS
+                                      AND CSKT.KOSTL = ANLZ.KOSTL
+                                      AND DATBI = ( SELECT MIN( DATBI )
+                                                      FROM CSKT AS T
+                                                     WHERE T.MANDT = ANLA.MANDT
+                                                       AND T.SPRAS = :LV_SPRAS
+                                                       AND T.KOKRS = TKA02.KOKRS
+                                                       AND T.KOSTL = ANLZ.KOSTL
+                                                       AND T.DATBI >= :LV_SDATE )
+       WHERE ANLA.MANDT = :LV_MANDT
+         AND ANLA.AKTIV <= :LV_EDATE AND ANLA.AKTIV > '19000101'
+         AND ( ANLA.DEAKT <= '19000101' OR ANLA.DEAKT >= :LV_SDATE );
+
+
+    LT_DATA = APPLY_FILTER (:LT_DATA, :IV_FLT);
+    IF IS_EMPTY ( :LT_DATA ) THEN RETURN;
+    END IF;
+
+  -- РАССЧИТЫВАЮТСЯ СТОИМОСТИ НА НАЧАЛО И КОНЕЦ ОТЧЕТА
+  LT_VALS =
+     SELECT AFABE,
+            BUKRS,
+            ANLN1,
+            ANLN2,
+            SUM( VALUE_BEG ) AS VALUE_BEG,
+            SUM( NETVL_BEG ) AS NETVL_BEG,
+            SUM( VALUE_END ) AS VALUE_END,
+            SUM( NETVL_END ) AS NETVL_END,
+            SUM( VL_IN  ) AS VL_IN ,
+            SUM( AM_IN  ) AS AM_IN ,
+            SUM( VL_OUT ) AS VL_OUT,
+            SUM( AM_OUT ) AS AM_OUT
+        FROM
+         ( SELECT DT.AFABE,
+                  DT.BUKRS,
+                  DT.ANLN1,
+                  DT.ANLN2,
+                  CASE WHEN MOVS.BUDAT < :LV_SDATE THEN MOVS.KANSW END AS VALUE_BEG,
+                  CASE WHEN MOVS.BUDAT < :LV_SDATE THEN MOVS.NETVL END AS NETVL_BEG,
+                  CASE WHEN MOVS.BUDAT <= :LV_EDATE THEN MOVS.KANSW END AS VALUE_END,
+                  CASE WHEN MOVS.BUDAT <= :LV_EDATE THEN MOVS.NETVL END AS NETVL_END,
+                  CASE WHEN MOVS.BUDAT >= :LV_SDATE AND TABWG.GITCOL IN ( '1', '3', '5') THEN MOVS.KANSW END AS VL_IN,
+                  CASE WHEN MOVS.BUDAT >= :LV_SDATE AND TABWG.GITCOL IN ( '1', '3', '5') THEN MOVS.KANSW - MOVS.NETVL END AS AM_IN,
+                  CASE WHEN MOVS.BUDAT >= :LV_SDATE AND TABWG.GITCOL IN ( '4', '2')      THEN MOVS.KANSW END AS VL_OUT,
+                  CASE WHEN MOVS.BUDAT >= :LV_SDATE AND TABWG.GITCOL IN ( '4', '2')      THEN - MOVS.KANSW + MOVS.NETVL END AS AM_OUT
+             FROM "ZAA_UTILS_HDB=>GET_ASSET_VAL_NG"( SESSION_CONTEXT('CLIENT') ) AS MOVS
+               INNER JOIN :LT_DATA AS DT ON  MOVS.BUKRS = DT.BUKRS
+                                         AND MOVS.ANLN1 = DT.ANLN1
+                                         AND MOVS.ANLN2 = DT.ANLN2
+                                         AND MOVS.AFABE = DT.AFABE
+                                         AND MOVS.BUDAT >= :LV_GDATE
+                                         AND MOVS.BUDAT <= :LV_EDATE
+              LEFT JOIN TABW AS TABW ON  TABW.MANDT = SESSION_CONTEXT('CLIENT')
+                                     AND TABW.BWASL = MOVS.BWASL
+              LEFT JOIN TABWG AS TABWG ON  TABWG.MANDT = TABW.MANDT
+                                       AND TABWG.BWAGRP = TABW.BWAGRP
+        ) GROUP BY AFABE, BUKRS, ANLN1, ANLN2 ;
+
+
+ -- ФОРМИРОВАНИЕ ВЫХОДНОЙ ТАБЛИЦЫ -=ФОРМИРУЕМ ЗАВИСИМЫЕ ДАННЫЕ
+  ET_DATA =
+     SELECT LT.BUKRS,
+            LT.ANLN1,
+            LT.ANLN2,
+            VL.VALUE_BEG AS KANSW01,
+            VL.VALUE_BEG - VL.NETVL_BEG  AS DEPR01,
+            LT.TYPEUSE
+        FROM :LT_DATA AS LT LEFT OUTER JOIN :LT_VALS AS VL ON  LT.AFABE = VL.AFABE
+                                                           AND LT.BUKRS = VL.BUKRS
+                                                           AND LT.ANLN1 = VL.ANLN1
+                                                           AND LT.ANLN2 = VL.ANLN2
+       ORDER BY LT.AFABE, LT.BUKRS, LT.ANLN1, LT.ANLN2;
+  ENDMETHOD.
+ENDCLASS.

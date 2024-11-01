@@ -1,0 +1,1700 @@
+FUNCTION ADDR_MEMORY_SAVE
+  IMPORTING
+    VALUE(EXECUTE_IN_UPDATE_TASK) LIKE SZAD_FIELD-FLAG DEFAULT SPACE
+  EXCEPTIONS
+    ADDRESS_NUMBER_MISSING
+    PERSON_NUMBER_MISSING
+    INTERNAL_ERROR
+    DATABASE_ERROR
+    REFERENCE_MISSING.
+
+
+
+
+*{
+*-----------------------------------------------------------------------
+*   Speichert das gesamte lokale Gedächtnis auf die Datenbank
+*   und schreibt die Änderungsbelege.
+*-----------------------------------------------------------------------
+*
+*   Vorbedingungen:
+*   - Alle Adreßnummern sind gezogen. Ansonsten wird die Ausnahme
+*     ADDRESS_NUMBER_MISSING ausgelöst.
+*   - Alle Personennummern sind gezogen. Ansonsten wird die Ausnahme
+*     PERSON_NUMBER_MISSING ausgelöst.
+*
+*   Nachbedingungen:
+*   - Lokales Gedächtnis ist intakt und erfüllt alle Konsistenz-
+*     bedingungen. Insbesondere sind die Indextabellen danach noch
+*     up-to-date.
+*
+*-----------------------------------------------------------------------
+*
+*   Vorgehen:
+*  (0. gemäß Tabelle G_TEMPORARY_POINTERS in der IADRP die Indizes in
+*      den Feldern ADDR_PERS und ADDR_COMP durch Adreßnummern ersetzen.)
+*   1. Änderungsbelege erstellen
+*        Für alle Adreßobjekte:
+*          Daten in x und z-Tabellen stellen
+*          Änderungsbeleg schreiben
+*   2. DB schreiben
+*        Für alle DB-Tabellen:
+*          1. Delete-Lauf
+*          2. Update-Lauf
+*          3. Insert-Lauf
+*   3. Konsistenzcheck des lok. Ged.
+*      (fehlt noch)
+*      Idee: Änderungsbelege löschen sukzessive die Daten aus dem
+*      lokalen Gedächtnis - am Ende muß dann das lokale Gedächtnis
+*      leer sein.
+*
+*-----------------------------------------------------------------------
+*---------------------------------------------------------------------*
+*       MAKRO perform_write
+*---------------------------------------------------------------------*
+*       Schreiben der Veränderungen einer Datenbanktabelle            *
+*       auf die Datenbank sowie Modifikation des lokalen              *
+*       Gedächtnis auf den Stand nach dem Datenbankupdate.            *
+*---------------------------------------------------------------------*
+*       Parameter:
+*       &1   Name der Datenbanktabelle
+*---------------------------------------------------------------------*
+*       Vorbedingungen:
+*       - DB-Tabelle &1 besitzt zugehörige i&1, x&1 und z&1 Tabellen.
+*         (alle DB-Tabellen für die Änderungsbelege geschrieben werden)
+*       - Feld &1-op_code existiert
+*       Vorgehen:
+*       - Unter der Annahme, daß die Mehrzahl aller Einträge beim
+*         Speichern des lokalen Gedächtnis unverändert bleiben,
+*         werden die Z-Tabellen sukzessive bearbeitet, anstatt
+*         aus den modifizierten I-Tabellen kopiert zu werden.
+*---------------------------------------------------------------------*
+  DEFINE perform_write.
+
+    if not i&1[] is initial.                                "*152i
+* ------------------------- Gelöschte Einträge
+
+*      perform clear_table tables x&1.                "694d
+      clear x&1.                                            "*694i
+      refresh x&1.                                          "*694i
+      if c_&1_key_length eq 0.                              "*133i
+        get_key_length_of &1.                               "*133i
+      endif.                                                "*133i
+      loop at i&1
+           where op_code    =  c_delete
+           and   addrnumber in la_addrnumber.               "*1010i
+*       move i&1(c_&1_key_length) to x&1(c_&1_key_length).  "*1401d
+        move-corresponding  i&1   to x&1.                   "*1401i
+        append x&1.
+
+        i&1-op_code = c_ignore.
+        modify i&1.
+
+        move i&1(c_&1_key_length) to l_key_&2(c_&1_key_length).
+        perform get_table_index_for_delete
+          tables z&1 using 'Z&1' l_key_&2 changing z_index.
+        delete z&1 index z_index.
+      endloop.
+
+*DELETE &1 FROM TABLE X&1.
+*IF SY-SUBRC <> 0.
+*  MESSAGE A840 WITH '&1' RAISING INTERNAL_ERROR.
+** Datenbankfehler beim Löschen aus Tabelle &
+*ENDIF.
+      move x&1[] to &1_d[].                          "#EC ENHOK "*1332u
+
+* ------------------------- Geänderte Einträge
+*      perform clear_table tables x&1.                   "694d
+      clear x&1.                                            "*694i
+      refresh x&1.                                          "*694i
+      loop at i&1
+           where op_code    =  c_update
+           and   addrnumber in la_addrnumber.               "*1010i
+        move i&1 to x&1.
+        append x&1.
+
+        i&1-op_code = c_skip.
+        modify i&1.
+
+        move i&1(c_&1_key_length) to l_key_&2(c_&1_key_length).
+        perform get_table_index_for_update
+          tables z&1 using 'Z&1' l_key_&2 changing z_index.
+        move i&1 to z&1.                                    "*15i
+        modify z&1 index z_index.
+      endloop.
+
+*UPDATE &1 FROM TABLE X&1.
+*IF SY-SUBRC <> 0.
+*  MESSAGE A841 WITH '&1' RAISING INTERNAL_ERROR.
+** Datenbankfehler beim Ändern von Tabelle &
+*ENDIF.
+      move x&1[] to &1_u[].                          "#EC ENHOK "*1332u
+
+* ------------------------- Eingefügte Einträge
+*      perform clear_table tables x&1.                             "694d
+      clear x&1.                                            "*694i
+      refresh x&1.                                          "*694i
+      loop at i&1
+           where op_code    =  c_insert
+           and   addrnumber in la_addrnumber.               "*1010i
+        move i&1 to x&1.
+        append x&1.
+
+        i&1-op_code = c_skip.
+        modify i&1.
+
+        move i&1(c_&1_key_length) to l_key_&2(c_&1_key_length).
+        perform get_table_index_for_insert
+          tables z&1 using 'Z&1' l_key_&2 changing z_index.
+        move i&1 to z&1.                                    "*15i
+        insert z&1 index z_index.
+      endloop.
+
+*INSERT &1 FROM TABLE X&1.
+*IF SY-SUBRC <> 0.
+*  MESSAGE A842 WITH '&1' RAISING INTERNAL_ERROR.
+** Datenbankfehler beim Einfügen in Tabelle &
+*ENDIF.
+      move x&1[] to &1_i[].                          "#EC ENHOK "*1332u
+    endif.                                                  "*152i
+  END-OF-DEFINITION.
+
+*---------------------------------------------------------------------*
+*       MAKRO perform_write_p
+*---------------------------------------------------------------------*
+*       Schreiben der Veränderungen einer Datenbanktabelle            *
+*       auf die Datenbank sowie Modifikation des lokalen              *
+*       Gedächtnis auf den Stand nach dem Datenbankupdate.            *
+*
+*       Der Unterschie zu Makro perform_write besteht darin, daß
+*       hier bei mselektiven Sichern das Kriterium für Personennummern
+*       anstelle des Kriteriums für Adressnummern verwendet
+*       wird.
+*
+*       Das ist notwendig für Tabellen, die kein Feld für die
+*       Adressnummer haben: ADRP, ADRVP, ADRGP
+*
+*---------------------------------------------------------------------*
+
+  DEFINE perform_write_p.                                   "*1010i+
+
+    if not i&1[] is initial.
+* ------------------------- Gelöschte Einträge
+
+      clear x&1.
+      refresh x&1.
+      if c_&1_key_length eq 0.
+        get_key_length_of &1.
+      endif.
+      loop at i&1
+           where op_code    =  c_delete
+           and   persnumber in la_persnumber.
+*       move i&1(c_&1_key_length) to x&1(c_&1_key_length). "*1401d
+        move-corresponding  i&1   to x&1.                   "*1401i
+        append x&1.
+
+        i&1-op_code = c_ignore.
+        modify i&1.
+
+        move i&1(c_&1_key_length) to l_key_&2(c_&1_key_length).
+        perform get_table_index_for_delete
+          tables z&1 using 'Z&1' l_key_&2 changing z_index.
+        delete z&1 index z_index.
+      endloop.
+
+      move x&1[] to &1_d[].                          "#EC ENHOK "*1332u
+
+* ------------------------- Geänderte Einträge
+      clear x&1.
+      refresh x&1.
+      loop at i&1
+           where op_code    =  c_update
+           and   persnumber in la_persnumber.
+        move i&1 to x&1.
+        append x&1.
+
+        i&1-op_code = c_skip.
+        modify i&1.
+
+        move i&1(c_&1_key_length) to l_key_&2(c_&1_key_length).
+        perform get_table_index_for_update
+          tables z&1 using 'Z&1' l_key_&2 changing z_index.
+        move i&1 to z&1.
+        modify z&1 index z_index.
+      endloop.
+
+      move x&1[] to &1_u[].                          "#EC ENHOK "*1332u
+
+* ------------------------- Eingefügte Einträge
+      clear x&1.
+      refresh x&1.
+      loop at i&1
+           where op_code    =  c_insert
+           and   persnumber in la_persnumber.
+        move i&1 to x&1.
+        append x&1.
+
+        i&1-op_code = c_skip.
+        modify i&1.
+
+        move i&1(c_&1_key_length) to l_key_&2(c_&1_key_length).
+        perform get_table_index_for_insert
+          tables z&1 using 'Z&1' l_key_&2 changing z_index.
+        move i&1 to z&1.
+        insert z&1 index z_index.
+      endloop.
+
+      move x&1[] to &1_i[].                          "#EC ENHOK "*1332u
+    endif.
+
+  END-OF-DEFINITION.                                        "*1010i-
+
+
+*---------------------------------------------------------------------*
+*       MAKRO perform_write_simple
+*---------------------------------------------------------------------*
+*       Schreiben der Veränderungen einer Datenbanktabelle            *
+*       auf die Datenbank sowie Modifikation des lokalen              *
+*       Gedächtnis auf den Stand nach dem Datenbankupdate.            *
+*---------------------------------------------------------------------*
+*       Parameter:
+*       &1   Name der Datenbanktabelle
+*---------------------------------------------------------------------*
+*       Vorbedingungen:
+*       - DB-Tabelle &1 besitzt zugehörige i&1 und x&1 Tabellen.
+*         (alle DB-Tabellen für die keine Änderungsbelege
+*         geschrieben werden)
+*       - Feld &1-op_code existiert
+*       Vorgehen:
+*       - Unter der Annahme, daß die Mehrzahl aller Einträge beim
+*         Speichern des lokalen Gedächtnis unverändert bleiben,
+*         werden die Z-Tabellen sukzessive bearbeitet, anstatt
+*         aus den modifizierten I-Tabellen kopiert zu werden.
+*---------------------------------------------------------------------*
+  DEFINE perform_write_simple.
+    if not i&1[] is initial.                                "*152i
+* ------------------------- Gelöschte Einträge
+*      perform clear_table tables x&1.                      "*694d
+      clear x&1.                                            "*694i
+      refresh x&1.                                          "*694i
+      if c_&1_key_length eq 0.                              "*133i
+        get_key_length_of &1.                               "*133i
+      endif.                                                "*133i
+
+      loop at i&1
+           where op_code    =  c_delete
+           and   addrnumber in la_addrnumber.               "*1010i
+        move i&1(c_&1_key_length) to x&1(c_&1_key_length).
+        append x&1.
+
+        i&1-op_code = c_ignore.
+        modify i&1.
+      endloop.
+
+*DELETE &1 FROM TABLE X&1.
+*IF SY-SUBRC <> 0.
+*  MESSAGE A840 WITH '&1' RAISING INTERNAL_ERROR.
+** Datenbankfehler beim Löschen aus Tabelle &
+*ENDIF.
+      move x&1[] to &1_d[].
+
+* ------------------------- Geänderte Einträge
+*      perform clear_table tables x&1.                      "*694d
+      clear x&1.                                            "*694i
+      refresh x&1.                                          "*694i
+      loop at i&1
+           where op_code    =  c_update
+           and   addrnumber in la_addrnumber.               "*1010i
+        move i&1 to x&1.
+        append x&1.
+
+        i&1-op_code = c_skip.
+        modify i&1.
+      endloop.
+
+*UPDATE &1 FROM TABLE X&1.
+*IF SY-SUBRC <> 0.
+*  MESSAGE A841 WITH '&1' RAISING INTERNAL_ERROR.
+** Datenbankfehler beim Ändern von Tabelle &
+*ENDIF.
+      move x&1[] to &1_u[].
+
+* ------------------------- Eingefügte Einträge
+*      perform clear_table tables x&1.                      "*694d
+      clear x&1.                                            "*694i
+      refresh x&1.                                          "*694i
+      loop at i&1
+           where op_code    =  c_insert
+           and   addrnumber in la_addrnumber.               "*1010i
+        move i&1 to x&1.
+        append x&1.
+
+        i&1-op_code = c_skip.
+        modify i&1.
+      endloop.
+
+*INSERT &1 FROM TABLE X&1.
+*IF SY-SUBRC <> 0.
+*  MESSAGE A842 WITH '&1' RAISING INTERNAL_ERROR.
+** Datenbankfehler beim Einfügen in Tabelle &
+*ENDIF.
+      move x&1[] to &1_i[].
+    endif.                                                  "*152i
+  END-OF-DEFINITION.
+
+**---------------------------------------------------------------------*
+**       MAKRO perform_write_simple_p
+**---------------------------------------------------------------------*
+**       Schreiben der Veränderungen einer Datenbanktabelle            *
+**       auf die Datenbank sowie Modifikation des lokalen              *
+**       Gedächtnis auf den Stand nach dem Datenbankupdate.            *
+**
+**       Der Unterschie zu Makro perform_write_simple besteht darin,
+**       daß hier bei mselektiven Sichern das Kriterium für
+**       Personennummern anstelle des Kriteriums für Adressnummern
+**       verwendet wird.
+**
+**       Das ist notwendig für Tabellen, die kein Feld für die
+**       Adressnummer haben: ADRP, ADRVP, ADRGP
+**
+**---------------------------------------------------------------------*
+*
+**---------------------------------------------------------------------*
+*  DEFINE perform_write_simple_p.                   "*1010i+"*1409d+
+*
+*    if not i&1[] is initial.
+** ------------------------- Gelöschte Einträge
+*      clear x&1.
+*      refresh x&1.
+*      if c_&1_key_length eq 0.
+*        get_key_length_of &1.
+*      endif.
+*
+*      loop at i&1
+*           where op_code    =  c_delete
+*           and   persnumber in la_persnumber.
+*        move i&1(c_&1_key_length) to x&1(c_&1_key_length).
+*        append x&1.
+*
+*        i&1-op_code = c_ignore.
+*        modify i&1.
+*      endloop.
+*
+*      move x&1[] to &1_d[].
+*
+** ------------------------- Geänderte Einträge
+*      clear x&1.
+*      refresh x&1.
+*      loop at i&1
+*           where op_code    = c_update
+*           and   persnumber in la_persnumber.
+*        move i&1 to x&1.
+*        append x&1.
+*
+*        i&1-op_code = c_skip.
+*        modify i&1.
+*      endloop.
+*
+*      move x&1[] to &1_u[].
+*
+** ------------------------- Eingefügte Einträge
+*      clear x&1.
+*      refresh x&1.
+*      loop at i&1
+*           where op_code    =  c_insert
+*           and   persnumber in la_persnumber.
+*        move i&1 to x&1.
+*        append x&1.
+*
+*        i&1-op_code = c_skip.
+*        modify i&1.
+*      endloop.
+*
+*      move x&1[] to &1_i[].
+*    endif.
+*
+*  END-OF-DEFINITION.                               "*1010i-"*1409d-
+
+**96i+
+**---------------------------------------------------------------------*
+**       MAKRO    GET_PERS_GROUP
+**---------------------------------------------------------------------*
+**       Liest die Personengruppe aus der IADRP - bei 'I' und 'U' über
+**       PERS_EXT_TO_INT-PNR, bei 'D' (PERS_EXT_TO_INT-Eintrag ist schon
+**       gelöscht) direkt, ansonsten gar nicht.
+**       Die Personengruppe wird zur Spezifizierung der Objekt-ID bei
+**       den Änderungsbelegen (ADRESSE2, ADRESSE3) benötigt.
+**---------------------------------------------------------------------*
+*  DEFINE GET_PERS_GROUP.
+*  IF *IADCP-OP_CODE = C_INSERT OR *IADCP-OP_CODE = C_UPDATE.
+*    PERFORM READ_TABLE_KEY_BINARY
+*      TABLES PERS_EXT_TO_INT
+*      USING  'PERS_EXT_TO_INT'
+*             PERSNUMBER.
+*    PERFORM READ_TABLE_INDEX_I
+*      TABLES IADRP
+*      USING  'IADRP'
+*             PERS_EXT_TO_INT-PNR.
+*  ELSEIF *IADCP-OP_CODE = C_DELETE.
+*    LOOP AT IADRP WHERE PERSNUMBER = PERSNUMBER.
+*      EXIT.
+*    ENDLOOP.
+*    IF SY-SUBRC <> 0.
+*      PERFORM BREAK_POINT.
+*      MESSAGE A892 WITH 'IADRP' RAISING INTERNAL_ERROR.
+*    ENDIF.
+*  ELSE.
+*    EXIT.
+*  ENDIF.
+*  PERS_GROUP = IADRP-PERS_GROUP.
+*  END-OF-DEFINITION.
+**96i-
+*}
+************************************************************************
+* PERFORMANCE: wenn MEMORY_SAVE als erster FB der Gruppe aufgerufen
+* wird, sind keine Änderungen gemacht worden ==> schnell wieder raus!!
+************************************************************************
+  IF g_function_group_initialized <> c_true.                "*133i
+    EXIT.                                                   "*133i
+  ENDIF.                                                    "*133i
+*                           Initialisierung der FG sicherstellen
+  PERFORM check_for_initialization.
+
+* ------------------------- Lokale Variable
+  DATA: lines LIKE sy-tabix,
+        first TYPE t_boole,
+        client LIKE adcp-client,
+        addrnumber LIKE adcp-addrnumber,
+        addr_group LIKE adrc-addr_group,
+        persnumber LIKE adcp-persnumber,
+        pers_group LIKE adrp-pers_group,
+        z_index LIKE sy-tabix.
+  DATA: adrc_qu3_tab TYPE TABLE OF adrc_qu3,                "*403i
+        adrc_qu3_wa LIKE LINE OF adrc_qu3_tab,              "*403i
+        countries_wa LIKE LINE OF gt_qu_countries.          "*403i
+  DATA: lv_objectid LIKE cdhdr-objectid.                    "*440i
+  DATA: lv_write_cd_for_deletion TYPE xfeld.                "*777i
+  DATA: la_group TYPE RANGE OF adrc-addr_group,             "*1010i
+        la_addrnumber TYPE RANGE OF adrc-addrnumber,        "*1010i
+        ls_addrnumber_range LIKE LINE OF la_addrnumber,     "*1010i
+        la_persnumber TYPE RANGE OF adrp-persnumber,        "*1010i
+        ls_persnumber_range LIKE LINE OF la_persnumber.     "*1010i
+
+  DEFINE define_interface_tables_for.
+* &1 Datenbank-Tabellenname
+* ------------------------- Tabellen zur Übergabe an die Verbuchung
+    data: begin of &1_d occurs 0.      "zu löschende Einträge
+            include structure &1.
+    data: end of &1_d.
+    data: begin of &1_u occurs 0.      "zu ändernde Einträge
+            include structure &1.
+    data: end of &1_u.
+    data: begin of &1_i occurs 0.      "einzufügende Einträge
+            include structure &1.
+    data: end of &1_i.
+  END-OF-DEFINITION.
+
+  define_interface_tables_for adrc.
+  define_interface_tables_for adrct.
+  define_interface_tables_for adrp.
+  define_interface_tables_for adcp.
+  define_interface_tables_for adrt.
+  define_interface_tables_for adru.                         "*981i
+  define_interface_tables_for adr2.
+  define_interface_tables_for adr3.
+  define_interface_tables_for adr4.
+  define_interface_tables_for adr5.
+  define_interface_tables_for adr6.
+  define_interface_tables_for adr7.
+  define_interface_tables_for adr8.
+  define_interface_tables_for adr9.
+  define_interface_tables_for adr10.                        "*178i
+  define_interface_tables_for adr11.                        "*178i
+  define_interface_tables_for adr12.                        "*178i
+  define_interface_tables_for adr13.                        "*178i
+  define_interface_tables_for adrcomc.
+  define_interface_tables_for adrv.
+  define_interface_tables_for adrvp.
+
+    IF g_simulation_mode = 'X'.                              "*2092
+*    This should not happen as applications must not call any
+*    BAS save mdodules if simulation is still active.
+*    Provide a dump to prevent further process of data.
+    MESSAGE x851 WITH 'ADDR_MEMORY_SAVE'.
+
+   ENDIF.
+
+  IF  NOT ga_group[] IS INITIAL                             "*1010i+
+  AND NOT g_memory_save_force IS INITIAL.
+* Das ist für die arme Programmlogik dann doch zu viel.
+    MESSAGE a891
+            WITH 'G_MEMORY_SAVE_FORCE'
+                 'GA_GROUP'.
+  ENDIF.
+
+  IF NOT ga_group[] IS INITIAL.
+
+    la_group[] = ga_group[].
+    REFRESH ga_group.
+
+    CLEAR ls_addrnumber_range.
+    ls_addrnumber_range-sign = 'I'.
+    ls_addrnumber_range-option = 'EQ'.
+
+    LOOP AT iadrc
+         WHERE addr_group IN la_group.
+
+      ls_addrnumber_range-low = iadrc-addrnumber.
+      APPEND ls_addrnumber_range TO la_addrnumber.
+
+    ENDLOOP.
+
+    IF la_addrnumber[] IS INITIAL.
+* Später im Programm können wir nur sehr schwer und
+* umständlich unterscheiden, ob LA_ADDRNUMBER[] leer
+* ist, weil es keine Gruppeneinschränkung gab oder
+* weil zu den zu sichernden Gruppen keine Adressen
+* im lokalen Gedächtnis sind. Daher wird in letzterem
+* Fall die Dummy-Nummer 'NONEXADDRN', die nie vergeben
+* wird, in den Range aufgenommen.
+*
+* Damit ist gewährleistet, daß die Bedingung
+*
+* ADDRNUMBER IN LA_ADDRNUMBER
+*
+* immer genau aussagt, ob die Adresse zu dieser
+* Adressnummer gesichert werden soll.
+      ls_addrnumber_range-low = 'NONEXADDRN'.
+      APPEND ls_addrnumber_range TO la_addrnumber.
+    ENDIF.
+
+    SORT la_addrnumber.
+    DELETE ADJACENT DUPLICATES FROM la_addrnumber.
+
+    CLEAR ls_persnumber_range.
+    ls_persnumber_range-sign = 'I'.
+    ls_persnumber_range-option = 'EQ'.
+
+    LOOP AT iadrp
+         WHERE pers_group IN la_group.
+
+      ls_persnumber_range-low = iadrp-persnumber.
+      APPEND ls_persnumber_range TO la_persnumber.
+
+    ENDLOOP.
+
+    IF la_persnumber[] IS INITIAL.
+* s.o.
+      ls_persnumber_range-low = 'NONEXPERSN'.
+      APPEND ls_persnumber_range TO la_persnumber.
+    ENDIF.
+
+    SORT la_persnumber.
+    DELETE ADJACENT DUPLICATES FROM la_persnumber.
+
+  ENDIF.                                                    "*1010i-
+
+* ------------------------- Restliche Nummern für pers. Adressen ziehen
+*                           (Für jede Adresse nur einmal)
+* PERFORM PERSONAL_ADDRESS_NUMBERS.    "*78i                      "*114d
+*------------------------------------- "*422i+
+  IF g_memory_save_force = c_yes.
+    LOOP AT pers_appl_to_int.
+      LOOP AT addr_appl_to_int WHERE anr = pers_appl_to_int-pnr.
+        CALL FUNCTION 'ADDR_PERS_COMP_SINGLE_RESET'
+          EXPORTING
+            address_handle          = addr_appl_to_int-addr_handle
+*           ADDRESS_NUMBER          = ' '
+            person_handle           = pers_appl_to_int-person_handle
+*           PERSON_NUMBER           = ' '
+            retain_personal_changes = ' '
+          EXCEPTIONS
+            number_not_found        = 1
+            handle_not_found        = 2
+            parameter_error         = 3
+            internal_error          = 4
+            personal_changes_exist  = 5
+            OTHERS                  = 6.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+                  RAISING internal_error.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+  ENDIF.
+*------------------------------------- "*422i-
+
+*777i+
+* Die interne Tabelle gt_cd_for_deletion_obj_types kann durch einen
+* Aufruf des FB ADDR_WRITE_CD_FOR_DELETION direkt vor dem
+* ADDR_MEMORY_SAVE oder ADDR_SINGLE_SAVE gefüllt werden.
+* Sie wird hier wieder zurückgesetzt, um Folgeaufrufe nicht zu
+* beeinflussen.
+* In allen folgenden Form-Routinen wird gt_cd_for_deletion_obj_types2
+* abgefragt.
+  gt_cd_for_deletion_obj_types2[] = gt_cd_for_deletion_obj_types[].
+  REFRESH gt_cd_for_deletion_obj_types[].
+*777i-
+
+* ------------------------- Formalcheck
+*                           Adreßnummern gezogen?
+  DESCRIBE TABLE addr_appl_to_int LINES lines.
+  IF lines <> 0.
+*------------------------------------- "*422i+
+    IF g_memory_save_force = c_yes.
+      LOOP AT addr_appl_to_int.
+        CALL FUNCTION 'ADDR_SINGLE_RESET'
+          EXPORTING
+            address_handle   = addr_appl_to_int-addr_handle
+          EXCEPTIONS
+            number_not_found = 1
+            handle_not_found = 2
+            parameter_error  = 3
+            internal_error   = 4
+            OTHERS           = 5.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+                  RAISING internal_error.
+        ENDIF.
+      ENDLOOP.
+    ELSEIF NOT la_group[] IS INITIAL.                       "*1010i
+* Es soll nur ein Teil der Adressdaten gesichert werden.    "*1010i
+* Wir müssen also prüfen, zu welcher Adressgruppe die       "*1010i
+* Handles gehören.                                          "*1010i
+      LOOP AT addr_appl_to_int                              "*1010i
+           WHERE nation IS INITIAL.                         "*1010i
+* Eine Überprüfung pro Handle reicht.                       "*1010i
+        PERFORM read_table_index_i                          "*1010i
+                TABLES iadrc                                "*1010i
+                USING  'IADRC'                              "*1010i
+                       addr_appl_to_int-anr.                "*1010i
+        IF iadrc-addr_group IN la_group.                    "*1010i
+          MESSAGE e830 RAISING address_number_missing.      "*1010i
+        ENDIF.                                              "*1010i
+      ENDLOOP.                                              "*1010i
+    ELSE.
+*------------------------------------------ "*422i-
+      MESSAGE e830 RAISING address_number_missing.
+    ENDIF.                                                  "*422i
+*   Es sind noch nicht alle Adreßnummern gezogen
+  ENDIF.
+*                           Personennummern gezogen?
+  DESCRIBE TABLE pers_appl_to_int LINES lines.
+  IF lines <> 0.
+    IF NOT la_group[] IS INITIAL.                           "*1010i
+* Es soll nur ein Teil der Adressdaten gesichert werden.    "*1010i
+* Wir müssen also prüfen, zu welcher Personengruppe die     "*1010i
+* Handles gehören.                                          "*1010i
+      LOOP AT pers_appl_to_int                              "*1010i
+           WHERE nation IS INITIAL.                         "*1010i
+* Eine Überprüfung pro Handle reicht.                       "*1010i
+        PERFORM read_table_index_i                          "*1010i
+                TABLES iadrp                                "*1010i
+                USING  'IADRP'                              "*1010i
+                       pers_appl_to_int-pnr.                "*1010i
+        IF iadrp-pers_group IN la_group.                    "*1010i
+          MESSAGE e831 RAISING person_number_missing.       "*1010i
+        ENDIF.                                              "*1010i
+      ENDLOOP.                                              "*1010i
+    ELSE.                                                   "*1010i
+      MESSAGE e831 RAISING person_number_missing.
+*   Es sind noch nicht alle Personennummern gezogen
+    ENDIF.                                                  "*1010i
+  ENDIF.
+
+* ------------------------- Zuordnungen Person - Firmenadresse müssen
+*                           durch entsprechende Verwendungen abgebildet
+*                           sein
+
+* Dieses Unterprogramm überprüft beim selektiven Sichern    "*1010i
+* auch, ob alle Typ 2 und Typ 3 Adressen entweder komplett  "*1010i
+* oder gar nicht gesichert werden sollen.                   "*1010i
+
+  PERFORM relations_check_reference
+          TABLES la_group.                                  "*1010i
+
+* ------------------------- Attribut ADCP-SO_KEY erzeugen
+  PERFORM get_numbers_for_so_keys
+          TABLES la_addrnumber                              "*1010i
+                 la_persnumber.                             "*1010i
+
+*976i+
+* Ermittlung der lt_cd_p_tab wird vorgezogen
+*835i+
+  DATA: BEGIN OF lt_cd_p_tab OCCURS 0,
+        persnumber LIKE adrp-persnumber,
+        pers_group LIKE adrp-pers_group,
+        END OF lt_cd_p_tab.
+
+  DATA: lv_addrnumber LIKE adrc-addrnumber.
+  DATA: lv_person_index LIKE sy-tabix.
+  DATA: lv_returncode_read LIKE szad_field-rc_read.
+  DATA: lv_lines LIKE sy-tabix.
+  DATA: ls_iadcp LIKE iadcp.
+
+* Die Sätze aus IADRP, zu denen es keinen Eintrag in cd_2_tab und
+* cd_3_tab gibt, werden in lt_cd_p_tab gestellt.
+* Das tritt nur bei GP-Personen auf.
+  LOOP AT iadrp
+       WHERE (    op_code = c_insert                        "*1010u
+               OR op_code = c_update                        "*1010u
+               OR op_code = c_delete )                      "*1010u
+       AND   persnumber IN la_persnumber.                   "*1010i
+    lt_cd_p_tab-persnumber = iadrp-persnumber.
+    lt_cd_p_tab-pers_group = iadrp-pers_group.
+    COLLECT lt_cd_p_tab.
+  ENDLOOP.
+  SORT lt_cd_p_tab.
+  DESCRIBE TABLE lt_cd_p_tab LINES lv_lines.
+  IF lv_lines > 0.
+    LOOP AT cd_2_tab
+         WHERE persnumber IN la_persnumber.                 "*1010i
+      READ TABLE lt_cd_p_tab
+          WITH KEY persnumber = cd_2_tab-persnumber
+          BINARY SEARCH.
+      IF sy-subrc = 0.
+        DELETE lt_cd_p_tab INDEX sy-tabix.
+      ENDIF.
+    ENDLOOP.
+* Person (name ...) is changed and additionally the person   "*1252i
+* is getting a type 3 address: update person anyway          "*1252i
+*    LOOP AT cd_3_tab                                        "*1252d
+*         WHERE persnumber IN la_persnumber.                 "*1010i  *1252d
+*    READ TABLE lt_cd_p_tab                                  "*1252d
+*        WITH KEY persnumber = cd_3_tab-persnumber           "*1252d
+*        BINARY SEARCH.                                      "*1252d
+*    IF sy-subrc = 0.                                        "*1252d
+*        DELETE lt_cd_p_tab index sy-tabix.                  "*1252d
+*      ENDIF.                                                "*1252d
+*    ENDLOOP.                                                "*1252d
+  ENDIF.
+
+* Jetzt sind nur noch solche Personennummern in der lt_cd_p_tab,
+* zu denen keine Adressdaten geändert wurden.
+* In pers_data_in_memory schauen, ob alle Typ2-Daten eingelesen
+* wurden, sonst nachlesen
+  LOOP AT lt_cd_p_tab.
+    READ TABLE pers_data_in_memory
+         WITH KEY persnumber = lt_cd_p_tab-persnumber
+         BINARY SEARCH.
+    IF sy-subrc = 0.
+      IF pers_data_in_memory-pers_flag = c_yes.
+*     alle Typ2-Daten sind schon eingelesen oder es gibt keine
+      ELSE.
+        PERFORM read_all_personal_addresses
+        USING    c_default_handle
+                 pers_data_in_memory-persnumber
+                 c_default_nation
+                 c_default_date_from
+        CHANGING lv_person_index
+                 lv_returncode_read.
+      ENDIF.
+    ELSE.
+*    darf nicht vorkommen
+      MESSAGE x891 WITH 'ADRP' 'PERS_DATA_IN_MEMORY'.
+    ENDIF.
+  ENDLOOP.
+
+*  Jetzt sind alle Typ2-Daten im lokalen Gedächtnis.
+*  Typ3-Daten sind nicht relevant, denn es wird address2_saved
+*  aufgerufen.
+*835i-
+*976i-
+
+*976i+
+* Für das Füllen von Parametern in den Methoden des BAdIs ADDRESS_UPDATE
+* müssen noch Daten nachgelesen werden
+* Nur relevant, falls Dublettenprüfung aktiv ist
+  DATA: lv_duplicate_check_active TYPE t_boole.
+  DATA: BEGIN OF lt_persnumbers_for_completion OCCURS 0,
+        persnumber LIKE adrp-persnumber,
+        END OF lt_persnumbers_for_completion.
+  DATA: ls_pers_data_in_memory LIKE LINE OF pers_data_in_memory.
+  DATA: lv_read_type2 TYPE t_boole.
+  DATA: lv_read_type3 TYPE t_boole.
+  DATA: lt_selection_tab
+        TYPE TABLE OF addr_addr_pers_cp_line WITH HEADER LINE.
+  DATA: lt_adcp TYPE TABLE OF adcp WITH HEADER LINE.
+  DATA: lt_array2_sel TYPE TABLE OF addr2_sel WITH HEADER LINE.
+  DATA: lt_array3_sel TYPE TABLE OF addr3_sel WITH HEADER LINE.
+* Ist überhaupt Dublettencheck aktiv
+  PERFORM determine_dupl_check_active
+    CHANGING lv_duplicate_check_active.
+  REFRESH gt_ixadcp_sort_by_pnr.
+  IF lv_duplicate_check_active = c_yes.
+* Unter Berücksichtigung von la_persnumber alle Personennummern aus
+* CD_2_TAB, CD_3_TAB, LT_CD_P_TAB aufsammeln
+    LOOP AT cd_2_tab WHERE persnumber IN la_persnumber.
+      lt_persnumbers_for_completion-persnumber = cd_2_tab-persnumber.
+      COLLECT lt_persnumbers_for_completion.
+    ENDLOOP.
+    LOOP AT cd_3_tab WHERE persnumber IN la_persnumber.
+      lt_persnumbers_for_completion-persnumber = cd_3_tab-persnumber.
+      COLLECT lt_persnumbers_for_completion.
+    ENDLOOP.
+    LOOP AT lt_cd_p_tab WHERE persnumber IN la_persnumber.
+      lt_persnumbers_for_completion-persnumber = lt_cd_p_tab-persnumber.
+      COLLECT lt_persnumbers_for_completion.
+    ENDLOOP.
+
+* Je Personennummer über Pers_data_in_memory schauen, was noch
+* nachgelesen werden muss
+* Ergebnis sammeln und ADDR_SELECT_ADCP_ARRAY jeweils nur mit Persnumber
+* pro Zeile der it_selection_tab aufrufen
+* Mit dem Ergebnis von ADDR_SELECT_ADCP_ARRAY den FB
+* addr_personal_get_array und/oder
+* addr_pers_comp_get_array aufrufen
+* Danach ist alles im SZA0-Memory, was gebraucht wird.
+    REFRESH lt_selection_tab.
+    LOOP AT lt_persnumbers_for_completion.
+      READ TABLE pers_data_in_memory INTO ls_pers_data_in_memory WITH KEY
+           persnumber = lt_persnumbers_for_completion-persnumber
+           BINARY SEARCH.
+      IF sy-subrc = 0.
+        IF ls_pers_data_in_memory-pers_flag IS INITIAL
+          OR ls_pers_data_in_memory-comp_flag IS INITIAL.
+          lt_selection_tab-persnumber =
+            lt_persnumbers_for_completion-persnumber.
+          IF ls_pers_data_in_memory-pers_flag IS INITIAL.
+            lv_read_type2 = c_yes.
+          ELSE.
+            lv_read_type2 = c_no.
+          ENDIF.
+          IF ls_pers_data_in_memory-comp_flag IS INITIAL.
+            lv_read_type3 = c_yes.
+          ELSE.
+            lv_read_type3 = c_no.
+          ENDIF.
+          IF lv_read_type2 = c_yes AND lv_read_type3 = c_yes.
+            lt_selection_tab-comp_pers = space.
+          ELSEIF lv_read_type2 = c_yes.
+            lt_selection_tab-comp_pers = 'P'.
+          ELSEIF lv_read_type3 = c_yes.
+            lt_selection_tab-comp_pers = 'C'.
+          ENDIF.
+          APPEND lt_selection_tab.
+        ENDIF.
+      ELSE.
+        MESSAGE x892 WITH 'PERS_DATA_IN_MEMORY'.
+      ENDIF.
+    ENDLOOP.
+    IF lt_selection_tab[] IS NOT INITIAL.
+      REFRESH lt_adcp.
+      CALL FUNCTION 'ADDR_SELECT_ADCP_ARRAY'
+*       IMPORTING
+*         RETURNCODE             =
+        TABLES
+          it_selection_tab       = lt_selection_tab
+          et_adcp                = lt_adcp
+*         ET_ERROR_TABLE         =
+       EXCEPTIONS
+          no_entries_found       = 1
+          parameter_error        = 2
+          internal_error         = 3
+          OTHERS                 = 4.
+      IF sy-subrc > 1.
+        MESSAGE x885 WITH 'ADDR_SELECT_ADCP_ARRAY'.
+      ENDIF.
+      CLEAR: lt_array2_sel, lt_array3_sel.
+      LOOP AT lt_adcp.
+        IF lt_adcp-comp_pers = 'P'.
+          lt_array2_sel-addrnumber = lt_adcp-addrnumber.
+          lt_array2_sel-persnumber = lt_adcp-persnumber.
+          lt_array2_sel-nation     = lt_adcp-nation.
+          lt_array2_sel-date       = lt_adcp-date_from.
+          APPEND lt_array2_sel.
+        ELSEIF lt_adcp-comp_pers = 'C'.
+          lt_array3_sel-addrnumber = lt_adcp-addrnumber.
+          lt_array3_sel-persnumber = lt_adcp-persnumber.
+          lt_array3_sel-nation     = lt_adcp-nation.
+          lt_array3_sel-date       = lt_adcp-date_from.
+          APPEND lt_array3_sel.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+    IF lt_array2_sel[] IS NOT INITIAL.
+      CALL FUNCTION 'ADDR_PERSONAL_GET_ARRAY'
+        EXPORTING
+          put_into_memory            = 'X'
+        TABLES
+          address_personal_selection = lt_array2_sel
+        EXCEPTIONS
+          parameter_error            = 1
+          internal_error             = 2
+          OTHERS                     = 3.
+      IF sy-subrc <> 0.
+        MESSAGE x885 WITH 'ADDR_PERSONAL_GET_ARRAY'.
+      ENDIF.
+    ENDIF.
+    IF lt_array3_sel[] IS NOT INITIAL.
+      CALL FUNCTION 'ADDR_PERS_COMP_GET_ARRAY'
+        EXPORTING
+          put_into_memory                = 'X'
+        TABLES
+          address_pers_in_comp_selection = lt_array3_sel
+        EXCEPTIONS
+          parameter_error                = 1
+          internal_error                 = 2
+          OTHERS                         = 3.
+      IF sy-subrc <> 0.
+        MESSAGE x885 WITH 'ADDR_PERS_COMP_GET_ARRAY'.
+      ENDIF.
+    ENDIF.
+* Jetzt ist alles im SZA0-Memory, was gebraucht wird.
+    gt_ixadcp_sort_by_pnr[] = ixadcp[].
+    SORT gt_ixadcp_sort_by_pnr BY pnr anr date_from nation.
+* In form adresse3/2_write_document sowie adrp_call_badi_address_update
+* kann man dann mittels der Persnumber aus der gt_ixadcp_sort_by_pnr
+* performant die nötigen Einträge lesen
+  ENDIF.        "if lv_duplicate_check_active = c_yes.
+*976i-
+
+* ------------------------- Initialisierung
+*                           Sortieren für generischen Zugriff über
+*                           IADCP-DATE_FROM und IADCP-NATION
+  MOVE iadcp[] TO *iadcp[].
+  DELETE *iadcp WHERE op_code EQ c_ignore.                  "*488i
+  SORT *iadcp.
+*                           Sortieren für generischen Zugriff über
+*                           IADRC-DATE_FROM und IADRC-NATION
+  MOVE iadrc[] TO *iadrc[].
+  DELETE *iadrc WHERE op_code EQ c_ignore.                  "*488i
+  SORT *iadrc.
+
+*835i+
+* ------------------------- BAdI-Aufruf für ADRP-Änderungen
+*  Das BAdI ADDRESS_UPDATE muss auch dann aufgerufen werden, wenn
+*  Änderungen nur in der IADRP stattgefunden haben.
+*  Die Ermittlung der internen Tabelle lt_cd_p_tab wurde im  *976i
+*  Rahmen von Entwicklung 976 nach oben gezogen.             *976i
+
+*  Bestimmen, ob es eine Typ2-Adresse zur Personennummer gibt
+*  Wenn ja, eine Adressnummer nehmen, ansonsten bleibt die
+*  Adressnummer leer.
+  LOOP AT lt_cd_p_tab.
+* Wenn ein Satz in IADCP op_code = 'D' hätte, wäre die
+* Persnumber in der cd_2_tab oder cd_3_tab gestanden.
+    CLEAR lv_addrnumber.
+    LOOP AT iadcp WHERE persnumber = lt_cd_p_tab-persnumber
+              AND comp_pers = 'P'
+              AND op_code <> c_ignore.
+*  es gibt (unveränderte) Typ2-Adressen, nimm eine
+* (angelegt, geändert, gelöscht -> wäre in cd_2_tab gewesen)
+      lv_addrnumber = iadcp-addrnumber.
+      ls_iadcp = iadcp.
+      EXIT.
+    ENDLOOP.
+    IF sy-subrc <> 0.
+      CLEAR lv_addrnumber.
+    ENDIF.
+    PERFORM wd_adresse2_clear_tables.
+
+    IF lv_addrnumber IS INITIAL.
+      DATA: lv_max_lines LIKE sy-tabix,
+            lv_index LIKE sy-tabix.
+*      yadrp aus zadrp füllen (kopiert aus wd_adresse2_3_get_old)
+*                           ZADRP:
+      MOVE sy-mandt               TO l_key_cn-client.
+      MOVE lt_cd_p_tab-persnumber TO l_key_cn-number.
+*
+      READ TABLE zadrp WITH KEY l_key_cn BINARY SEARCH.
+*
+      IF sy-subrc = 0.
+        lv_index = sy-tabix.
+        DESCRIBE TABLE zadrp LINES lv_max_lines.
+*
+        WHILE zadrp-client     = l_key_cn-client
+          AND zadrp-persnumber = l_key_cn-number.
+
+          MOVE zadrp TO yadrp.
+          PERFORM put_entry TABLES yadrp USING 'YADRP'.
+
+          exitif lv_index >= lv_max_lines.
+
+          lv_index = lv_index + 1.
+          PERFORM read_table_index_i
+            TABLES zadrp USING 'ZADRP' lv_index.
+        ENDWHILE.
+      ENDIF.
+*      xadrp aus iadrp füllen (kopiert aus wd_adresse2_3_put_new)
+*                           IADRP:
+      LOOP AT iadrp
+        WHERE client     = sy-mandt
+          AND persnumber = lt_cd_p_tab-persnumber.
+
+        IF iadrp-op_code <> c_ignore AND iadrp-op_code <> c_delete.
+          MOVE iadrp TO xadrp.                       "#EC ENHOK "*1332u
+          PERFORM put_entry TABLES xadrp USING 'XADRP'.
+        ENDIF.
+      ENDLOOP.
+
+    ELSE.
+* Adressnummer gefüllt, dann werden die x- und y-Tabellen gefüllt
+* wie bei normalen Änderungen an Typ2-Adressen
+      CLEAR *iadcp.
+       *iadcp = ls_iadcp.
+      PERFORM wd_adresse2_3_get_old.
+      PERFORM wd_adresse2_3_put_new.
+    ENDIF.
+*  BAdI ADDRESS_UPDATE aufrufen
+    PERFORM adrp_call_badi_address_update
+      USING lt_cd_p_tab-persnumber
+            lv_addrnumber
+            lt_cd_p_tab-pers_group
+            execute_in_update_task.
+    persnumber = lt_cd_p_tab-persnumber.                    "*1111i
+    get_pers_group.                                         "*1111i
+    PERFORM delete_changedocs_adresse2_3                    "*1111i
+        USING pers_group                                    "*1111i
+              persnumber.                                   "*1111i
+  ENDLOOP.
+*835i-
+
+* ------------------------- Änderungsbeleg für ADRESSE2
+*                           ADCP, ADRC, ADRCT, ADRP, ADR2..ADR9, ADRT
+* IF g_suppress_cd_for_type_2 IS INITIAL.               "*218i  470d
+  first = c_true.
+  PERFORM wd_adresse2_clear_tables.
+
+* loop at *iadcp where comp_pers = 'P'        "*209d
+*                  and op_code <> c_ignore.   "*209d              "*111i
+  LOOP AT cd_2_tab                                          "*209i
+       WHERE addrnumber IN la_addrnumber                    "*1010i
+       AND   persnumber IN la_persnumber.                   "*1010i
+
+    READ TABLE *iadcp WITH KEY client = sy-mandt
+                              addrnumber = cd_2_tab-addrnumber"*209i
+                              persnumber = cd_2_tab-persnumber."*209i
+    IF sy-subrc = 0.                                        "*595i
+      IF first = c_true.
+
+        client     = *iadcp-client.
+        addrnumber = *iadcp-addrnumber.
+        persnumber = *iadcp-persnumber.
+        get_pers_group.                                     "*96i
+        PERFORM wd_adresse2_3_get_old.
+        PERFORM wd_adresse2_3_put_new.
+
+        first = c_false.
+
+      ELSEIF client   <> *iadcp-client
+        OR addrnumber <> *iadcp-addrnumber
+        OR persnumber <> *iadcp-persnumber.
+
+        PERFORM adresse2_write_document
+          USING addrnumber persnumber pers_group
+                execute_in_update_task.                     "*370i
+        PERFORM wd_adresse2_clear_tables.
+
+        client     = *iadcp-client.
+        addrnumber = *iadcp-addrnumber.
+        persnumber = *iadcp-persnumber.
+        get_pers_group.                                     "*96i
+        PERFORM wd_adresse2_3_get_old.
+        PERFORM wd_adresse2_3_put_new.
+
+      ENDIF.
+      PERFORM delete_changedocs_adresse2_3                  "*1111i
+        USING pers_group                                    "*1111i
+              persnumber.                                   "*1111i
+    ENDIF.                                                  "*595i
+    DELETE cd_2_tab.                                        "*209i
+
+  ENDLOOP.
+  IF first = c_false.                                       "*152i
+    PERFORM adresse2_write_document
+      USING addrnumber persnumber pers_group
+            execute_in_update_task.                         "*370i
+    PERFORM delete_changedocs_adresse2_3                    "*1111i
+      USING pers_group                                      "*1111i
+            persnumber.                                     "*1111i
+  ENDIF.                                                    "*152i
+* ELSE.                                "*218i 470d
+  IF g_suppress_cd_for_type_2 = c_yes.                      "*470i
+    g_suppress_cd_for_type_2 = c_no.                        "*218i
+  ENDIF.                                                    "*218i
+  IF NOT gv_suppress_update_badi_type_2 IS INITIAL.         "*1000i
+    CLEAR gv_suppress_update_badi_type_2.                   "*1000i
+  ENDIF.                                                    "*1000i
+* ------------------------- Änderungsbeleg für ADRESSE3
+*                           ADCP, ADRP, ADR2..ADR12, ADRT
+* IF g_suppress_cd_for_type_3 IS INITIAL.                   "*218i 470d
+  first = c_true.
+  PERFORM wd_adresse3_clear_tables.
+
+* loop at *iadcp where comp_pers = 'C'        "*209d
+*                  and op_code <> c_ignore.   "*209d              "*111i
+  LOOP AT cd_3_tab                                          "*209i
+       WHERE addrnumber IN la_addrnumber                    "*1010i
+       AND   persnumber IN la_persnumber.                   "*1010i
+
+    READ TABLE *iadcp WITH KEY client = sy-mandt
+                              addrnumber = cd_3_tab-addrnumber"*209i
+                              persnumber = cd_3_tab-persnumber."*209i
+    IF sy-subrc = 0.                                        "*595i
+      IF first = c_true.
+
+        client     = *iadcp-client.
+        addrnumber = *iadcp-addrnumber.
+        persnumber = *iadcp-persnumber.
+        get_pers_group.                                     "*96i
+        PERFORM wd_adresse2_3_get_old.
+        PERFORM wd_adresse2_3_put_new.
+
+        first = c_false.
+
+      ELSEIF client   <> *iadcp-client
+        OR addrnumber <> *iadcp-addrnumber
+        OR persnumber <> *iadcp-persnumber.
+
+        PERFORM adresse3_write_document
+          USING addrnumber persnumber pers_group
+                execute_in_update_task.                     "*370i
+
+        PERFORM wd_adresse3_clear_tables.
+
+        client     = *iadcp-client.
+        addrnumber = *iadcp-addrnumber.
+        persnumber = *iadcp-persnumber.
+        get_pers_group.                  "                            *96i
+        PERFORM wd_adresse2_3_get_old.
+        PERFORM wd_adresse2_3_put_new.
+
+      ENDIF.
+      PERFORM delete_changedocs_adresse2_3                  "*1111i
+        USING pers_group                                    "*1111i
+              persnumber.                                   "*1111i
+    ENDIF.                                                  "*595i
+    DELETE cd_3_tab.                                        "*209i
+
+  ENDLOOP.
+  IF first = c_false.                                       "*152i
+    PERFORM adresse3_write_document
+      USING addrnumber persnumber pers_group
+            execute_in_update_task.                         "*370i
+    PERFORM delete_changedocs_adresse2_3                    "*1111i
+      USING pers_group                                      "*1111i
+            persnumber.                                     "*1111i
+  ENDIF.                                                    "*152i
+* ELSE.                                "*218i  470d
+  IF g_suppress_cd_for_type_3 = c_yes.                      "*470i
+    g_suppress_cd_for_type_3 = c_no.                        "*218i
+  ENDIF.                                                    "*218i
+  IF NOT gv_suppress_update_badi_type_3 IS INITIAL.         "*1000i
+    CLEAR gv_suppress_update_badi_type_3.                   "*1000i
+  ENDIF.                                                    "*1000i
+
+* ------------------------- Änderungsbeleg für ADRESSE
+*                           ADRC, ADRCT, ADR2..ADR12, ADRT
+* IF g_suppress_cd_for_type_1 IS INITIAL.                   "*218i 470d
+  first = c_true.
+  PERFORM wd_adresse_clear_tables.
+
+* loop at *iadrc where pers_addr = c_off      "*209d               "*79u
+*                  and op_code <> c_ignore.   "*209d              "*111i
+  LOOP AT cd_1_tab                                          "*209i
+       WHERE addrnumber IN la_addrnumber.                   "*1010i
+
+    READ TABLE *iadrc WITH KEY client = sy-mandt
+                              addrnumber = cd_1_tab-addrnumber."*209i
+    IF sy-subrc = 0.                                        "*595i
+      IF first = c_true.
+
+        client     = *iadrc-client.
+        addrnumber = *iadrc-addrnumber.
+        addr_group = *iadrc-addr_group.
+        PERFORM wd_adresse_get_old.
+        PERFORM wd_adresse_put_new.
+
+        first = c_false.
+
+      ELSEIF client   <> *iadrc-client
+        OR addrnumber <> *iadrc-addrnumber.
+
+        PERFORM adresse_write_document
+          USING addrnumber addr_group execute_in_update_task.
+
+        PERFORM wd_adresse_clear_tables.
+
+        client     = *iadrc-client.
+        addrnumber = *iadrc-addrnumber.
+        addr_group = *iadrc-addr_group.
+        PERFORM wd_adresse_get_old.
+        PERFORM wd_adresse_put_new.
+
+      ENDIF.
+      PERFORM delete_changedocs_adresse                     "*1111i
+      USING addr_group                                      "*1111i
+            addrnumber.                                     "*1111i
+    ENDIF.                                                  "*595i
+    DELETE cd_1_tab.                                        "*209i
+  ENDLOOP.
+
+  IF first = c_false.                                       "*79i
+    PERFORM adresse_write_document
+      USING addrnumber addr_group execute_in_update_task.
+    PERFORM delete_changedocs_adresse                       "*1111i
+      USING addr_group                                      "*1111i
+            addrnumber.                                     "*1111i
+  ENDIF.                                                    "*79i
+* ELSE.                                "*218i  470d
+  IF g_suppress_cd_for_type_1 = c_yes.                      "*470i
+    g_suppress_cd_for_type_1 = c_no.                        "*218i
+  ENDIF.                                                    "*218i
+  IF NOT gv_suppress_update_badi_type_1 IS INITIAL.         "*1000i
+    CLEAR gv_suppress_update_badi_type_1.                   "*1000i
+  ENDIF.                                                    "*1000i
+
+  REFRESH gt_ixadcp_sort_by_pnr.                            "*976i
+
+  CLEAR gv_tcode_for_change_doc.                            "*1257i
+  CLEAR gv_uname_for_change_doc.                            "*1257i
+
+* ------------------------- Datenbank schreiben
+*                           Datenbanktabellen mit Änderungsbelegen
+*                           in die Übergabetabellen kopieren:
+  perform_write adrc  cndn.
+  perform_write adrct cndnl.
+* perform_write adrp  cndn.                                 "*1010d
+  perform_write_p adrp cndn.                                "*1010i
+* The following calls make the assumption that in case of a "*1409i+
+* group specific save it was previously checked for type 2
+* and type 3
+* addresses, that either both addrnumber and persnumber
+* are to be saved or none of them.
+*
+* Therefore here to select the entries to be saved only
+* the addrnumber field is compared to la_addrnumber.
+*
+* There is one case where the above condition is not
+* necessarily true (person group 'BP', address group
+* 'BBP0'). However in this case it is always the address
+* (and the relation) that is not saved, so the same check
+* suffices.                                                 "*1409i-
+  perform_write adcp  cnndn.
+  perform_write adrt  cnntdcl.
+  perform_write adru  cnntcuv.                              "*981i
+  perform_write adr2  cnndc.
+  perform_write adr3  cnndc.
+  perform_write adr4  cnndc.
+  perform_write adr5  cnndc.
+  perform_write adr6  cnndc.
+  perform_write adr7  cnndc.
+  perform_write adr8  cnndc.
+  perform_write adr9  cnndc.
+  perform_write adr10 cnndc.                                "*178i
+  perform_write adr11 cnndc.                                "*178i
+  perform_write adr12 cnndc.                                "*178i
+  perform_write adr13 cnndc.                                "*178i
+*                           Datenbanktabellen ohne Änderungsbelege
+*                           in die Übergabetabellen kopieren:
+  perform_write_simple adrcomc.
+* perform_write_simple adrgp.                               "*1010d
+  perform_write_simple adrv.
+* perform_write_simple adrvp.                               "*1010d
+* This macro is only used once, and is therefore expanded   "*1409u
+* perform_write_simple_p adrvp.                      "*1010i"*1409d
+  IF NOT iadrvp[] IS INITIAL.                               "*1409i+
+* ------------------------- Gelöschte Einträge
+    CLEAR xadrvp.
+    REFRESH xadrvp.
+    IF c_adrvp_key_length EQ 0.
+      get_key_length_of adrvp.
+    ENDIF.
+
+    LOOP AT iadrvp
+         WHERE op_code    =  c_delete
+         AND   persnumber IN la_persnumber
+         AND   (    addrnumber IS INITIAL
+                 OR addrnumber IN la_addrnumber ).
+      MOVE iadrvp(c_adrvp_key_length) TO xadrvp(c_adrvp_key_length).
+      APPEND xadrvp.
+
+      iadrvp-op_code = c_ignore.
+      MODIFY iadrvp.
+    ENDLOOP.
+
+    MOVE xadrvp[] TO adrvp_d[].
+
+* ------------------------- Geänderte Einträge
+    CLEAR xadrvp.
+    REFRESH xadrvp.
+    LOOP AT iadrvp
+         WHERE op_code    = c_update
+         AND   persnumber IN la_persnumber
+         AND   (    addrnumber IS INITIAL
+                 OR addrnumber IN la_addrnumber ).
+      MOVE iadrvp TO xadrvp.
+      APPEND xadrvp.
+
+      iadrvp-op_code = c_skip.
+      MODIFY iadrvp.
+    ENDLOOP.
+
+    MOVE xadrvp[] TO adrvp_u[].
+
+* ------------------------- Eingefügte Einträge
+    CLEAR xadrvp.
+    REFRESH xadrvp.
+    LOOP AT iadrvp
+         WHERE op_code    =  c_insert
+         AND   persnumber IN la_persnumber
+         AND   (    addrnumber IS INITIAL
+                 OR addrnumber IN la_addrnumber ).
+      MOVE iadrvp TO xadrvp.
+      APPEND xadrvp.
+
+      iadrvp-op_code = c_skip.
+      MODIFY iadrvp.
+    ENDLOOP.
+
+    MOVE xadrvp[] TO adrvp_i[].
+  ENDIF.                                                    "*1409i-
+
+*{ "*152i+  (Performance)
+  IF NOT adrc_d[] IS INITIAL OR
+     NOT adrc_u[] IS INITIAL OR
+     NOT adrc_i[] IS INITIAL OR
+     NOT adrct_d[] IS INITIAL OR
+     NOT adrct_u[] IS INITIAL OR
+     NOT adrct_i[] IS INITIAL OR
+     NOT adrp_d[] IS INITIAL OR
+     NOT adrp_u[] IS INITIAL OR
+     NOT adrp_i[] IS INITIAL OR
+     NOT adcp_d[] IS INITIAL OR
+     NOT adcp_u[] IS INITIAL OR
+     NOT adcp_i[] IS INITIAL OR
+     NOT adrt_d[] IS INITIAL OR
+     NOT adrt_u[] IS INITIAL OR
+     NOT adrt_i[] IS INITIAL OR
+     NOT adru_d[] IS INITIAL OR                             "*981i
+     NOT adru_u[] IS INITIAL OR                             "*981i
+     NOT adru_i[] IS INITIAL OR                             "*981i
+     NOT adr2_d[] IS INITIAL OR
+     NOT adr2_u[] IS INITIAL OR
+     NOT adr2_i[] IS INITIAL OR
+     NOT adr3_d[] IS INITIAL OR
+     NOT adr3_u[] IS INITIAL OR
+     NOT adr3_i[] IS INITIAL OR
+     NOT adr4_d[] IS INITIAL OR
+     NOT adr4_u[] IS INITIAL OR
+     NOT adr4_i[] IS INITIAL OR
+     NOT adr5_d[] IS INITIAL OR
+     NOT adr5_u[] IS INITIAL OR
+     NOT adr5_i[] IS INITIAL OR
+     NOT adr6_d[] IS INITIAL OR
+     NOT adr6_u[] IS INITIAL OR
+     NOT adr6_i[] IS INITIAL OR
+     NOT adr7_d[] IS INITIAL OR
+     NOT adr7_u[] IS INITIAL OR
+     NOT adr7_i[] IS INITIAL OR
+     NOT adr8_d[] IS INITIAL OR
+     NOT adr8_u[] IS INITIAL OR
+     NOT adr8_i[] IS INITIAL OR
+     NOT adr9_d[] IS INITIAL OR
+     NOT adr9_u[] IS INITIAL OR
+     NOT adr9_i[] IS INITIAL OR
+*------------------------------- "*178i+
+     NOT adr10_d[] IS INITIAL OR
+     NOT adr10_u[] IS INITIAL OR
+     NOT adr10_i[] IS INITIAL OR
+     NOT adr11_d[] IS INITIAL OR
+     NOT adr11_u[] IS INITIAL OR
+     NOT adr11_i[] IS INITIAL OR
+     NOT adr12_d[] IS INITIAL OR
+     NOT adr12_u[] IS INITIAL OR
+     NOT adr12_i[] IS INITIAL OR
+     NOT adr13_d[] IS INITIAL OR
+     NOT adr13_u[] IS INITIAL OR
+     NOT adr13_i[] IS INITIAL OR
+*--------------------------------- "178i-
+     NOT adrcomc_d[] IS INITIAL OR
+     NOT adrcomc_u[] IS INITIAL OR
+     NOT adrcomc_i[] IS INITIAL OR
+     NOT adrv_d[] IS INITIAL OR
+     NOT adrv_u[] IS INITIAL OR
+     NOT adrv_i[] IS INITIAL OR
+     NOT adrvp_d[] IS INITIAL OR
+     NOT adrvp_u[] IS INITIAL OR
+     NOT adrvp_i[] IS INITIAL.
+*} "*152i-
+
+*741i+
+* Der DB-Puffer wird direkt vor dem Aufruf von ADDR_SAVE_INTERN
+* gelöscht, da dieser auch bei einem fehlerhaften Verlauf
+* Datenbakänderungen vornehmen kann. Besser, wenn danach wieder von der
+* Datenbank gelesen wird.
+    CALL FUNCTION 'ADDR_REFRESH_BUFFER_DB'
+      EXCEPTIONS
+        internal_error = 1
+        OTHERS         = 2.
+
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE 'X' NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+*741i-
+
+*                           Änderungen auf die Datenbank schreiben:
+    IF execute_in_update_task = c_on.
+      CALL FUNCTION 'ADDR_SAVE_INTERN' IN UPDATE TASK
+           TABLES
+                adrc_d    = adrc_d
+                adrc_u    = adrc_u
+                adrc_i    = adrc_i
+                adrct_d   = adrct_d
+                adrct_u   = adrct_u
+                adrct_i   = adrct_i
+                adrp_d    = adrp_d
+                adrp_u    = adrp_u
+                adrp_i    = adrp_i
+                adcp_d    = adcp_d
+                adcp_u    = adcp_u
+                adcp_i    = adcp_i
+                adrt_d    = adrt_d
+                adrt_u    = adrt_u
+                adrt_i    = adrt_i
+                adr2_d    = adr2_d
+                adr2_u    = adr2_u
+                adr2_i    = adr2_i
+                adr3_d    = adr3_d
+                adr3_u    = adr3_u
+                adr3_i    = adr3_i
+                adr4_d    = adr4_d
+                adr4_u    = adr4_u
+                adr4_i    = adr4_i
+                adr5_d    = adr5_d
+                adr5_u    = adr5_u
+                adr5_i    = adr5_i
+                adr6_d    = adr6_d
+                adr6_u    = adr6_u
+                adr6_i    = adr6_i
+                adr7_d    = adr7_d
+                adr7_u    = adr7_u
+                adr7_i    = adr7_i
+                adr8_d    = adr8_d
+                adr8_u    = adr8_u
+                adr8_i    = adr8_i
+                adr9_d    = adr9_d
+                adr9_u    = adr9_u
+                adr9_i    = adr9_i
+*----------------------------- "*178i+
+                adr10_d  = adr10_d
+                adr10_u  = adr10_u
+                adr10_i  = adr10_i
+                adr11_d  = adr11_d
+                adr11_u  = adr11_u
+                adr11_i  = adr11_i
+                adr12_d  = adr12_d
+                adr12_u  = adr12_u
+                adr12_i  = adr12_i
+                adr13_d  = adr13_d
+                adr13_u  = adr13_u
+                adr13_i  = adr13_i
+*------------------------------ "*178i-
+                adrcomc_d = adrcomc_d
+                adrcomc_u = adrcomc_u
+                adrcomc_i = adrcomc_i
+                adrv_d    = adrv_d
+                adrv_u    = adrv_u
+                adrv_i    = adrv_i
+                adrvp_d   = adrvp_d
+                adrvp_u   = adrvp_u
+                adrvp_i   = adrvp_i                         "*981u
+                adru_d    = adru_d                          "*981i
+                adru_u    = adru_u                          "*981i
+                adru_i    = adru_i.                         "*981i
+    ELSE.
+      CALL FUNCTION 'ADDR_SAVE_INTERN'
+           TABLES
+                adrc_d         = adrc_d
+                adrc_u         = adrc_u
+                adrc_i         = adrc_i
+                adrct_d        = adrct_d
+                adrct_u        = adrct_u
+                adrct_i        = adrct_i
+                adrp_d         = adrp_d
+                adrp_u         = adrp_u
+                adrp_i         = adrp_i
+                adcp_d         = adcp_d
+                adcp_u         = adcp_u
+                adcp_i         = adcp_i
+                adrt_d         = adrt_d
+                adrt_u         = adrt_u
+                adrt_i         = adrt_i
+                adr2_d         = adr2_d
+                adr2_u         = adr2_u
+                adr2_i         = adr2_i
+                adr3_d         = adr3_d
+                adr3_u         = adr3_u
+                adr3_i         = adr3_i
+                adr4_d         = adr4_d
+                adr4_u         = adr4_u
+                adr4_i         = adr4_i
+                adr5_d         = adr5_d
+                adr5_u         = adr5_u
+                adr5_i         = adr5_i
+                adr6_d         = adr6_d
+                adr6_u         = adr6_u
+                adr6_i         = adr6_i
+                adr7_d         = adr7_d
+                adr7_u         = adr7_u
+                adr7_i         = adr7_i
+                adr8_d         = adr8_d
+                adr8_u         = adr8_u
+                adr8_i         = adr8_i
+                adr9_d         = adr9_d
+                adr9_u         = adr9_u
+                adr9_i         = adr9_i
+*----------------------------- "*178i+
+                adr10_d  = adr10_d
+                adr10_u  = adr10_u
+                adr10_i  = adr10_i
+                adr11_d  = adr11_d
+                adr11_u  = adr11_u
+                adr11_i  = adr11_i
+                adr12_d  = adr12_d
+                adr12_u  = adr12_u
+                adr12_i  = adr12_i
+                adr13_d  = adr13_d
+                adr13_u  = adr13_u
+                adr13_i  = adr13_i
+*------------------------------ "*178i-
+                adrcomc_d      = adrcomc_d
+                adrcomc_u      = adrcomc_u
+                adrcomc_i      = adrcomc_i
+                adrv_d         = adrv_d
+                adrv_u         = adrv_u
+                adrv_i         = adrv_i
+                adrvp_d        = adrvp_d
+                adrvp_u        = adrvp_u
+                adrvp_i        = adrvp_i
+                adru_d         = adru_d                     "*981i
+                adru_u         = adru_u                     "*981i
+                adru_i         = adru_i                     "*981i
+           EXCEPTIONS
+                database_error = 01
+                internal_error = 02
+                OTHERS         = 99.
+      IF sy-subrc = 01.
+        MESSAGE ID 'AM' TYPE 'A' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2
+                sy-msgv3 sy-msgv4 RAISING database_error.
+      ELSEIF sy-subrc = 02.
+        MESSAGE ID 'AM' TYPE 'A' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2
+                sy-msgv3 sy-msgv4 RAISING internal_error.
+      ELSEIF sy-subrc = 99.
+        MESSAGE a885 WITH 'ADDR_SAVE_INTERN'.
+      ENDIF.
+    ENDIF.
+*412i+
+    DATA: lt_insert_tab TYPE aes_addrnum_table,
+          lt_update_tab TYPE aes_addrnum_table,
+          lt_delete_tab TYPE aes_addrnum_table.
+*    LOOP AT adrc_i .                                  "*1250d
+    LOOP AT adrc_i WHERE  nation = space.                   "*1250i
+      APPEND adrc_i-addrnumber TO lt_insert_tab.
+    ENDLOOP.
+*    LOOP AT adrc_u.                                   "*1250d
+    LOOP AT adrc_u WHERE  nation = space.                   "*1250i
+      APPEND adrc_u-addrnumber TO lt_update_tab.
+    ENDLOOP.
+*    LOOP AT adrc_d.                                   "*1250d
+    LOOP AT adrc_d WHERE  nation = space.                   "*1250i
+      APPEND adrc_d-addrnumber TO lt_delete_tab.
+    ENDLOOP.
+
+    CALL FUNCTION 'ADDR_CONTAINER_SAVE'
+      EXPORTING
+        execute_in_update_task = execute_in_update_task
+        insert_tab             = lt_insert_tab
+        update_tab             = lt_update_tab
+        delete_tab             = lt_delete_tab
+      EXCEPTIONS
+        internal_error         = 01
+        database_error         = 02
+        OTHERS                 = 99.
+
+    IF sy-subrc = 01.
+      MESSAGE ID 'AM' TYPE 'A' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2
+              sy-msgv3 sy-msgv4 RAISING internal_error.
+    ELSEIF sy-subrc = 02.
+      MESSAGE ID 'AM' TYPE 'A' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2
+              sy-msgv3 sy-msgv4 RAISING database_error.
+    ELSEIF sy-subrc = 99.
+      MESSAGE ID 'AM' TYPE 'A' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2
+               sy-msgv3 sy-msgv4 RAISING internal_error.
+    ENDIF.
+*412i-
+
+*403i+
+*   Falls Quartalsabgleich aktiv, alle Adressnummern aus ADRC_U an
+*   die Merkertabelle anhängen
+*   Dies nicht tun, falls RSADRQU3 Daten schon zurückschreibt    "*403i
+    IF g_rsadrqu3_active IS INITIAL.                        "*403i
+      READ TABLE gt_qu_countries INDEX 1 INTO countries_wa.
+      IF sy-subrc = 0 AND NOT adrc_u[] IS INITIAL.
+*       Merkertabelle für Quartalsabgleich einlesen
+        REFRESH adrc_qu3_tab.
+        IMPORT adrc_qu3_tab FROM DATABASE adquindx(rs)
+          CLIENT sy-mandt ID c_indx_addr_nums.
+        LOOP AT adrc_u.
+          adrc_qu3_wa-addrnumber = adrc_u-addrnumber.
+          APPEND adrc_qu3_wa TO adrc_qu3_tab.
+        ENDLOOP.
+*       Merkertabelle für Quartalsabgleich zurückschreiben
+        EXPORT adrc_qu3_tab TO DATABASE adquindx(rs)
+          CLIENT sy-mandt ID c_indx_addr_nums.
+      ENDIF.
+    ENDIF.                                                  "*403i
+*403i-
+
+* ------------------------- Zwischentabellen löschen
+*    PERFORM clear_table TABLES *iadcp.                     "*694d
+    CLEAR *iadcp.                                           "*694i
+    REFRESH *iadcp.                                         "*694i
+*    PERFORM clear_table TABLES *iadrc.                     "*694d
+    CLEAR *iadrc.                                           "*694i
+    REFRESH *iadrc.                                         "*694i
+* ------------------------- Globale Variable zurücksetzen   "*1010d
+*   g_different_to_db = c_false.                            "*1010d
+
+  ENDIF.                                                    "*152i
+
+*370i+
+* Objekt ggf. instanziieren
+  IF g_obj_ex_address_update IS INITIAL.
+    CALL METHOD cl_exithandler=>get_instance
+      EXPORTING                                             "*959i
+        exit_name              = 'ADDRESS_UPDATE'           "*959i
+        null_instance_accepted = space                      "*959i
+      IMPORTING                                             "*959i
+        act_imp_existing       = gv_act_imp_address_update  "*959i
+      CHANGING
+        instance               = g_obj_ex_address_update.
+  ENDIF.
+* Methode "Sichern beendet" aufrufen (Trappatoni-Methode)
+  IF NOT gv_act_imp_address_update IS INITIAL.              "*959i
+    CALL METHOD g_obj_ex_address_update->finished
+      EXPORTING
+        im_saved_all = c_yes.
+  ENDIF.                                                    "*959i
+*  CLEAR g_obj_ex_address_update.          "*807d
+*370i-
+
+*773i+
+* Wenn der Funktionsbaustein ohne Probleme bis hierher gekomen ist,
+* dann wurden alle Änderungen gesichert und der Datenbankstand
+* stimmt auf jeden Fall mit dem lokalen Gedächtnis überein.
+* Also muß G_DIFFERENT_TO_DB zurückgesetzt werden, insbesondere
+* wenn es keine Änderungen gab und daher das Zurücksetzen noch nicht
+* passiert ist.
+  IF la_group[] IS INITIAL.                                 "*1010i
+    g_different_to_db = c_false.
+  ELSE.                                                     "*1010i
+    PERFORM determine_different_to_db.                      "*1010i
+  ENDIF.                                                    "*1010i
+*773i-
+
+ENDFUNCTION.

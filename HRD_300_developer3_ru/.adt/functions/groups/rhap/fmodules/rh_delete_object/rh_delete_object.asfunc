@@ -1,0 +1,503 @@
+FUNCTION RH_DELETE_OBJECT
+  IMPORTING
+    VALUE(PLVAR) LIKE WPLOG-PLVAR OPTIONAL
+    VALUE(OTYPE) LIKE WPLOG-OTYPE OPTIONAL
+    VALUE(OBJID) LIKE WPLOG-OBJID OPTIONAL
+    VALUE(VTASK) LIKE HRRHAP-VTASK
+    VALUE(ORDER_FLG) LIKE HRRHAP-ORDER_FLG DEFAULT 'X'
+    VALUE(COMMIT_FLG) LIKE HRRHAP-COMMIT_FLG DEFAULT 'X'
+    VALUE(AUTHY) LIKE HRRHAP-AUTHY DEFAULT 'X'
+    VALUE(CONFIRM) LIKE HRRHAP-COMMIT_FLG DEFAULT SPACE
+    VALUE(DELETE_1205_WFDID) LIKE HRRHAP-COMMIT_FLG DEFAULT 'X'
+    VALUE(DELETE_USER_PROFILES) LIKE HRRHAP-COMMIT_FLG DEFAULT 'X'
+    VALUE(DELETE_DEPENDENTS) LIKE HRRHAP-COMMIT_FLG DEFAULT 'X'
+    VALUE(KEEP_LUPD) LIKE HRRHAP-KEEP_LUPD OPTIONAL
+    VALUE(WORKF_ACTV) LIKE HRRHAP-WORKF_ACTV DEFAULT 'X'
+    VALUE(NO_EXCEPT_FOREIGN_DATA) LIKE HRRHAP-COMMIT_FLG DEFAULT SPACE
+  EXPORTING
+    VALUE(CONFIRM_EXIT) TYPE ANY
+  TABLES
+    DEL_OBJECTS LIKE HROBJECT OPTIONAL
+    ILFCODE LIKE ILFCOD OPTIONAL
+  EXCEPTIONS
+    ERROR_DURING_DELETE
+    NO_AUTHORIZATION
+    CORR_EXIT
+    BUFFER_UPD_WITH_FOREIGN_DATA.
+
+
+
+
+  TABLES: TPRPROF.
+  CONSTANTS : OTYPE_TASK LIKE WPLOG-OTYPE VALUE 'T ',
+              OTYPE_ROLE LIKE WPLOG-OTYPE VALUE 'RY'.
+  DATA : DEL_SUBRC LIKE SY-SUBRC.
+  DATA : DEL_OBJECTS_LINES TYPE I.
+  DATA : DEL_TAB LIKE WPLOG OCCURS 1 WITH HEADER LINE.
+  DATA : DEL_1001_TAB LIKE P1001 OCCURS 1 WITH HEADER LINE.
+  DATA : DEL_1205_TAB LIKE P1205 OCCURS 1 WITH HEADER LINE.
+  DATA : BEGIN OF DEL_AUTH_TAB OCCURS 1,
+           PLVAR LIKE WPLOG-PLVAR,
+           OTYPE LIKE WPLOG-OTYPE,
+           INFTY LIKE WPLOG-INFTY,
+           SUBTY LIKE WPLOG-SUBTY,
+           ISTAT LIKE WPLOG-ISTAT,
+         END   OF DEL_AUTH_TAB.
+
+  DATA: DEL_AUTH_TAB_STRUC LIKE DEL_AUTH_TAB.             "ANDBCEK002698
+  DATA: DO_INFTB LIKE PPPCH-INFTB.
+  DATA: DO_SORT LIKE HRRHDB-SORT.      "VWMWF
+  DATA: OBJ_ILFCODE LIKE ILFCOD OCCURS 0 WITH HEADER LINE."VWMWF
+  DATA: DEL_ILFCODE LIKE ILFCOD OCCURS 0 WITH HEADER LINE."VWMWF
+  DATA: DEL_TABIX LIKE SY-TABIX.       "VWMWF
+  DATA: DEL_OBJECTS_TABIX LIKE SY-TABIX.                  "VWMWF
+  DATA: ACT_OBJECT LIKE HROBJECT.      "VWMWF
+  DATA: LAST_OBJECT LIKE HROBJECT.     "VWMWF
+  DATA: T77FC_LFCOD LIKE T77FC-LFCOD.  "VWMWF
+  DATA: I_LINES TYPE I.
+  DATA: ACT_OBJECT_EXT LIKE RHOBJECTS-OBJECT.
+  DATA: DEPENDENT_OBJECTS LIKE HROBJECT OCCURS 0 WITH HEADER LINE.
+  DATA: DEPENDENT_LINES TYPE I.
+  DATA: DEPENDENT_ILFCODE LIKE ILFCOD OCCURS 0 WITH HEADER LINE.
+
+  PERFORM CLIENT_SET.                                     "VWMCLIENT
+  PERFORM SET_KEEP_LUPD USING KEEP_LUPD.                  "VWMWF
+  PERFORM SET_WORKF_ACTV USING WORKF_ACTV.                "VWMWF
+
+  IF NOT ( PLVAR IS INITIAL OR OTYPE IS INITIAL OR OBJID IS INITIAL ).
+    DEL_OBJECTS-PLVAR = PLVAR.
+    DEL_OBJECTS-OTYPE = OTYPE.
+    DEL_OBJECTS-OBJID = OBJID.
+    APPEND DEL_OBJECTS.
+  ENDIF.
+* look for dependent objects and append del_objects
+  IF NOT DELETE_DEPENDENTS IS INITIAL.
+
+    CALL FUNCTION 'RH_DEPENDENT_OBJECTS_HANDLE'
+         EXPORTING
+*             act_plvar           = plvar
+*             parent_otype        = otype
+*             parent_objid        = objid
+              CONFIRM_FLAG        = SPACE
+              WORKF_ACTV          = RHAP_WORKF_ACTV
+         TABLES
+              DEPENDENT_OBJECTS   = DEPENDENT_OBJECTS
+              DEPENDENT_ILFCODE   = DEPENDENT_ILFCODE
+              DEL_OBJECTS         = DEL_OBJECTS
+              DEL_ILFCODE         = ILFCODE
+         EXCEPTIONS
+              NO_ACTIVE_PLVAR     = 1
+              NO_DEPENDENTS_FOUND = 2
+              PARAMETER_CONFLICT  = 3
+              FCODE_NOT_SUPPORTED = 4
+              ERROR_OCCURRED      = 5
+              ACTION_ABORTED      = 6
+              OTHERS              = 7.
+    IF SY-SUBRC EQ 0.
+      IF RHAP_WORKF_ACTV NE SPACE.     "VWMWF
+        DESCRIBE TABLE DEL_OBJECTS LINES DEL_OBJECTS_LINES."VWMWF
+        LOOP AT DEPENDENT_ILFCODE.     "VWMWF
+*       TABIX um Anzahl Einträge in DEL_OBJECTS erhöhen    "VWMWF
+          ADD DEL_OBJECTS_LINES TO DEPENDENT_ILFCODE-TABIX."VWMWF
+          MODIFY DEPENDENT_ILFCODE.    "VWMWF
+        ENDLOOP.                       "VWMWF
+        OBJ_ILFCODE[] = ILFCODE[].     "VWMWF
+        APPEND LINES OF DEPENDENT_ILFCODE TO OBJ_ILFCODE.  "VWMWF
+        SORT OBJ_ILFCODE BY TABIX.     "VWMWF
+      ENDIF.                           "VWMWF
+      APPEND LINES OF DEPENDENT_OBJECTS TO DEL_OBJECTS.
+    ELSEIF SY-SUBRC EQ 6.
+      EXIT.
+    ENDIF.
+  ENDIF.
+
+  DESCRIBE TABLE DEPENDENT_OBJECTS LINES DEPENDENT_LINES.
+
+  IF AUTHY NE SPACE.
+    LOOP AT DEL_OBJECTS.
+      CALL FUNCTION 'RH_STRU_AUTHORITY_CHECK'
+           EXPORTING
+                FCODE  = 'DEL '
+                PLVAR  = DEL_OBJECTS-PLVAR
+                OTYPE  = DEL_OBJECTS-OTYPE
+                OBJID  = DEL_OBJECTS-OBJID
+                WITH_BASE_AC = ' '
+           EXCEPTIONS
+                OTHERS = 4.
+      IF SY-SUBRC GT 0.
+        RAISE NO_AUTHORIZATION.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  DESCRIBE TABLE DEL_OBJECTS LINES DEL_OBJECTS_LINES.
+  CHECK DEL_OBJECTS_LINES GT 0.
+
+  CLEAR CONFIRM_EXIT.
+  IF CONFIRM NE SPACE.
+    CLEAR : ANSWER, TEXT_LINE1, TEXT_LINE2.
+    IF DEL_OBJECTS_LINES EQ 1.
+      READ TABLE DEL_OBJECTS INDEX 1.
+      TEXT_LINE1 = TEXT-OBJ.
+      TEXT_LINE1+10 = DEL_OBJECTS-PLVAR.
+      TEXT_LINE1+15 = DEL_OBJECTS-OTYPE.
+      TEXT_LINE1+20 = DEL_OBJECTS-OBJID.
+      CONDENSE TEXT_LINE1.
+      IF DEPENDENT_LINES = 0.
+        TEXT_LINE2 = TEXT-DE1.
+      ELSE.
+        TEXT_LINE2 = TEXT-DD1.
+      ENDIF.
+    ELSE.
+      IF DEPENDENT_LINES = 0.
+        TEXT_LINE1 = TEXT-DE2.
+      ELSE.
+        TEXT_LINE1 = TEXT-DD2.
+      ENDIF.
+    ENDIF.
+    CALL FUNCTION 'POPUP_TO_CONFIRM_STEP'
+         EXPORTING
+              DEFAULTOPTION = 'N'
+              TEXTLINE1     = TEXT_LINE1
+              TEXTLINE2     = TEXT_LINE2
+              TITEL         = TEXT-DEL
+         IMPORTING
+              ANSWER        = ANSWER.
+    IF ANSWER NE 'J'.
+      CONFIRM_EXIT = ANSWER.
+      EXIT.
+    ENDIF.
+  ENDIF.
+  DO_INFTB = '0'.
+
+  IF RHAP_WORKF_ACTV NE SPACE.         "VWMWF
+    DO_SORT = 'X'.                     "VWMWF
+  ENDIF.                               "VWMWF
+
+  CALL FUNCTION 'RH_READ_INFTY'
+       EXPORTING
+            AUTHORITY = SPACE
+            INFTY     = SPACE
+            ISTAT     = SPACE
+            EXTEND    = SPACE
+            INFTB     = DO_INFTB
+            SORT      = DO_SORT        "VWMWF
+            VIA_T777D = 'X'
+       TABLES
+            INNNN     = DEL_TAB
+            OBJECTS   = DEL_OBJECTS
+       EXCEPTIONS
+            OTHERS    = 4.
+
+  IF SY-SUBRC NE 0.
+    RAISE ERROR_DURING_DELETE.
+  ENDIF.
+
+  perform fill_wplog_lengths.                               "ANDUNI
+  LOOP AT DEL_TAB.
+    IF AUTHY NE SPACE.
+      MOVE-CORRESPONDING DEL_TAB TO DEL_AUTH_TAB.
+      COLLECT DEL_AUTH_TAB.
+    ENDIF.
+    IF DEL_TAB-INFTY EQ '1001'.
+*      DEL_1001_TAB = DEL_TAB.                              "ANDUNI
+      del_1001_tab(pkeyadmin_len) = del_tab(pkeyadmin_len). "ANDUNI
+      assign del_tab-vdata to <p1001_vdata> casting.        "ANDUNI
+      del_1001_tab-hrip1001 = <p1001_vdata>.                "ANDUNI
+      APPEND DEL_1001_TAB.
+    ENDIF.
+*   store 1205-infties (WFD-Definitions), if the user want this
+    IF DEL_TAB-INFTY = '1205' AND DELETE_1205_WFDID = 'X'.
+      MOVE DEL_TAB TO DEL_1205_TAB.
+      IF NOT DEL_1205_TAB-WFD_ID IS INITIAL.
+*       just the entries with a valid wfd-id
+        APPEND DEL_1205_TAB.
+      ENDIF.
+    ENDIF.
+
+*   Löschen Benutzerprofile zur Aktivitätsgruppe
+    IF ( DEL_TAB-OTYPE = OTYPE_TASK OR
+         DEL_TAB-OTYPE = OTYPE_ROLE ) AND
+       DEL_TAB-INFTY = '1000' AND
+       DEL_TAB-MANDT = SY-MANDT AND                         "VWMCLIENT
+       NOT DELETE_USER_PROFILES IS INITIAL.
+
+*     check vtask: it's forbidden vtask = 'B' with foreign data
+      IF VTASK = 'B'
+      and no_except_foreign_data is initial.
+        MESSAGE S378(5A) RAISING BUFFER_UPD_WITH_FOREIGN_DATA.
+      ENDIF.
+
+      CALL FUNCTION 'RH_CHECK_PROF_OF_USERS'
+           EXPORTING
+                PLVAR                         = DEL_TAB-PLVAR
+                OTYPE                         = DEL_TAB-OTYPE
+                OBJID                         = DEL_TAB-OBJID
+                NO_DIALOG                     = 'X'
+                DELETE_PROFILES               = 'X'
+           EXCEPTIONS
+                NO_ACTIVE_PLVAR               = 1
+                CANCEL                        = 2
+                PROFILE_NOT_DELETED           = 3
+                NO_ACTIVITY_GROUP             = 4
+                COMPOSITE_PROFILE_NOT_DELETED = 5
+                OTHERS                        = 6.
+      IF SY-SUBRC EQ 3.
+        MESSAGE S521(5W) RAISING NO_AUTHORIZATION.
+*   Keine Berechtigung zur Pflege von Berechtigungen.
+      ELSEIF SY-SUBRC EQ 5.
+        MESSAGE S474(5A) RAISING ERROR_DURING_DELETE.
+*    Zu löschendes generiertes Profil wird noch in Sammelprofil(en) verw
+      ELSEIF SY-SUBRC EQ 0.
+        IF NOT DEL_TAB-OTYPE IS INITIAL AND NOT
+               DEL_TAB-OBJID IS INITIAL.
+* clean up TPRPOF (all planversions):
+          DELETE FROM TPRPROF WHERE OTYPE = DEL_TAB-OTYPE AND
+                                    OBJID = DEL_TAB-OBJID.
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+  ENDLOOP.
+
+  IF AUTHY NE SPACE.
+   LOOP AT DEL_AUTH_TAB WHERE INFTY EQ 1000.
+* Strukturelle Berechtigung ist vorhanden. Wenn jetzt noch Basis-
+* berechtigung für den IT1000 für den Funktionscode 'delo' vor-
+* handen ist, ist die Berechtigungsprüfung abgeschlossen. Wenn
+* keine Berechtigun für 'delo' vorhanden ist, wird die
+* Berechtigung 'del' für alle Infotypen geprüft. Dies ist auch
+* eine hinreichende Bedingung zum Erfüllen der Basisberechtigung.
+    CALL FUNCTION 'RH_BASE_AUTHORITY_CHECK'               "ANDBCEK002698
+             EXPORTING                                    "ANDBCEK002698
+                  FCODE             = DELO                "ANDBCEK002698
+                  PLVAR             = DEL_AUTH_TAB-PLVAR  "ANDBCEK002698
+                  OTYPE             = DEL_AUTH_TAB-OTYPE  "ANDBCEK002698
+                  INFTY             = DEL_AUTH_TAB-INFTY  "ANDBCEK002698
+                  SUBTY             = DEL_AUTH_TAB-SUBTY  "ANDBCEK002698
+                  ISTAT             = DEL_AUTH_TAB-ISTAT  "ANDBCEK002698
+             EXCEPTIONS                                   "ANDBCEK002698
+                  NO_BASE_AUTHORITY = 04.                 "ANDBCEK002698
+                                                          "ANDBCEK002698
+    IF SY-SUBRC NE 0.                                     "ANDBCEK002698
+      LOOP AT DEL_AUTH_TAB INTO DEL_AUTH_TAB_STRUC WHERE  "ANDBCEK002698
+                           PLVAR EQ DEL_AUTH_TAB-PLVAR    "ANDBCEK002698
+                       AND OTYPE EQ DEL_AUTH_TAB-OTYPE    "ANDBCEK002698
+                       AND ISTAT EQ DEL_AUTH_TAB-ISTAT.   "ANDBCEK002698
+
+
+        CALL FUNCTION 'RH_BASE_AUTHORITY_CHECK'           "ANDBCEK002698
+           EXPORTING                                      "ANDBCEK002698
+                FCODE             = 'DEL '
+                PLVAR             = DEL_AUTH_TAB_STRUC-PLVAR "BCEK002698
+                OTYPE             = DEL_AUTH_TAB_STRUC-OTYPE "BCEK002698
+                INFTY             = DEL_AUTH_TAB_STRUC-INFTY "BCEK002698
+                SUBTY             = DEL_AUTH_TAB_STRUC-SUBTY "BCEK002698
+                ISTAT             = DEL_AUTH_TAB_STRUC-ISTAT "BCEK002698
+           EXCEPTIONS
+                NO_BASE_AUTHORITY = 01.
+        IF SY-SUBRC GT 0.
+          RAISE NO_AUTHORIZATION.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.                                                "ANDBCEK002698
+   ENDLOOP.                                               "ANDBCEK002698
+  ENDIF.
+
+  perform fill_wplog_lengths.                                "ANDUNI
+  LOOP AT DEL_1001_TAB.
+    PERFORM TURN_RELATION USING DEL_1001_TAB-SCLAS DEL_SUBRC.
+    IF DEL_SUBRC EQ 0.
+      PERFORM INVERT_RELA_INFTY USING DEL_1001_TAB.
+*      DEL_TAB = DEL_1001_TAB.                               "ANDUNI
+      clear del_tab.                                         "ANDUNI
+      del_tab(pkeyadmin_len) = del_1001_tab(pkeyadmin_len).  "ANDUNI
+      assign del_1001_tab-hrip1001 to <wplog_vdata>          "ANDUNI
+                                      casting type c.        "ANDUNI
+      del_tab-vdata = <wplog_vdata>.                         "ANDUNI
+      APPEND DEL_TAB.
+    ENDIF.
+  ENDLOOP.
+
+* check existence of wfd-ids
+  DESCRIBE TABLE DEL_1205_TAB LINES I_LINES.
+  IF I_LINES > 0.
+*   we have entries to delete
+*   check vtask: it's forbidden vtask = 'B' with foreign data
+    IF VTASK = 'B'
+    and no_except_foreign_data is initial.
+      MESSAGE S378(5A) RAISING BUFFER_UPD_WITH_FOREIGN_DATA.
+    ENDIF.
+
+    LOOP AT DEL_1205_TAB.
+      ACT_OBJECT_EXT+0(2) = DEL_1205_TAB-OTYPE.
+      ACT_OBJECT_EXT+2(8) = DEL_1205_TAB-OBJID.
+*     delete wf-definition (without commit !!!)
+*      CALL FUNCTION 'SWD_INVOKE_WORKFLOW_EDITOR'
+*           EXPORTING
+*                ACT_OBJECT_TYPE = DEL_1205_TAB-OTYPE
+*                ACT_OBJECT_EXT  = ACT_OBJECT_EXT
+*                ACT_STEXT       = ' '
+*                ACT_SHORT       = ' '
+*                ACT_WFD_ID      = DEL_1205_TAB-WFD_ID
+*                ACT_WFD_VERSION = DEL_1205_TAB-VERSION
+*                ACT_UCOMM       = 'DELE'.
+*
+**** AND *****
+
+      data: wfd_key like swd_wfdkey.
+      data: wf_inst type ref to cl_workflow_task_wf,
+            ws_inst type ref to cl_workflow_task_ws.
+
+      case DEL_1205_TAB-OTYPE.
+       when 'WF'.
+        call method cl_workflow_factory=>create_wf
+          exporting
+            objid                      = DEL_1205_TAB-OBJID
+            begin_date                 = low_date
+            end_date                   = high_date
+            no_changes_allowed         = 'X'
+            enqueue_already_done       = 'X'
+          receiving
+            wf_inst                    = wf_inst
+           EXCEPTIONS
+             TASK_TYPE_DOES_NOT_EXIST   = 1
+             WORKFLOW_DOES_NOT_EXIST    = 2
+             OBJECT_COULD_NOT_BE_LOCKED = 3
+             NO_DATES_GIVEN             = 4
+             NO_LANGUAGES_MAINTAINED    = 5
+             NO_ACTIVE_PLVAR            = 6
+             OBJID_NOT_GIVEN            = 7
+             others                     = 8.
+
+        if sy-subrc <> 0.
+          continue.
+        endif.
+
+       when 'WS'.
+        call method cl_workflow_factory=>create_ws
+          exporting
+            objid                      = del_1205_tab-objid
+            NO_CHANGES_ALLOWED         = 'X'
+            ENQUEUE_ALREADY_DONE       = 'X'
+          receiving
+            ws_inst                    = ws_inst
+           EXCEPTIONS
+             WORKFLOW_DOES_NOT_EXIST    = 1
+             OBJECT_COULD_NOT_BE_LOCKED = 2
+             OBJID_NOT_GIVEN            = 3
+             others                     = 4.
+
+        if sy-subrc <> 0.
+          continue.
+        endif.
+       when others.
+        continue.
+      endcase.
+
+      wfd_key-version = DEL_1205_TAB-version.
+      wfd_key-wfd_id = DEL_1205_TAB-WFD_ID.
+
+      call function 'SWD_INVOKE_WORKFLOW_EDITOR'
+        EXPORTING
+          IM_TASK_ID                = ACT_OBJECT_EXT
+          IM_WF                     = wf_inst
+          IM_WS                     = ws_inst
+          IM_COMMAND                = 'DELE'
+*         IM_STEXT                  =
+*         IM_SHORT                  =
+*         IM_TEMPLATE               =
+*         IM_ADHOC_OBJECTTYPE       =
+          IM_WFDKEY                 = wfd_key
+*         IM_PROFILE                =
+*         IM_EDITOR_TYPE            = ' '
+*       IMPORTING
+*         EX_CHANGED                =
+        EXCEPTIONS
+          NOT_FOUND                 = 1
+          OTHERS                    = 2.
+
+      if sy-subrc <> 0.
+        continue.
+      endif.
+
+**** AND *****
+
+    ENDLOOP.
+  ENDIF.
+
+  IF RHAP_WORKF_ACTV NE SPACE.
+*   logischen FCODE aus T77FC ermitteln
+    SELECT SINGLE * FROM T77FC WHERE FCODE = DELO.
+    IF SY-SUBRC = 0.
+      T77FC_LFCOD = T77FC-LFCOD.
+    ENDIF.
+    LOOP AT DEL_TAB.
+      CLEAR WORKF_SET.
+      ADD 1 TO DEL_TABIX.
+      ACT_OBJECT-PLVAR = DEL_TAB-PLVAR.
+      ACT_OBJECT-OTYPE = DEL_TAB-OTYPE.
+      ACT_OBJECT-OBJID = DEL_TAB-OBJID.
+      IF ACT_OBJECT NE LAST_OBJECT.
+        IF DEL_TAB-INFTY = ID_INFTY.
+*         Ermitteln des Objekt-TABIX
+          READ TABLE DEL_OBJECTS
+               WITH KEY PLVAR = DEL_TAB-PLVAR
+                        OTYPE = DEL_TAB-OTYPE
+                        OBJID = DEL_TAB-OBJID.
+          IF SY-SUBRC = 0.
+*           Lesen log.FCODE des Primärsatzes
+            DEL_OBJECTS_TABIX = SY-TABIX.
+            READ TABLE OBJ_ILFCODE
+                 WITH KEY DEL_OBJECTS_TABIX BINARY SEARCH.
+            IF SY-SUBRC = 0.
+              DEL_ILFCODE-TABIX = DEL_TABIX.
+              DEL_ILFCODE-LFCOD = OBJ_ILFCODE-LFCOD.
+              APPEND DEL_ILFCODE.
+            ELSE.
+*             logischen FCODE aus T77FC setzen
+              DEL_ILFCODE-TABIX = DEL_TABIX.
+              DEL_ILFCODE-LFCOD = T77FC_LFCOD.
+              APPEND DEL_ILFCODE.
+            ENDIF.
+            WORKF_SET = 'X'.
+          ENDIF.
+        ENDIF.
+      ELSE.
+        LAST_OBJECT-PLVAR = DEL_TAB-PLVAR.
+        LAST_OBJECT-OTYPE = DEL_TAB-OTYPE.
+        LAST_OBJECT-OBJID = DEL_TAB-OBJID.
+      ENDIF.
+      IF WORKF_SET EQ SPACE.
+        DEL_ILFCODE-TABIX = DEL_TABIX.
+        DEL_ILFCODE-LFCOD = LFCOD_NO.
+        APPEND DEL_ILFCODE.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  CALL FUNCTION 'RH_DELETE_INFTY_DIRECT'
+       EXPORTING
+            VTASK               = VTASK
+*           ORDER_FLG           = SPACE                    "VWMD060985
+            ORDER_FLG           = ORDER_FLG                 "VWMD060985
+            COMMIT_FLG          = COMMIT_FLG
+            AUTHY               = SPACE
+       TABLES
+            INNNN               = DEL_TAB
+            ILFCODE             = DEL_ILFCODE               "VWMWF
+       EXCEPTIONS
+            NO_AUTHORIZATION    = 01
+            ERROR_DURING_DELETE = 02
+            CORR_EXIT           = 03.
+
+  CASE SY-SUBRC.
+    WHEN 01.
+      RAISE NO_AUTHORIZATION.
+    WHEN 02.
+      RAISE ERROR_DURING_DELETE.
+    WHEN 03.
+      MESSAGE S377 RAISING CORR_EXIT.
+  ENDCASE.
+
+ENDFUNCTION.

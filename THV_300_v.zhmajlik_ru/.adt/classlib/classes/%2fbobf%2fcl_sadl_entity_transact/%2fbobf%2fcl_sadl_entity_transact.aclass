@@ -1,0 +1,1210 @@
+CLASS /bobf/cl_sadl_entity_transact DEFINITION INHERITING FROM cl_sadl_entity_transactional
+  PUBLIC
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    METHODS constructor IMPORTING iv_type TYPE sadl_entity_type DEFAULT /bobf/if_sadl_c=>gc_entity_type
+                                  iv_id   TYPE sadl_entity_id
+                        RAISING   cx_sadl_static
+                                  cx_sadl_contract_violation.
+    METHODS prepare_create EXPORTING et_bopf_modifications TYPE /bobf/t_frw_modification
+                           CHANGING  ct_bopf_data          TYPE STANDARD TABLE
+                           RAISING   cx_sadl_contract_violation.
+    METHODS prepare_create_by_association IMPORTING iv_association_name   TYPE sadl_entity_association
+                                                    it_bopf_source_keys   TYPE /bobf/t_frw_key
+                                          EXPORTING et_bopf_modifications TYPE /bobf/t_frw_modification
+                                          CHANGING  ct_target_bopf_data   TYPE STANDARD TABLE
+                                          RAISING   cx_sadl_contract_violation
+                                                    cx_sadl_static.
+
+    METHODS prepare_delete IMPORTING iv_alternative_key_name TYPE if_sadl_entity=>ty_key_name
+                                     it_entity_key_values    TYPE INDEX TABLE
+                           EXPORTING et_bopf_modifications   TYPE /bobf/t_frw_modification
+                                     et_bopf_keys            TYPE /bobf/t_frw_key
+                                     et_failed_converted     TYPE if_sadl_entity_transactional=>tt_tabix
+                           RAISING   cx_sadl_contract_violation.
+    METHODS prepare_execute IMPORTING iv_action_name          TYPE sadl_entity_action
+                                      iv_alternative_key_name TYPE if_sadl_entity=>ty_key_name
+                                      it_entity_key_values    TYPE INDEX TABLE
+                            EXPORTING et_bopf_keys            TYPE /bobf/t_frw_key
+                                      et_failed_converted     TYPE if_sadl_entity_transactional=>tt_tabix
+                                      et_existing_keys        TYPE /bobf/t_frw_key
+                                      ev_bopf_action_key      TYPE /bobf/act_key
+                            RAISING   cx_sadl_contract_violation.
+    METHODS prepare_update IMPORTING iv_alternative_key_name       TYPE if_sadl_entity=>ty_key_name
+                                     it_updated_elements_per_tabix TYPE if_sadl_entity_transactional=>tt_elements_per_tabix
+                                     it_entity_data                TYPE STANDARD TABLE
+                           EXPORTING et_bopf_modifications         TYPE /bobf/t_frw_modification
+                                     et_bopf_keys                  TYPE /bobf/t_frw_key
+                                     et_failed_converted           TYPE if_sadl_entity_transactional=>tt_tabix
+                           RAISING   cx_sadl_contract_violation.
+    METHODS get_existing_bopf_keys IMPORTING is_source_key_values           TYPE data
+                                             iv_source_alternative_key_name TYPE if_sadl_entity=>ty_key_name
+                                             iv_force_existence_check       TYPE abap_bool DEFAULT abap_false
+                                   EXPORTING et_bopf_source_keys            TYPE /bobf/t_frw_key
+                                             ev_source_failed               TYPE abap_bool
+                                   RAISING   cx_sadl_contract_violation .
+    CLASS-METHODS check_type_supported IMPORTING iv_type TYPE if_sadl_entity=>ty_entity_type
+                                       RAISING   cx_sadl_contract_violation.
+
+protected section.
+
+  methods _CREATE
+    redefinition .
+  methods _CREATE_BY_ASSOCIATION
+    redefinition .
+  methods _CREATE_MESSAGE_HANDLER
+    redefinition .
+  methods _DELETE
+    redefinition .
+  methods _EXECUTE
+    redefinition .
+  methods _GET_PROPERTIES_ACTION
+    redefinition .
+  methods _GET_PROPERTIES_ASSOCIATION
+    redefinition .
+  methods _GET_PROPERTIES_ELEMENTS
+    redefinition .
+  methods _GET_PROPERTIES_ENTITY
+    redefinition .
+  methods _READ
+    redefinition .
+  methods _READ_BY_ASSOCIATION
+    redefinition .
+  methods _READ_KEYS_BY_ASSOCIATION
+    redefinition .
+  methods _UPDATE
+    redefinition .
+  PRIVATE SECTION.
+
+    TYPES:
+      BEGIN OF gty_key_tabix,
+        key   TYPE /bobf/conf_key,
+        tabix TYPE sytabix,
+      END OF gty_key_tabix .
+    TYPES:
+      gtt_key_tabix_map TYPE STANDARD TABLE OF gty_key_tabix WITH DEFAULT KEY
+                                                                   WITH NON-UNIQUE SORTED KEY key COMPONENTS key . "non-unique for faster inserts
+
+    DATA mv_entity_type TYPE sadl_entity_type .
+    DATA mo_service_manager TYPE REF TO /bobf/if_tra_service_manager .
+    DATA mo_bopf_sadl_entity_rt_access TYPE REF TO /bobf/cl_sadl_entity_rt_access .
+
+    CLASS-METHODS convert_links_bopf_to_sadl
+      IMPORTING
+        !it_bopf_key_links TYPE /bobf/t_frw_key_link
+        !it_source_keys    TYPE /bobf/t_frw_key
+        !it_target_data    TYPE STANDARD TABLE OPTIONAL
+        !it_target_keys    TYPE /bobf/t_frw_key OPTIONAL
+      EXPORTING
+        !et_sadl_links     TYPE if_sadl_entity_transactional=>tt_tabix_links .
+    "! creates a table of [KEY, TABIX] pairs (where KEY is the BOPF instance instance key), sorted by KEY.
+    CLASS-METHODS build_sorted_key_tabix_map
+      IMPORTING
+        !it_entities      TYPE INDEX TABLE
+      EXPORTING
+        !et_key_tabix_map TYPE gtt_key_tabix_map .
+    CLASS-METHODS merge_failed_indexes
+      IMPORTING
+        !it_failed TYPE if_sadl_entity_transactional=>tt_tabix
+      CHANGING
+        !ct_failed TYPE if_sadl_entity_transactional=>tt_tabix .
+    CLASS-METHODS calc_failed_tabix_from_keys
+      IMPORTING
+        !it_all_keys    TYPE /bobf/t_frw_key
+        !it_failed_keys TYPE /bobf/t_frw_key
+      EXPORTING
+        !et_failed      TYPE if_sadl_entity_transactional=>tt_tabix .
+    METHODS convert_edit_mode_sadl_to_bopf
+      IMPORTING
+        !iv_sadl_edit_mode       TYPE if_sadl_entity_transactional=>ty_edit_mode
+      RETURNING
+        VALUE(rv_bopf_edit_mode) TYPE /bobf/conf_edit_mode .
+    METHODS add_message
+      IMPORTING
+        !io_message TYPE REF TO /bobf/if_frw_message .
+    METHODS calc_failed_tabix_from_change
+      IMPORTING
+        !it_bopf_keys   TYPE /bobf/t_frw_key
+        !io_tra_change  TYPE REF TO /bobf/if_tra_change
+        !iv_change_mode TYPE /bobf/conf_change_mode
+        !iv_node_key    TYPE /bobf/obm_node_key OPTIONAL
+      EXPORTING
+        !et_failed      TYPE if_sadl_entity_transactional=>tt_tabix .
+    METHODS convert_keys_entity_to_bopf
+      IMPORTING
+        !it_entity_key_values     TYPE INDEX TABLE
+        !iv_alternative_key_name  TYPE if_sadl_entity=>ty_key_name
+        !iv_force_existence_check TYPE abap_bool DEFAULT abap_false
+      EXPORTING
+        !et_all_bopf_keys         TYPE /bobf/t_frw_key
+        !et_successful_bopf_keys  TYPE /bobf/t_frw_key
+        !et_failed_tabix          TYPE if_sadl_entity_transactional=>tt_tabix
+      RAISING
+        cx_sadl_contract_violation .
+    METHODS get_failed_keys_from_change
+      IMPORTING
+        !io_tra_change  TYPE REF TO /bobf/if_tra_change
+        !iv_change_mode TYPE /bobf/conf_change_mode
+        !iv_node_key    TYPE /bobf/obm_node_key OPTIONAL
+      EXPORTING
+        !et_failed_key  TYPE /bobf/t_frw_key .
+    "! Returns changed fields for a BOPF update based on the SADL updated elements information. Some fields might be removed from
+    "! result, if the fields don't exist in the BOPF combined structure. For example the key field of a persistency that is integrated
+    "! via persistency mapping does not exist in the combined structure
+    "! <br/><strong>BEWARE:</strong> special handling by the caller is required for the case when none of the updated elements can be mapped to SADL
+    "! <br/>TODO: This method might be moved to /BOBF/CL_SADL_MAPPER
+    METHODS get_changed_fields_for_update
+      IMPORTING
+        !it_sadl_updated_elements TYPE if_sadl_entity_transactional=>tt_element_names
+      EXPORTING
+        !et_bopf_changed_fields   TYPE /bobf/t_frw_name .
+ENDCLASS.
+
+
+
+CLASS /BOBF/CL_SADL_ENTITY_TRANSACT IMPLEMENTATION.
+
+
+  METHOD add_message.
+    IF io_message IS BOUND.
+      CAST /bobf/cl_sadl_message_handler( _get_message_handler( ) )->add_bopf_messages( io_message ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD build_sorted_key_tabix_map.
+    DATA lr_entity TYPE REF TO data.
+    FIELD-SYMBOLS <ls_entity_work_area> TYPE data.
+    FIELD-SYMBOLS <lv_bopf_key> TYPE /bobf/conf_key.
+
+    CLEAR et_key_tabix_map.
+    CREATE DATA lr_entity LIKE LINE OF it_entities.
+    ASSIGN lr_entity->* TO <ls_entity_work_area>.
+    ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_key OF STRUCTURE <ls_entity_work_area> TO <lv_bopf_key>.
+    LOOP AT it_entities INTO <ls_entity_work_area>. "note: INTO - not ASSIGNING. SIC!
+      APPEND VALUE #( key = <lv_bopf_key>  tabix = sy-tabix ) TO et_key_tabix_map.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD calc_failed_tabix_from_change.
+    DATA lt_failed_key TYPE /bobf/t_frw_key.
+
+    IF iv_node_key IS NOT SUPPLIED.
+      get_failed_keys_from_change( EXPORTING io_tra_change  = io_tra_change
+                                             iv_change_mode = iv_change_mode
+                                   IMPORTING et_failed_key  = lt_failed_key ).
+    ELSE.
+      get_failed_keys_from_change( EXPORTING io_tra_change  = io_tra_change
+                                             iv_change_mode = iv_change_mode
+                                             iv_node_key    = iv_node_key
+                                   IMPORTING et_failed_key  = lt_failed_key ).
+    ENDIF.
+
+    calc_failed_tabix_from_keys( EXPORTING it_all_keys    = it_bopf_keys
+                                           it_failed_keys = lt_failed_key
+                                 IMPORTING et_failed      = et_failed ).
+  ENDMETHOD.
+
+
+  METHOD calc_failed_tabix_from_keys.
+    CLEAR et_failed.
+    IF it_failed_keys IS NOT INITIAL.
+      LOOP AT it_all_keys INTO DATA(ls_bopf_key).
+        "Looping at it_all_keys limits max. runtime to N*log(N)  - with log(N) for line_exists()
+        "Looping at it_failed_keys would require a linear search on it_bopf_keys to
+        "determine sy-tabix. This would result in an unacceptable runtime of N*N.
+        IF line_exists( it_failed_keys[ KEY key_sort COMPONENTS key = ls_bopf_key-key ] ).
+          INSERT sy-tabix INTO TABLE et_failed.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD check_type_supported.
+    IF  iv_type <> /bobf/if_sadl_c=>gc_entity_type
+    AND iv_type <> cl_sadl_entity_factory=>co_type-cds.
+      RAISE EXCEPTION TYPE cx_sadl_contract_violation
+        EXPORTING
+          textid = cx_sadl_contract_violation=>type_not_found
+          name   = CONV #( iv_type ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD constructor.
+    super->constructor( iv_entity_type = iv_type
+                        iv_entity_id   = iv_id ).
+
+    check_type_supported( iv_type ).
+
+    mv_entity_type = iv_type.
+
+    "MO_SADL_ENTITY has been set by the SUPER call above, but in case of IV_TYPE='CDS' this is
+    "not our own (i.e. BOPF's) implementation.  We want to be sure to use our own implementation:
+    mo_sadl_entity = /bobf/cl_sadl_entity=>get( iv_type = iv_type
+                                                iv_id   = iv_id   ).
+
+    "TODO: MO_SADL_ENTITY should not be used at all in the run time!
+    "some method implementations of IF_SADL_ENTITY have to be "slow" by nature (e.g. because they need to return descriptions)
+    "we do not want to be tempted to use them, so we discard the SADL entity and exclusively use /BOBF/CL_SADL_ENTITY_RT_ACCESS
+    "TODO: clear mo_sadl_entity. - This requires re-defining all methods of cl_sadl_entity_transactional using it or calling GET_SADL_ENTITY
+
+    mo_bopf_sadl_entity_rt_access = /bobf/cl_sadl_entity_rt_access=>get( iv_type = iv_type  iv_id = iv_id ).
+
+    " DO instantiation is not supported
+    IF mo_bopf_sadl_entity_rt_access->mo_frw_configuration->ms_obj-objcat = /bobf/if_conf_c=>sc_objcat_do.
+      RAISE EXCEPTION TYPE cx_sadl_static. " Should be caught by /bobf/cl_sadl_entity_prov_tra->if_sadl_entity_transact_prov~get_transactional_runtime
+    ENDIF.
+
+    mo_service_manager = mo_bopf_sadl_entity_rt_access->get_bopf_service_manager( ).
+  ENDMETHOD.
+
+
+  METHOD convert_edit_mode_sadl_to_bopf.
+    CASE iv_sadl_edit_mode.
+      WHEN if_sadl_entity_transactional=>co_edit_mode-read_only.
+        rv_bopf_edit_mode = /bobf/if_conf_c=>sc_edit_read_only.
+      WHEN if_sadl_entity_transactional=>co_edit_mode-edit.
+        rv_bopf_edit_mode = /bobf/if_conf_c=>sc_edit_optimistic.
+      WHEN if_sadl_entity_transactional=>co_edit_mode-edit_exclusive.
+        rv_bopf_edit_mode = /bobf/if_conf_c=>sc_edit_exclusive.
+      WHEN OTHERS.
+        rv_bopf_edit_mode = /bobf/if_conf_c=>sc_edit_read_only.
+    ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD convert_keys_entity_to_bopf.
+    IF it_entity_key_values IS INITIAL.
+      CLEAR et_all_bopf_keys.
+      CLEAR et_successful_bopf_keys.
+      CLEAR et_failed_tabix.
+    ELSE.
+      mo_bopf_sadl_entity_rt_access->mapper( )->convert_keys_entity_to_bopf(
+        EXPORTING
+          it_entity_key_values         = it_entity_key_values
+          iv_alternative_key_name      = iv_alternative_key_name
+          iv_force_existence_check     = iv_force_existence_check
+          iv_fill_all_bopf_keys        = boolc( et_all_bopf_keys IS SUPPLIED )
+          iv_fill_successful_bopf_keys = boolc( et_successful_bopf_keys IS SUPPLIED )
+          iv_fill_failed_tabix         = boolc( et_failed_tabix IS SUPPLIED )
+        IMPORTING
+          et_all_bopf_keys             = et_all_bopf_keys
+          et_successful_bopf_keys      = et_successful_bopf_keys
+          et_failed_tabix              = et_failed_tabix
+          eo_message                   = DATA(lo_message) ).
+      add_message( lo_message ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD convert_links_bopf_to_sadl.
+    DATA lt_target_key_map TYPE gtt_key_tabix_map.
+
+    CLEAR et_sadl_links.
+    build_sorted_key_tabix_map( EXPORTING it_entities      = it_source_keys
+                                IMPORTING et_key_tabix_map = DATA(lt_source_key_map) ).
+    IF it_target_data IS SUPPLIED.
+      build_sorted_key_tabix_map( EXPORTING it_entities      = it_target_data
+                                  IMPORTING et_key_tabix_map = lt_target_key_map ).
+    ELSE.
+      build_sorted_key_tabix_map( EXPORTING it_entities      = it_target_keys
+                                  IMPORTING et_key_tabix_map = lt_target_key_map ).
+    ENDIF.
+
+    LOOP AT it_bopf_key_links INTO DATA(ls_bopf_link).
+      APPEND VALUE #( source = lt_source_key_map[ KEY key COMPONENTS key = ls_bopf_link-source_key ]-tabix
+                      target = lt_target_key_map[ KEY key COMPONENTS key = ls_bopf_link-target_key ]-tabix )
+             TO et_sadl_links.
+      "If an exception is raised because a KEY is not found this might indicate an application error in implemented association
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD get_changed_fields_for_update.
+    CLEAR et_bopf_changed_fields.
+
+    DATA(lo_mapper) = mo_bopf_sadl_entity_rt_access->mapper( ).
+    LOOP AT it_sadl_updated_elements INTO DATA(lv_sadl_element).
+      DATA(lv_bopf_field) = lo_mapper->map_element_to_node_attribute( lv_sadl_element ).
+      IF lv_bopf_field IS NOT INITIAL "make sure a corresponding BOPF field exists
+      AND lv_bopf_field <> /bobf/if_conf_c=>sc_attribute_name_key. "the BOPF KEY field is read-only!
+        APPEND lv_bopf_field TO et_bopf_changed_fields.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD get_existing_bopf_keys.
+    DATA:
+       lr_key_value_table  TYPE REF TO data.
+    FIELD-SYMBOLS:
+       <lt_source_key_values> TYPE STANDARD TABLE.
+
+    "check existence of the source node instance
+    CREATE DATA lr_key_value_table LIKE TABLE OF is_source_key_values.
+    ASSIGN lr_key_value_table->* TO <lt_source_key_values>.
+    INSERT is_source_key_values INTO TABLE <lt_source_key_values>.
+    convert_keys_entity_to_bopf( EXPORTING it_entity_key_values     = <lt_source_key_values>
+                                           iv_alternative_key_name  = iv_source_alternative_key_name
+                                           iv_force_existence_check = abap_true
+                                 IMPORTING et_successful_bopf_keys  = et_bopf_source_keys ).
+    IF et_bopf_source_keys IS INITIAL.
+      ev_source_failed = abap_true.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD get_failed_keys_from_change.
+    DATA lv_node_key TYPE /bobf/obm_node_key.
+
+    CLEAR et_failed_key.
+    IF io_tra_change IS BOUND.
+      io_tra_change->get_bo_changes( EXPORTING iv_bo_key = mo_bopf_sadl_entity_rt_access->get_bo_key( )
+                                     IMPORTING eo_change = DATA(lo_frw_change) ).
+      IF lo_frw_change IS BOUND.
+        IF iv_node_key IS SUPPLIED.
+          lv_node_key = iv_node_key.
+        ELSE.
+          lv_node_key = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( ).
+        ENDIF.
+
+        lo_frw_change->get_changes( EXPORTING iv_node_key    = lv_node_key
+                                              iv_change_mode = iv_change_mode
+                                              iv_failed      = abap_true
+                                    IMPORTING et_changed_key = et_failed_key ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD merge_failed_indexes.
+    IF ct_failed IS INITIAL.
+      ct_failed = it_failed.
+    ELSE.
+      LOOP AT it_failed INTO DATA(lv_failed).
+        INSERT lv_failed INTO TABLE ct_failed. "sorted table
+      ENDLOOP.
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD prepare_create.
+    DATA ls_modification TYPE /bobf/s_frw_modification.
+    FIELD-SYMBOLS: <cs_bopf_data>     TYPE data,
+                   <cv_bopf_data_key> TYPE data.
+
+    CLEAR et_bopf_modifications.
+
+    " Fill BOPF KEY fields. This is required to
+    " 1.) know the keys of created instances
+    " 2.) register transient keys for the Union DAC before creating active document instances
+    " Note that this modifies the KEY field even for FAILED creates. The SADL contract does not forbid this.
+    mo_bopf_sadl_entity_rt_access->mapper( )->fill_bopf_keys_for_create( CHANGING ct_bopf_data = ct_bopf_data ).
+
+    "create modifications:
+    ls_modification-node        = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( ).
+    ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+    LOOP AT ct_bopf_data ASSIGNING <cs_bopf_data>.
+      ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_key OF STRUCTURE <cs_bopf_data> TO <cv_bopf_data_key>.
+      ls_modification-key  = <cv_bopf_data_key>.
+      ls_modification-data = REF #( <cs_bopf_data> ).
+      APPEND ls_modification TO et_bopf_modifications.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD prepare_create_by_association.
+    DATA: ls_modification     TYPE /bobf/s_frw_modification,
+          ls_bopf_association TYPE /bobf/s_confro_assoc.
+    FIELD-SYMBOLS: <cs_target_bopf_data>  TYPE data.
+
+    CLEAR et_bopf_modifications.
+
+    ASSERT it_bopf_source_keys IS NOT INITIAL.
+
+    mo_bopf_sadl_entity_rt_access->get_bopf_association_by_name( EXPORTING iv_sadl_association_name = iv_association_name
+                                                                 IMPORTING es_association           = ls_bopf_association ).
+
+    mo_bopf_sadl_entity_rt_access->mapper( )->fill_bopf_keys_for_cba( EXPORTING iv_bopf_source_key       = it_bopf_source_keys[ 1 ]-key
+                                                                                iv_target_node_key       = ls_bopf_association-target_node_key
+                                                                      CHANGING  ct_target_node_bopf_data = ct_target_bopf_data ).
+
+    "create modifications:
+    ls_modification-node        = ls_bopf_association-target_node_key.
+    ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_create.
+    ls_modification-source_key  = it_bopf_source_keys[ 1 ]-key.
+    ls_modification-source_node = ls_bopf_association-source_node_key.
+    ls_modification-association = ls_bopf_association-assoc_key.
+    LOOP AT ct_target_bopf_data ASSIGNING <cs_target_bopf_data>.
+      GET REFERENCE OF <cs_target_bopf_data> INTO ls_modification-data.
+      ASSIGN COMPONENT /bobf/if_conf_c=>sc_attribute_name_key OF STRUCTURE <cs_target_bopf_data> TO FIELD-SYMBOL(<cv_target_bopf_key>).
+      ls_modification-key = <cv_target_bopf_key>.
+      APPEND ls_modification TO et_bopf_modifications.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD prepare_delete.
+    DATA ls_modification TYPE /bobf/s_frw_modification.
+
+    CLEAR et_bopf_modifications.
+    convert_keys_entity_to_bopf( EXPORTING it_entity_key_values    = it_entity_key_values
+                                           iv_alternative_key_name = iv_alternative_key_name
+                                 IMPORTING et_all_bopf_keys        = et_bopf_keys
+                                           et_failed_tabix         = et_failed_converted
+                                           et_successful_bopf_keys = DATA(lt_existing_keys) ).
+
+    "fill ET_MODIFICATIONS
+    ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_delete.
+    ls_modification-node        = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( ).
+    LOOP AT lt_existing_keys INTO DATA(ls_bopf_key).
+      ls_modification-key = ls_bopf_key-key.
+      APPEND ls_modification TO et_bopf_modifications.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD prepare_execute.
+    convert_keys_entity_to_bopf( EXPORTING it_entity_key_values    = it_entity_key_values
+                                           iv_alternative_key_name = iv_alternative_key_name
+                                 IMPORTING et_all_bopf_keys        = et_bopf_keys
+                                           et_failed_tabix         = et_failed_converted
+                                           et_successful_bopf_keys = et_existing_keys  ).
+    ev_bopf_action_key  = mo_bopf_sadl_entity_rt_access->get_bopf_action_key( iv_action_name ).
+  ENDMETHOD.
+
+
+  METHOD prepare_update.
+    DATA: ls_modification TYPE /bobf/s_frw_modification.
+    FIELD-SYMBOLS: <ls_bopf_data> TYPE data,
+                   <lt_bopf_data> TYPE STANDARD TABLE.
+
+    CLEAR et_bopf_modifications.
+
+    mo_bopf_sadl_entity_rt_access->verify_entity_data_type( it_data = it_entity_data ).
+
+    convert_keys_entity_to_bopf( EXPORTING it_entity_key_values    = it_entity_data
+                                           iv_alternative_key_name = iv_alternative_key_name
+                                 IMPORTING et_all_bopf_keys        = et_bopf_keys
+                                           et_failed_tabix         = et_failed_converted ).
+
+    DATA(lrt_bopf_data) = mo_bopf_sadl_entity_rt_access->mapper( )->convert_entity_data_to_bopf( it_entity_data ).
+    ASSIGN lrt_bopf_data->* TO <lt_bopf_data>.
+
+    "create modifications:
+    ls_modification-node        = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( ).
+    ls_modification-change_mode = /bobf/if_frw_c=>sc_modify_update.
+    LOOP AT <lt_bopf_data> ASSIGNING <ls_bopf_data>.
+      ls_modification-key = et_bopf_keys[ sy-tabix ]-key.
+      IF ls_modification-key IS INITIAL.
+        "TODO
+*        RAISE EXCEPTION type /bobf/cx_sadl_entity EXPORTING textid = /bobf/cx_sadl_entity=>invalid_key
+      ELSE.
+        READ TABLE it_updated_elements_per_tabix ASSIGNING FIELD-SYMBOL(<ls_updated_elements>) WITH TABLE KEY tabix = sy-tabix.
+        IF sy-subrc = 0 AND <ls_updated_elements>-elements IS NOT INITIAL.
+          get_changed_fields_for_update( EXPORTING it_sadl_updated_elements = <ls_updated_elements>-elements
+                                         IMPORTING et_bopf_changed_fields   = ls_modification-changed_fields ).
+          IF ls_modification-changed_fields IS INITIAL.
+            "<ls_updated_elements>-elements is not initial but ls_modification-changed_fields is initial
+            "This means that none of the fields to be updated could be mapped to BOPF
+            "=> skip the entire update.
+            CONTINUE.
+          ENDIF.
+        ELSE.
+          "all fields are to be updated
+          CLEAR ls_modification-changed_fields.
+        ENDIF.
+        GET REFERENCE OF <ls_bopf_data> INTO ls_modification-data.
+        APPEND ls_modification TO et_bopf_modifications.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD _create.
+    DATA: lt_bopf_keys        TYPE /bobf/t_frw_key,
+          lt_elements_to_fill TYPE stringtab,
+          lrt_bopf_data       TYPE REF TO data.
+    FIELD-SYMBOLS: <lt_bopf_data> TYPE STANDARD TABLE.
+
+    CLEAR et_failed.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+
+    TRY.
+        mo_bopf_sadl_entity_rt_access->verify_entity_data_type( it_data = ct_entity_data ).
+
+        lrt_bopf_data  = mo_bopf_sadl_entity_rt_access->mapper( )->convert_entity_data_to_bopf( CHANGING ct_entity_data = ct_entity_data ).
+        ASSIGN lrt_bopf_data->* TO <lt_bopf_data>.
+
+        prepare_create( IMPORTING et_bopf_modifications = DATA(lt_modifications)
+                        CHANGING  ct_bopf_data          = <lt_bopf_data> ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->modify( EXPORTING it_modification = lt_modifications
+                                    IMPORTING eo_message      = DATA(lo_message)
+                                              eo_change       = DATA(lo_change) ).
+
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        add_message( lo_message ).
+
+        "get list of possibly created keys:
+        MOVE-CORRESPONDING lt_modifications TO lt_bopf_keys.
+        calc_failed_tabix_from_change( EXPORTING it_bopf_keys   = lt_bopf_keys
+                                                 io_tra_change  = lo_change
+                                                 iv_change_mode = /bobf/if_frw_c=>sc_modify_create
+                                       IMPORTING et_failed      = et_failed ).
+
+        "Update elements in CT_ENTITY_DATA, according to SADL contract:
+        mo_bopf_sadl_entity_rt_access->get_non_standard_key_fields( EXPORTING iv_alternative_key_name = iv_requested_alternative_key
+                                                                    IMPORTING et_bopf_element_names   = lt_elements_to_fill ).
+        mo_bopf_sadl_entity_rt_access->fill_additional_elements( EXPORTING it_fill_elements            = lt_elements_to_fill
+                                                                           it_bopf_keys                = lt_bopf_keys
+                                                                           it_bopf_key_tabix_to_ignore = et_failed
+                                                                 CHANGING  ct_bopf_data                = <lt_bopf_data> ).
+
+        mo_bopf_sadl_entity_rt_access->mapper( )->convert_bopf_data_to_entity( EXPORTING irt_bopf_data  = lrt_bopf_data
+                                                                               CHANGING  ct_entity_data = ct_entity_data ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+  METHOD _create_by_association.
+    DATA: lt_modifications    TYPE /bobf/t_frw_modification,
+          lo_modify_message   TYPE REF TO /bobf/if_frw_message,
+          lt_bopf_keys        TYPE /bobf/t_frw_key,
+          lt_failed_key       TYPE /bobf/t_frw_key,
+          lt_bopf_source_keys TYPE /bobf/t_frw_key.
+    FIELD-SYMBOLS: <lt_target_bopf_data> TYPE INDEX TABLE.
+
+    CLEAR et_target_failed.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        "convert target entity data to BOPF:
+        DATA(lo_target_rt_access) = mo_bopf_sadl_entity_rt_access->get_association_target( iv_association_name ).
+        lo_target_rt_access->verify_entity_data_type( it_data = ct_target_entity_data ).
+        DATA(lrt_target_bopf_data) = lo_target_rt_access->mapper( )->convert_entity_data_to_bopf( CHANGING ct_entity_data = ct_target_entity_data ).
+        ASSIGN lrt_target_bopf_data->* TO <lt_target_bopf_data>.
+
+        get_existing_bopf_keys( EXPORTING is_source_key_values           = is_source_key_values
+                                          iv_source_alternative_key_name = iv_source_alternative_key_name
+                                          iv_force_existence_check       = abap_true
+                                IMPORTING et_bopf_source_keys            = lt_bopf_source_keys ).
+        IF lt_bopf_source_keys IS INITIAL.
+          ev_source_failed = abap_true.
+        ELSE.
+
+          prepare_create_by_association( EXPORTING iv_association_name            = iv_association_name
+*                                                 iv_source_alternative_key_name = iv_source_alternative_key_name
+*                                                 is_source_key_values           = is_source_key_values
+                                                   it_bopf_source_keys            = lt_bopf_source_keys
+                                         IMPORTING et_bopf_modifications = lt_modifications
+*                                                 ev_source_failed      = ev_source_failed
+                                         CHANGING  ct_target_bopf_data   = <lt_target_bopf_data> ).
+
+*        IF ev_source_failed = abap_true.
+*          RETURN.
+        ENDIF.
+
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->modify( EXPORTING it_modification = lt_modifications
+                                    IMPORTING eo_message      = lo_modify_message
+                                              eo_change       = DATA(lo_tra_change) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+
+        add_message( lo_modify_message ).
+
+        "fill failed target key indexes
+        IF lo_tra_change IS BOUND AND lo_tra_change->has_failed_changes( ).
+          get_failed_keys_from_change( EXPORTING io_tra_change  = lo_tra_change
+                                                 iv_change_mode = /bobf/if_frw_c=>sc_modify_create
+                                                 iv_node_key    = lo_target_rt_access->get_bopf_node_key( )
+                                       IMPORTING et_failed_key  = lt_failed_key ).
+        ENDIF.
+        IF lt_failed_key IS NOT INITIAL.
+          build_sorted_key_tabix_map( EXPORTING it_entities      = lt_modifications
+                                      IMPORTING et_key_tabix_map = DATA(lt_modification_key_tabix_map) ).
+          LOOP AT lt_failed_key INTO DATA(ls_failed_key).
+            INSERT lt_modification_key_tabix_map[ KEY key COMPONENTS key = ls_failed_key-key ]-tabix INTO TABLE et_target_failed.
+          ENDLOOP.
+        ENDIF.
+
+        "Update elements in CT_ENTITY_DATA, according to SADL contract:
+        lo_target_rt_access->get_non_standard_key_fields( EXPORTING iv_alternative_key_name = iv_requested_target_alt_key
+                                                          IMPORTING et_bopf_element_names   =  DATA(lt_elements_to_fill) ).
+        IF lt_elements_to_fill IS NOT INITIAL.
+          MOVE-CORRESPONDING lt_modifications TO lt_bopf_keys.
+          mo_bopf_sadl_entity_rt_access->get_association_target( iv_association_name
+                                      )->fill_additional_elements( EXPORTING it_fill_elements            = lt_elements_to_fill
+                                                                             it_bopf_keys                = lt_bopf_keys
+                                                                             it_bopf_key_tabix_to_ignore = et_target_failed
+                                                                   CHANGING  ct_bopf_data                = <lt_target_bopf_data> ).
+        ENDIF.
+
+        lo_target_rt_access->mapper( )->convert_bopf_data_to_entity( EXPORTING irt_bopf_data  = lrt_target_bopf_data
+                                                                     CHANGING  ct_entity_data = ct_target_entity_data ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _create_message_handler.
+    ro_message_handler = /bobf/cl_sadl_message_handler=>get( mv_entity_type ).
+  ENDMETHOD.
+
+
+  METHOD _delete.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    DATA lr_active_entity_key_values TYPE REF TO data.
+    CREATE DATA lr_active_entity_key_values LIKE it_key_values.
+    ASSIGN lr_active_entity_key_values->* TO FIELD-SYMBOL(<lt_active_entity_key_values>).
+    TRY.
+
+        prepare_delete( EXPORTING iv_alternative_key_name     = iv_alternative_key_name
+                                  it_entity_key_values        = it_key_values
+                        IMPORTING et_bopf_modifications       = DATA(lt_modifications)
+                                  et_bopf_keys                = DATA(lt_bopf_keys)
+                                  et_failed_converted         = DATA(lt_failed_converted) ).
+
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->modify( EXPORTING it_modification = lt_modifications
+                                    IMPORTING eo_message      = DATA(lo_message)
+                                              eo_change       = DATA(lo_change) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        calc_failed_tabix_from_change( EXPORTING it_bopf_keys   = lt_bopf_keys
+                                                 io_tra_change  = lo_change
+                                                 iv_change_mode = /bobf/if_frw_c=>sc_modify_delete
+                                       IMPORTING et_failed      = et_failed ).
+        merge_failed_indexes( EXPORTING it_failed = lt_failed_converted
+                              CHANGING  ct_failed = et_failed ).
+        add_message( lo_message ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _execute.
+    DATA lo_message    TYPE REF TO /bobf/if_frw_message.
+    DATA lo_change     TYPE REF TO /bobf/if_tra_change.
+    DATA lt_failed_key TYPE        /bobf/t_frw_key.
+    DATA lr_bopf_data  TYPE REF TO data.
+    DATA ls_sadl_action TYPE       if_sadl_entity=>ty_action.
+    DATA lr_action_param_data_type TYPE REF TO data.
+
+    FIELD-SYMBOLS: <lt_result_data> TYPE INDEX TABLE.
+
+    CLEAR et_data.
+    CLEAR et_failed.
+    CLEAR ev_static_action_failed.
+
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        ls_sadl_action = mo_sadl_entity->get_action( EXPORTING iv_name = iv_action_name ).
+        IF ls_sadl_action-return_entity_id IS NOT INITIAL.
+          DATA(lo_target_entity_rt_access) = /bobf/cl_sadl_entity_rt_access=>get( iv_type = mv_entity_type
+                                                                                  iv_id   = CONV #( ls_sadl_action-return_entity_id ) ).
+
+          lr_bopf_data = lo_target_entity_rt_access->mapper( )->convert_entity_data_to_bopf( CHANGING ct_entity_data = et_data ).
+          ASSIGN lr_bopf_data->* TO <lt_result_data>.
+        ELSE.
+          ASSIGN et_data TO <lt_result_data>.
+        ENDIF.
+
+        prepare_execute( EXPORTING iv_action_name          = iv_action_name
+                                   iv_alternative_key_name = iv_alternative_key_name
+                                   it_entity_key_values    = it_key_values
+                         IMPORTING et_bopf_keys        = DATA(lt_bopf_keys)
+                                   et_failed_converted = DATA(lt_failed_converted)
+                                   et_existing_keys    = DATA(lt_existing_keys)
+                                   ev_bopf_action_key  = DATA(lv_bopf_action_key) ).
+
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+        " Action parameters can have three possible cases when filled and when not
+        " 1. When an action has an importing parameter and it is filled
+        " 2. When an action has an importing parameter and when not filled/or left blank
+        " 3. When an action has no importing parameter
+        IF i_action_parameters IS NOT INITIAL.
+          mo_service_manager->do_action( EXPORTING iv_act_key              = lv_bopf_action_key
+                                                   it_key                  = lt_existing_keys
+                                                   is_parameters           = REF #( i_action_parameters )
+                                         IMPORTING eo_message              = lo_message
+                                                   eo_change               = lo_change
+                                                   et_failed_key           = lt_failed_key
+                                                   ev_static_action_failed = ev_static_action_failed
+                                                   et_data                 = <lt_result_data> ).
+        ELSE.
+          IF ls_sadl_action-data_type IS INITIAL.
+            mo_service_manager->do_action( EXPORTING iv_act_key              = lv_bopf_action_key
+                                                     it_key                  = lt_existing_keys
+                                           IMPORTING eo_message              = lo_message
+                                                     eo_change               = lo_change
+                                                     et_failed_key           = lt_failed_key
+                                                     ev_static_action_failed = ev_static_action_failed
+                                                     et_data                 = <lt_result_data> ).
+          ELSE.
+            CREATE DATA lr_action_param_data_type TYPE (ls_sadl_action-data_type).
+
+            mo_service_manager->do_action( EXPORTING iv_act_key              = lv_bopf_action_key
+                                                     it_key                  = lt_existing_keys
+                                                     is_parameters           = lr_action_param_data_type
+                                           IMPORTING eo_message              = lo_message
+                                                     eo_change               = lo_change
+                                                     et_failed_key           = lt_failed_key
+                                                     ev_static_action_failed = ev_static_action_failed
+                                                     et_data                 = <lt_result_data> ).
+          ENDIF.
+        ENDIF.
+
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+
+        " calculate failed tabix for non-static actions
+        IF mo_sadl_entity->get_action( iv_action_name )-static = abap_false.
+          calc_failed_tabix_from_keys( EXPORTING it_all_keys    = lt_bopf_keys
+                                                 it_failed_keys = lt_failed_key
+                                       IMPORTING et_failed      = et_failed ).
+          merge_failed_indexes( EXPORTING it_failed = lt_failed_converted
+                                CHANGING  ct_failed = et_failed ).
+        ENDIF.
+
+        add_message( lo_message ).
+
+        IF ls_sadl_action-return_entity_id IS NOT INITIAL.
+          lo_target_entity_rt_access->mapper( )->convert_bopf_data_to_entity( EXPORTING irt_bopf_data  = lr_bopf_data
+                                                                              CHANGING  ct_entity_data = et_data ).
+        ENDIF.
+
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+
+  ENDMETHOD.
+
+
+  METHOD _get_properties_action.
+
+    CLEAR et_failed.
+    CLEAR et_properties.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        convert_keys_entity_to_bopf( EXPORTING it_entity_key_values     = it_key_values
+                                               iv_alternative_key_name  = iv_alternative_key_name
+                                               iv_force_existence_check = abap_true "SADL contract requires an existence check
+                                     IMPORTING et_all_bopf_keys         = DATA(lt_bopf_keys)
+                                               et_successful_bopf_keys  = DATA(lt_existing_keys)
+                                               et_failed_tabix          = et_failed ).
+
+        DATA(lt_action_bopf) = VALUE /bobf/t_frw_key2( ( mo_bopf_sadl_entity_rt_access->get_bopf_action_key( iv_sadl_action_name = iv_action_name ) ) ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->retrieve_property( EXPORTING iv_node_key                  = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( )
+                                                         it_key                       = lt_existing_keys
+                                                         iv_action_property           = abap_false "TRUE would request ALL action properties
+                                                         it_action                    = lt_action_bopf
+                                                         iv_action_attribute_property = abap_false
+                                                         iv_key_is_default            = abap_false
+                                                         iv_node_property             = abap_false
+                                                         iv_node_attribute_property   = abap_false
+                                                         iv_assoc_property            = abap_false
+                                                         iv_assoc_attribute_property  = abap_false
+                                                         iv_query_property            = abap_false
+                                                         iv_query_attribute_property  = abap_false
+                                               IMPORTING eo_property                  = DATA(lo_property)
+                                                         eo_message                   = DATA(lo_message) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        /bobf/cl_sadl_property_convrtr=>convert_props_action_to_sadl( EXPORTING io_bopf_properties = lo_property
+                                                                                it_bopf_keys       = lt_bopf_keys
+                                                                      IMPORTING et_sadl_properties = et_properties ).
+        add_message( lo_message ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _get_properties_association.
+
+    CLEAR et_failed.
+    CLEAR et_properties.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        convert_keys_entity_to_bopf( EXPORTING it_entity_key_values     = it_key_values
+                                               iv_alternative_key_name  = iv_alternative_key_name
+                                               iv_force_existence_check = abap_true "SADL contract requires an existence check
+                                     IMPORTING et_all_bopf_keys         = DATA(lt_bopf_keys)
+                                               et_successful_bopf_keys  = DATA(lt_existing_keys)
+                                               et_failed_tabix          = et_failed ).
+
+        DATA(lt_assoc_bopf) = VALUE /bobf/t_frw_key2( ( mo_bopf_sadl_entity_rt_access->get_bopf_association_key( iv_sadl_association_name = iv_association_name ) ) ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->retrieve_property( EXPORTING iv_node_key                  = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( )
+                                                         it_key                       = lt_existing_keys
+                                                         iv_assoc_property            = abap_false "TRUE would request ALL association properties
+                                                         it_assoc                     = lt_assoc_bopf
+                                                         iv_assoc_attribute_property  = abap_false
+                                                         iv_key_is_default            = abap_false
+                                                         iv_node_property             = abap_false
+                                                         iv_node_attribute_property   = abap_false
+                                                         iv_action_property           = abap_false
+                                                         iv_action_attribute_property = abap_false
+                                                         iv_query_property            = abap_false
+                                                         iv_query_attribute_property  = abap_false
+                                               IMPORTING eo_property                  = DATA(lo_property)
+                                                         eo_message                   = DATA(lo_message) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        /bobf/cl_sadl_property_convrtr=>convert_props_assoc_to_sadl( EXPORTING io_bopf_properties = lo_property
+                                                                               it_bopf_keys       = lt_bopf_keys
+                                                                     IMPORTING et_sadl_properties = et_properties ).
+        add_message( lo_message ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _get_properties_elements.
+    DATA lt_node_attribute_bopf TYPE /bobf/t_frw_name.
+    DATA lt_requested_elements  TYPE if_sadl_entity_transactional=>tt_element_names.
+
+    CLEAR et_failed.
+    CLEAR et_props_by_tabix_and_elems.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        DATA(lo_mapper) = mo_bopf_sadl_entity_rt_access->mapper( ).
+
+        IF it_requested_elements IS INITIAL.
+          mo_bopf_sadl_entity_rt_access->get_sadl_element_names( IMPORTING et_elements = lt_requested_elements ).
+          mo_bopf_sadl_entity_rt_access->get_bopf_attribute_names( IMPORTING et_names = lt_node_attribute_bopf ).
+        ELSE.
+          lt_requested_elements = it_requested_elements.
+          LOOP AT it_requested_elements INTO DATA(lv_requested_element).
+            DATA(lv_node_attribute_bopf) = lo_mapper->map_element_to_node_attribute( lv_requested_element ).
+            IF lv_node_attribute_bopf IS NOT INITIAL.
+              INSERT lv_node_attribute_bopf INTO TABLE lt_node_attribute_bopf.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        convert_keys_entity_to_bopf( EXPORTING it_entity_key_values     = it_key_values
+                                               iv_alternative_key_name  = iv_alternative_key_name
+                                               iv_force_existence_check = abap_true "SADL contract requires an existence check
+                                     IMPORTING et_all_bopf_keys         = DATA(lt_bopf_keys)
+                                               et_successful_bopf_keys  = DATA(lt_existing_keys)
+                                               et_failed_tabix          = et_failed ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+        mo_service_manager->retrieve_property( EXPORTING iv_node_key                  = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( )
+                                                         it_key                       = lt_existing_keys
+                                                         iv_node_attribute_property   = abap_false "TRUE would request ALL attribute's properties
+                                                         it_node_attribute            = lt_node_attribute_bopf
+                                                         iv_key_is_default            = abap_false
+                                                         iv_node_property             = abap_true
+                                                         iv_assoc_property            = abap_false
+                                                         iv_assoc_attribute_property  = abap_false
+                                                         iv_action_property           = abap_false
+                                                         iv_action_attribute_property = abap_false
+                                                         iv_query_property            = abap_false
+                                                         iv_query_attribute_property  = abap_false
+                                               IMPORTING eo_property                  = DATA(lo_property)
+                                                         eo_message                   = DATA(lo_message) ).
+
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        /bobf/cl_sadl_property_convrtr=>convert_props_elem_to_sadl( EXPORTING io_bopf_properties      = lo_property
+                                                                              io_mapper               = lo_mapper
+                                                                              it_bopf_keys            = lt_bopf_keys
+                                                                              it_bopf_attribute_names = lt_node_attribute_bopf
+                                                                              it_sadl_element_names   = lt_requested_elements
+                                                                              it_failed_keys_tabix    = et_failed
+                                                                    IMPORTING et_sadl_properties      = et_props_by_tabix_and_elems ).
+        add_message( lo_message ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _get_properties_entity.
+    CLEAR et_failed.
+    CLEAR et_properties.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        convert_keys_entity_to_bopf( EXPORTING it_entity_key_values     = it_key_values
+                                               iv_alternative_key_name  = iv_alternative_key_name
+                                               iv_force_existence_check = abap_true "SADL contract requires an existence check
+                                     IMPORTING et_all_bopf_keys         = DATA(lt_bopf_keys)
+                                               et_successful_bopf_keys  = DATA(lt_existing_keys)
+                                               et_failed_tabix          = et_failed ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->retrieve_property( EXPORTING iv_node_key                  = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( )
+                                                         it_key                       = lt_existing_keys
+                                                         iv_node_property             = abap_true
+                                                         iv_key_is_default            = abap_false
+                                                         iv_node_attribute_property   = abap_false
+                                                         iv_assoc_property            = abap_false
+                                                         iv_assoc_attribute_property  = abap_false
+                                                         iv_action_property           = abap_false
+                                                         iv_action_attribute_property = abap_false
+                                                         iv_query_property            = abap_false
+                                                         iv_query_attribute_property  = abap_false
+                                               IMPORTING eo_property                  = DATA(lo_property)
+                                                         eo_message                   = DATA(lo_message) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        /bobf/cl_sadl_property_convrtr=>convert_props_entity_to_sadl( EXPORTING io_bopf_properties = lo_property
+                                                                                it_bopf_keys       = lt_bopf_keys
+                                                                      IMPORTING et_sadl_properties = et_properties ).
+        add_message( lo_message ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _read.
+    DATA: lt_failed_keys          TYPE /bobf/t_frw_key,
+          lt_requested_attributes TYPE /bobf/t_frw_name.
+    FIELD-SYMBOLS: <lt_bopf_data> TYPE INDEX TABLE.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        convert_keys_entity_to_bopf( EXPORTING it_entity_key_values    = it_key_values
+                                               iv_alternative_key_name = iv_alternative_key_name
+                                     IMPORTING et_all_bopf_keys        = DATA(lt_bopf_keys)
+                                               et_failed_tabix         = DATA(lt_failed_converted_keys)
+                                               et_successful_bopf_keys = DATA(lt_existing_keys) ).
+
+        CLEAR et_entity_data.
+        DATA(lrt_bopf_data) = mo_bopf_sadl_entity_rt_access->mapper( )->convert_entity_data_to_bopf( CHANGING ct_entity_data = et_entity_data ).
+        ASSIGN lrt_bopf_data->* TO <lt_bopf_data>.
+
+        MOVE-CORRESPONDING it_requested_elements TO lt_requested_attributes.
+        "TODO: consider mapping of requested elements. What if only key fields are requested and key fields need mapping?
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->retrieve( EXPORTING iv_node_key             = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( )
+                                                it_key                  = lt_existing_keys
+                                                it_requested_attributes = lt_requested_attributes
+                                                iv_edit_mode            = convert_edit_mode_sadl_to_bopf( iv_edit_mode )
+                                      IMPORTING et_data                 = <lt_bopf_data>
+                                                et_failed_key           = lt_failed_keys
+                                                eo_message              = DATA(lo_message) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        add_message( lo_message ).
+
+        calc_failed_tabix_from_keys( EXPORTING it_all_keys    = lt_bopf_keys
+                                               it_failed_keys = lt_failed_keys
+                                     IMPORTING et_failed      = et_failed ).
+        merge_failed_indexes( EXPORTING it_failed = lt_failed_converted_keys
+                              CHANGING  ct_failed = et_failed ).
+
+        mo_bopf_sadl_entity_rt_access->mapper( )->convert_bopf_data_to_entity( EXPORTING irt_bopf_data  = lrt_bopf_data
+                                                                               CHANGING  ct_entity_data = et_entity_data ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _read_by_association.
+    DATA: lt_requested_attributes TYPE /bobf/t_frw_name,
+          lt_bopf_failed_keys     TYPE /bobf/t_frw_key,
+          lt_bopf_key_links       TYPE /bobf/t_frw_key_link.
+    FIELD-SYMBOLS: <lt_target_bopf_data> TYPE STANDARD TABLE.
+
+    CLEAR et_target_entity_data.
+    CLEAR et_links.
+    APPEND LINES OF it_requested_elements TO lt_requested_attributes.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        convert_keys_entity_to_bopf( EXPORTING it_entity_key_values    = it_source_key_values
+                                               iv_alternative_key_name = iv_source_alternative_key_name
+                                     IMPORTING et_all_bopf_keys        = DATA(lt_bopf_source_keys)
+                                               et_successful_bopf_keys = DATA(lt_existing_keys)
+                                               et_failed_tabix         = DATA(lt_failed_converted) ).
+
+        DATA(lo_target_entity_rt_access) = mo_bopf_sadl_entity_rt_access->get_association_target( iv_association_name ).
+
+        IF lt_requested_attributes IS NOT INITIAL.
+          "make sure all requested ALT key elements and any non-standard primary key is requested:
+          lo_target_entity_rt_access->get_non_standard_key_fields( EXPORTING iv_alternative_key_name = iv_target_alternative_key_name
+                                                                   IMPORTING et_bopf_element_names   = DATA(lt_key_elements_to_retrieve) ).
+          IF lt_key_elements_to_retrieve IS NOT INITIAL.
+            APPEND LINES OF lt_key_elements_to_retrieve TO lt_requested_attributes.
+            SORT lt_requested_attributes.
+            DELETE ADJACENT DUPLICATES FROM lt_requested_attributes.
+          ENDIF.
+        ENDIF.
+
+        DATA(lrt_target_bopf_data) = lo_target_entity_rt_access->mapper( )->convert_entity_data_to_bopf( CHANGING ct_entity_data = et_target_entity_data ).
+        ASSIGN lrt_target_bopf_data->* TO <lt_target_bopf_data>.
+
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->retrieve_by_association( EXPORTING iv_node_key             = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( )
+                                                               iv_association          = mo_bopf_sadl_entity_rt_access->get_bopf_association_key( iv_association_name )
+                                                               iv_fill_data            = abap_true
+                                                               it_key                  = lt_existing_keys
+                                                               it_requested_attributes = lt_requested_attributes
+                                                               iv_edit_mode            = convert_edit_mode_sadl_to_bopf( iv_target_edit_mode )
+                                                     IMPORTING et_data                 = <lt_target_bopf_data>
+                                                               et_failed_key           = lt_bopf_failed_keys
+                                                               et_key_link             = lt_bopf_key_links
+                                                               eo_message              = DATA(lo_message) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        add_message( lo_message ).
+
+        calc_failed_tabix_from_keys( EXPORTING it_all_keys    = lt_bopf_source_keys
+                                               it_failed_keys = lt_bopf_failed_keys
+                                     IMPORTING et_failed      = et_source_failed ).
+        merge_failed_indexes( EXPORTING it_failed = lt_failed_converted
+                              CHANGING  ct_failed = et_source_failed ).
+
+        convert_links_bopf_to_sadl( EXPORTING it_bopf_key_links = lt_bopf_key_links
+                                              it_source_keys    = lt_bopf_source_keys
+                                              it_target_data    = <lt_target_bopf_data>
+                                    IMPORTING et_sadl_links     = et_links ).
+
+        lo_target_entity_rt_access->mapper( )->convert_bopf_data_to_entity( EXPORTING irt_bopf_data  = lrt_target_bopf_data
+                                                                            CHANGING  ct_entity_data = et_target_entity_data ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _read_keys_by_association.
+    DATA: lt_bopf_target_key         TYPE /bobf/t_frw_key,
+          lt_bopf_failed_keys        TYPE /bobf/t_frw_key,
+          lt_bopf_key_links          TYPE /bobf/t_frw_key_link,
+          lo_target_entity_rt_access TYPE REF TO /bobf/cl_sadl_entity_rt_access,
+          lt_attributes_to_retrieve  TYPE stringtab,
+          lv_fill_data               TYPE abap_bool,
+          lo_message                 TYPE REF TO /bobf/if_frw_message.
+    FIELD-SYMBOLS: <lt_bopf_target_data> TYPE STANDARD TABLE.
+
+    CLEAR: et_links, et_source_failed, et_target_key_values.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        convert_keys_entity_to_bopf( EXPORTING it_entity_key_values    = it_source_key_values
+                                               iv_alternative_key_name = iv_source_alternative_key_name
+                                     IMPORTING et_all_bopf_keys        = DATA(lt_bopf_source_keys)
+                                               et_successful_bopf_keys = DATA(lt_existing_keys)
+                                               et_failed_tabix         = DATA(lt_failed_converted) ).
+
+        "determine which attributes (in addition to KEY) need to be filled:
+        lo_target_entity_rt_access = mo_bopf_sadl_entity_rt_access->get_association_target( iv_association_name ).
+        lo_target_entity_rt_access->get_non_standard_key_fields( EXPORTING iv_alternative_key_name = iv_target_alternative_key_name
+                                                                 IMPORTING et_bopf_element_names   = lt_attributes_to_retrieve ).
+
+        DATA(lrt_bopf_target_data) = mo_bopf_sadl_entity_rt_access->mapper( )->convert_entity_data_to_bopf( CHANGING ct_entity_data = et_target_key_values ).
+        ASSIGN lrt_bopf_target_data->* TO <lt_bopf_target_data>.
+
+        lv_fill_data = boolc( lt_attributes_to_retrieve IS NOT INITIAL ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->retrieve_by_association( EXPORTING iv_node_key             = mo_bopf_sadl_entity_rt_access->get_bopf_node_key( )
+                                                               iv_association          = mo_bopf_sadl_entity_rt_access->get_bopf_association_key( iv_association_name )
+                                                               iv_fill_data            = lv_fill_data
+                                                               it_requested_attributes = lt_attributes_to_retrieve
+                                                               it_key                  = lt_existing_keys
+                                                               iv_edit_mode            = convert_edit_mode_sadl_to_bopf( iv_target_edit_mode )
+                                                     IMPORTING et_data                 = <lt_bopf_target_data>
+                                                               et_target_key           = lt_bopf_target_key
+                                                               et_failed_key           = lt_bopf_failed_keys
+                                                               et_key_link             = lt_bopf_key_links
+                                                               eo_message              = lo_message ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        IF lv_fill_data = abap_false.
+          MOVE-CORRESPONDING lt_bopf_target_key TO <lt_bopf_target_data>.
+        ENDIF.
+        mo_bopf_sadl_entity_rt_access->mapper( )->convert_bopf_data_to_entity( EXPORTING irt_bopf_data  = lrt_bopf_target_data
+                                                                               CHANGING  ct_entity_data = et_target_key_values ).
+
+        add_message( lo_message ).
+
+        calc_failed_tabix_from_keys( EXPORTING it_all_keys    = lt_bopf_source_keys
+                                               it_failed_keys = lt_bopf_failed_keys
+                                     IMPORTING et_failed      = et_source_failed ).
+        merge_failed_indexes( EXPORTING it_failed = lt_failed_converted
+                              CHANGING  ct_failed = et_source_failed ).
+        convert_links_bopf_to_sadl( EXPORTING it_bopf_key_links = lt_bopf_key_links
+                                              it_source_keys    = lt_bopf_source_keys
+                                              it_target_keys    = lt_bopf_target_key
+                                    IMPORTING et_sadl_links     = et_links ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+  METHOD _update.
+
+    DATA(lv_privileged) = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+    TRY.
+        prepare_update( EXPORTING iv_alternative_key_name       = iv_alternative_key_name
+                                  it_updated_elements_per_tabix = it_updated_elements_per_tabix
+                                  it_entity_data                = it_entity_data
+                        IMPORTING et_bopf_modifications = DATA(lt_modifications)
+                                  et_bopf_keys          = DATA(lt_bopf_keys)
+                                  et_failed_converted   = DATA(lt_failed_converted) ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+        mo_service_manager->modify( EXPORTING it_modification = lt_modifications
+                                    IMPORTING eo_message      = DATA(lo_message)
+                                              eo_change       = DATA(lo_change) ).
+        lv_privileged = /bobf/cl_frw_authority_context=>set_privileged_by_sadl( ).
+        add_message( lo_message ).
+        calc_failed_tabix_from_change( EXPORTING it_bopf_keys   = lt_bopf_keys
+                                                 io_tra_change  = lo_change
+                                                 iv_change_mode = /bobf/if_frw_c=>sc_modify_update
+                                       IMPORTING et_failed      = et_failed ).
+        merge_failed_indexes( EXPORTING it_failed = lt_failed_converted
+                              CHANGING  ct_failed = et_failed ).
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+      CLEANUP.
+        /bobf/cl_frw_authority_context=>restore_privileged_by_sadl( lv_privileged ).
+    ENDTRY.
+
+  ENDMETHOD.
+ENDCLASS.

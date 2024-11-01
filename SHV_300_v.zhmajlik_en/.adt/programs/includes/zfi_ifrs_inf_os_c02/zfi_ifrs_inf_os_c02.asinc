@@ -1,0 +1,1002 @@
+*********************************************************************
+* Описание : Инфлирование по МСФО объетов ОС, НМА
+* Код ТС : АСУБН.САП-КСУП.DEV.030-БНУ.60.E-045
+* Разработчик : Шмидт В.С.
+* Постановка задачи: Дробышевский К.
+* Дата постановки : 30.03.2017
+* Дата создания : 18.04.2017
+*********************************************************************
+CLASS lcl_report IMPLEMENTATION.
+  METHOD run.
+
+    CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+      EXPORTING
+        percentage = '40'
+        text       = 'Выбор данных'(001).
+
+    "Выборка данных
+    IF NOT get_data( ).
+      IF gt_data IS INITIAL.
+        RAISE EXCEPTION TYPE lcl_exception
+          EXPORTING
+            text = 'Данных по выбранным критериям не найдено'(002).
+      ENDIF.
+    ENDIF.
+    IF p_job = abap_true.
+      IF sy-batch = abap_true.
+        run_post( ).
+        init_grid( ).
+      ELSE.
+        run_job( ).
+      ENDIF.
+    ELSE.
+      CALL SCREEN '0100'.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD f4_ktansw.
+    TYPES:
+      BEGIN OF lty_s_t095,
+        ktopl  TYPE t095-ktopl,
+        ktplt  TYPE t004t-ktplt,
+        ktogr  TYPE t095-ktogr,
+        ktgrtx TYPE t095t-ktgrtx,
+        ktansw TYPE t095-ktansw,
+      END OF lty_s_t095.
+
+    DATA:
+      lt_value_tab TYPE STANDARD TABLE OF lty_s_t095,
+      lt_return    TYPE TABLE OF ddshretval.
+
+    "Выборка данных для отображения F4
+    SELECT
+        t095~ktopl
+        t004t~ktplt
+        t095~ktogr
+        t095t~ktgrtx
+        t095~ktansw
+      INTO TABLE lt_value_tab
+      FROM t095
+        INNER JOIN t004t ON t095~ktopl = t004t~ktopl
+                        AND t004t~spras = sy-langu
+        INNER JOIN t095t ON t095~ktogr = t095t~ktogr   "#EC CI_BUFFJOIN
+                        AND t095t~spras = sy-langu
+      WHERE t095~afabe = '01'.
+
+    "вызов окна F4
+    CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+      EXPORTING
+        retfield         = 'KTANSW'
+        value_org        = 'S'
+        dynprofield      = iv_field
+        dynpprog         = sy-cprog
+        dynpnr           = sy-dynnr
+        callback_program = sy-repid
+      TABLES
+        value_tab        = lt_value_tab
+        return_tab       = lt_return
+      EXCEPTIONS
+        parameter_error  = 1
+        no_values_found  = 2
+        OTHERS           = 3.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+          WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD user_command_0100.
+    IF sy-ucomm = 'BACK'
+        OR sy-ucomm = 'CANCEL'
+        OR sy-ucomm = 'EXIT'.
+      lcl_report=>dispose( ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_data.
+    DATA:
+      lt_infl_type_rng TYPE RANGE OF zfi_ifrs_inf_t-infl_type,
+      lt_data_new      TYPE zfi_ifrs_inf_os=>tt_data_new,
+      ls_color         TYPE lvc_s_scol.
+
+    DATA(lv_date_from) = CONV dats( p_budat+0(6) && '01' ).
+    DATA(lv_date_to)   = CONV dats( lv_date_from + 31 ).
+    DATA(lv_p_bukrs_low) = CONV bukrs( '01' ).  "AK_GUBAREVICH #36910 Работы по параметризации источников данных
+    DATA(lv_p_bukrs_high) = CONV bukrs( '99' ).  "AK_GUBAREVICH #36910 Работы по параметризации источников данных
+
+    lv_date_to =  lv_date_to+0(6) && '01'.
+    lv_date_to =  lv_date_to - 1.
+
+    DATA(lv_period)   = p_budat+0(4) && '0' && p_budat+4(2).
+*    DATA(lv_period_p) = p_budat+0(4) - 1.
+*    lv_period_p = CONV jahrper( lv_period_p && '012' ).
+
+    " затраты НКС на период отчета
+    SELECT *
+      FROM zt_ifrs_wbs1( p_period = @lv_period, p_bukrs_low = @lv_p_bukrs_low, p_bukrs_high = @lv_p_bukrs_high )  "AK_GUBAREVICH #36910 Работы по параметризации источников данных
+*        WHERE rbukrs IN @s_bukrs[]    #8000001334, Проводка по инфлированию МР1 - дельта - убрать фильтр по БЕ
+          INTO TABLE @DATA(lt_ifrs_wbs_c).
+    " затраты НКС на период 012 предшествующего года
+*    SELECT *
+*      FROM zt_ifrs_wbs1( p_period = @lv_period_p )
+*        WHERE rbukrs IN @s_bukrs[]
+*          INTO TABLE @DATA(lt_ifrs_wbs_p).
+
+    TRY.
+        CALL METHOD zfi_ifrs_inf_os=>get_data
+          EXPORTING
+            et_update     = VALUE #( )
+            ev_where      = cl_shdb_seltab=>combine_seltabs(
+                              it_named_seltabs = VALUE #(
+                                ( name = 'BUKRS'  dref = REF #( s_bukrs[] ) )
+                                ( name = 'ANLKL'  dref = REF #( s_anlkl[] ) )
+                                ( name = 'ANLN1'  dref = REF #( s_anln1[] ) )
+                                ( name = 'ANLN2'  dref = REF #( s_anln2[] ) )
+                                ( name = 'KTANSW' dref = REF #( s_ktansw[] ) ) ) )
+            ev_adate      = lv_date_from
+            ev_bdate      = lv_date_to
+            et_ifrs_wbs_c = lt_ifrs_wbs_c
+*            et_ifrs_wbs_p = lt_ifrs_wbs_p
+          IMPORTING
+            it_result_new = lt_data_new.
+      CATCH cx_root.
+        MESSAGE i999(zaa) WITH TEXT-e01 'ZFI_IFRS_INF_OS=>GET_DATA'. "Ошибка вызова метода
+        RETURN.
+    ENDTRY.
+    "проверка заполнения диапазонов
+    lt_infl_type_rng = VALUE #( sign = 'I' option = 'EQ'
+                               ( low = gc_infl_type_au )
+                               ( low = gc_infl_type_an )
+                               ( low = gc_infl_type_cp )
+                               ( low = gc_infl_type_cn )
+                               ( low = gc_infl_type_pp )
+                               ( low = gc_infl_type_pn )
+                               ( low = gc_infl_type_mp )
+                               ( low = gc_infl_type_mn )
+                               ( low = gc_infl_type_dp )
+                               ( low = gc_infl_type_dn )
+                               ( low = gc_infl_type_ip )
+                               ( low = gc_infl_type_in )
+                               ( low = gc_infl_type_sp )
+                               ( low = gc_infl_type_sn )
+                               ).
+    SELECT infl_type, bwasl
+      FROM zfi_ifrs_inf_t
+      INTO CORRESPONDING FIELDS OF TABLE @gt_infl_type
+      WHERE infl_type IN @lt_infl_type_rng.
+
+    IF lt_data_new IS NOT INITIAL.
+      LOOP AT lt_data_new ASSIGNING FIELD-SYMBOL(<ls_data_new>).
+        APPEND INITIAL LINE TO gt_data ASSIGNING FIELD-SYMBOL(<ls_data>).
+        MOVE-CORRESPONDING <ls_data_new> TO <ls_data>.
+        IF <ls_data>-deakt <> '00000000'.
+          <ls_data>-colortab = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = 'Объект выбыл!'(023).
+        ENDIF.
+        "отметка цветом ошибочных по определению области оценки
+        IF <ls_data>-status IS NOT INITIAL.
+          ls_color-fname = 'STATUS'.
+          ls_color-color-col = 6.
+
+          CASE <ls_data>-status.
+            WHEN 'A'.
+              <ls_data>-status_fi = 'Невозможно выбрать область оценки'(008).
+              <ls_data>-status = abap_true.
+            WHEN 'I'.
+              <ls_data>-status_fi = 'За текущий период уже проинфлировано'(011).
+              CLEAR <ls_data>-status.
+            WHEN 'L'.
+              <ls_data>-status_fi = 'Существует последующее инфлирование'(009).
+              <ls_data>-status = abap_true.
+            WHEN 'D'.
+              <ls_data>-status_fi = 'Предыдущий расчет отличается от текущего'(010).
+              CLEAR <ls_data>-status.
+          ENDCASE.
+        ENDIF.
+        APPEND ls_color TO <ls_data>-colortab.
+        CLEAR ls_color.
+      ENDLOOP.
+    ENDIF.
+    rv_result = abap_false.
+  ENDMETHOD.
+
+  METHOD init_grid.
+
+    CONSTANTS: lc_sel_mode   TYPE lvc_libox VALUE 'A',
+               lc_ctab_fname TYPE lvc_ctfnm VALUE 'COLORTAB',
+               lc_i_save     TYPE char01 VALUE 'A'.
+
+    DATA:
+      lt_fieldcat       TYPE lvc_t_fcat,
+      lt_toolbar_exclud TYPE TABLE OF ui_func,
+      lt_sort           TYPE lvc_t_sort,
+      lv_title          TYPE string.
+
+    CHECK gr_grid IS INITIAL.
+
+    "Формирование заголовка над гридом
+    lv_title = 'Период инфлирования'(003) && `: ` && p_budat+6(2) && `.` && p_budat+4(2) && `.` && p_budat(4).
+
+    CREATE OBJECT gr_grid
+      EXPORTING
+        i_appl_events = abap_true
+        i_parent      = cl_gui_custom_container=>screen0.
+
+    lt_fieldcat = VALUE #(
+      ( fieldname = 'STATUS'                                                               coltext = 'Статус'(t46) )
+      ( fieldname = 'STATUS_AA'                                                            coltext = 'Статус AA'(t47) )
+      ( fieldname = 'STATUS_FI'                                                            coltext = 'Статус FI'(t48) )
+      ( fieldname = 'BUKRS'                 ref_table = 'ANLA'    ref_field = 'BUKRS'      coltext = 'БЕ'(t01)                                         scrtext_l = 'БЕ'(t01)  )
+      ( fieldname = 'KTANSW_01'             ref_table = 'T095'    ref_field = 'KTANSW'     coltext = 'Счет учета по БСБУ'(t02)                         scrtext_l = 'Счет учета по БСБУ'(t02) )
+      ( fieldname = 'KTANSW_50'             ref_table = 'T095'    ref_field = 'KTANSW'     coltext = 'Счет учета по МСФО'(t03)                         scrtext_l = 'Счет учета по МСФО'(t03) )
+      ( fieldname = 'ANLKL'                 ref_table = 'ANLA'    ref_field = 'ANLKL'      coltext = 'Класс ОС'(t04)                                   scrtext_l = 'Класс ОС'(t04) )
+      ( fieldname = 'ANLN1'                 ref_table = 'ANLA'    ref_field = 'ANLN1'      coltext = 'Основное средство'(t05)                          scrtext_l = 'Основное средство'(t05) )
+      ( fieldname = 'ANLN2'                 ref_table = 'ANLA'    ref_field = 'ANLN2'      coltext = 'Субномер'(t06)                                   scrtext_l = 'Субномер'(t06) )
+      ( fieldname = 'INVNR'                 ref_table = 'ANLA'    ref_field = 'INVNR'      coltext = 'Инвентарный номер'(t07)                          scrtext_l = 'Инвентарный номер'(t07) )
+      ( fieldname = 'TXTF1'                 ref_table = 'ZAFULL'  ref_field = 'TXTF1'      coltext = 'Наименование объекта'(t08)                       scrtext_l = 'Наименование объекта'(t08) )
+      ( fieldname = 'GRMSFO'                ref_table = 'ZANLU'   ref_field = 'GRMSFO'     coltext = 'Группа ОС (НМА) по МСФО'(t09)                    scrtext_l = 'Группа ОС (НМА) по МСФО'(t09) )
+      ( fieldname = 'AFABE523'              ref_table = 'ANLC'    ref_field = 'AFABE'      coltext = 'Область оценки 52/53'(t10)                       scrtext_l = 'Область оценки 52/53'(t10) )
+      ( fieldname = 'EXPDATE'               ref_table = 'ZANLU'   ref_field = 'EXPDATE'    coltext = 'Дата начала эксплуатации по МСФО'(t11)           scrtext_l = 'Дата начала эксплуатации по МСФО'(t11) )
+      ( fieldname = 'IPC'                   ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Индекс CPI'(t12)                                 scrtext_l = 'Индекс CPI'(t12) )
+      ( fieldname = 'PST_IN_NKS_P'          ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ затрат НКС на начало года'(t13)                scrtext_l = '∑ затрат НКС на начало года'(t13) )
+      ( fieldname = 'INF_PST_IN_NKS_C'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ затр НКС за ТекГод с УчетИнфлНаОтчДату'(t14)   scrtext_l = '∑ затр НКС за ТекГод с УчетИнфлНаОтчДату'(t14) )
+      ( fieldname = 'PST_IN_NKS_C'          ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ затрат НКС за текущий год'(t15)                scrtext_l = '∑ затрат НКС за текущий год'(t15) )
+      ( fieldname = 'INF_PST_IN_NKS_P'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ затр НКС на НачГод с УчетИнфлНаОтчДату'(t16)   scrtext_l = '∑ затр НКС на НачГод с УчетИнфлНаОтчДату'(t16) )
+      ( fieldname = 'INF_PST_IN_NKS_N'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ инфл. затрат НКС на нач. года'(t17)            scrtext_l = '∑ инфл. затрат НКС на нач. года'(t17) )
+      ( fieldname = 'INF_PST_IN_NKS_T'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ инфл. затрат НКС за тек. год'(t18)             scrtext_l = '∑ инфл. затрат НКС за тек. год'(t18) )
+      ( fieldname = 'SUM_PST_IN_NKS'        ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ пров в SAP затрат НКС за отч месяц'(t49)       scrtext_l = '∑ пров в SAP затрат НКС за отч месяц'(t49) )
+      ( fieldname = 'SUM_INF_PST_IN_NKS_N'  ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ пров в SAP инфл затр НКС НГ за отч мес'(t50)   scrtext_l = '∑ пров в SAP инфл затр НКС НГ за отч мес'(t50) )
+      ( fieldname = 'SUM_INF_PST_IN_NKS_T'  ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ пров в SAP инфл затр НКС ТГ за отч мес'(t51)   scrtext_l = '∑ пров в SAP инфл затр НКС ТГ за отч мес'(t51) )
+      ( fieldname = 'PRICE_FIRST'           ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Стоимость подлеж инфлир за отч месяц'(t19)       scrtext_l = 'Стоимость подлеж инфлир за отч месяц'(t19) )
+      ( fieldname = 'AMORT_NA_Y_NACH'       ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Накопл аморт на НГ до инфлир за отч мес'(t20)    scrtext_l = 'Накопл аморт на НГ до инфлир за отч меся'(t20) )
+      ( fieldname = 'AMORT_NACH_YEAR'       ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Начисленная амортизация ТГ 52/53 обл оц'(t21)    scrtext_l = 'Начисленная амортизация ТГ 52/53 обл оц'(t21) )
+      ( fieldname = 'FALL_NACH_YEAR'        ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Начисл обесцен до инфлир за отч пер'(t22)        scrtext_l = 'Начисл обесцен до инфлир за отч пер'(t22) )
+      ( fieldname = 'SUM_INF_PST_MONTH'     ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ пров в SAP инфл ПСт за отч месяц'(t23)         scrtext_l = '∑ пров в SAP инфл ПСт за отч месяц'(t23) )
+      ( fieldname = 'SUM_INF_AMORT_MONTH'   ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ пров в SAP инфл аморт на НГ за отч мес'(t24)   scrtext_l = '∑ пров в SAP инфл аморт на НГ за отч мес'(t24) )
+      ( fieldname = 'SUM_P_INF_AMORT_M'     ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ пров в SAP инфл аморт ТГ за отч месяц'(t25)    scrtext_l = '∑ пров в SAP инфл аморт ТГ за отч месяц'(t25) )
+      ( fieldname = 'SUM_P_INF_FALL_M'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '∑ пров в SAP инфл обесцен за отч месяц'(t26)     scrtext_l = '∑ пров в SAP инфл обесцен за отч месяц'(t26) )
+      ( fieldname = 'SUM_INF_PST'           ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Планир ∑ инфл ПСт за отчетный месяц'(t27)        scrtext_l = 'Планир ∑ инфл ПСт за отчетный месяц'(t27) )
+      ( fieldname = 'SUM_INF_AMORT_NG'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Планир ∑ инфл аморт НГ за отч месяц'(t28)        scrtext_l = 'Планир ∑ инфл аморт НГ за отч месяц'(t28) )
+      ( fieldname = 'SUM_INF_AMORT_OM'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Планир ∑ инфл тек аморт ТГ за отч месяц'(t29)    scrtext_l = 'Планир ∑ инфл тек аморт ТГ за отч месяц'(t29) )
+      ( fieldname = 'SUM_INF_FALL_OM'       ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = 'Планир ∑ инфл обесцен за отч месяц'(t30)         scrtext_l = 'Планир ∑ инфл обесцен за отч месяц'(t30) )
+      ( fieldname = 'PST_NO_MOVE_FROM_INF'  ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Ст после предыдущего инфлирования'(t31)         scrtext_l = '#Ст после предыдущего инфлирования'(t31) )
+      ( fieldname = 'AMORT_NO_MOVE_NG_INF'  ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Аморт НГ после пред инфл'(t32)                  scrtext_l = '#Аморт НГ после пред инфл'(t32) )
+      ( fieldname = 'AMORT_NO_MOVE_TG_INF'  ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Аморт ТГ после пред инфл'(t33)                  scrtext_l = '#Аморт ТГ после пред инфл'(t33) )
+      ( fieldname = 'MOVE_PST_FROM_INF'     ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Поступл ПСт посл пред инфл'(t34)                scrtext_l = '#Поступл ПСт посл пред инфл'(t34) )
+      ( fieldname = 'MOVE_AMORT_NG_INF'     ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Поступл аморт НГ посл пред инфл'(t35)           scrtext_l = '#Поступл аморт НГ посл пред инфл'(t35) )
+      ( fieldname = 'MOVE_AMORT_TG_INF'     ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Поступл аморт ТГ посл пред инфл'(t36)           scrtext_l = '#Поступл аморт ТГ посл пред инфл'(t36) )
+      ( fieldname = 'INF_MOVE_PST_OM'       ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Инфл поступл ПСт за отчетный месяц'(t37)        scrtext_l = '#Инфл поступл ПСт за отчетный месяц'(t37) )
+      ( fieldname = 'INF_MOVE_AMORT_NG'     ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Инфл поступл аморт НГ за отчет месяц'(t38)      scrtext_l = '#Инфл поступл аморт НГ за отчет месяц'(t38) )
+      ( fieldname = 'INF_MOVE_AMORT_TG'     ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Инфл поступл аморт ТГ за отчет месяц'(t39)      scrtext_l = '#Инфл поступл аморт ТГ за отчет месяц'(t39) )
+      ( fieldname = 'RET_PST_FROM_INF'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Выбытие ПСт посл пред инфл'(t40)                scrtext_l = '#Выбытие ПСт посл пред инфл'(t40) )
+      ( fieldname = 'RET_AMORT_NG_INF'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Выбытие аморт НГ посл пред инфл'(t41)           scrtext_l = '#Выбытие аморт НГ посл пред инфл'(t41) )
+      ( fieldname = 'RET_AMORT_TG_INF'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Выбытие аморт ТГ посл пред инфл'(t42)           scrtext_l = '#Выбытие аморт ТГ посл пред инфл'(t42) )
+      ( fieldname = 'INF_RET_PST_OM'        ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Инфл выбытия ПСт за отчетный месяц'(t43)        scrtext_l = '#Инфл выбытия ПСт за отчетный месяц'(t43) )
+      ( fieldname = 'INF_RET_AMORT_NG'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Инфл выбытия аморт НГ за отчет месяц'(t44)      scrtext_l = '#Инфл выбытия аморт НГ за отчет месяц'(t44) )
+      ( fieldname = 'INF_RET_AMORT_TG'      ref_table = 'ANEP'    ref_field = 'ANBTR'      coltext = '#Инфл выбытия аморт ТГ за отчет месяц'(t45)      scrtext_l = '#Инфл выбытия аморт ТГ за отчет месяц'(t45) )
+    ).
+
+    lt_toolbar_exclud = VALUE #(
+      ( cl_gui_alv_grid=>mc_fc_graph )
+      ( cl_gui_alv_grid=>mc_fc_info )
+      ( cl_gui_alv_grid=>mc_fc_loc_paste )
+      ( cl_gui_alv_grid=>mc_fc_loc_delete_row )
+      ( cl_gui_alv_grid=>mc_fc_loc_insert_row )
+      ( cl_gui_alv_grid=>mc_fc_loc_paste_new_row )
+      ( cl_gui_alv_grid=>mc_fc_loc_copy_row )
+      ( cl_gui_alv_grid=>mc_fc_loc_append_row )
+      ( cl_gui_alv_grid=>mc_fc_loc_cut )
+      ( cl_gui_alv_grid=>mc_fc_loc_copy )
+      ( cl_gui_alv_grid=>mc_fc_loc_undo )
+      ( cl_gui_alv_grid=>mc_fc_check )
+      ( cl_gui_alv_grid=>mc_fc_refresh )
+    ).
+
+    lt_sort = VALUE #(
+      ( spos = '1' fieldname = 'BUKRS' )
+      ( spos = '2' fieldname = 'ANLN1' )
+      ( spos = '3' fieldname = 'ANLN2' )
+      ( spos = '4' fieldname = 'INVNR' )
+    ).
+
+    gr_grid->set_table_for_first_display(
+      EXPORTING
+        is_layout            = VALUE #( frontend   = abap_true
+                                        no_merging = space
+                                        sel_mode   = lc_sel_mode
+                                        cwidth_opt = abap_true
+                                        ctab_fname = lc_ctab_fname
+                                        grid_title = lv_title )
+        i_save               = lc_i_save
+        i_default            = abap_true
+        it_toolbar_excluding = lt_toolbar_exclud
+        is_variant           = VALUE #( report = sy-repid handle = '0001' )
+        is_print             = VALUE #( )
+      CHANGING
+        it_sort              = lt_sort[]
+        it_outtab            = gt_data[]
+        it_fieldcatalog      = lt_fieldcat[]
+      ).
+
+    gr_grid->register_edit_event( cl_gui_alv_grid=>mc_evt_modified ).
+
+    SET HANDLER:
+        lcl_grid_event=>on_double_click
+        lcl_grid_event=>handle_toolbar
+        lcl_grid_event=>handle_user_command
+      FOR gr_grid.
+
+    gr_grid->set_toolbar_interactive( ).
+  ENDMETHOD.
+
+  METHOD show_hist_amount_detail.
+
+    CONSTANTS: lc_sel_mode TYPE lvc_libox VALUE 'B',
+               lc_i_save   TYPE char01 VALUE 'A'.
+
+    DATA:
+      lt_fieldcat       TYPE lvc_t_fcat,
+      lt_toolbar_exclud TYPE TABLE OF ui_func,
+      lv_title          TYPE string,
+      lr_alv_container  TYPE REF TO cl_gui_docking_container.
+
+
+    IF gr_hist_amount_detail_grid IS INITIAL.
+      CREATE OBJECT lr_alv_container
+        EXPORTING
+          side                        = cl_gui_docking_container=>dock_at_top
+          extension                   = cl_gui_docking_container=>ws_maximizebox
+        EXCEPTIONS
+          cntl_error                  = 1
+          cntl_system_error           = 2
+          create_error                = 3
+          lifetime_error              = 4
+          lifetime_dynpro_dynpro_link = 5
+          OTHERS                      = 6.
+      IF sy-subrc <> 0.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                   WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+
+
+      CREATE OBJECT gr_hist_amount_detail_grid
+        EXPORTING
+          i_appl_events = abap_true
+          i_parent      = lr_alv_container.
+
+      lt_fieldcat = VALUE #(
+        ( fieldname = 'BUKRS'     ref_table = 'ANLA'                  ref_field = 'BUKRS'       coltext = 'БЕ'(t01) )
+        ( fieldname = 'ANLN1'     ref_table = 'ANLA'                  ref_field = 'ANLN1'       coltext = 'Основное средство'(t05) )
+        ( fieldname = 'ANLN2'     ref_table = 'ANLA'                  ref_field = 'ANLN2'       coltext = 'Субномер'(t06) )
+        ( fieldname = 'DATUM'     ref_table = 'ZFIAA_PRICE_HIST'      ref_field = 'DATUM'       coltext = 'Дата образования затраты'(t60) )
+        ( fieldname = 'TYPEZ'     ref_table = 'ZFIAA_PRICE_HIST'      ref_field = 'TYPEZ'       coltext = 'Код вида затрат'(t61) )
+        ( fieldname = 'ACTIVE'    ref_table = 'ZFIAA_PRICE_HIST'      ref_field = 'ACTIVE'      coltext = 'Признак: признается по МСФО'(t62) )
+        ( fieldname = 'AMOUNT'    ref_table = 'ZFIAA_PRICE_HIST'      ref_field = 'AMOUNT'      coltext = 'Сумма затрат'(t63)  )
+        ( fieldname = 'INF_DATE'  ref_table = 'ZFIAA_PRICE_HIST'      ref_field = 'INF_DATE'    coltext = 'Дата инфлирования'(t64) )
+        ( fieldname = 'INF_SUM'   ref_table = 'ANEP'                  ref_field = 'ANBTR'       coltext = 'Сумма инфлирования'(t65)  do_sum = 'X')
+        ( fieldname = 'INF_CPI'   ref_table = 'ZFIAA_PRICE_HIST'      ref_field = 'INF_CPI'     coltext = 'Индекс CPI'(t12) )
+      ).
+
+      lt_toolbar_exclud = VALUE #(
+        ( cl_gui_alv_grid=>mc_fc_graph )
+        ( cl_gui_alv_grid=>mc_fc_info )
+        ( cl_gui_alv_grid=>mc_fc_loc_paste )
+        ( cl_gui_alv_grid=>mc_fc_loc_delete_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_insert_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_paste_new_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_copy_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_append_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_cut )
+        ( cl_gui_alv_grid=>mc_fc_loc_copy )
+        ( cl_gui_alv_grid=>mc_fc_loc_undo )
+        ( cl_gui_alv_grid=>mc_fc_check )
+        ( cl_gui_alv_grid=>mc_fc_refresh )
+      ).
+
+      gr_hist_amount_detail_grid->set_table_for_first_display(
+        EXPORTING
+          is_layout            = VALUE #( frontend   = abap_true
+                                          no_merging = space
+                                          sel_mode   = lc_sel_mode
+                                          cwidth_opt = abap_true
+                                          grid_title = lv_title )
+          i_save               = lc_i_save
+          it_toolbar_excluding = lt_toolbar_exclud
+          is_print             = VALUE #( )
+        CHANGING
+          it_outtab            = gt_hist_amount_detail[]
+          it_fieldcatalog      = lt_fieldcat[]
+        ).
+
+      gr_hist_amount_detail_grid->set_toolbar_interactive( ).
+    ELSE.
+      gr_hist_amount_detail_grid->refresh_table_display( ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD show_retirement_detail.
+
+    CONSTANTS: lc_sel_mode TYPE lvc_libox VALUE 'B',
+               lc_i_save   TYPE char01 VALUE 'A'.
+
+    DATA:
+      lt_fieldcat       TYPE lvc_t_fcat,
+      lt_toolbar_exclud TYPE TABLE OF ui_func,
+      lv_title          TYPE string,
+      lr_alv_container  TYPE REF TO cl_gui_docking_container.
+
+    IF gr_retirement_detail_grid IS INITIAL.
+      CREATE OBJECT lr_alv_container
+        EXPORTING
+          side                        = cl_gui_docking_container=>dock_at_top
+          extension                   = cl_gui_docking_container=>ws_maximizebox
+        EXCEPTIONS
+          cntl_error                  = 1
+          cntl_system_error           = 2
+          create_error                = 3
+          lifetime_error              = 4
+          lifetime_dynpro_dynpro_link = 5
+          OTHERS                      = 6.
+      IF sy-subrc <> 0.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                   WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+
+      CREATE OBJECT gr_retirement_detail_grid
+        EXPORTING
+          i_appl_events = abap_true
+          i_parent      = lr_alv_container.
+
+      lt_fieldcat = VALUE #(
+        ( fieldname = 'BUKRS'                 ref_table = 'ANLA'    ref_field = 'BUKRS'    coltext = 'БЕ'(t01) )
+        ( fieldname = 'ANLN1'                 ref_table = 'ANLA'    ref_field = 'ANLN1'    coltext = 'Основное средство'(t05) )
+        ( fieldname = 'ANLN2'                 ref_table = 'ANLA'    ref_field = 'ANLN2'    coltext = 'Субномер'(t06) )
+        ( fieldname = 'RETIRE_DATE'           ref_table = 'ANEP'    ref_field = 'BUDAT'    coltext = 'Дата выбытия объекта'(t66) )
+        ( fieldname = 'RETIRE_SUM'            ref_table = 'ANEP'    ref_field = 'ANBTR'    coltext = 'Сумма досписания стоимости по выбывшим объектам'(t67) )
+        ( fieldname = 'RETIRE_NACHISL'        ref_table = 'ANEP'    ref_field = 'NAFAB'    coltext = 'Сумма доначисления амортизации за отчетный год по выбывшим объектам'(t68) )
+        ( fieldname = 'RETIRE_SPISAN'         ref_table = 'ANEP'    ref_field = 'NAFAB'    coltext = 'Сумма досписания накопленной амортизации по выбывшим объектам'(t69) )
+      ).
+
+      lt_toolbar_exclud = VALUE #(
+        ( cl_gui_alv_grid=>mc_fc_graph )
+        ( cl_gui_alv_grid=>mc_fc_info )
+        ( cl_gui_alv_grid=>mc_fc_loc_paste )
+        ( cl_gui_alv_grid=>mc_fc_loc_delete_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_insert_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_paste_new_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_copy_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_append_row )
+        ( cl_gui_alv_grid=>mc_fc_loc_cut )
+        ( cl_gui_alv_grid=>mc_fc_loc_copy )
+        ( cl_gui_alv_grid=>mc_fc_loc_undo )
+        ( cl_gui_alv_grid=>mc_fc_check )
+        ( cl_gui_alv_grid=>mc_fc_refresh )
+      ).
+
+      gr_retirement_detail_grid->set_table_for_first_display(
+        EXPORTING
+          is_layout            = VALUE #( frontend = abap_true
+                                          no_merging = space
+                                          sel_mode = lc_sel_mode
+                                          cwidth_opt = abap_true
+                                          grid_title = lv_title )
+          i_save               = lc_i_save
+          it_toolbar_excluding = lt_toolbar_exclud
+          is_print             = VALUE #( )
+        CHANGING
+          it_outtab            = gt_retirement_detail[]
+          it_fieldcatalog      = lt_fieldcat[]
+        ).
+
+      gr_retirement_detail_grid->set_toolbar_interactive( ).
+    ELSE.
+      gr_retirement_detail_grid->refresh_table_display( ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD dispose.
+    IF gr_grid IS BOUND.
+      gr_grid->free( ).
+      FREE gr_grid.
+    ENDIF.
+    cl_gui_cfw=>flush( ).
+    SET SCREEN 0.
+    LEAVE SCREEN.
+  ENDMETHOD.
+
+  METHOD run_job .
+
+    CONSTANTS: lc_job_name TYPE tbtcjob-jobname VALUE 'INF_OS',
+               lc_ktopl(4) TYPE c VALUE 'BNFT'.
+
+    DATA: lv_job_number TYPE tbtcjob-jobcount,
+          lv_job_name   TYPE tbtcjob-jobname.
+
+    DATA: lt_seltab TYPE TABLE OF rsparams,
+          lt_rspar  TYPE TABLE OF rsparams,
+          ls_tab    LIKE LINE OF lt_rspar.
+
+    DATA: lv_njob(1) TYPE n VALUE 0.
+
+    CLEAR: lt_seltab.
+
+    SELECT bukrs FROM t001 INTO TABLE @DATA(lt_bukrs) WHERE ktopl = @lc_ktopl.
+
+    lt_seltab = VALUE #( ( selname = 'P_BUDAT' kind = 'P' low  = p_budat                            )
+                         ( selname = 'S_ANLKL' kind = 'S' sign = 'I'      option = 'CP' low  = '1*' )
+                         ( selname = 'S_ANLKL' kind = 'S' sign = 'I'      option = 'CP' low  = '4*' )
+                         ( selname = 'S_ANLKL' kind = 'S' sign = 'I'      option = 'CP' low  = '3*' )     " AK_BUTVILOVS  #26984 ZFI_IFRS_INF_OS - включить ОЗОС с классом 3*
+                         ( selname = 'P_JOB'   kind = 'P' low  = 'X'                                ) ).
+
+    LOOP AT s_anln1 ASSIGNING FIELD-SYMBOL(<fs_anln1>).
+      ls_tab = VALUE #( selname = 'S_ANLN1'
+                        kind    = 'S'
+                        sign    = <fs_anln1>-sign
+                        option  = <fs_anln1>-option
+                        low     = <fs_anln1>-low
+                        high    = <fs_anln1>-high ).
+      APPEND ls_tab TO lt_seltab.
+    ENDLOOP.
+
+    CLEAR: lt_rspar.
+
+    DATA(lv_i) = 0.
+    DATA(lv_kol_job) = ceil( lines( lt_bukrs ) / p_proc ).
+
+    LOOP AT lt_bukrs ASSIGNING FIELD-SYMBOL(<ls_data>).
+      DATA(lv_tabix) = sy-tabix.
+      IF lt_rspar IS INITIAL.
+        MOVE lt_seltab TO lt_rspar.
+      ENDIF.
+
+      ls_tab = VALUE #( selname = 'S_BUKRS'
+                        kind    = 'S'
+                        sign    = 'I'
+                        option  = 'EQ'
+                        low     = <ls_data>-bukrs ).
+      APPEND ls_tab TO lt_rspar.
+
+      lv_i = lv_i + 1.
+
+      IF lv_i = lv_kol_job OR lines( lt_bukrs ) = lv_tabix.
+        lv_njob = lv_njob + 1.
+        CONCATENATE lc_job_name p_budat sy-datum lv_njob INTO lv_job_name SEPARATED BY '_'.
+        CALL FUNCTION 'JOB_OPEN'
+          EXPORTING
+            jobname          = lv_job_name
+          IMPORTING
+            jobcount         = lv_job_number
+          EXCEPTIONS
+            cant_create_job  = 1
+            invalid_job_data = 2
+            jobname_missing  = 3
+            OTHERS           = 4.
+
+        IF sy-subrc = 0.
+          SUBMIT (sy-repid) WITH SELECTION-TABLE lt_rspar VIA JOB lv_job_name NUMBER lv_job_number "#EC CI_SUBMIT
+                AND RETURN.
+          IF sy-subrc = 0.
+            CALL FUNCTION 'JOB_CLOSE'
+              EXPORTING
+                jobcount             = lv_job_number
+                jobname              = lv_job_name
+                strtimmed            = abap_true
+              EXCEPTIONS
+                cant_start_immediate = 1
+                invalid_startdate    = 2
+                jobname_missing      = 3
+                job_close_failed     = 4
+                job_nosteps          = 5
+                job_notex            = 6
+                lock_failed          = 7
+                OTHERS               = 8.
+            IF sy-subrc <> 0.
+              IF sy-subrc = 2.
+                MESSAGE e081(cacscheck).
+              ELSE.
+                MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+              ENDIF.
+            ELSE.
+              MESSAGE s080(cacscheck).
+            ENDIF.
+          ENDIF.
+        ENDIF.
+        CLEAR: lt_rspar.
+        lv_i = 0.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD run_post.
+
+    CONSTANTS lc_offset_account TYPE bf_gkont VALUE 'M000000099'.
+
+    DATA:
+      ls_bapi_gen_info        TYPE bapifapo_gen_info,
+      ls_bapifapo_acq         TYPE bapifapo_acq,
+      ls_bapifapo_revaluation TYPE bapifapo_revaluation,
+      ls_bapifapo_val_adj     TYPE bapifapo_value_adjustment,
+      ls_writeup              TYPE bapifapo_writeup,
+      ls_bapifapo_ret         TYPE bapifapo_ret,
+      lt_propareavalues       TYPE TABLE OF bapifapo_areavalues_prop,
+      ls_propareavalues       TYPE bapifapo_areavalues_prop,
+      lt_areavalues_writeup   TYPE TABLE OF bapifapo_areavalues_writeup,
+      ls_areavalues_writeup   TYPE bapifapo_areavalues_writeup,
+      ls_bapiret2             TYPE bapiret2.
+    DATA:
+      lv_was_error  TYPE char01,
+      lt_rows       TYPE lvc_t_row,
+      lt_hist       TYPE zfi_ifrs_inf_os=>tt_invnr,
+      ls_color      TYPE lvc_s_scol,
+      lv_bwasl      TYPE zfi_ifrs_inf_t-bwasl,
+      lt_ifrs_inf_d TYPE TABLE OF zfi_ifrs_inf_d,
+      gt_data_post  TYPE STANDARD TABLE OF gty_s_data,
+      lv_true       TYPE abap_bool.
+    DATA:
+      lv_valuedate TYPE budat,
+      lv_amount    TYPE p DECIMALS 2.
+
+    CLEAR: lv_was_error,
+           gt_data_post.
+
+    IF p_job = abap_false.
+      "получение выделенных строк
+      CALL METHOD lcl_report=>gr_grid->get_selected_rows
+        IMPORTING
+          et_index_rows = lt_rows.
+      IF lt_rows[] IS INITIAL.
+        RETURN.
+      ELSE.
+        LOOP AT lt_rows ASSIGNING FIELD-SYMBOL(<ls_rows>).
+          ASSIGN lcl_report=>gt_data[ <ls_rows>-index ] TO FIELD-SYMBOL(<ls_data_post>).
+          APPEND <ls_data_post> TO gt_data_post.
+        ENDLOOP.
+      ENDIF.
+    ELSE.
+      MOVE lcl_report=>gt_data[] TO gt_data_post.
+    ENDIF.
+
+    "{ подготовка данных для проводки
+    LOOP AT gt_data_post ASSIGNING FIELD-SYMBOL(<ls_data>).
+      IF <ls_data>-status = abap_true.
+        lv_was_error = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      "запоминание инвентарного номер
+      READ TABLE lt_hist TRANSPORTING NO FIELDS
+      WITH KEY invnr = <ls_data>-invnr
+      BINARY SEARCH.
+      IF sy-subrc <> 0.
+        INSERT VALUE #(
+                        invnr = <ls_data>-invnr
+                        bukrs = <ls_data>-bukrs
+                        anln1 = <ls_data>-anln1
+                        anln2 = <ls_data>-anln2
+                        anlkl = <ls_data>-anlkl
+                      )
+        INTO lt_hist INDEX sy-tabix ASSIGNING FIELD-SYMBOL(<ls_hist>).
+      ENDIF.
+    ENDLOOP.
+    "} подготовка данных для проводки
+    "{ проверка разрешена ли проводка
+    zfi_ifrs_inf_os=>check_post(
+    EXPORTING
+      ev_bdate = p_budat
+    CHANGING
+      ct_invnr = lt_hist
+      ).
+    "} проверка разрешена ли проводка
+
+    LOOP AT gt_data_post ASSIGNING <ls_data>.
+      IF <ls_data>-status = abap_true.
+        lv_was_error = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      IF <ls_data>-deakt <> '00000000'.
+        <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+        <ls_data>-status_aa = 'Объект выбыл!'(023).
+        CONTINUE.
+      ENDIF.
+
+      CLEAR:
+      <ls_data>-status,
+      <ls_data>-colortab,
+      ls_bapi_gen_info,
+      ls_bapifapo_acq,
+      lt_propareavalues.
+
+      lv_true = abap_false.
+
+      ASSIGN lt_hist[ invnr = <ls_data>-invnr ] TO <ls_hist>.
+      IF <ls_hist>-flag     = 'I'.
+        <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+        <ls_data>-status_aa = 'Инфлирование за данный период уже проведено'(016).
+*        CONTINUE.
+      ENDIF.
+
+      IF <ls_data>-budat_last IS INITIAL OR <ls_data>-budat_last+4(4) = '1231' OR <ls_data>-budat_last = '00000000'.
+        lv_valuedate = p_budat.
+      ELSE.
+        lv_valuedate = <ls_data>-budat_last + 1.
+      ENDIF.
+
+      IF <ls_data>-pst_in_nks_c + <ls_data>-pst_in_nks_p - <ls_data>-sum_pst_in_nks  <> 0.
+        IF <ls_data>-pst_in_nks_c + <ls_data>-pst_in_nks_p - <ls_data>-sum_pst_in_nks  > 0.
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_au ]-bwasl DEFAULT space ) .
+        ELSE.
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_an ]-bwasl DEFAULT space ) .
+        ENDIF.
+
+        IF lv_bwasl = space.
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = 'Нет настроек для вида движения'(033).
+          CONTINUE.
+        ENDIF.
+
+        ls_bapi_gen_info = VALUE #( username   = sy-uname
+                                    assettrtyp = lv_bwasl
+                                    doc_date   = p_budat
+                                    pstng_date = p_budat
+                                    comp_code  = <ls_data>-bukrs
+                                    assetmaino = <ls_data>-anln1
+                                    assetsubno = <ls_data>-anln2
+                                    depr_area  = <ls_data>-afabe523 ).
+
+        lv_amount = abs( <ls_data>-pst_in_nks_c + <ls_data>-pst_in_nks_p - <ls_data>-sum_pst_in_nks ).
+
+        ls_bapifapo_acq = VALUE #( valuedate      = lv_valuedate
+                                   amount         = lv_amount
+                                   currency       = <ls_data>-bukrs_waers
+                                   offset_account = lc_offset_account ).
+
+        CALL FUNCTION 'BAPI_ASSET_ACQUISITION_POST'
+          EXPORTING
+            generalpostingdata = ls_bapi_gen_info
+            acquisitiondata    = ls_bapifapo_acq
+          IMPORTING
+            return             = ls_bapiret2.
+        IF ls_bapiret2 IS NOT INITIAL AND ls_bapiret2-type CA 'AEX'.
+          <ls_data>-status    = abap_true.
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = ls_bapiret2-message.
+          <ls_hist>-flag      = abap_true.
+          CONTINUE.
+        ELSE.
+          "Если всё успешно делаем COMMIT
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+          "Отметка об успешной проводке
+          <ls_data>-colortab = VALUE #( ( fname = 'STATUS' color-col = 5 ) ).
+          <ls_data>-status_aa = 'Успешно'(015).
+        ENDIF.
+      ENDIF.
+
+      IF <ls_data>-inf_pst_in_nks_n - <ls_data>-sum_inf_pst_in_nks_n <> 0.
+        IF ( <ls_data>-inf_pst_in_nks_n - <ls_data>-sum_inf_pst_in_nks_n ) > 0 .
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_pp ]-bwasl DEFAULT space  ) .
+        ELSE.
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_pn ]-bwasl DEFAULT space ) .
+        ENDIF.
+
+        IF lv_bwasl = space.
+          <ls_data>-colortab = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = 'Нет настроек для вида движения'(033).
+          CONTINUE.
+        ENDIF.
+
+        ls_bapi_gen_info = VALUE #( username   = sy-uname
+                                    assettrtyp = lv_bwasl
+                                    doc_date   = p_budat
+                                    pstng_date = p_budat
+                                    comp_code  = <ls_data>-bukrs
+                                    assetmaino = <ls_data>-anln1
+                                    assetsubno = <ls_data>-anln2
+                                    depr_area  = <ls_data>-afabe523 ).
+
+        lv_amount = abs( <ls_data>-inf_pst_in_nks_n - <ls_data>-sum_inf_pst_in_nks_n ).
+
+        ls_bapifapo_acq = VALUE #( valuedate      = lv_valuedate
+                                   amount         = lv_amount
+                                   currency       = <ls_data>-bukrs_waers
+                                   offset_account = lc_offset_account ).
+
+        CALL FUNCTION 'BAPI_ASSET_ACQUISITION_POST'
+          EXPORTING
+            generalpostingdata = ls_bapi_gen_info
+            acquisitiondata    = ls_bapifapo_acq
+          IMPORTING
+            return             = ls_bapiret2.
+        IF ls_bapiret2 IS NOT INITIAL AND ls_bapiret2-type CA 'AEX'.
+          <ls_data>-status    = abap_true.
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = ls_bapiret2-message.
+          <ls_hist>-flag      = abap_true.
+          CONTINUE.
+        ELSE.
+          "Если всё успешно делаем COMMIT
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+          "Отметка об успешной проводке
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 5 ) ).
+          <ls_data>-status_aa = 'Успешно'(015).
+        ENDIF.
+      ENDIF.
+
+      IF <ls_data>-inf_pst_in_nks_t - <ls_data>-sum_inf_pst_in_nks_t <> 0.
+        IF ( <ls_data>-inf_pst_in_nks_t - <ls_data>-sum_inf_pst_in_nks_t ) > 0 .
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_cp ]-bwasl DEFAULT space ) .
+        ELSE.
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_cn ]-bwasl DEFAULT space ) .
+        ENDIF.
+
+        IF lv_bwasl = space.
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = 'Нет настроек для вида движения'(033).
+          CONTINUE.
+        ENDIF.
+
+        ls_bapi_gen_info = VALUE #( username   = sy-uname
+                                    assettrtyp = lv_bwasl
+                                    doc_date   = p_budat
+                                    pstng_date = p_budat
+                                    comp_code  = <ls_data>-bukrs
+                                    assetmaino = <ls_data>-anln1
+                                    assetsubno = <ls_data>-anln2
+                                    depr_area  = <ls_data>-afabe523 ).
+
+        lv_amount = abs( <ls_data>-inf_pst_in_nks_t - <ls_data>-sum_inf_pst_in_nks_t ).
+
+        ls_bapifapo_acq = VALUE #( valuedate      = lv_valuedate
+                                   amount         = lv_amount
+                                   currency       = <ls_data>-bukrs_waers
+                                   offset_account = lc_offset_account ).
+
+        CALL FUNCTION 'BAPI_ASSET_ACQUISITION_POST'
+          EXPORTING
+            generalpostingdata = ls_bapi_gen_info
+            acquisitiondata    = ls_bapifapo_acq
+          IMPORTING
+            return             = ls_bapiret2.
+        IF ls_bapiret2 IS NOT INITIAL AND ls_bapiret2-type CA 'AEX'.
+          <ls_data>-status    = abap_true.
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = ls_bapiret2-message.
+          <ls_hist>-flag      = abap_true.
+          CONTINUE.
+        ELSE.
+          "Если всё успешно делаем COMMIT
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+          "Отметка об успешной проводке
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 5 ) ).
+          <ls_data>-status_aa = 'Успешно'(015).
+        ENDIF.
+      ENDIF.
+
+      IF ( <ls_data>-sum_inf_pst - <ls_data>-sum_inf_pst_month ) <> 0.
+        IF ( <ls_data>-sum_inf_pst - <ls_data>-sum_inf_pst_month ) > 0 .
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_ip ]-bwasl DEFAULT space  ) .
+        ELSE.
+          lv_bwasl = VALUE #( lcl_report=>gt_infl_type[ infl_type = lcl_report=>gc_infl_type_in ]-bwasl DEFAULT space  ) .
+        ENDIF.
+
+        IF lv_bwasl = space.
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = 'Нет настроек для вида движения'(033).
+          CONTINUE.
+        ENDIF.
+
+        lv_amount = abs( <ls_data>-sum_inf_pst - <ls_data>-sum_inf_pst_month ).
+
+        ls_bapifapo_acq = VALUE #( valuedate      = lv_valuedate
+                                   amount         = lv_amount
+                                   currency       = <ls_data>-bukrs_waers
+                                   offset_account = lc_offset_account ).
+
+        ls_bapi_gen_info = VALUE #( username   = sy-uname
+                                    assettrtyp = lv_bwasl
+                                    doc_date   = p_budat
+                                    pstng_date = p_budat
+                                    comp_code  = <ls_data>-bukrs
+                                    assetmaino = <ls_data>-anln1
+                                    assetsubno = <ls_data>-anln2
+                                    depr_area  = <ls_data>-afabe523 ).
+
+        lt_propareavalues = VALUE #( currency   = <ls_data>-bukrs_waers
+                                     amount     = ( <ls_data>-sum_inf_pst - <ls_data>-sum_inf_pst_month )
+                                     ord_dep    = ( <ls_data>-sum_inf_amort_ng - <ls_data>-sum_inf_amort_month )
+                                     ord_dep_cy = ( <ls_data>-sum_inf_amort_om - <ls_data>-sum_p_inf_amort_m )
+                                     spe_dep    = ( <ls_data>-sum_inf_fall_om - <ls_data>-sum_p_inf_fall_m )
+                                   ( depr_area  = <ls_data>-afabe523 ) ).
+
+        CALL FUNCTION 'BAPI_ASSET_ACQUISITION_POST'
+          EXPORTING
+            generalpostingdata = ls_bapi_gen_info
+            acquisitiondata    = ls_bapifapo_acq
+          IMPORTING
+            return             = ls_bapiret2
+          TABLES
+            propareavalues     = lt_propareavalues.
+
+        IF ls_bapiret2 IS NOT INITIAL AND ls_bapiret2-type CA 'AEX'.
+          <ls_data>-status    = abap_true.
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 6 ) ).
+          <ls_data>-status_aa = ls_bapiret2-message.
+          <ls_hist>-flag      = abap_true.
+          CONTINUE.
+        ELSE.
+          "Если всё успешно делаем COMMIT
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+          "Отметка об успешной проводке
+          <ls_data>-colortab  = VALUE #( ( fname = 'STATUS' color-col = 5 ) ).
+          <ls_data>-status_aa = 'Успешно'(015).
+        ENDIF.
+      ENDIF.
+
+    ENDLOOP.
+    "обновление таблицы по успешному прогону
+    DATA(lv_tz) = cl_fdt_date_time=>get_system_tz( ).
+
+    SELECT * FROM zfi_ifrs_inf_d
+         INTO TABLE @DATA(lt_infl_ts)
+         WHERE gjahr = @p_budat+0(4) AND
+               perio = @p_budat+4(2)
+         ORDER BY infl_ts DESCENDING, bukrs ASCENDING.
+    READ TABLE lt_infl_ts ASSIGNING FIELD-SYMBOL(<fs_infl_ts>) INDEX 1.
+    IF sy-subrc = 0.
+      DATA(lv_bukrs) = <fs_infl_ts>-bukrs.
+      SELECT SINGLE MAX( runnr ) FROM zfi_ifrs_inf_d
+           INTO @DATA(lv_runnr)
+           WHERE bukrs = @<fs_infl_ts>-bukrs AND
+                 gjahr = @p_budat+0(4) AND
+                 perio = @p_budat+4(2).
+      IF sy-subrc = 0.
+        lv_runnr = lv_runnr + 1.
+      ELSE.
+        lv_runnr = 1.
+      ENDIF.
+    ELSE.
+      lv_bukrs = '01'.
+      lv_runnr = 1.
+    ENDIF.
+
+    CONVERT DATE sy-datum TIME sy-uzeit INTO TIME STAMP DATA(lv_infl_ts) TIME ZONE lv_tz.
+    APPEND INITIAL LINE TO lt_ifrs_inf_d ASSIGNING FIELD-SYMBOL(<ls_ifrs_inf_d>).
+    <ls_ifrs_inf_d> =  VALUE #( bukrs   = lv_bukrs
+                                gjahr   = p_budat+0(4)
+                                perio   = p_budat+4(2)
+                                runnr   = lv_runnr
+                                infl_ts = lv_infl_ts ).
+
+    INSERT zfi_ifrs_inf_d FROM TABLE lt_ifrs_inf_d.
+
+    COMMIT WORK.
+
+    IF lv_was_error = abap_true.
+      MESSAGE 'Записи с ошибочным статусом не обрабатываются'(021) TYPE 'E' DISPLAY LIKE 'W'.
+    ENDIF.
+
+    LOOP AT gt_data_post ASSIGNING <ls_data_post>.
+      READ TABLE lcl_report=>gt_data ASSIGNING <ls_data>
+                      WITH KEY bukrs    = <ls_data_post>-bukrs
+                               anlkl    = <ls_data_post>-anlkl
+                               anln1    = <ls_data_post>-anln1
+                               anln2    = <ls_data_post>-anln2
+                               invnr    = <ls_data_post>-invnr
+                               afabe523 = <ls_data_post>-afabe523.
+      IF sy-subrc = 0.
+        <ls_data>-status    = <ls_data_post>-status.
+        <ls_data>-status_aa = <ls_data_post>-status_aa.
+        <ls_data>-colortab  = <ls_data_post>-colortab.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.

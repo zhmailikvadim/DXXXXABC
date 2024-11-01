@@ -1,0 +1,207 @@
+CLASS zfi_npo_hdb DEFINITION
+  public
+  final
+  create public.
+
+public section.
+interfaces if_amdp_marker_hdb.
+types:
+    begin of gty_s_data,
+      bukrs       type anla-bukrs,                                               "БЕ
+      name_anln   type t001-butxt,                                               "наименование БЕ -
+      saknr       type skat-saknr,                                               "счет бухгалтерского учета
+      name_hkont  type skat-txt20,                                               "наименование счета бухгалтерского учета -
+      anlkl       type anla-anlkl,                                               "класс
+      name_anlkl  type ankt-txk50,                                               "наименование класса -
+      anln1       type anla-anln1,                                               "системный номер
+      anln2       type anla-anln2,                                               "субномер -
+      invnr       type anla-invnr,                                               "инвентарный номер
+      name_object type ankt-txk50,                                               "наименование объекта - уточнить
+      menge       type anla-menge,                                               "количество
+      stort       type anlz-lgort,                                               "склад
+      name_stort  type t499s-ktext,                                              "наименование склада -
+      aktiv       type c LENGTH 7,                                               "anla-aktiv,                        "дата ввода в эксплуатацию
+      zzbudate    type anlu-zzbudate,                                            "дата принятия к БУ в БЕ
+      depgr       type glofaaassetdata-glo_rus_depgr,                            "группа
+      gr_descr    type j_3rfdeprgroupt-descript,                                 "наименование группы -
+      glo_okof    type glofaaassetdata-glo_rus_okof,                             "шифр нормы
+      okoft1      type j_3raokoft-okoft,                                         "наименование шифра 1 -
+      okoft2      type j_3raokoft-okoft2,                                        "наименование шифра 2 -
+      f_cost      type anlc-kansw,                                               "первоначальная переоценочная стоимость
+      amort       type anlc-knafa,                                               "накопленная амортизация
+      pr_amort    type bseg-popts,                                               "% накопленной амортизации (6 разрядов после запятой)
+      l_cost      type anlc-kansw,                                               "остаточная стоимость
+      dfna        type c LENGTH 7, "d,                                           "дата окончания начисления амортизациии
+      reason      type string,                                                   "причина (заполняется в ручную)
+    end of gty_s_data,
+    gty_t_data type standard table of gty_s_data with empty key.
+
+
+class-methods:
+  get_data
+    importing
+      value(iv_gjahr) type anlc-gjahr
+      value(iv_afabe) type anlc-afabe default '01'
+      value(iv_flt)   type string
+    exporting
+      value(et_data)  type gty_t_data.
+
+protected section.
+private section.
+ENDCLASS.
+
+
+
+CLASS ZFI_NPO_HDB IMPLEMENTATION.
+
+
+method get_data BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT
+                USING anla ankt glofaaassetdata t001 t095 skat anlz j_3rfdeprgroupt zafull tka02 t001l
+                      j_3raokoft anlu faav_anlc zfi_revas ZFI_STOCK_ASSET_HDB=>GET_DATE_AMORT.
+
+    declare lv_mandt char(3) := session_context( 'CLIENT' );
+    declare lv_spras char(1) := session_context( 'LOCALE_SAP' );
+    declare lv_deakt char(8) := :iv_gjahr || '0101';                            --Дата для не выбывших на начало отчетного периода (анализ ANLA-DEACT) ?
+    declare lv_edate char(8) := to_dats(last_day( :iv_gjahr || '1201' ) );      --Дата для поступивших до конца периода (ANLA-ZUGDT)
+
+                                                                                -- Выборка основных данных по ОС, согласно входным параметрам
+    et_data =
+      select
+        anla.bukrs,
+        t001.butxt                                          as name_anln,      -- Наименование ОС
+        skat.saknr,
+        skat.txt20                                          as name_hkont,     -- Наименование счета бухгалтерского учета skat-txt20 для t095-ktansw
+        anla.anlkl,
+        ankt.txk50                                          as name_anlkl,     -- Наименование класса ОС
+        anla.anln1,
+        anla.anln2,
+        anla.invnr,
+        zf.txtf1 || zf.txtf2                                as name_object,    -- Наименование объекта уточнить?
+        anla.menge,
+        coalesce(anlz.lgort,'')                             as stort,          -- Склад
+        t001l.lgobe                                         as name_stort,     -- Наименование склада
+        case when anla.aktiv <> '00000000' then substring (anla.aktiv,5,2 ) || '.'|| left(anla.aktiv, 4) else '' end as aktiv,    --anla.aktiv,
+        anlu.zzbudate,
+        glofa.glo_rus_depgr                                 as depgr,          -- Группа ОС
+        substring( depr.descript, 1, 1 ) || lower( substring( depr.descript, 2, length( depr.descript ) ) ) as gr_descr, --Наименование группы
+        glofa.glo_rus_okof                                  as glo_okof,       -- Шифр нормы
+        j_3ra.okoft                                         as okoft1,         -- Наименование шифра 1
+        j_3ra.okoft2                                        as okoft2,         -- Наименование шифра 2
+        ( anlc.kansw + anlc.kaufw )                         as f_cost,         -- Первоначальная переоценочная стоимость
+        ( anlc.knafa + anlc.kaafa + anlc.kaufn )*( -1 )            as amort,          -- Накопленная амортизация
+        case when COALESCE(( anlc.kansw +  anlc.kaufw ), 0 ) = 0 then 0 else
+        ( anlc.knafa + anlc.kaafa + anlc.kaufn )/
+        ( anlc.kansw +  anlc.kaufw )  * 100 * ( -1 )    end as pr_amort,       -- % накопленной амортизации (6 разрядов после запятой)
+        ( anlc.kansw + anlc.kaufw + anlc.knafa +
+          anlc.kaafa + anlc.kaufn )                         as l_cost,         -- Остаточная стоимость
+        '0000000'                                           as dfna,           -- Дата окончания начисления амортизациии
+        ''                                                  as reason
+
+      from anla as anla
+        left outer join faav_anlc as anlc        on anlc.mandt = anla.mandt
+                                                and anlc.bukrs = anla.bukrs
+                                                and anlc.anln1 = anla.anln1
+                                                and anlc.anln2 = anla.anln2
+                                                and anlc.afabe = :iv_afabe
+                                                and anlc.gjahr = year(to_nchar( :iv_gjahr + 1 )) --:lv_nyaer
+
+        left outer join zafull as zf             on zf.mandt = anla.mandt
+                                                and zf.bukrs = anla.bukrs
+                                                and zf.anln1 = anla.anln1
+                                                and zf.anln2 = anla.anln2
+        left outer join ankt as ankt             on ankt.mandt = anla.mandt             --Текст - класс ОС
+                                                and ankt.spras = :lv_spras
+                                                and ankt.anlkl = anla.anlkl
+        left outer join tka02 as tka02           on tka02.mandt = anla.mandt            --присвоение ке
+                                                and tka02.bukrs = anla.bukrs
+        left outer join glofaaassetdata as glofa on glofa.mandt = anla.mandt            --ос специфика страны
+                                                and glofa.bukrs = anla.bukrs
+                                                and glofa.anln1 = anla.anln1
+                                                and glofa.anln2 = anla.anln2
+        left outer join j_3rfdeprgroupt as depr  on depr.mandt  = glofa.mandt           --группа ОС
+                                                and depr.sprsl  = :lv_spras
+                                                and depr.amortgr = glofa.glo_rus_depgr
+        left outer join j_3raokoft as j_3ra      on j_3ra.mandt  = anla.mandt           --наименования шифров 1 и 2
+                                                and j_3ra.sprsl  = :lv_spras
+                                                and j_3ra.okof = glofa.glo_rus_okof
+        left outer join t001 as t001             on t001.mandt = anla.mandt             --данные бе
+                                                and t001.bukrs = anla.bukrs
+        left outer join t095 as t095             on t095.mandt = anla.mandt             -- счета запаса класса
+                                                and t095.ktopl = t001.ktopl
+                                                and t095.ktogr = anla.ktogr
+                                                and t095.afabe = :iv_afabe                   --Класс оценки '01' по умолчанию
+        left outer join skat as skat             on skat.spras = :lv_spras              --Счета с текстами
+                                                and skat.mandt = anla.mandt
+                                                and skat.ktopl = t001.ktopl
+                                                and skat.saknr = t095.ktansw
+        left outer join anlz as anlz             on anlz.mandt = anla.mandt             -- ос временно зависимые данные
+                                                and anlz.bukrs = anla.bukrs
+                                                and anlz.anln1 = anla.anln1
+                                                and anlz.anln2 = anla.anln2
+                                                and anlz.adatu <= :lv_deakt
+                                                and anlz.bdatu >= :lv_deakt
+        left join anlu as anlu                   on anlu.mandt = anla.mandt             -- дата принятия к бухучету
+                                                and anlu.bukrs = anla.bukrs
+                                                and anlu.anln1 = anla.anln1
+                                                and anlu.anln2 = anla.anln2
+        left outer join t001l as t001l           on t001l.mandt = anlz.mandt
+                                                and t001l.werks = anlz.werks
+                                                and t001l.lgort = anlz.lgort
+        left outer join zfi_revas as rev         on rev.mandt = anla.mandt              -- история переоценки
+                                                and rev.bukrs = anla.bukrs
+                                                and rev.gjahr = :iv_gjahr
+                                                and rev.afabe = :iv_afabe
+                                                and rev.anln1 = anla.anln1
+                                                and rev.anln2 = anla.anln2
+                                                and rev.status   = 'P'
+                                                and rev.rev_type = 9
+        where anla.mandt = :lv_mandt
+          and ( anla.deakt = '00000000'  or anla.deakt > :lv_edate )
+          and ( anlu.zzbudate = '00000000' or ( anlu.zzbudate > '00000000' and anlu.zzbudate <= :lv_edate ) )
+          and ( anla.aktiv > '00000000' and anla.aktiv <= :lv_edate )
+          and rev.gjahr is null;
+
+   et_data = apply_filter( :et_data, :iv_flt);
+
+  lt_afabe = select :iv_afabe afabe from dummy;                                                -- формируем области оценки
+  lt_dats = select distinct dt.bukrs, dt.anln1, dt.anln2 from :et_data as dt;                  -- ОС
+  CALL "ZFI_STOCK_ASSET_HDB=>GET_DATE_AMORT"( :LV_EDATE, :LT_DATS, :LT_AFABE, LT_DATE_AMORT ); -- получаем даты окончания амортизации
+
+      et_data =
+      select
+        dt.bukrs,
+        dt.name_anln,                                                          -- Наименование ОС
+        dt.saknr,
+        dt.name_hkont,                                                         -- Наименование счета бухгалтерского учета skat-txt20 для t095-ktansw
+        dt.anlkl,
+        dt.name_anlkl,                                                         -- Наименование класса ОС
+        dt.anln1,
+        dt.anln2,
+        dt.invnr,
+        dt.name_object,                                                        -- Наименование объекта
+        dt.menge,
+        dt.stort,                                                              -- Склад
+        dt.name_stort,                                                         -- Наименование склада
+        dt.aktiv,
+        dt.zzbudate,
+        dt.depgr,                                                              -- Группа ОС
+        dt.gr_descr,                                                           --Наименование группы
+        dt.glo_okof,                                                           -- Шифр нормы
+        dt.okoft1,                                                             -- Наименование шифра 1
+        dt.okoft2,                                                             -- Наименование шифра 2
+        dt.f_cost,                                                             -- Первоначальная переоценочная стоимость
+        dt.amort,                                                              -- Накопленная амортизация
+        dt.pr_amort,                                                           -- % накопленной амортизации (6 разрядов после запятой)
+        dt.l_cost,                                                             -- Остаточная стоимость
+        case when date_amort.am_endda <> '00000000'
+        then substring (date_amort.am_endda,5,2 ) || '.'|| left(date_amort.am_endda, 4) else '' end as dfna, -- date_amort.am_endda  as dfna Дата окончания начисления амортизации
+        dt.reason                                                              --Причина
+      from :et_data as dt
+        left outer join :lt_date_amort as date_amort on date_amort.bukrs = dt.bukrs
+                                                    and date_amort.anln1 = dt.anln1
+                                                    and date_amort.anln2 = dt.anln2
+                                                    and date_amort.afabe = :iv_afabe
+      order by dt.bukrs, dt.anln1, dt.anln2;
+
+  endmethod.
+ENDCLASS.

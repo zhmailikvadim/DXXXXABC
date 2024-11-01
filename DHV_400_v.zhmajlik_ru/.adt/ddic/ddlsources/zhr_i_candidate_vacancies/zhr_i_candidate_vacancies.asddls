@@ -10,7 +10,7 @@
 
 @ObjectModel:{
     modelCategory : #BUSINESS_OBJECT,
-    transactionalProcessingEnabled: true,
+    //transactionalProcessingEnabled: true,
     writeActivePersistence: 'ZHR_VACANCIES',
     semanticKey: ['uuid'],
     representativeKey: 'uuid',
@@ -29,7 +29,7 @@ define view ZHR_I_CANDIDATE_VACANCIES
       name_vacans    as name_vacans,
       address        as address,
       enterprise     as enterprise,
-      name_id        as id,
+      name_id        as name_id,
       city           as City,
       orgname        as orgname,
       hot_job        as hot_job,

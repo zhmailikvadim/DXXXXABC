@@ -1,0 +1,142 @@
+CLASS zcl_mm_a_generate_reserve DEFINITION
+  PUBLIC
+  INHERITING FROM /bobf/cl_lib_a_supercl_simple
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    METHODS /bobf/if_frw_action~execute
+        REDEFINITION .
+    METHODS after_rfc IMPORTING p_task TYPE clike.
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    DATA gv_resb TYPE bapi2093_res_key-reserv_no.
+ENDCLASS.
+
+
+
+CLASS ZCL_MM_A_GENERATE_RESERVE IMPLEMENTATION.
+
+
+  METHOD /bobf/if_frw_action~execute.
+    DATA:
+      ls_reshead      TYPE bapi2093_res_head,
+      ls_param        TYPE zmm_s_a_generate_reserve,
+      ls_reserv_item  TYPE zmm_s_a_reserve_item,
+      lt_reserv_items TYPE zmm_t_a_reserve_items,
+      ls_item         TYPE bapi2093_res_item,
+      lr_data         TYPE REF TO data,
+      ls_res          TYPE zmm_i_transport_reserve,
+      ls_ret          TYPE bapiret2,
+      lt_ret          TYPE TABLE OF bapiret2,
+      lt_items        TYPE TABLE OF bapi2093_res_item,
+      lt_ps           TYPE STANDARD TABLE OF bapi_profitability_segment,
+      lv_atpcheck     TYPE bapi2093_atpcheck VALUE 'X',
+      lv_calcheck     TYPE bapi2093_calcheck VALUE 'X',
+      lv_resb         TYPE bapi2093_res_key-reserv_no.
+    FIELD-SYMBOLS <ls_send> TYPE zmm_i_transport_reserve.
+    CLEAR: eo_message, et_failed_key, et_data.
+    IF is_parameters IS BOUND.
+      TRY.
+          ls_reshead-res_date = sy-datum.
+          ls_reshead-created_by = sy-uname.
+          ls_reshead-move_type = CAST zmm_s_a_generate_reserve( is_parameters )->bwart.
+          ls_reshead-move_plant = CAST zmm_s_a_generate_reserve( is_parameters )->werks.
+          ls_reshead-move_stloc = CAST zmm_s_a_generate_reserve( is_parameters )->umlgo.
+          IF ls_reshead-move_type = '261'.
+            ls_reshead-orderid = CAST zmm_s_a_generate_reserve( is_parameters )->aufnr.
+          ELSEIF ls_reshead-move_type = '201'.
+            ls_reshead-costcenter = CAST zmm_s_a_generate_reserve( is_parameters )->kostl.
+          ENDIF.
+*          NEED NOT UNCOMMENT
+*          lt_reserv_items = CAST zmm_s_a_generate_reserve( is_parameters )->items.
+*          LOOP AT lt_reserv_items ASSIGNING FIELD-SYMBOL(<fs_item>).
+*            ls_item-batch = <fs_item>-charg.
+*            ls_item-stge_loc = <fs_item>-lgort.
+*            ls_item-entry_qnt = <fs_item>-menge.
+*            ls_item-material = <fs_item>-matnr.
+*           ls_item-entry_uom = <fs_item>-meins.
+          ls_item-material = CAST zmm_s_a_generate_reserve( is_parameters )->matnr.
+          ls_item-material = |{ ls_item-material ALPHA = IN }|.
+          ls_item-batch = CAST zmm_s_a_generate_reserve( is_parameters )->charg.
+          ls_item-stge_loc = CAST zmm_s_a_generate_reserve( is_parameters )->lgort.
+          ls_item-entry_qnt = CAST zmm_s_a_generate_reserve( is_parameters )->menge.
+          ls_item-entry_uom = CAST zmm_s_a_generate_reserve( is_parameters )->meins.
+          ls_item-plant = ls_reshead-move_plant.
+          ls_item-movement   = 'X'.
+          ls_item-acct_man   = 'X'.
+          SELECT SINGLE meins
+            FROM mara
+            WHERE matnr = @ls_item-material
+            INTO @DATA(lv_current).
+          IF sy-subrc = 0 AND lv_current <> ls_item-entry_uom.
+            CALL FUNCTION 'MATERIAL_UNIT_CONVERSION'
+              EXPORTING
+                input  = ls_item-entry_qnt
+                matnr  = ls_item-material
+                meinh  = ls_item-entry_uom
+                meins  = lv_current
+                charge = ls_item-batch
+                werks  = ls_item-plant
+              IMPORTING
+                output = ls_item-entry_qnt.
+          ENDIF.
+          SELECT SINGLE lgort
+            FROM mard
+            INTO @DATA(lv_tmp)
+           WHERE matnr = @ls_item-material
+             AND werks = @ls_item-plant
+             AND lgort = @ls_item-stge_loc.
+          IF sy-subrc <> 0.
+            CALL FUNCTION 'ZMM_STORAGE_EXTEND'
+              EXPORTING
+                iv_matnr = ls_item-material
+                iv_werks = ls_item-plant
+                iv_lgort = ls_item-stge_loc
+              IMPORTING
+                return   = ls_ret.
+          ENDIF.
+          IF  ls_reshead-move_type = '261' OR ls_reshead-move_type = '201'.
+*          NEED NOT UNCOMMENT
+*              ls_item-gl_account = <fs_item>-saknr.
+            ls_item-gl_account = CAST zmm_s_a_generate_reserve( is_parameters )->saknr.
+          ENDIF.
+
+          APPEND ls_item TO lt_items.
+*          NEED NOT UNCOMMENT
+*          ENDLOOP.
+
+          CALL FUNCTION 'ZBAPI_RESERVATION_CREATE1' STARTING NEW TASK 'RESERVE'
+            CALLING after_rfc ON END OF TASK
+            EXPORTING
+              reservationheader    = ls_reshead
+              atpcheck             = lv_atpcheck
+              calcheck             = lv_calcheck
+            TABLES
+              profitabilitysegment = lt_ps
+              reservationitems     = lt_items
+              return               = lt_ret.
+          WAIT FOR ASYNCHRONOUS TASKS UNTIL gv_resb IS NOT INITIAL.
+          APPEND INITIAL LINE TO et_data ASSIGNING FIELD-SYMBOL(<fs_data>).
+          ASSIGN COMPONENT 'RSNUM' OF STRUCTURE <fs_data> TO FIELD-SYMBOL(<fs_rsnum>).
+          <fs_rsnum> = gv_resb.
+
+      ENDTRY.
+    ENDIF.
+    ev_static_action_failed = abap_false.
+  ENDMETHOD.
+
+
+  METHOD after_rfc.
+    RECEIVE RESULTS FROM FUNCTION 'ZBAPI_RESERVATION_CREATE1'
+      IMPORTING  reservation           = gv_resb
+      EXCEPTIONS system_failure        = 1
+                 communication_failure = 2
+                 resource_failure      = 3
+                 OTHERS                = 4.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

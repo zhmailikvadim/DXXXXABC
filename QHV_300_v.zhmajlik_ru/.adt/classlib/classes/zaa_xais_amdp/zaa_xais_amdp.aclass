@@ -1,0 +1,308 @@
+    CLASS zaa_xais_amdp DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+      PUBLIC SECTION.
+        INTERFACES if_amdp_marker_hdb.
+        TYPES:
+          BEGIN OF gty_s_9042,
+            rownum   TYPE i,
+            datez    TYPE zaa_zatr_date,
+            typez    TYPE zfiaa_expense-typez,
+            ttext    TYPE zfiaa_expense_tx-ttext,
+            ifrs_ok  TYPE abap_bool, "признается в МСФО
+            lifnr    TYPE zfiaa_price_hist-lifnr,
+            mc_name1 TYPE but000-mc_name1,
+            sum_zatr TYPE acdoca-hsl,
+            sum_inf  TYPE acdoca-hsl,
+            ipc      TYPE zaa_ipc, "ИПЦ
+          END OF gty_s_9042,
+          gty_t_9042 TYPE STANDARD TABLE OF gty_s_9042,
+          BEGIN OF gty_s_ipc_date,
+            datez TYPE zaa_zatr_date,
+            ipc   TYPE zaa_ipc,
+          END OF gty_s_ipc_date,
+          gty_t_ipc_date TYPE HASHED TABLE OF gty_s_ipc_date WITH UNIQUE KEY datez,
+          BEGIN OF gty_s_9043.
+            INCLUDE TYPE zfiaa_price_hist.
+        TYPES:
+          ttext    TYPE zfiaa_expense_tx-ttext,
+          mc_name1 TYPE string,
+          bwatxt   TYPE tabwt-bwatxt,
+          afbktx   TYPE t093t-afbktx,
+          datez    TYPE zaa_zatr_date,
+          new      TYPE abap_bool,
+          active   TYPE zfiaa_expense-active,
+          rowcolor TYPE char4,
+          END OF gty_s_9043,
+          gty_t_9043 TYPE STANDARD TABLE OF gty_s_9043,
+          BEGIN OF gty_s_storno,
+            bukrs     TYPE anla-bukrs,
+            anln1     TYPE anla-anln1,
+            anln2     TYPE anla-anln2,
+            awtyp     TYPE bkpf-awtyp,
+            aworg_rev TYPE accit-aworg_rev,
+            awref_rev TYPE accit-awref_rev,
+            belnr     TYPE bkpf-belnr,
+            afabe     type anep-afabe,
+          END OF gty_s_storno,
+          gty_t_storno type SORTED TABLE OF gty_s_storno with UNIQUE key bukrs
+                                                                         anln1
+                                                                         anln2
+                                                                         awtyp
+                                                                         aworg_rev
+                                                                         awref_rev
+                                                                         belnr
+                                                                         afabe.
+        CLASS-METHODS:
+          get_data_9043
+            IMPORTING VALUE(iv_bukrs) TYPE anla-bukrs
+                      VALUE(iv_anln1) TYPE anla-anln1
+                      VALUE(iv_anln2) TYPE anla-anln2
+                      VALUE(iv_invnr) TYPE anla-invnr DEFAULT ''
+            EXPORTING VALUE(et_data)  TYPE gty_t_9043,
+          fill_storno
+            IMPORTING VALUE(it_pos)   TYPE gty_t_storno
+                      VALUE(iv_budat) TYPE budat
+                      value(iv_ldgrp) type bkpf-ldgrp
+            EXPORTING VALUE(et_hist)  TYPE zfiaa_price_hist_t,
+          fill_ipc  " заполнение ИПС и суммы инфлирования
+            IMPORTING VALUE(iv_date) TYPE d
+            CHANGING  VALUE(ct_data) TYPE gty_t_9042.
+
+
+      PROTECTED SECTION.
+      PRIVATE SECTION.
+ENDCLASS.
+
+
+
+CLASS ZAA_XAIS_AMDP IMPLEMENTATION.
+
+
+      METHOD FILL_IPC BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT
+           USING ZFI_IFRS_CPI ZFIAA_EXPENSE.
+        DECLARE LV_MANDT STRING := SESSION_CONTEXT( 'CLIENT');
+        LT_CUM =
+          SELECT DATEZ,
+                 CASE WHEN CUM1 = 0 OR CUM2 = 0 THEN 0
+                      ELSE CUM1 / SQRT( CUM2 * CUM3 ) END AS IPC
+          FROM
+            ( SELECT
+                    DATEZ,
+                    SUM(  CUM1 ) AS CUM1,
+                    SUM(  CUM2 ) AS CUM2,
+                    SUM(  CUM3 ) AS CUM3
+                FROM (
+                       SELECT CT.DATEZ,
+                             CASE WHEN LEFT(CPI.CALDAY,6) = LEFT(:IV_DATE, 6) THEN ZCPICUMM  END  AS CUM1, --ИНДЕКС НА ДАТУ ЗАПРОСА
+                             CASE WHEN LEFT(CPI.CALDAY,6) = CT.DATEZ THEN ZCPICUMM END            AS CUM2, --ИНДЕКС НА ДАТУ ЗАТРАТЫ
+                             CASE WHEN LEFT(TO_DATS(ADD_MONTHS(CPI.CALDAY,-1)),6)  = CT.DATEZ  THEN ZCPICUMM  END  AS CUM3 --ИНДЕКС НА ПРЕД ДАТУ ЗАТРАТЫ
+                        FROM ZFI_IFRS_CPI AS CPI
+                          JOIN :CT_DATA AS CT ON ( LEFT(CPI.CALDAY,6) = CT.DATEZ
+                                                   OR LEFT(CPI.CALDAY,6) = LEFT(:IV_DATE, 6)
+                                                   OR LEFT(TO_DATS(ADD_MONTHS(CPI.CALDAY,-1)),6)  = CT.DATEZ )
+                          JOIN ZFIAA_EXPENSE AS EXP ON EXP.MANDT = :LV_MANDT
+                                                    AND EXP.TYPEZ = CT.TYPEZ
+                                                    AND EXP.COSTTYP = 'Z'
+                        WHERE CPI.MANDT = :LV_MANDT
+                         ) GROUP BY DATEZ
+            );
+
+
+        CT_DATA =
+          SELECT  ROW_NUMBER ( ) OVER () AS ROWNUM,
+                  CT.DATEZ,
+                  TYPEZ,
+                  TTEXT,
+                  IFRS_OK,
+                  LIFNR,
+                  MC_NAME1,
+                  SUM_ZATR,
+                  CASE WHEN COALESCE(CUM.IPC,0) <> 0 THEN  SUM_ZATR * ( CUM.IPC - 1) END AS SUM_INF,
+                  COALESCE(CUM.IPC,0) AS IPC
+            FROM :CT_DATA AS CT
+              LEFT JOIN  :LT_CUM AS CUM ON CUM.DATEZ = CT.DATEZ
+
+
+              ;
+      ENDMETHOD.
+
+
+      METHOD fill_storno  BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT
+           USING zfiaa_price_hist bkpf.
+        ET_HIST =
+          SELECT  H.MANDT,
+                  H.BUKRS,
+                  H.ANLN1,
+                  H.ANLN2,
+                  H.AFABE,
+                  H.GJAHR,
+                  D.BELNR,
+                  H.BWASL,
+                  H.MONATZ,
+                  H.GJAHRZ,
+                  H.TYPEZ,
+                  H.MANUAL,
+                  H.INVNR,
+                  H.INTER,
+                  :IV_BUDAT AS BUDAT,
+                  - H.ANBTR AS ANBTR,
+                  H.LIFNR,
+                  H.PBUKR,
+                  H.PANL1,
+                  H.PANL2
+             FROM :IT_POS AS D
+               JOIN BKPF AS B ON   B.MANDT = SESSION_CONTEXT('CLIENT')
+                              AND  B.BUKRS = D.BUKRS
+                              AND  B.LDGRP = :IV_LDGRP
+                              AND  B.AWTYP = D.AWTYP
+                              AND  B.AWKEY = D.AWREF_REV || D.AWORG_REV
+               JOIN ZFIAA_PRICE_HIST AS H ON B.MANDT = H.MANDT
+                                         AND D.BUKRS = H.BUKRS
+                                         AND D.ANLN1 = H.ANLN1
+                                         AND D.ANLN2 = H.ANLN2
+                                         AND D.AFABE = H.AFABE
+                                         AND B.BELNR = H.BELNR
+                                         AND B.GJAHR = H.GJAHR
+               WHERE H.MANDT = SESSION_CONTEXT('CLIENT');
+      ENDMETHOD.
+
+
+      METHOD GET_DATA_9043  BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT
+           USING ZFIAA_PRICE_HIST BUT000 ZFIAA_EXPENSE_TX ZAA_V0_MOVE ANLA T093T TABWT T093C ZFIAA_EXPENSE ANLA ACDOCA.
+        DECLARE LV_MANDT CHAR(3) := SESSION_CONTEXT( 'CLIENT' );
+        DECLARE LV_SPRAS CHAR(1) := SESSION_CONTEXT( 'LOCALE_SAP' );
+        LT_HIST =
+          SELECT H.*,
+                T.TTEXT,
+                B.MC_NAME1,
+                Z.ACTIVE
+          FROM ZFIAA_PRICE_HIST AS H
+            JOIN ANLA AS ANLA ON  ANLA.MANDT = H.MANDT
+                              AND ANLA.ANLN1 = H.ANLN1
+                              AND ANLA.ANLN2 = H.ANLN2
+            LEFT JOIN BUT000 AS B ON  B.PARTNER = H.LIFNR
+                                  AND B.CLIENT = H.MANDT
+            LEFT JOIN ZFIAA_EXPENSE AS Z ON  Z.MANDT = H.MANDT
+                                            AND Z.TYPEZ = H.TYPEZ
+
+            LEFT JOIN ZFIAA_EXPENSE_TX AS T ON  T.MANDT = H.MANDT
+                                            AND T.TYPEZ = H.TYPEZ AND T.SPRAS = :LV_SPRAS
+          WHERE H.MANDT = :LV_MANDT
+            AND ( H.BUKRS = :IV_BUKRS
+                  AND H.ANLN1 = :IV_ANLN1
+                  AND H.ANLN2 = :IV_ANLN2 )
+            OR ( :IV_INVNR <> '' AND ANLA.INVNR = :IV_INVNR ) ;
+        LT_MOV =
+          SELECT
+                :LV_MANDT AS MANDT,
+                ANLA.INVNR,
+                MOV.AFABE,
+                MOV.BUKRS,
+                MOV.ANLN1,
+                MOV.ANLN2,
+                MOV.GJAHR,
+                MOV.LNRAN,
+                MOV.ZUCOD,
+                MOV.BUDAT,
+                MOV.KANSW AS ANBTR,
+                MOV.BWASL,
+                MOV.BELNR,
+                TABWT.BWATXT,
+                IFNULL(CORR.PBUKR,'') AS PBUKR,
+                IFNULL(CORR.PANL1,'') AS PANL1,
+                IFNULL(CORR.PANL2,'') AS PANL2
+            FROM ZAA_V0_MOVE AS MOV
+              LEFT JOIN
+                ( SELECT DISTINCT A1.BELNR, A1.RBUKRS AS BUKRS, A1.GJAHR,A1.ANBWA AS BWASL, RIGHT (A1.SUBTA,5) AS LNRAN,
+                                  A1.ANLN1, A2.ANLN2, A1.AFABE,
+                                  A2.RBUKRS AS PBUKR, A2.ANLN1 AS PANL1, A2.ANLN2 AS PANL2
+                    FROM ACDOCA AS A1
+                      JOIN ACDOCA AS A2 ON   A2.RCLNT = A1.RCLNT
+                                        AND  A2.RLDNR = A1.RLDNR
+                                        AND  A2.AWTYP = A1.AWTYP
+                                        AND  A2.AWORG = A1.AWORG
+                                        AND  A2.AWREF = A1.AWREF
+                                        AND  A2.AFABE = A1.AFABE
+                                        AND  A2.GJAHR = A1.GJAHR
+                                        AND  A2.DRCRK <> A1.DRCRK
+                                        AND  ABS( A2.HSL ) = ABS( A1.HSL )
+                                        AND  A2.ANLN1 <> ''
+                                        AND  ( A2.ANLN1 <> A1.ANLN1 OR  A2.ANLN2 <> A1.ANLN2 OR A2.RBUKRS <> A1.RBUKRS )
+                      WHERE A1.RCLNT = :LV_MANDT ) AS CORR ON CORR.BUKRS = MOV.BUKRS  || ''
+                                                           AND CORR.BELNR = MOV.BELNR || ''
+                                                           AND CORR.GJAHR = MOV.GJAHR || ''
+                                                           AND CORR.AFABE = MOV.AFABE || ''
+                                                           AND CORR.ANLN1 = MOV.ANLN1 || ''
+                                                           AND CORR.ANLN2 = MOV.ANLN2 || ''
+                                                           AND CORR.LNRAN = MOV.LNRAN || ''
+                                                           AND CORR.BWASL = MOV.BWASL || ''
+              JOIN ANLA AS ANLA ON  ANLA.MANDT = MOV.MANDT
+                                AND ANLA.BUKRS = MOV.BUKRS
+                                AND ANLA.ANLN1 = MOV.ANLN1
+                                AND ANLA.ANLN2 = MOV.ANLN2
+              JOIN TABWT AS TABWT ON  TABWT.MANDT = MOV.MANDT
+                                  AND TABWT.SPRAS = :LV_SPRAS
+                                  AND TABWT.BWASL = MOV.BWASL
+            WHERE MOV.MANDT = :LV_MANDT
+              AND ( MOV.BUKRS = :IV_BUKRS
+                    AND MOV.ANLN1 = :IV_ANLN1
+                    AND MOV.ANLN2 = :IV_ANLN2
+                     OR ( :IV_INVNR <> '' AND ANLA.INVNR = :IV_INVNR ) )
+              AND MOV.KANSW <> 0
+              AND MOV.AFABE IN ( '50','51');
+        ET_DATA =
+          SELECT
+                :LV_MANDT AS MANDT,
+                IFNULL(H.BUKRS,MOV.BUKRS) AS BUKRS,
+                IFNULL(H.ANLN1,MOV.ANLN1) AS ANLN1,
+                IFNULL(H.ANLN2,MOV.ANLN2) AS ANLN2,
+                COALESCE(H.AFABE,MOV.AFABE) AS AFABE,
+                IFNULL(H.GJAHR,MOV.GJAHR) AS GJAHR,
+                IFNULL(H.BELNR,MOV.BELNR) AS BELNR,
+                IFNULL(H.BWASL,MOV.BWASL) AS BWASL,
+                IFNULL(H.MONATZ,'00') AS MONATZ,
+                IFNULL(H.GJAHRZ,'0000') AS GJAHRZ,
+                IFNULL(H.TYPEZ,'') AS TYPEZ,
+                IFNULL(H.MANUAL,'') AS MANUAL,
+                COALESCE(H.INVNR,MOV.INVNR) AS INVNR,
+                IFNULL(H.INTER,'') AS INTER,
+                IFNULL(H.BUDAT,MOV.BUDAT) AS BUDAT,
+                IFNULL(H.ANBTR,MOV.ANBTR) AS ANBTR,
+                IFNULL(H.LIFNR,'') AS LIFNR,
+                IFNULL(H.PBUKR,MOV.PBUKR) AS PBUKR,
+                IFNULL(H.PANL1,MOV.PANL1) AS PANL1,
+                IFNULL(H.PANL2,MOV.PANL2) AS PANL2,
+                IFNULL(H.TTEXT,'') AS TTEXT,
+                IFNULL(H.MC_NAME1,'') AS MC_NAME1,
+                IFNULL(MOV.BWATXT,'') AS BWATXT,
+                IFNULL(T093T.AFBKTX,'') AS AFBKTX,
+                IFNULL(H.GJAHRZ || H.MONATZ  || '01'   ,'00000000') AS DATEZ,
+                '' AS NEW,
+                IFNULL(H.ACTIVE,'') AS ACTIVE,
+                CASE WHEN H.TYPEZ IS NULL THEN 'C400' END AS ROWCOLOR
+             FROM :LT_HIST AS H
+               FULL OUTER JOIN
+                 (  SELECT SUM(ANBTR) AS ANBTR,
+                           AFABE,BUDAT,BUKRS,ANLN1,ANLN2,GJAHR,BELNR,BWASL,INVNR,BWATXT,PBUKR,PANL1,PANL2
+                      FROM :LT_MOV AS MOV
+                      WHERE MOV.MANDT = :LV_MANDT
+                      GROUP BY AFABE,BUDAT,BUKRS,ANLN1,ANLN2,GJAHR,BELNR,BWASL,INVNR,BWATXT,PBUKR,PANL1,PANL2 )
+                  AS MOV ON MOV.BUKRS = H.BUKRS
+                              AND  MOV.AFABE = H.AFABE
+                              AND  MOV.ANLN1 = H.ANLN1
+                              AND  MOV.ANLN2 = H.ANLN2
+                              AND  MOV.GJAHR = H.GJAHR
+                              AND  MOV.BELNR = H.BELNR
+                              AND  MOV.BWASL = H.BWASL
+                              AND  H.MANUAL = ''
+               JOIN T093C AS T093C ON  T093C.MANDT = :LV_MANDT
+                                   AND T093C.BUKRS = IFNULL( H.BUKRS,MOV.BUKRS)
+               JOIN T093T AS T093T ON  T093T.MANDT = :LV_MANDT
+                                   AND T093T.AFAPL = T093C.AFAPL
+                                   and T093T.SPRAS = :LV_SPRAS
+                                   AND T093T.AFABER = IFNULL( H.AFABE,MOV.AFABE);
+      ENDMETHOD.
+ENDCLASS.

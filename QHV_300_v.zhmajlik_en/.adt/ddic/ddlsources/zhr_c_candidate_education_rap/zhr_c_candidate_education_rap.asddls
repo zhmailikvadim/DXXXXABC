@@ -1,0 +1,57 @@
+@AccessControl.authorizationCheck: #NOT_REQUIRED
+@EndUserText.label: 'Education'
+@Metadata.ignorePropagatedAnnotations: true
+@Metadata.allowExtensions: true
+
+define view entity ZHR_C_CANDIDATE_EDUCATION_RAP as projection on ZHR_I_CANDIDATE_EDUCATION_RAP
+{
+    key uuid,
+    uuid_candidate,
+    Pernr,
+    Subty,
+    Objps,
+    Sprps,
+    Endda,
+    Begda,
+    Seqnr,
+    Aedtm,
+    Uname,
+    Histo,
+    Itxex,
+    Refex,
+    Ordex,
+    Itbld,
+    Preas,
+    Flag1,
+    Flag2,
+    Flag3,
+    Flag4,
+    Rese1,
+    Rese2,
+    Grpvl,
+    Slart,
+    Insti,
+    Sland,
+    Ausbi,
+    Slabs,
+    Anzkl,
+    Anzeh,
+    Sltp1,
+    Sltp2,
+    Jbez1,
+    Waers,
+    Slpln,
+    Slktr,
+    Slrzg,
+    Ksbez,
+    Tx122,
+    Schcd,
+    Faccd,
+    Dptmt,
+    Emark,
+    ftext,
+    qualiname,
+    last_changed_at,
+    /* Associations */
+    _CandidateHeader : redirected to parent ZHR_C_CANDIDATEHEADER_RAP
+    }

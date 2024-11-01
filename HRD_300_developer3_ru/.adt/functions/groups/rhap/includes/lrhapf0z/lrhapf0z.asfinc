@@ -1,0 +1,862 @@
+* 20.10.2005 note 890704 add an object to the structural profile
+*                        independent of the authority check
+*---------------------------------------------------------------------*
+*       FORM INSERT_INFTY                                             *
+*---------------------------------------------------------------------*
+*       Einfügen eines Satzes                                         *
+*---------------------------------------------------------------------*
+* -->   VALUE(II_FCODE)       Funktionscode (INSE,PLVO,BEAN,GENE,AKTI)*
+* -->   VALUE(II_SET)         Neuer Satz                              *
+* -->   VALUE(II_TABIX)       Tabellenindex bei Mengenverarbeitung    *
+* -->   VALUE(II_UPD)         Art der Verbuchung D,V,S                *
+* -->   VALUE(II_ORDER_FLG)   Schalter Reihenfolge                    *
+* -->   VALUE(II_COMMIT_FLG)  Schalter COMMIT                         *
+* -->   VALUE(II_AUTHY)       Schalter Berechtigungsprüfung           *
+* -->   VALUE(II_PPPAR)       Feldleiste PPPAR                        *
+* -->   VALUE(II_OLD_TABNR)   Flagge alten Pointer übernehmen         *
+* -->   VALUE(II_REPID)       Reportname zur Übergabe Tab.-Infotyp    *
+* -->   VALUE(II_FORM)        FORM-Name zur Übergabe Tab.-Infotyp     *
+* -->   VALUE(II_LFCOD)       Logischer FCODE                         *
+* <--   II_SUBRC              0 = Alles Ok                            *
+*                             1 = Ok überlagerte Sätze gelöscht       *
+*                             2 = Ok Vorgänger am Ende begrenzt       *
+*                             3 = Ok 1 + 2                            *
+*                             4 = Ok umfassenden Satz aufgespalten    *
+*                             5 = Beginndatum vorgezogen wg. ZB1      *
+*                             6 = Endedatum verlängert wg. ZB1        *
+*                             8 = Ok Nachfolger am Ende begrenzt      *
+*                             9 = Ok 1 + 8                            *
+*                            10 = Ok 2 + 8                            *
+*                            11 = Ok 1 + 2 + 8                        *
+*                            12 = keine Berechtigung                  *
+*                            16 = Fehler                              *
+*                            20 = Report-/FORM-Name initial           *
+*                            24 = Beginndatum > Endedatum             *
+*                            30 = Fehler Vergabe Korrektur-Nr.        *
+*---------------------------------------------------------------------*
+FORM INSERT_INFTY USING VALUE(II_FCODE) LIKE HRRHAP-FCODE
+                        VALUE(II_SET) type wplog
+                        VALUE(II_TABIX) LIKE HRRHAP-TABIX
+                        VALUE(II_UPD) LIKE RHAP-VTASK
+                        VALUE(II_ORDER_FLG) TYPE CHAR1
+                        VALUE(II_COMMIT_FLG) TYPE CHAR1
+                        VALUE(II_AUTHY) LIKE HRRHAP-AUTHY
+                        VALUE(II_PPPAR) STRUCTURE PPPAR
+                        VALUE(II_OLD_TABNR) LIKE HRRHAP-OLD_TABNR
+                        VALUE(II_REPID)
+                        VALUE(II_FORM)
+                        VALUE(II_LFCOD) LIKE ILFCOD-LFCOD    "VWMWF
+                        II_SUBRC LIKE SY-SUBRC.
+  DATA : II_WITH_PPPAR.
+  DATA : II_TABNR LIKE HRTDBTAB-TABNR. "temporärer Pointer (TABNR)
+  DATA : II_VIEW_INSERT(1) VALUE '0'.
+  DATA : BEGIN OF II_VIEW.
+          INCLUDE STRUCTURE HRVIEW.
+  DATA:  END   OF II_VIEW.
+
+  CLEAR II_SUBRC.
+
+* falls Feldleiste PPPAR mitgegeben wurde => übertragen, sonst löschen
+  IF NOT II_PPPAR IS INITIAL.
+    II_WITH_PPPAR = 'X'.
+    PPPAR = II_PPPAR.
+  ELSE.
+    CLEAR PPPAR.
+  ENDIF.
+
+  CLEAR : INT_WPLOG, PPLOG.
+  INT_WPLOG = II_SET.
+  PERFORM CLIENT_SET.
+  INT_WPLOG-MANDT = RHAP_CLIENT.
+
+* Beginn- größer Endedatum
+  IF INT_WPLOG-BEGDA > INT_WPLOG-ENDDA.
+    II_SUBRC = 24.
+    EXIT.
+  ENDIF.
+
+  IF NOT II_AUTHY IS INITIAL.
+* mit Berechtigungsprüfung
+    CLEAR DUMMY.
+    CALL FUNCTION 'RH_BASE_AUTHORITY_CHECK'
+         EXPORTING
+              FCODE             = II_FCODE
+              PLVAR             = INT_WPLOG-PLVAR
+              OTYPE             = INT_WPLOG-OTYPE
+              INFTY             = INT_WPLOG-INFTY
+              SUBTY             = INT_WPLOG-SUBTY
+              ISTAT             = INT_WPLOG-ISTAT
+         EXCEPTIONS
+              NO_BASE_AUTHORITY = 04.
+    SUBRC = SY-SUBRC.
+    IF SUBRC EQ 0.
+      CALL FUNCTION 'RH_STRU_AUTHORITY_CHECK_PP01'
+           EXPORTING
+                FCODE      = II_FCODE
+                PLVAR      = INT_WPLOG-PLVAR
+                OTYPE      = INT_WPLOG-OTYPE
+                OBJID      = INT_WPLOG-OBJID
+                INFTY      = INT_WPLOG-INFTY
+           EXCEPTIONS
+                NEW_OBJECT = 02
+                OTHERS     = 04.
+      SUBRC = SY-SUBRC.
+    ENDIF.
+    II_VIEW_INSERT = OFF.
+    IF SUBRC EQ 2 AND II_FCODE EQ 'INSE'
+                  AND INT_WPLOG-INFTY EQ ID_INFTY.
+*     Objekt in VIEW aufnehmen
+      II_VIEW_INSERT = ON.
+    ENDIF.
+    IF SUBRC GT 2.
+*   SUBRC=2 (neues Objekt) muss vom
+*   Anwendungsprogramm behandelt werden
+      II_SUBRC = 12.
+      EXIT.
+    ENDIF.
+    IF INT_WPLOG-INFTY EQ RELA_INFTY.
+      PERFORM TURN_RELATION USING INT_WPLOG-VDATA(2) SUBRC."VWMAUTHINV
+      IF SUBRC = 0.                                        "VWMAUTHINV
+        CLEAR X_WPLOG.
+        X_WPLOG = INT_WPLOG.
+        PERFORM INVERT_RELA_INFTY USING X_WPLOG.
+        CALL FUNCTION 'RH_BASE_AUTHORITY_CHECK'
+             EXPORTING
+                  FCODE             = II_FCODE
+                  PLVAR             = X_WPLOG-PLVAR
+                  OTYPE             = X_WPLOG-OTYPE
+                  INFTY             = X_WPLOG-INFTY
+                  SUBTY             = X_WPLOG-SUBTY
+                  ISTAT             = X_WPLOG-ISTAT
+             EXCEPTIONS
+                  NO_BASE_AUTHORITY = 04.
+        SUBRC = SY-SUBRC.
+        IF SUBRC EQ 0.
+          CALL FUNCTION 'RH_STRU_AUTHORITY_CHECK_PP01'
+               EXPORTING
+                    FCODE      = II_FCODE
+                    PLVAR      = X_WPLOG-PLVAR
+                    OTYPE      = X_WPLOG-OTYPE
+                    OBJID      = X_WPLOG-OBJID
+                    INFTY      = X_WPLOG-INFTY
+               EXCEPTIONS
+                    NEW_OBJECT = 02
+                    OTHERS     = 04.
+          SUBRC = SY-SUBRC.
+        ENDIF.
+        IF SUBRC GT 2.
+          II_SUBRC = 12.
+          EXIT.
+        ENDIF.
+      ENDIF.                                               "VWMAUTHINV
+    ENDIF.
+  ENDIF.
+
+  CASE II_FCODE.
+    WHEN PLVO.
+      ORIGINAL_ISTAT = INT_WPLOG-ISTAT.
+      INT_WPLOG-ISTAT = '2'.
+    WHEN BEAN.
+      ORIGINAL_ISTAT = INT_WPLOG-ISTAT.
+      INT_WPLOG-ISTAT = '3'.
+    WHEN GENE.
+      ORIGINAL_ISTAT = INT_WPLOG-ISTAT.
+      INT_WPLOG-ISTAT = '4'.
+    WHEN ABLN.
+      ORIGINAL_ISTAT = INT_WPLOG-ISTAT.
+      INT_WPLOG-ISTAT = '5'.
+    WHEN AKTI.
+      ORIGINAL_ISTAT = INT_WPLOG-ISTAT.
+      INT_WPLOG-ISTAT = '1'.
+  ENDCASE.
+
+  PPLOG = INT_WPLOG.
+  IF RHAP_WORKF_ACTV NE SPACE.                              "VWMWF
+    IF NOT II_LFCOD IS INITIAL OR                           "VWMWF
+       II_FCODE = INSERT.                                   "VWMWF
+      PPLOG_LFCOD = II_LFCOD.                               "VWMWF
+    ELSE.                                                   "VWMWF
+*     Log. FCODE bei Statuswechsel aus T77FC ermitteln      "VWMWF
+      SELECT SINGLE * FROM T77FC CLIENT SPECIFIED           "VWMWF
+      WHERE MANDT = RHAP_CLIENT                             "VWMWF
+        AND FCODE = II_FCODE.                               "VWMWF
+      IF SY-SUBRC = 0.                                      "VWMWF
+        PPLOG_LFCOD = T77FC-LFCOD.                          "VWMWF
+      ENDIF.                                                "VWMWF
+    ENDIF.                                                  "VWMWF
+  ENDIF.                                                    "VWMWF
+
+  IF II_WITH_PPPAR IS INITIAL.
+* lies Zeitbindung.
+    PERFORM RE777Z_RA(MSTT777Z) USING                      "VWMZB3A
+            INT_WPLOG-OTYPE INT_WPLOG-INFTY INT_WPLOG-SUBTY
+            INT_WPLOG-VDATA(2)
+            PPPAR-TIMCO PPPAR-ADDCO PPPAR-SCLAS SUBRC.
+    IF SUBRC GT 0.
+      II_SUBRC = 16.
+      EXIT.
+    ENDIF.
+
+    PPPAR-FCODE = II_FCODE.
+    PPPAR-LISTB = OFF.
+    PPPAR-UPDAT = ON.
+    PPPAR-VTASK = II_UPD.
+*   lies Struktur zum Infty aus T777d und mache assign
+    SELECT SINGLE * FROM T777D WHERE INFTY EQ INT_WPLOG-INFTY.
+    IF SY-SUBRC GT 0
+    OR T777D-EXT_INFTY NE SPACE.                           "VWMEXT
+      II_SUBRC = 16.
+      EXIT.
+    ENDIF.
+    if t777d-dbtab is initial.                             "ANDUNI
+      message e718(5A) with INT_WPLOG-INFTY into msg_dummy."ANDUNI
+      ii_subrc = 16.                                       "ANDUNI
+      exit.                                                "ANDUNI
+    endif.                                                 "ANDUNI
+    PPPAR-PPNNN = T777D-PPNNN.
+    PPPAR-TBTAB = T777D-TBTAB.
+    IF T777D-LANGU EQ SPACE.
+      PPPAR-LANGU = OFF.
+    ELSE.
+      PPPAR-LANGU = ON.
+    ENDIF.
+  ENDIF.
+
+  IF II_UPD NE 'X'.
+    IF NOT II_UPD IS INITIAL.
+*   Puffer nicht bei VTASK = SPACE füllen
+      CLEAR FILL_VARYF.
+      IF PPPAR-TIMCO EQ '3' AND PPLOG-INFTY EQ RELA_INFTY
+         AND ( PPPAR-ADDCO EQ SPACE                        "VWMZB3AD
+            OR PPPAR-ADDCO EQ ADDCO_RELATIMCO3 ).          "VWMZB3AD
+*       Zusatzbedingung wird unabhängig vom VARYF geprüft, "VWMZB3AD
+*       d.h. über alle Zielobjekte selektieren             "VWMZB3AD
+*       Bei RELATIMCO3 und Umkehrverknüpfung jedoch        "VWMZB3AD
+*       nur Verknüpfungen mit gleichem Zielobjekt in Puffer"VWMZB3AD
+*       lesen (bei RELATIMCO3 wird nix geprüft und SEQNR   "VWMZB3AD
+*       wird generell nur noch über das gleiche Zielobjekt "VWMZB3AD
+*       vergeben).                                         "VWMZB3AD
+        PERFORM TURN_RELATION USING PPLOG-VDATA(2) SUBRC.
+        IF SUBRC EQ 0.
+          FILL_VARYF = PPLOG-VDATA(10).
+        ENDIF.
+      ENDIF.
+*     Bei ZB1 über ganzen Zeitraum lesen wg. Lücken        "VWMGAPTCO1
+      IF PPPAR-TIMCO EQ '1'.                               "VWMGAPTCO1
+        FILL_BEGDA = LOW_DATE.                             "VWMGAPTCO1
+        FILL_ENDDA = HIGH_DATE.                            "VWMGAPTCO1
+      ELSE.                                                "VWMGAPTCO1
+        FILL_BEGDA = PPLOG-BEGDA.                          "VWMGAPTCO1
+        FILL_ENDDA = PPLOG-ENDDA.                          "VWMGAPTCO1
+      ENDIF.                                               "VWMGAPTCO1
+      PERFORM FUELLE_BUFFER_WITH_DATA USING PPLOG-PLVAR
+                                            PPLOG-OTYPE
+                                            PPLOG-OBJID
+                                            PPLOG-INFTY
+                                            PPLOG-SUBTY
+                                            PPLOG-ISTAT
+*                                           PPLOG-BEGDA    "VWMGAPTCO1
+*                                           PPLOG-ENDDA    "VWMGAPTCO1
+                                            FILL_BEGDA     "VWMGAPTCO1
+                                            FILL_ENDDA     "VWMGAPTCO1
+                                            FILL_VARYF
+                                            SUBRC.
+*     Check for existing ZB0 records. If found, II_SUBRC = 16.
+      IF PPPAR-TIMCO EQ '0' AND SUBRC EQ 0.
+        II_SUBRC = 16.
+        EXIT.
+      ENDIF.
+      CLEAR FILL_VARYF.
+    ENDIF.
+  ELSE.
+    PERFORM CLEAR_BUFFER.
+  ENDIF.
+
+  IF NOT PPPAR-TBTAB IS INITIAL AND
+   ( ( II_FCODE EQ INSERT AND II_OLD_TABNR IS INITIAL )
+      OR II_FCODE EQ PLVO ).
+*   INSERT mit neuem Tabelleninfotyp, wobei alter Pointer nicht
+*   übernommen werden soll
+*   Prüfung, ob FORM/REPID fehlen
+    IF II_REPID IS INITIAL OR II_FORM IS INITIAL.
+*   REPID/FORM fehlen
+      II_SUBRC = 20.
+      EXIT.
+    ENDIF.
+*   Ermitteln nächsten temporären Pointer
+    PERFORM GET_NEXT_TEMP_TABNR USING II_TABNR.
+*   Tabellenteil abholen -> TB_BUFFER
+*   Es muß Originalsatz (II_SET) ohne Statusänderung (INT_WPLOG)
+*   zurückgegeben werden
+    PERFORM FETCH_TDATA USING II_SET II_TABIX
+                              II_REPID II_FORM
+                              II_TABNR 'I'
+                              FETCH_SUBRC.
+    IF FETCH_SUBRC NE 0.
+*   Tabellenteil leer
+*   => temporären Pointerwert auf leeren Pointer zurücksetzen
+      CLEAR II_TABNR.
+    ENDIF.
+*   Schreiben temporären Pointer in einzufügenden Satz
+    PERFORM SET_TABNR USING PPLOG PPPAR-PPNNN II_TABNR II_SUBRC.
+    IF II_SUBRC NE 0.
+*     Pointer (Feld TABNR) nicht gefunden
+      II_SUBRC = 16.
+      EXIT.
+    ENDIF.
+  ENDIF.
+
+  CLEAR INT_P1000.
+  INT_P1000 = INT_WPLOG.
+  IF INT_WPLOG-INFTY EQ ID_INFTY AND II_FCODE EQ AKTI
+                                 AND INT_P1000-GDATE NE DATE_INITIAL.
+    PERFORM CUT_OBJECT USING 'X' INT_P1000-GDATE 'X' '1' 'X' II_SUBRC.
+    IF II_SUBRC NE 0.
+      II_SUBRC = 16.
+    ENDIF.
+  ELSE.
+    PERFORM INSERT USING II_SUBRC.
+    IF II_SUBRC LE 11.
+      PERFORM CHECK_TIMCO_1001_EXT USING II_SUBRC.
+    ENDIF.
+  ENDIF.
+
+  IF II_SUBRC LE 11.
+    CLEAR CORR_SUBRC.
+    CASE II_UPD.
+      WHEN 'B'.                        " Update nur auf Buffer
+        PERFORM UPDATE_BUFFER.
+      WHEN 'D'.                        " Update im DIALOG
+        PERFORM UPDATE_BUFFER_PLOG USING II_ORDER_FLG
+                                         II_COMMIT_FLG
+                                         CORR_SUBRC.
+      WHEN 'V'.                        " Update in der Verbuchung
+        PERFORM UPDATE_BUFFER_PLOG_VTASK USING II_ORDER_FLG
+                                               II_COMMIT_FLG
+                                               CORR_SUBRC.
+      WHEN 'S'.                        " Synchupdate in Verbuchung
+        II_COMMIT_FLG = 'X'.                          "Note 1589671
+        PERFORM UPDATE_BUFFER_PLOG USING II_ORDER_FLG
+                                         II_COMMIT_FLG
+                                                    CORR_SUBRC.
+      WHEN 'X'.                        " Update nur auf Buffer
+        PERFORM UPDATE_BUFFER.
+    ENDCASE.
+
+    IF CORR_SUBRC NE 0.
+*     Fehler Vergabe Korrektur-Nr.
+      II_SUBRC = 30.
+      EXIT.
+    ENDIF.
+
+* begin of note 890704
+    IF II_VIEW_INSERT EQ ON OR
+       ( II_FCODE EQ 'INSE' AND
+         INT_WPLOG-INFTY EQ ID_INFTY ).
+*     add the object to the structural profile
+      MOVE-CORRESPONDING INT_WPLOG TO II_VIEW.
+      II_VIEW-MAINT = 'X'.
+      CALL FUNCTION 'RH_VIEW_ENTRY_INSERT'
+           EXPORTING
+                VIEW_ENTRY = II_VIEW.
+    ENDIF.
+* end of note 890704
+  ELSE.
+    II_SUBRC = 16.                     "Fehler
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  planned_infotype_operation
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  INNNN         infotype record to be activated
+*  -->  VTASK         vtask 'B' or space allowed
+*  <--  return_code   0 <=> nothing done
+*                     1 <=> planned operation activated
+*                     2 <=> error: record not found
+*                     3 <=> error: time contraint not found
+*                     4 <=> error: infotype 6200 record does not exist
+*                     5 <=> error: missing authorization
+*                    10 <=> internal error
+*----------------------------------------------------------------------*
+FORM planned_infotype_operation USING value(innnn) TYPE any
+                                      value(vtask) TYPE vtask
+                                      return_code TYPE sy-subrc.
+
+  DATA: p6200_tab     TYPE STANDARD TABLE OF p6200.
+  DATA: p6200_wa      TYPE p6200.
+  DATA: l_cut_subrc   TYPE sy-subrc.
+  DATA: l_del_subrc   TYPE sy-subrc.
+  DATA: wplog_tab     TYPE wplog_tab.
+  DATA: wplog_Tab2    TYPE wplog_tab.
+  DATA: wplog_wa      TYPE wplog.
+  DATA: l_timco       TYPE timco.
+  DATA: l_addco       TYPE addco.
+  DATA: l_sclas       TYPE sclas.
+  DATA: l_subrc       TYPE sy-subrc.
+  DATA: l_condition   TYPE REF TO cl_hrbas_condition.
+  DATA: l_cond_nr     TYPE hrrhdb-condition.
+  DATA: l_cond_value  TYPE hrcond-low.
+  DATA: l_lines_count type i.
+  DATA: l_p1001       type p1001.
+
+  FIELD-SYMBOLS: <p6200>   TYPE p6200.
+  FIELD-SYMBOLS: <hripkey> TYPE hripkey.
+  field-symbols: <p1001>   TYPE p1001.
+
+
+  ASSIGN innnn TO <hripkey> CASTING.
+  IF <hripkey>-infty <> '6200'.
+*   this routine is only relevant if an infotype 6200 record is activated
+    CLEAR return_code.
+    EXIT.
+  ELSE.
+    return_code = 1.
+    ASSIGN innnn TO <p6200> CASTING.
+
+*   delete old 6200 record in inactive status
+    CLEAR wplog_tab[].
+    APPEND innnn TO wplog_tab.
+    CALL FUNCTION 'RH_DELETE_INFTY'
+      EXPORTING
+*       LOAD                      = 'X'
+        vtask                     = vtask
+*       ORDER_FLG                 = 'X'
+*       COMMIT_FLG                = 'X'
+        authy                     = space
+        workf_actv                = space
+      TABLES
+        innnn                     = wplog_tab
+     EXCEPTIONS
+       error_during_delete       = 1
+       no_authorization          = 2
+       delete_first_record       = 3
+       corr_exit                 = 4
+       OTHERS                    = 5.
+
+    IF sy-subrc <> 0.
+*     It is very unlikely that an error happend:
+*       ERROR_DURING_DELETE     =>  record to be deleted does not exist!
+*       NO_AUTHORIZATION        =>  not possible because RH_DELETE_INFTY was called with AUTHY = space.
+*       DELETE_FIRST_RECORD     =>  not possible because infotype 6200 does have time constraint 3.
+*       CORR_EXIT               =>  not possible because VTASK = 'B'
+
+      return_code = 4.
+      EXIT.
+    ENDIF.
+
+**   determine time constraint of infty to be termindated/deleted.
+*    PERFORM re777z_ra(mstt777z) USING
+*            <hripkey>-otype
+*            <p6200>-ref_infty
+*            <p6200>-ref_subty
+*            <p6200>-ref_varyf(2)  "in case of infty = 1001 this holds SCLAS
+*            l_timco
+*            l_addco
+*            l_sclas
+*            l_subrc.
+*    IF l_subrc GT 0.
+*      return_code = 3.
+*      EXIT.
+*    ENDIF.
+
+*    IF l_timco = 3.
+      MOVE-CORRESPONDING <hripkey> TO wplog_wa.
+
+      wplog_wa-infty = <p6200>-ref_infty.
+      wplog_wa-subty = <p6200>-ref_subty.
+      wplog_wa-istat = 1.
+      wplog_wa-begda = <p6200>-ref_begda.
+      wplog_wa-endda = <p6200>-ref_endda.
+      wplog_wa-varyf = <p6200>-ref_varyf.
+      wplog_wa-seqnr = <p6200>-ref_seqnr.
+
+      CLEAR wplog_tab[].
+
+      IF wplog_wa-infty = rela_infty.
+*       Get current PRIOX
+
+        assign wplog_wa to <p1001> casting.
+        <p1001>-sclas = <p1001>-varyf(2).
+        <p1001>-sobid = <p1001>-varyf+2(8).
+
+        CREATE OBJECT l_condition.
+
+        l_cond_value = <p1001>-rsign.
+        CALL METHOD l_condition->add_condition_line
+          EXPORTING
+            field  = 'RSIGN'
+            opera  = 'EQ'
+            low    = l_cond_value.
+
+        l_cond_value = <p1001>-relat.
+        CALL METHOD l_condition->add_condition_line
+          EXPORTING
+            field  = 'RELAT'
+            opera  = 'EQ'
+            low    = l_cond_value.
+
+
+        l_cond_value = <p1001>-begda.
+        CALL METHOD l_condition->add_condition_line
+          EXPORTING
+            field  = 'BEGDA'
+            opera  = 'EQ'
+            low    = l_cond_value.
+
+        l_cond_value = <p1001>-endda.
+        CALL METHOD l_condition->add_condition_line
+          EXPORTING
+            field  = 'ENDDA'
+            opera  = 'EQ'
+            low    = l_cond_value.
+
+        l_cond_value = <p1001>-varyf.
+        CALL METHOD l_condition->add_condition_line
+          EXPORTING
+            field  = 'VARYF'
+            opera  = 'EQ'
+            low    = l_cond_value.
+
+        l_cond_value = <p1001>-seqnr.
+        CALL METHOD l_condition->add_condition_line
+          EXPORTING
+            field  = 'SEQNR'
+            opera  = 'EQ'
+            low    = l_cond_value.
+
+        CALL FUNCTION 'RH_CONDITION_BUILD'
+          EXPORTING
+            infty                  = '1001'
+          IMPORTING
+            condition              = l_cond_nr
+          TABLES
+            condtab                = l_condition->a_condition.
+
+
+        CLEAR wplog_tab[].
+        CALL FUNCTION 'RH_READ_INFTY_1001'
+          EXPORTING
+            authority              = space
+            with_stru_auth         = space
+            plvar                  = <p1001>-plvar
+            otype                  = <p1001>-otype
+            objid                  = <p1001>-objid
+            istat                  = <p1001>-istat
+            extend                 = 'D'
+            condition              = l_cond_nr
+            auth_sobid             = space
+          TABLES
+            i1001                  = wplog_tab
+          EXCEPTIONS
+            nothing_found          = 1
+            wrong_condition        = 2
+            wrong_parameters       = 3
+            OTHERS                 = 4.
+
+        IF sy-subrc <> 0.
+*          record not found
+           return_code = 2.
+           EXIT.
+        ENDIF.
+        DESCRIBE TABLE wplog_tab LINES l_lines_count.
+        IF l_lines_count <> 1.
+*          internal error: more than one entry is not expected...
+           return_code = 10.
+           EXIT.
+        ENDIF.
+
+*       Read inverse relation and delete 6200er records which link to the inverse relationship.
+        CALL FUNCTION 'RH_INVERT_RELA_INFTY'
+          EXPORTING
+            p1001_imp                     = <p1001>
+          IMPORTING
+            P1001_EXP                     = l_p1001
+          EXCEPTIONS
+            RELATION_NOT_REVERSIBLE       = 1
+            OTHERS                        = 2.
+
+        IF sy-subrc = 2.
+*         internal error.
+          return_code = 10.
+          EXIT.
+        elseif sy-subrc = 1.
+*         relationship is not reversible: Nothing to do!
+        else.
+*         reversible relationship: Check if there is also a planning for the inverse relationship.
+*         If there is one then we will delete the corresponding 6200 record.
+
+          CREATE OBJECT l_condition.
+
+          l_cond_value = l_p1001-infty.
+          CALL METHOD l_condition->add_condition_line
+            EXPORTING
+              field  = 'REF_INFTY'
+              opera  = 'EQ'
+              low    = l_cond_value.
+
+          l_cond_value(1) = l_p1001-rsign.
+          l_cond_value+1(3) = l_p1001-relat.
+          CALL METHOD l_condition->add_condition_line
+            EXPORTING
+              field  = 'REF_SUBTY'
+              opera  = 'EQ'
+              low    = l_cond_value.
+
+            l_cond_value = l_p1001-begda.
+          CALL METHOD l_condition->add_condition_line
+            EXPORTING
+              field  = 'REF_BEGDA'
+              opera  = 'EQ'
+              low    = l_cond_value.
+
+          l_cond_value = l_p1001-endda.
+          CALL METHOD l_condition->add_condition_line
+            EXPORTING
+              field  = 'REF_ENDDA'
+              opera  = 'EQ'
+              low    = l_cond_value.
+
+          l_cond_value = l_p1001-varyf.
+          CALL METHOD l_condition->add_condition_line
+            EXPORTING
+              field  = 'REF_VARYF'
+              opera  = 'EQ'
+              low    = l_cond_value.
+
+          l_cond_value = l_p1001-seqnr.
+          CALL METHOD l_condition->add_condition_line
+            EXPORTING
+              field  = 'REF_SEQNR'
+              opera  = 'EQ'
+              low    = l_cond_value.
+
+          CALL FUNCTION 'RH_CONDITION_BUILD'
+            EXPORTING
+              infty                  = '6200'
+            IMPORTING
+              condition              = l_cond_nr
+            TABLES
+              condtab                = l_condition->a_condition.
+
+         CALL FUNCTION 'RH_READ_INFTY_NNNN'
+           EXPORTING
+             AUTHORITY                   = space
+             WITH_STRU_AUTH              = space
+             PLVAR                       = l_p1001-plvar
+             OTYPE                       = l_p1001-otype
+             OBJID                       = l_p1001-objid
+             infty                       = '6200'
+             ISTAT                       = ' '
+             EXTEND                      = 'D'
+*            SUBTY                       = ' '
+*            BEGDA                       = '19000101'
+*            ENDDA                       = '99991231'
+             CONDITION                   = l_cond_nr
+           tables
+             innnn                       = wplog_tab2
+           EXCEPTIONS
+             NOTHING_FOUND               = 1
+             WRONG_CONDITION             = 2
+             INFOTYP_NOT_SUPPORTED       = 3
+             WRONG_PARAMETERS            = 4
+             OTHERS                      = 5.
+
+          IF sy-subrc >= 2.
+*           internal error
+            return_code = 10.
+            EXIT.
+          ELSEIF sy-subrc = 0.
+            DESCRIBE TABLE wplog_tab2 LINES l_lines_count.
+            IF l_lines_count <> 1.
+*              internal error: more than one entry is not expected...
+               return_code = 10.
+               EXIT.
+            ENDIF.
+*           Delete 6200er record.
+            CALL FUNCTION 'RH_DELETE_INFTY'
+              EXPORTING
+*               LOAD                      = 'X'
+                vtask                     = vtask
+*               ORDER_FLG                 = 'X'
+*               COMMIT_FLG                = 'X'
+                authy                     = space
+                workf_actv                = space
+              TABLES
+                innnn                     = wplog_tab2
+             EXCEPTIONS
+               error_during_delete       = 1
+               no_authorization          = 2
+               delete_first_record       = 3
+               corr_exit                 = 4
+               OTHERS                    = 5.
+
+            IF sy-subrc <> 0.
+*             It is very unlikely that an errors happend:
+*               ERROR_DURING_DELETE     =>  record to be deleted does not exist!
+*               NO_AUTHORIZATION        =>  not possible because RH_DELETE_INFTY was called with AUTHY = space.
+*               DELETE_FIRST_RECORD     =>  not possible because infotype 6200 does have time constraint 3.
+*               CORR_EXIT               =>  not possible because VTASK = 'B'
+
+              return_code = 10.
+              EXIT.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ELSE.
+        APPEND wplog_wa TO wplog_tab.
+      ENDIF.
+
+      IF <p6200>-plan_operation = cuti.
+*       Terminate reference record in status 1.
+        CALL FUNCTION 'RH_CUT_INFTY'
+          EXPORTING
+            gdate                    = <p6200>-plan_gdate
+            histo                    = space
+            del_succ                 = space
+            vtask                    = vtask
+            authy                    = 'X'
+          TABLES
+            innnn                    = wplog_tab
+         EXCEPTIONS
+           error_during_cut         = 1
+           no_authorization         = 2
+           gdate_before_begda       = 3
+           cut_of_timco_one         = 4
+           corr_exit                = 5
+           OTHERS                   = 6.
+
+        IF sy-subrc <> 0.
+          CASE sy-subrc.
+            WHEN 1.
+*             record does not exist
+              return_code = 2.
+            WHEN 2.
+*             missing authorization
+              return_code = 5.
+            WHEN 3 OR 4 OR 5 OR 6.
+*             internal error.
+              return_code = 10.
+          ENDCASE.
+        ENDIF.
+
+      ELSEIF <p6200>-plan_operation = delete.
+*       Delete record in status 1.
+        CALL FUNCTION 'RH_DELETE_INFTY'
+          EXPORTING
+            vtask                     = vtask
+            authy                     = 'X'
+          TABLES
+            innnn                     = wplog_tab
+*           ILFCODE                   =
+         EXCEPTIONS
+           error_during_delete       = 1
+           no_authorization          = 2
+           delete_first_record       = 3
+           corr_exit                 = 4
+           OTHERS                    = 5.
+
+        IF sy-subrc <> 0.
+          CASE sy-subrc.
+            WHEN 1.
+*             record does not exist
+              return_code = 2.
+            WHEN 2.
+*             missing authorization
+              return_code = 5.
+            WHEN 3 OR 4 OR 5.
+*             internal error.
+              return_code = 10.
+          ENDCASE.
+        ENDIF.
+      ENDIF.
+*    ELSE.
+**     TIMCO <> 3
+*      IF <p6200>-plan_operation = cuti.
+*
+*        CALL FUNCTION 'RH_CUT_INFTY_GENERIC'
+*          EXPORTING
+*            plvar                     = <hripkey>-plvar
+*            otype                     = <hripkey>-otype
+*            objid                     = <hripkey>-objid
+*            infty                     = <p6200>-ref_infty
+*            subty                     = <p6200>-ref_subty
+*            istat                     = '1'
+*            sclas                     = <p6200>-varyf(2)
+*            begda                     = <p6200>-ref_begda
+*            endda                     = <p6200>-ref_endda
+*            del_bef                   = 'X'
+*            gdate                     = <p6200>-plan_gdate
+*            histo                     = space
+*            del_succ                  = space
+*            vtask                     = vtask
+*            authy                     = 'X'
+*          EXCEPTIONS
+*            error_during_cut          = 1
+*            error_during_delete       = 2
+*            no_authorization          = 3
+*            cut_of_time_one           = 4
+*            delete_first_record       = 5
+*            corr_exit                 = 6
+*            invalid_parameters        = 7
+*            no_selection              = 8
+*            internal_error            = 9
+*            OTHERS                    = 10.
+*
+*        IF sy-subrc <> 0.
+*          CASE sy-subrc.
+*            WHEN 8.
+**             record does not exist
+*              return_code = 2.
+*            WHEN 3.
+**             missing authorization
+*              return_code = 5.
+*            WHEN OTHERS.
+**             internal error.
+*              return_code = 10.
+*          ENDCASE.
+*        ENDIF.
+*      ELSE.
+*        CALL FUNCTION 'RH_DELETE_INFTY_GENERIC'
+*          EXPORTING
+*            plvar                     = <hripkey>-plvar
+*            otype                     = <hripkey>-otype
+*            objid                     = <hripkey>-objid
+*            infty                     = <p6200>-ref_infty
+*            subty                     = <p6200>-ref_subty
+*            istat                     = '1'
+*            sclas                     = <p6200>-varyf(2)
+*            begda                     = <p6200>-ref_begda
+*            endda                     = <p6200>-ref_endda
+*            vtask                     = vtask
+*            authy                     = 'X'
+*          EXCEPTIONS
+*            error_during_delete       = 1
+*            no_authorization          = 2
+*            delete_first_record       = 3
+*            corr_exit                 = 4
+*            invalid_parameters        = 5
+*            no_selection              = 6
+*            internal_error            = 7
+*            OTHERS                    = 8.
+*
+*        IF sy-subrc <> 0.
+*          CASE sy-subrc.
+*            WHEN 6.
+**             record does not exist
+*              return_code = 2.
+*            WHEN 2.
+**             missing authorization
+*              return_code = 5.
+*            WHEN OTHERS.
+**             internal error.
+*              return_code = 10.
+*          ENDCASE.
+*        ENDIF.
+*      ENDIF.
+*    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " planned_infotype_operation
